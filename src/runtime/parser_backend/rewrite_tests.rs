@@ -181,7 +181,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
             "runtime finalization must reuse the already-prepared immutable view");
     }
 
-    let restored = Constraint::load_without_vocab(candidate.save()).unwrap();
+    let restored = Constraint::load(candidate.save(), &vocab).unwrap();
     let external = Constraint::load(
         candidate.save(), &vocab,
     ).unwrap();
@@ -258,7 +258,7 @@ fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tabl
         let summary = parser.link_grammar.as_ref().unwrap().stack_effects().unwrap();
         assert_eq!(summary.states, parser.state_count);
         assert!(!summary.effects.is_empty());
-        let loaded = Constraint::load_without_vocab(&component.save()).unwrap();
+        let loaded = Constraint::load(&component.save(), &vocab).unwrap();
         assert!(!loaded.table.is_present());
         assert_eq!(
             loaded.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
@@ -447,7 +447,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
             crate::BuildOptions::default().optimization(optimization),
         ).unwrap().with_end_tokens(&[64]).unwrap();
         let self_bytes = fresh.save();
-        let loaded = Constraint::load_without_vocab(&self_bytes).unwrap();
+        let loaded = Constraint::load(&self_bytes, &vocab).unwrap();
         assert_eq!(loaded.save(), self_bytes);
         let external_bytes = fresh.save();
         let external = Constraint::load(&external_bytes, &vocab).unwrap();

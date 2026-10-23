@@ -53,9 +53,9 @@ fn read_vocab_dump(path: &Path) -> Vocab {
     Vocab::new(entries)
 }
 
-fn load_constraint(path: &Path) -> Constraint {
+fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn schema_source(cfa_root: &Path, file: &str) -> String {
@@ -170,7 +170,7 @@ fn matrix_link_setup(
         let (schema_path, short_name) = &files[n];
         let schema_bytes = fs::read(schema_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", schema_path.display()));
-        let schema = Constraint::load_without_vocab(&schema_bytes)
+        let schema = Constraint::load(&schema_bytes, &vocab)
             .unwrap_or_else(|error| panic!("load {}: {error}", schema_path.display()));
         let parent = Constraint::compile(
             Grammar::glrm(parent_source.as_ref().expect("inner source")),
@@ -185,8 +185,8 @@ fn matrix_link_setup(
         });
         (parent, schema, format!("TOOL_ARGS_SLOT_{n}"), records)
     } else {
-        let core = load_constraint(&cache_dir.join("core.bin"));
-        let dispatch = load_constraint(&cache_dir.join(dispatch_name));
+        let core = load_constraint(&cache_dir.join("core.bin"), vocab);
+        let dispatch = load_constraint(&cache_dir.join(dispatch_name), vocab);
         let records = serde_json::json!({
             "inputs_desc": "core+dispatch",
             "core_bytes": core.save().len(),
@@ -295,8 +295,8 @@ fn cmd_matrix_link_with_vocab(
     // Fresh-vs-reload per backend (separately timed validation): each
     // backend's reload mask must equal ITS OWN fresh mask, not just each other.
     let r0 = Instant::now();
-    let rs = Constraint::load_without_vocab(&s_bytes).expect("reload static");
-    let rd = Constraint::load_without_vocab(&d_bytes).expect("reload dynamic");
+    let rs = Constraint::load(&s_bytes, &vocab).expect("reload static");
+    let rd = Constraint::load(&d_bytes, &vocab).expect("reload dynamic");
     let rs_mask: Vec<u32> = rs.start().mask();
     let rd_mask: Vec<u32> = rd.start().mask();
     let reload_static_equal = rs_mask == static_mask;
@@ -409,25 +409,26 @@ fn stat_line(name: &str, bytes_len: usize, c: &Constraint) {
     );
 }
 
-fn print_stat_row(name: &str, path: &Path) {
+fn print_stat_row(name: &str, path: &Path, vocab: &Vocab) {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let c = Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+    let c = Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
     stat_line(name, bytes.len(), &c);
 }
 
-fn cmd_sizes(cache_dir: &Path, dispatch_name: &str) {
+fn cmd_sizes(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str) {
     println!("name\tartifact_bytes\tlr_states\tterminals\ttokenizer_states\tinternal_tsids\tinternal_tokens\tparser_dwa_states\tparser_dwa_transitions");
-    print_stat_row("core", &cache_dir.join("core.bin"));
-    print_stat_row("dispatch", &cache_dir.join(dispatch_name));
+    print_stat_row("core", &cache_dir.join("core.bin"), vocab);
+    print_stat_row("dispatch", &cache_dir.join(dispatch_name), vocab);
     for (index, (short_name, _)) in SELECTED10.iter().enumerate() {
         print_stat_row(
             &format!("schema-{index:02}-{short_name}"),
             &schema_cache_path(cache_dir, index, short_name),
+            vocab,
         );
     }
     let composed = cache_dir.join("composed-latest.bin");
     if composed.exists() {
-        print_stat_row("composed", &composed);
+        print_stat_row("composed", &composed, vocab);
     }
 }
 
@@ -440,8 +441,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
     for run in 0..runs {
         // Static path A: compose_compiled_subgrammars (the bench path).
         let started = Instant::now();
-        let core = Constraint::load_without_vocab(&core_bytes).unwrap();
-        let dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
+        let core = Constraint::load(&core_bytes, &vocab).unwrap();
+        let dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
         let load = started.elapsed();
         let started = Instant::now();
         let composed = core
@@ -457,8 +458,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
 
         // Dynamic path: same placeholder substitution, DynamicDirect backend.
         let started = Instant::now();
-        let core = Constraint::load_without_vocab(&core_bytes).unwrap();
-        let dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
+        let core = Constraint::load(&core_bytes, &vocab).unwrap();
+        let dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
         let _ = started.elapsed();
         let started = Instant::now();
         let dyn_result = core.compose_compiled_subgrammars_dynamic(
@@ -697,7 +698,7 @@ fn rng_choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {
 
 fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
     let constraint = match which {
-        "core" => load_constraint(&cache_dir.join("core.bin")),
+        "core" => load_constraint(&cache_dir.join("core.bin"), vocab),
         "static" | "dynamic" => {
             let dispatch_name = if cache_dir.join("dispatch-literal.bin").exists() {
                 "dispatch-literal.bin"
@@ -722,7 +723,7 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
                 .unwrap()
             }
         }
-        "mono" => load_constraint(&cache_dir.join("monolithic.bin")),
+        "mono" => load_constraint(&cache_dir.join("monolithic.bin"), vocab),
         other => panic!("unknown --which {other:?} (core|static|dynamic|mono)"),
     };
     let composed_prefixes: Vec<Vec<u8>> = composed_prefixes();
@@ -859,7 +860,7 @@ fn cmd_dispatch_compose(cache_dir: &Path, vocab: &Vocab, runs: usize) {
             .iter()
             .enumerate()
             .map(|(index, (short_name, _))| {
-                load_constraint(&schema_cache_path(cache_dir, index, short_name))
+                load_constraint(&schema_cache_path(cache_dir, index, short_name), vocab)
             })
             .collect::<Vec<_>>();
         let bindings = (0..SELECTED10.len())
@@ -904,8 +905,8 @@ fn mask_set_bits(mask: &[u32]) -> Vec<u32> {
     out
 }
 
-fn cmd_diff_masks(cache_dir: &Path, prefix: &str, tokens_csv: &str) {
-    let composed = load_constraint(&cache_dir.join("composed-latest.bin"));
+fn cmd_diff_masks(cache_dir: &Path, vocab: &Vocab, prefix: &str, tokens_csv: &str) {
+    let composed = load_constraint(&cache_dir.join("composed-latest.bin"), vocab);
     let mut state = composed.start();
     if !prefix.is_empty() {
         state.commit_bytes(prefix.as_bytes()).expect("prefix commit");
@@ -1112,8 +1113,8 @@ fn cmd_prefix_diff(
         static_path, dynamic_path,
         "static and dynamic artifact paths must differ",
     );
-    let static_c = Constraint::load_without_vocab(&static_bytes).expect("load static artifact");
-    let dynamic_c = Constraint::load_without_vocab(&dynamic_bytes).expect("load dynamic artifact");
+    let static_c = Constraint::load(&static_bytes, &vocab).expect("load static artifact");
+    let dynamic_c = Constraint::load(&dynamic_bytes, &vocab).expect("load dynamic artifact");
     mark("load done");
     // Pair identity via existing public metadata APIs: same terminal /
     // tokenizer-state counts, exact-vocab bind on both. NOTE (verified
@@ -1506,8 +1507,8 @@ fn cmd_trace_replay(
     } else {
         let core_bytes = fs::read(cache_dir.join("core.bin")).expect("core.bin missing");
         let dispatch_bytes = fs::read(cache_dir.join(dispatch_name)).expect("dispatch cache missing");
-        let core = load_constraint(&cache_dir.join("core.bin"));
-        let dispatch = load_constraint(&cache_dir.join(dispatch_name));
+        let core = load_constraint(&cache_dir.join("core.bin"), vocab);
+        let dispatch = load_constraint(&cache_dir.join(dispatch_name), vocab);
         let _ = (core_bytes.len(), dispatch_bytes.len());
         eprintln!("[trace-progress] stage=static-link BEGIN");
         let link_started = Instant::now();
@@ -1918,7 +1919,10 @@ fn main() {
         }
     }
     match sub {
-        "sizes" => cmd_sizes(&cache_dir, &dispatch_name),
+        "sizes" => {
+            let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
+            cmd_sizes(&cache_dir, &vocab, &dispatch_name)
+        }
         "link" => {
             let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
             cmd_link(&cache_dir, &vocab, &dispatch_name, runs);
@@ -1939,7 +1943,8 @@ fn main() {
         "diff-masks" => {
             let prefix = positional.first().cloned().unwrap_or_default();
             let tokens = positional.get(1).cloned().unwrap_or_default();
-            cmd_diff_masks(&cache_dir, &prefix, &tokens);
+            let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
+            cmd_diff_masks(&cache_dir, &vocab, &prefix, &tokens);
         }
         "dispatch-compose" => {
             let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));

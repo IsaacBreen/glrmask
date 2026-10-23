@@ -168,12 +168,10 @@ fn dynamic_envelope_is_byte_identical_to_previous_assembly() {
     let one = compile_dynamic(&vocab);
     let many = DynamicConstraint::from_alternatives(vec![one.clone(), one.clone()]);
     for dynamic in [&one, &many] {
-        for external in [false, true] {
-            assert_eq!(
-                dynamic.save_template_alternatives(external),
-                old_envelope(dynamic, external),
-            );
-        }
+        assert_eq!(
+            dynamic.save_template_alternatives(),
+            old_envelope(dynamic, true),
+        );
     }
 }
 
@@ -212,7 +210,7 @@ fn shared_cached_transfer_is_copied_without_invalidating_the_other_owner() {
 fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
     let vocab = vocab();
     let direct = compile_dynamic(&vocab);
-    let self_contained = DynamicConstraint::load(&direct.save()).unwrap();
+    let self_contained = DynamicConstraint::load(&direct.save(), &vocab).unwrap();
     let external =
         DynamicConstraint::load_with_vocab(&direct.save_without_vocab(), &vocab)
             .unwrap();
@@ -286,7 +284,7 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
                 crate::BuildOptions::default().optimization(optimization),
             )
             .unwrap();
-        let loaded = crate::Constraint::load_without_vocab(direct.save()).unwrap();
+        let loaded = crate::Constraint::load(direct.save(), &vocab).unwrap();
         let external = crate::Constraint::load(
             direct.save(),
             &vocab,

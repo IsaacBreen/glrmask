@@ -106,7 +106,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             _ => None,
         };
         if let Some(expected) = bounded_oracle {
-            let reloaded = glrmask::Constraint::load_without_vocab(c.save())
+            let reloaded = glrmask::Constraint::load(c.save(), &vocab)
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: reload failed: {e:?}"));
             assert_eq!(c.start().mask(), reloaded.start().mask(),
                 "seed {seed} mode {mode:?}: initial masks differ after save/load");
@@ -206,7 +206,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                     CompileOptions::default().end_tokens([99]).mask_strategy(mode),
                 )
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
-            let reloaded_eos = glrmask::Constraint::load_without_vocab(with_eos.save())
+            let reloaded_eos = glrmask::Constraint::load(with_eos.save(), &vocab)
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));
             for eos_constraint in [&with_eos, &reloaded_eos] {
                 // Cover completion decisions on 364 complete byte strings,

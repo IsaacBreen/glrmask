@@ -46,7 +46,7 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
             assert!(state.is_accepting(), "{mode:?}, {id}");
             assert!(state.mask().iter().all(|word| *word == 0));
         }
-        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
+        let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
         assert_mask(&loaded, &[], 96, accepts);
         let external = constraint.save();
         let external = Constraint::load(&external, &vocab).unwrap();
@@ -83,7 +83,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let open = Grammar::from_glrm(child_source).prepare(&vocab).unwrap();
     let bound = open.bind_snapshot("T", TokenSet::from_ranges([5..=15, 100..=120])).unwrap();
     let serialized = bound.save();
-    let loaded = PreparedGrammar::load(&serialized).unwrap();
+    let loaded = PreparedGrammar::load(&serialized, &vocab).unwrap();
     for mode in MODES {
         let options = BuildOptions::default().optimization(mode);
         let child = loaded.link_with(options.clone()).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
@@ -99,7 +99,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         let mut state = outer.start();
         for id in [0, 120, 5, 1] { state.commit_token(id).unwrap(); }
         assert!(state.is_accepting());
-        let outer_loaded = Constraint::load_without_vocab(&outer.save()).unwrap();
+        let outer_loaded = Constraint::load(&outer.save(), &vocab).unwrap();
         assert_mask(&outer_loaded, &[0, 120], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
     }
     // Binding is immutable: the original description is still open.
@@ -260,7 +260,7 @@ fn neutral_scalar_module_formats_are_not_misread_as_range_artifacts() {
     for version in [b"GLRMOD03", b"GLRMOD04", b"GLRMOD05", b"GLRMOD06"] {
         let mut old = bytes.clone();
         old[..8].copy_from_slice(version);
-        assert!(PreparedGrammar::load(&old).is_err());
+        assert!(PreparedGrammar::load(&old, &vocab).is_err());
     }
 }
 
@@ -280,7 +280,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
                 .bind_snapshot("B", TokenSet::from_ranges([b])).unwrap();
             let options = BuildOptions::default().optimization(mode).end_tokens([15]);
             let constraint = grammar.compile_with_build_options(&vocab, options).unwrap();
-            for constraint in [constraint.clone(), Constraint::load_without_vocab(&constraint.save()).unwrap()] {
+            for constraint in [constraint.clone(), Constraint::load(&constraint.save(), &vocab).unwrap()] {
                 assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
                 let mut state = constraint.start();
                 state.commit_token(0).unwrap();
@@ -302,7 +302,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
             .bind_snapshot("B", TokenSet::from_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1])).unwrap();
         let original = grammar.compile_with_build_options(&vocab,
             BuildOptions::default().optimization(mode).end_tokens([n])).unwrap();
-        for constraint in [original.clone(), Constraint::load_without_vocab(&original.save()).unwrap()] {
+        for constraint in [original.clone(), Constraint::load(&original.save(), &vocab).unwrap()] {
             assert_mask(&constraint, &[], n + 1, |id| id < n);
             assert_mask(&constraint, &[0], n + 1, |id| id < n && id != n / 2);
             assert_mask(&constraint, &[0, n - 1], n + 1, |id| id == n);

@@ -516,7 +516,7 @@ mod reset_projection_tests {
             for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                 let fresh = Grammar::from_glrm(&source).compile_with_build_options(&vocab,
                     BuildOptions::default().optimization(mode)).unwrap();
-                let loaded = Constraint::load_without_vocab(fresh.save()).unwrap();
+                let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
                 for constraint in [&fresh, &loaded] {
                     let reset = constraint.runtime_commit_initial_state();
                     let closure = constraint.tokenizer.singleton_epsilon_closure(reset);

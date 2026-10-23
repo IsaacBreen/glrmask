@@ -37,22 +37,21 @@ fn marker_inventory_roundtrips_every_public_mode_and_vocabulary_form() {
         assert_eq!(fresh.marker_ids(), &[10, 20, 30]);
         assert_eq!(batch(&fresh.start()), vec![(10, 0)]);
         let bytes = fresh.save();
-        assert!(bytes.starts_with(b"GLRMARK1"));
-        let owned = Constraint::load_without_vocab(bytes.clone()).unwrap();
-        let borrowed = Constraint::load_without_vocab(bytes.as_slice()).unwrap();
+        let marker=&bytes[40..]; assert!(marker.starts_with(b"GLRMARK1"));
+        let owned = Constraint::load(bytes.clone(), &vocab).unwrap();
+        let borrowed = Constraint::load(bytes.as_slice(), &vocab).unwrap();
         let bound = Constraint::load(bytes.clone(), &vocab).unwrap();
         let external = fresh.save();
-        assert!(Constraint::load_without_vocab(external.clone()).is_err());
         let external = Constraint::load(external, &vocab).unwrap();
         for loaded in [&owned, &borrowed, &bound, &external] {
             assert_eq!(fresh.marker_ids(), loaded.marker_ids(), "{mode:?}");
             for input in [&[0,1][..], &[2][..]] { equivalent_replay(&fresh, loaded, input); }
-            let twice = Constraint::load_without_vocab(loaded.save()).unwrap();
+            let twice = Constraint::load(loaded.save(), &vocab).unwrap();
             assert_eq!(fresh.marker_ids(), twice.marker_ids());
         }
         let plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).compile_with_build_options(&vocab, options(mode)).unwrap();
         assert!(plain.marker_ids().is_empty());
-        assert!(!plain.save().starts_with(b"GLRMARK1"));
+        assert!(!plain.save()[40..].starts_with(b"GLRMARK1"));
         equivalent_replay(&plain, &fresh, &[0,1]);
         equivalent_replay(&plain, &fresh, &[2]);
     }
@@ -63,17 +62,17 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
     let vocab = vocabulary();
     let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = @mark(40) "x" child "y" @mark(50);"#)
         .prepare(&vocab).unwrap();
-    let host = PreparedGrammar::load(host.save()).unwrap();
+    let host = PreparedGrammar::load(host.save(), &vocab).unwrap();
     for child_mode in modes() {
         let child = annotated().compile_with_build_options(&vocab, options(child_mode)).unwrap();
-        let child = Constraint::load_without_vocab(child.save()).unwrap();
+        let child = Constraint::load(child.save(), &vocab).unwrap();
         let mut bound = host.clone();
         bound.bind("child", &child).unwrap();
-        let bound = PreparedGrammar::load(bound.save()).unwrap();
+        let bound = PreparedGrammar::load(bound.save(), &vocab).unwrap();
         for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
             let linked = bound.link_with(options(mode)).unwrap();
             assert_eq!(linked.marker_ids().len(), 5, "child={child_mode:?} link={mode:?}");
-            let loaded = Constraint::load_without_vocab(linked.save()).unwrap();
+            let loaded = Constraint::load(linked.save(), &vocab).unwrap();
             let external = Constraint::load(linked.save(), &vocab).unwrap();
             for value in [&linked,&loaded,&external] {
                 assert_eq!(value.marker_ids(), linked.marker_ids());
@@ -87,7 +86,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
             outer.bind("child", &loaded).unwrap();
             let outer=outer.link_with(options(mode)).unwrap();
             assert_eq!(outer.marker_ids().len(),7);
-            let outer = Constraint::load_without_vocab(outer.save()).unwrap();
+            let outer = Constraint::load(outer.save(), &vocab).unwrap();
             assert_eq!(outer.marker_ids().len(),7);
             let mut state=outer.start();state.commit_token(7).unwrap();assert!(state.is_accepting());
             assert_eq!(batch(&state), vec![(40, 1), (10, 2), (20, 3), (30, 4), (50, 5), (70, 6)]);
@@ -101,16 +100,16 @@ fn malformed_marker_envelopes_fail_without_panics() {
     let bytes=annotated().compile_with_build_options(&vocab,options(MaskStrategy::TokenClassTrie)).unwrap().save();
     let mut malformed=Vec::new();
     for length in [0,1,7,8,12,19,20,27,28,bytes.len()-1] {malformed.push(bytes[..length].to_vec());}
-    for count in [0,u32::MAX] {let mut v=bytes.clone();v[8..12].copy_from_slice(&count.to_le_bytes());malformed.push(v);}
-    for length in [0,u64::MAX] {let mut v=bytes.clone();v[12..20].copy_from_slice(&length.to_le_bytes());malformed.push(v);}
-    let mut duplicate=bytes.clone();let first=duplicate[20..24].to_vec();duplicate[28..32].copy_from_slice(&first);malformed.push(duplicate);
-    let mut invalid=bytes.clone();invalid[20..24].copy_from_slice(&u32::MAX.to_le_bytes());malformed.push(invalid);
+    for count in [0,u32::MAX] {let mut v=bytes.clone();v[40+8..40+12].copy_from_slice(&count.to_le_bytes());malformed.push(v);}
+    for length in [0,u64::MAX] {let mut v=bytes.clone();v[40+12..40+20].copy_from_slice(&length.to_le_bytes());malformed.push(v);}
+    let mut duplicate=bytes.clone();let first=duplicate[40+20..40+24].to_vec();duplicate[40+28..40+32].copy_from_slice(&first);malformed.push(duplicate);
+    let mut invalid=bytes.clone();invalid[40+20..40+24].copy_from_slice(&u32::MAX.to_le_bytes());malformed.push(invalid);
     // Terminal 1 is the ordinary "a" lexer terminal, not an observation probe.
     // It is in range and correctly ordered, but must still be rejected.
-    let mut input_bound=bytes.clone();input_bound[20..24].copy_from_slice(&1u32.to_le_bytes());malformed.push(input_bound);
-    let mut future=bytes.clone();future[7]=b'2';malformed.push(future);
+    let mut input_bound=bytes.clone();input_bound[40+20..40+24].copy_from_slice(&1u32.to_le_bytes());malformed.push(input_bound);
+    let mut future=bytes.clone();future[40+7]=b'2';malformed.push(future);
     for (case,bytes) in malformed.into_iter().enumerate() {
-        let result=std::panic::catch_unwind(|| Constraint::load_without_vocab(bytes));
+        let result=std::panic::catch_unwind(|| Constraint::load(bytes, &vocab));
         assert!(result.is_ok(),"malformed case {case} panicked");
         assert!(result.unwrap().is_err(),"malformed case {case} was accepted");
     }
@@ -148,7 +147,7 @@ fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
         assert_eq!(batch(&state), vec![(7,0)]);
         let repeat = Grammar::from_glrm(r#"glrm 1; start root; nt root=@mark(7)* "a";"#)
             .compile_with_build_options(&vocab,options(mode)).unwrap();
-        let repeat = Constraint::load_without_vocab(repeat.save()).unwrap();
+        let repeat = Constraint::load(repeat.save(), &vocab).unwrap();
         let mut state = repeat.start();
         assert_eq!(batch(&state), vec![(7,0)]);
         state.commit_token(0).unwrap();

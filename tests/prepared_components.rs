@@ -38,7 +38,7 @@ fn prepared_open_children_survive_serialization_and_independent_binding() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF).prepare(&v).unwrap();
     let pair=Grammar::from_glrm(PAIR).prepare(&v).unwrap().bind_snapshot("LEFT",&leaf).unwrap().bind_snapshot("RIGHT",&leaf).unwrap();
     assert!(pair.link().is_err());assert_eq!(pair.requirements().unwrap().len(),2);
-    let loaded=PreparedGrammar::load_with_vocab(pair.save(),&v).unwrap();
+    let loaded=PreparedGrammar::load(pair.save(),&v).unwrap();
     assert!(loaded.bind_snapshot("LEFT::MARK",Grammar::from_glrm("start x nt x=\"x\"").prepare(&v).unwrap()).is_err());
     let complete=loaded.bind_snapshot("LEFT::MARK",TokenSet::from(4)).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::from(5)).unwrap();
     for mode in MODES {check_pair(&complete.link_with(BuildOptions::default().optimization(mode)).unwrap());}
@@ -82,7 +82,7 @@ fn requirement_coordinates_survive_preparation_and_save_load() {
     assert_eq!((span.line,span.column),(2,14));
     let v=vocab();let p=g.prepare(&v).unwrap();
     assert_eq!(p.requirements().unwrap(),[r.clone()]);
-    let loaded=PreparedGrammar::load_with_vocab(p.save(),&v).unwrap();
+    let loaded=PreparedGrammar::load(p.save(),&v).unwrap();
     assert_eq!(loaded.requirements().unwrap(),[r]);
     let child=Grammar::from_glrm("start root nt root=\"x\"");
     assert_eq!(g.bind_snapshot("MARK",&child).unwrap_err().source_span(),Some(span));
@@ -128,13 +128,13 @@ fn compact_closed_dag_does_not_expand_during_inspection_or_persistence() {
     assert!(graph.requirements().unwrap().is_empty());
     let bytes=graph.save();
     assert!(bytes.len()<unit_bytes*3+128_000,"artifact unexpectedly expanded: {} vs unit {unit_bytes}",bytes.len());
-    let loaded=PreparedGrammar::load_with_vocab(&bytes,&v).unwrap();
+    let loaded=PreparedGrammar::load(&bytes,&v).unwrap();
     assert!(loaded.requirements().unwrap().is_empty());
     assert_eq!(bytes,loaded.save(),"DAG round trip is canonical and preserves sharing");
     assert!(loaded.link().unwrap_err().to_string().contains("resource limit"));
     let mut corrupt=bytes.clone();corrupt.extend_from_slice(b"trailing");
-    assert!(PreparedGrammar::load(corrupt).is_err());
-    for cut in [0,8,15,bytes.len()-1] {assert!(PreparedGrammar::load(&bytes[..cut]).is_err());}
+    assert!(PreparedGrammar::load(corrupt, &vocab()).is_err());
+    for cut in [0,8,15,bytes.len()-1] {assert!(PreparedGrammar::load(&bytes[..cut], &vocab()).is_err());}
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn compact_open_dag_has_bounded_requirements_but_remains_serializable() {
     for _ in 0..18 {graph=wrapper.bind_snapshot("LEFT",&graph).unwrap().bind_snapshot("RIGHT",&graph).unwrap();}
     assert!(graph.requirements().unwrap_err().to_string().contains("resource limit"));
     let bytes=graph.save();assert!(bytes.len()<2_000_000);
-    let loaded=PreparedGrammar::load_with_vocab(bytes,&v).unwrap();
+    let loaded=PreparedGrammar::load(bytes,&v).unwrap();
     assert!(loaded.requirements().is_err());assert!(loaded.link().is_err());
 }
 
@@ -161,7 +161,7 @@ fn source_preparation_memoizes_shared_attachments_and_checks_depth() {
     let mut graph=Grammar::from_glrm("start root nt root=eps").prepare(&v).unwrap();
     for _ in 0..64 {graph=one.bind_snapshot("CHILD",&graph).unwrap();}
     assert!(one.bind_snapshot("CHILD",&graph).unwrap_err().to_string().contains("depth"));
-    assert!(PreparedGrammar::load(graph.save()).is_ok());
+    assert!(PreparedGrammar::load(graph.save(), &vocab()).is_ok());
 }
 
 
@@ -173,7 +173,7 @@ fn empty_exact_bindings_are_empty_languages_not_epsilon() {
     let parent=Grammar::from_glrm("extern token EVENT start root nt root=EVENT | \"x\"");
     let source=parent.bind_snapshot("EVENT",empty.clone()).unwrap();
     let prepared=parent.prepare(&v).unwrap().bind_snapshot("EVENT",empty.clone()).unwrap();
-    let loaded=PreparedGrammar::load_with_vocab(prepared.save(),&v).unwrap();
+    let loaded=PreparedGrammar::load(prepared.save(),&v).unwrap();
     let event=Grammar::exact(empty);
     for mode in MODES {
         let options=BuildOptions::default().optimization(mode);
@@ -182,7 +182,7 @@ fn empty_exact_bindings_are_empty_languages_not_epsilon() {
         }
         let c=event.compile_with_build_options(&v,options).unwrap();
         assert!(!c.start().is_accepting());assert!(c.start().mask().iter().all(|word|*word==0));
-        assert!(!Constraint::load_without_vocab(c.save()).unwrap().start().is_accepting());
+        assert!(!Constraint::load(c.save(), &vocab()).unwrap().start().is_accepting());
     }
 }
 

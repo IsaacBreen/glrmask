@@ -17,7 +17,7 @@ fn initial_split_and_inside_fused_token_events_all_modes() {
     let v = vocab(&[b"a",b"b",b"ab"]);
     for mode in MODES {
         let c = compile("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n", &v, mode);
-        for c in [&c, &Constraint::load_without_vocab(c.save()).unwrap()] {
+        for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
             let mut s = c.start();
             assert_eq!(events(&s), [(0,0)], "start {mode:?}");
             s.commit_token(0).unwrap();

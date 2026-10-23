@@ -9500,7 +9500,7 @@ mod tests {
         let mut comparisons = 0usize;
         for source in grammars {
             let built = Constraint::compile(Grammar::glrm(source), &vocab).unwrap();
-            let loaded = Constraint::load_without_vocab(built.save()).unwrap();
+            let loaded = Constraint::load(built.save(), &vocab).unwrap();
             for constraint in [&built, &loaded] {
                 let mut frontier = vec![constraint.start()];
                 let mut seen = BTreeSet::new();
@@ -9588,7 +9588,7 @@ mod tests {
             t B ::= "abcd";
             nt document ::= A | B | "z" C;
         "#), &vocab).unwrap();
-        for constraint in [&compiled, &Constraint::load_without_vocab(compiled.save()).unwrap()] {
+        for constraint in [&compiled, &Constraint::load(compiled.save(), &vocab).unwrap()] {
             let mut state = constraint.start();
             state.commit_bytes(b"ab").unwrap();
             let mut reference = state.state.clone();
@@ -9619,7 +9619,7 @@ mod tests {
                 nt document ::= WORD ("+" WORD)*;
             "#);
             let built = Constraint::compile(Grammar::glrm(&source), &vocab).unwrap();
-            let loaded = Constraint::load_without_vocab(built.save()).unwrap();
+            let loaded = Constraint::load(built.save(), &vocab).unwrap();
             for constraint in [&built, &loaded] {
                 for ids in [
                     vec![0,4,5,6,1,2],
@@ -9666,7 +9666,7 @@ mod tests {
             let outer = Constraint::compile(Grammar::glrm(
                 r#"start outer; extern middle; nt outer ::= middle "!";"#,
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
-            let loaded = Constraint::load_without_vocab(outer.save()).unwrap();
+            let loaded = Constraint::load(outer.save(), &vocab).unwrap();
             for constraint in [&outer, &loaded] {
                 for prefix in ["", "[", "[a", "[ab", "[ab]", "[ab]!", "[ ", "[]"] {
                     let mut state = constraint.start();
@@ -9896,7 +9896,7 @@ mod tests {
             .position(|name| name == "A")
             .unwrap() as u32;
         let bound = parent.bind_grammar("child", child).unwrap();
-        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
+        let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound, &loaded] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             assert_eq!(layout.leaves.len(), 2);
@@ -10072,7 +10072,9 @@ mod tests {
 
         let path = std::env::var("GLRMASK_DEBUG_ARTIFACT").expect("GLRMASK_DEBUG_ARTIFACT");
         let bytes = std::fs::read(path).unwrap();
-        let constraint = Constraint::load_without_vocab(&bytes).unwrap();
+        let vocab = crate::compiler::constraint_compose::load_vocab(
+            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+        let constraint = Constraint::load(&bytes, &vocab).unwrap();
         let mut state = constraint.start();
         state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
         eprintln!("STACKS {:?}", state.debug_parser_stacks());
@@ -10203,8 +10205,10 @@ mod tests {
 
         let core_path = std::env::var("GLRMASK_DEBUG_CORE_ARTIFACT").unwrap();
         let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
-        let core = Constraint::load_without_vocab(&std::fs::read(core_path).unwrap()).unwrap();
-        let fast = Constraint::load_without_vocab(&std::fs::read(fast_path).unwrap()).unwrap();
+        let vocab = crate::compiler::constraint_compose::load_vocab(
+            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+        let core = Constraint::load(&std::fs::read(core_path).unwrap(), &vocab).unwrap();
+        let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
         dump("core", &core, 38, 443);
         dump("fast", &fast, 39, 443);
     }
@@ -10259,7 +10263,9 @@ mod tests {
         }
 
         let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
-        let full = Constraint::load_without_vocab(&std::fs::read(full_path).unwrap()).unwrap();
+        let vocab = crate::compiler::constraint_compose::load_vocab(
+            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+        let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
         dump_case(&full, "tools_reset_a", 0, &[0,22,198,18], &[739,2446,7255,21966]);
         dump_case(&full, "tools_reset_b", 0, &[0,22,198,167], &[739,2446,7255,21966]);
         dump_case(&full, "tools_residual", 444, &[0,22,198], &[739,2446,7255,21966]);
@@ -10275,8 +10281,10 @@ mod tests {
 
         let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
         let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
-        let fast = Constraint::load_without_vocab(&std::fs::read(fast_path).unwrap()).unwrap();
-        let full = Constraint::load_without_vocab(&std::fs::read(full_path).unwrap()).unwrap();
+        let vocab = crate::compiler::constraint_compose::load_vocab(
+            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+        let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
+        let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
         unsafe {
             std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", "1");
             std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", "2");
@@ -10472,7 +10480,7 @@ mod tests {
         state.commit_token(2).unwrap();
         assert!(state.is_accepting());
 
-        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
+        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(1).unwrap();
         assert!(loaded_state.is_accepting());
@@ -10871,7 +10879,7 @@ nt start ::= item item? item?;
             .bind_grammar_dynamic_boundary("body", body.clone())
             .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
+        let loaded = Constraint::load(bound.save(), &vocab).unwrap();
 
         let mut expected = body.start();
         for token in [0, 1, 2] {

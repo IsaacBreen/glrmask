@@ -12,6 +12,12 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
         .collect()
 }
 
+fn probe_vocab() -> Vocab {
+    let path = std::env::var("GLRMASK_VOCAB")
+        .expect("GLRMASK_VOCAB must name the vocabulary JSON");
+    load_vocab(Path::new(&path))
+}
+
 fn load_vocab(path: &Path) -> Vocab {
     let raw = std::fs::read_to_string(path).unwrap();
     let entries: BTreeMap<u32, String> = serde_json::from_str(&raw).unwrap();
@@ -121,6 +127,7 @@ fn main() {
             }
         }
         Some("bench") => {
+            let vocab = probe_vocab();
             let path = Path::new(&args[2]);
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(21usize);
             let mut reads = Vec::with_capacity(iters);
@@ -135,7 +142,7 @@ fn main() {
                 artifact_bytes = bytes.len();
 
                 let started = Instant::now();
-                let constraint = Constraint::load_without_vocab(&bytes).unwrap();
+                let constraint = Constraint::load(&bytes, &vocab).unwrap();
                 loads.push(started.elapsed().as_nanos());
 
                 let started = Instant::now();
@@ -157,6 +164,7 @@ fn main() {
             );
         }
         Some("bench-owned") => {
+            let vocab = probe_vocab();
             let path = Path::new(&args[2]);
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(21usize);
             let mut reads = Vec::with_capacity(iters);
@@ -171,7 +179,7 @@ fn main() {
                 artifact_bytes = bytes.len();
 
                 let started = Instant::now();
-                let constraint = Constraint::load_without_vocab(bytes).unwrap();
+                let constraint = Constraint::load(bytes, &vocab).unwrap();
                 loads.push(started.elapsed().as_nanos());
 
                 let started = Instant::now();
@@ -193,15 +201,17 @@ fn main() {
             );
         }
         Some("load-once") => {
+            let vocab = probe_vocab();
             let bytes = std::fs::read(&args[2]).unwrap();
             let started = Instant::now();
-            let constraint = Constraint::load_without_vocab(&bytes).unwrap();
+            let constraint = Constraint::load(&bytes, &vocab).unwrap();
             println!("load_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(constraint);
         }
         Some("mask-bench") => {
+            let vocab = probe_vocab();
             let bytes = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_without_vocab(&bytes).unwrap();
+            let constraint = Constraint::load(&bytes, &vocab).unwrap();
             let state = constraint.start();
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10_000usize);
             let mut mask = state.mask();
@@ -228,8 +238,9 @@ fn main() {
             std::hint::black_box(mask);
         }
         Some("commit-bench") => {
+            let vocab = probe_vocab();
             let bytes = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_without_vocab(bytes).unwrap();
+            let constraint = Constraint::load(bytes, &vocab).unwrap();
             let state = constraint.start();
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10_000usize);
             let mask = state.mask();
@@ -267,8 +278,9 @@ fn main() {
             );
         }
         Some("profile-token") => {
+            let vocab = probe_vocab();
             let artifact = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_without_vocab(artifact).unwrap();
+            let constraint = Constraint::load(artifact, &vocab).unwrap();
             let token: u32 = args[3].parse().unwrap();
             let mut state = constraint.start();
             let started = Instant::now();
@@ -276,6 +288,7 @@ fn main() {
             println!("wall_us={:.3} profile={profile:#?}", started.elapsed().as_secs_f64() * 1e6);
         }
         Some("replay-token-ids") => {
+            let vocab = probe_vocab();
             let artifact = std::fs::read(&args[2]).unwrap();
             let token_sequences: Vec<Vec<u32>> =
                 serde_json::from_slice(&std::fs::read(&args[3]).unwrap()).unwrap();
@@ -293,7 +306,7 @@ fn main() {
             // artifact allocation. Nothing mutable survives from run N to N+1;
             // multiple runs exist only to reduce scheduler noise.
             for run in 0..runs {
-                let constraint = Constraint::load_without_vocab(artifact.clone()).unwrap();
+                let constraint = Constraint::load(artifact.clone(), &vocab).unwrap();
                 mask_words = constraint.mask_len();
                 let mut sample_index = 0usize;
                 for (example_index, tokens) in token_sequences.iter().enumerate() {
@@ -384,8 +397,9 @@ fn main() {
             print("tbm", &best_tbm);
         }
         Some("compare-replay") => {
-            let left = Constraint::load_without_vocab(std::fs::read(&args[2]).unwrap()).unwrap();
-            let right = Constraint::load_without_vocab(std::fs::read(&args[3]).unwrap()).unwrap();
+            let vocab = probe_vocab();
+            let left = Constraint::load(std::fs::read(&args[2]).unwrap(), &vocab).unwrap();
+            let right = Constraint::load(std::fs::read(&args[3]).unwrap(), &vocab).unwrap();
             let token_sequences: Vec<Vec<u32>> =
                 serde_json::from_slice(&std::fs::read(&args[4]).unwrap()).unwrap();
             assert_eq!(left.mask_len(), right.mask_len());
@@ -427,8 +441,9 @@ fn main() {
             println!("no divergence across {sample_index} samples");
         }
         Some("resave") => {
+            let vocab = probe_vocab();
             let bytes = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_without_vocab(&bytes).unwrap();
+            let constraint = Constraint::load(&bytes, &vocab).unwrap();
             let started = Instant::now();
             let saved = constraint.save();
             println!(

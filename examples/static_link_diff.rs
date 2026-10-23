@@ -46,9 +46,9 @@ fn read_vocab_dump(path: &Path) -> Vocab {
     Vocab::new(entries)
 }
 
-fn load_constraint(path: &Path) -> Constraint {
+fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {
@@ -147,12 +147,12 @@ fn main() {
     let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
     let dispatch_name =
         if cache_dir.join("dispatch-literal.bin").exists() { "dispatch-literal.bin" } else { "dispatch.bin" };
-    let core = load_constraint(&cache_dir.join("core.bin"));
-    let dispatch = load_constraint(&cache_dir.join(dispatch_name));
+    let core = load_constraint(&cache_dir.join("core.bin"), &vocab);
+    let dispatch = load_constraint(&cache_dir.join(dispatch_name), &vocab);
     let static_comp =
         core.compose_compiled_subgrammars(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], &vocab).unwrap();
-    let core = load_constraint(&cache_dir.join("core.bin"));
-    let dispatch = load_constraint(&cache_dir.join(dispatch_name));
+    let core = load_constraint(&cache_dir.join("core.bin"), &vocab);
+    let dispatch = load_constraint(&cache_dir.join(dispatch_name), &vocab);
     let dynamic_comp = core
         .compose_compiled_subgrammars_dynamic(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], &vocab)
         .unwrap();

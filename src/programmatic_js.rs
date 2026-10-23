@@ -803,7 +803,7 @@ mod tests {
         // Serde roundtrip of the production composed constraint: identical
         // masks, acceptance and rejection after save/load.
         let saved = production_static.save();
-        let reloaded = Constraint::load_without_vocab(&saved).expect("production static constraint must reload");
+        let reloaded = Constraint::load(&saved, &vocab).expect("production static constraint must reload");
         assert_eq!(
             reloaded.start().mask(),
             production_static.start().mask(),

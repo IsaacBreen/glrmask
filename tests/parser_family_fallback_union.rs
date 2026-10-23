@@ -14,7 +14,7 @@ fn cross_lexeme_vocabulary_token_does_not_hide_valid_comma() {
             let vocab = Vocab::new(entries);
             let constraint = Grammar::from_lark(GRAMMAR)
                 .compile_with_build_options(&vocab, BuildOptions::default().optimization(optimization)).unwrap();
-            let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
+            let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
             for artifact in [&constraint, &loaded] {
             let mut state = artifact.start();
             state.commit_bytes(PREFIX).unwrap();

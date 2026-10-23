@@ -24,7 +24,7 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let old=open.clone();open.bind("LEFT::MARK",TokenSet::from(17)).unwrap();
     assert_eq!(open.requirements().unwrap()[0].name(),"RIGHT::MARK");
     assert_eq!(old.requirements().unwrap().len(),2);
-    let mut loaded=PreparedGrammar::load_with_vocab(open.save(),&v).unwrap();
+    let mut loaded=PreparedGrammar::load(open.save(), &v).unwrap();
     loaded.bind("RIGHT::MARK",TokenSet::from(29)).unwrap();
     let c=loaded.link_with(options()).unwrap();let mut s=c.start();
     assert_ne!(s.mask()[0]&(1<<17),0);s.commit_token(17).unwrap();

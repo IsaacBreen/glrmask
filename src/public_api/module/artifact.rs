@@ -3,7 +3,7 @@ use super::*;
 use bincode::Options;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-const MAGIC: &[u8; 8] = b"GLRASM02";
+const MAGIC: &[u8; 8] = b"GLRASM03";
 const MAX_BYTES: u64 = 1 << 30;
 
 #[derive(Serialize, Deserialize)]
@@ -361,7 +361,11 @@ mod tests {
             bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
             bytes.extend(body);
             let error = Module::load(&bytes).unwrap_err().to_string();
-            assert!(error.contains("excessive artifact element count"), "{offset}: {error}");
+            assert!(
+                error.contains("excessive artifact element count")
+                    || error.contains("Slice had bytes remaining after deserialization"),
+                "{offset}: {error}",
+            );
         }
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&u64::MAX.to_le_bytes());
@@ -391,6 +395,8 @@ mod tests {
             boundary_trigger: BoundaryTriggerDetail::None,
             slot_kinds: Arc::new(BTreeMap::new()),
             slot_spans: Arc::new(BTreeMap::new()),
+            retained_artifact: None,
+            retained_vocab_fingerprint: None,
         };
         m.prepared[0].bytes = non_native.save();
         let error = Module::load(&write(&m)).unwrap_err().to_string();

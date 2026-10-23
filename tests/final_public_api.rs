@@ -161,8 +161,8 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     let mut module = Module::new(&Grammar::from_glrm(TOKEN_HOST));
     module.precompile(&v).unwrap();
     let bytes = module.save();
-    assert!(Constraint::load_without_vocab(bytes.clone()).is_err());
-    assert!(bytes.starts_with(b"GLRASM02"));
+    assert!(Constraint::load(bytes.clone(), &vocab()).is_err());
+    assert!(bytes.starts_with(b"GLRASM03"));
 
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
     assert!(Module::load(&constraint.save()).is_err());
@@ -255,7 +255,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     state.commit_token(1).unwrap();
     assert!(state.is_accepting());
 
-    let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
+    let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
     let mut state = loaded.start();
     state.commit_token(0).unwrap();
     assert!(allowed(&state.mask(), 2));
@@ -264,7 +264,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.is_accepting());
 
     let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
-    assert!(Module::load(&open.save()).is_err());
+    assert!(Module::load(&open.save()).is_ok());
     assert!(Constraint::load(constraint.save(), &missing_domain).is_err());
 }
 

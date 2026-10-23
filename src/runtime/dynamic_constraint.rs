@@ -997,6 +997,8 @@ impl DynamicConstraint {
             boundary_candidate_summary: std::sync::OnceLock::new(),
             late_grammar_slots: Vec::new(),
             late_bind_vocab: std::sync::OnceLock::new(),
+            pending_vocab_fingerprint: None,
+            pending_special_token_ids: None,
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
@@ -1427,7 +1429,7 @@ impl DynamicConstraint {
             ),
             recursive_constraint_artifact: constraint
                 .uses_compact_segmented_parser_runtime()
-                .then(|| constraint.save()),
+                .then(|| constraint.save_body_external_artifact()),
         }
     }
 
@@ -1517,7 +1519,7 @@ impl DynamicConstraint {
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
-            .then(|| constraint.save());
+            .then(|| constraint.save_body_external_artifact());
         DynamicConstraintTransferAlternativeV5 {
             table: CompactTransferTable {
                 table: constraint.table.into_lr(),
@@ -1616,7 +1618,7 @@ impl DynamicConstraint {
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
-            .then(|| constraint.save())
+            .then(|| constraint.save_body_external_artifact())
             .unwrap_or_default();
         let metadata = DynamicConstraintTransferMetadataV11 {
             terminal_display_names: constraint.terminal_display_names.clone(),
@@ -1740,7 +1742,7 @@ impl DynamicConstraint {
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
-            .then(|| constraint.save())
+            .then(|| constraint.save_body_external_artifact())
             .unwrap_or_default();
         let metadata_base = DynamicConstraintTransferMetadataV11 {
             terminal_display_names: constraint.terminal_display_names.clone(),
@@ -1851,7 +1853,7 @@ impl DynamicConstraint {
 
     fn build_external_vocab_artifact_bytes(&self) -> Vec<u8> {
         if self.inner.has_template_parser() || self.alternatives.iter().any(Constraint::has_template_parser) {
-            return self.save_template_alternatives(true);
+            return self.save_template_alternatives();
         }
         let profile_transfer = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile_transfer.then(std::time::Instant::now);
@@ -2099,7 +2101,7 @@ impl DynamicConstraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
             if !recursive_range.is_empty() {
-                let mut inner = Constraint::load_embedded_with_vocab(&backing[recursive_range], vocab)?;
+                let mut inner = Constraint::load_body_external_artifact(&backing[recursive_range], vocab)?;
                 if metadata.projected_terminal_quotients_prepared {
                     Self::restore_projected_terminal_quotients(
                         &mut inner,
@@ -2425,7 +2427,7 @@ impl DynamicConstraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
             if !recursive_range.is_empty() {
-                let mut inner = Constraint::load_embedded_with_vocab(&backing[recursive_range], vocab)?;
+                let mut inner = Constraint::load_body_external_artifact(&backing[recursive_range], vocab)?;
                 inner
                     .tokenizer
                     .restore_virtual_residual_master_slice_artifacts(
@@ -2991,7 +2993,11 @@ impl DynamicConstraint {
                 let projected_terminal_quotients = inner
                     .dynamic_mask_vocab
                     .projected_terminal_quotients_for_artifact();
-                let loaded = Constraint::load_self_contained(recursive_artifact)?;
+                let vocab = crate::public_api::constraint_vocab(inner);
+                let loaded = Constraint::load_body_external_artifact(
+                    recursive_artifact,
+                    &vocab,
+                )?;
                 let same_vocab = loaded.token_bytes_count() == inner.token_bytes_count()
                     && inner.token_bytes.iter().all(|(&token_id, bytes)| {
                         loaded.token_bytes_for_id(token_id) == Some(bytes.as_slice())
@@ -3086,17 +3092,17 @@ impl DynamicConstraint {
         Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
     }
 
-    fn save_template_alternatives(&self, external_vocab: bool) -> Vec<u8> {
+    fn save_template_alternatives(&self) -> Vec<u8> {
         let constraints = std::iter::once(&self.inner).chain(&self.alternatives);
         let count = self.alternatives.len().checked_add(1).expect("dynamic alternative count");
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(if external_vocab { &DYNAMIC_TRANSFER_MAGIC } else { &DYNAMIC_CONSTRAINT_MAGIC });
-        bytes.extend_from_slice(&(if external_vocab { TEMPLATE_DYNAMIC_TRANSFER_VERSION } else { TEMPLATE_DYNAMIC_CONSTRAINT_VERSION }).to_le_bytes());
+        bytes.extend_from_slice(&DYNAMIC_TRANSFER_MAGIC);
+        bytes.extend_from_slice(&TEMPLATE_DYNAMIC_TRANSFER_VERSION.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&u32::try_from(count).expect("dynamic alternative count fits u32").to_le_bytes());
         for constraint in constraints {
             assert!(constraint.has_template_parser(), "mixed LR/template dynamic artifacts are unsupported");
-            let body = if external_vocab { constraint.save_template_with_external_vocab() } else { constraint.save() };
+            let body = constraint.save_template_with_external_vocab();
             bytes.reserve(8usize.checked_add(body.len()).expect("dynamic alternative size overflow"));
             bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
             bytes.extend_from_slice(&body);
@@ -3106,7 +3112,7 @@ impl DynamicConstraint {
         bytes
     }
 
-    fn load_template_alternatives(payload: &[u8], vocab: Option<&Vocab>) -> crate::Result<Self> {
+    fn load_template_alternatives(payload: &[u8], vocab: &Vocab) -> crate::Result<Self> {
         let error = |message: &str| crate::GlrMaskError::Serialization(message.into());
         let count = payload.get(..4).ok_or_else(|| error("truncated template dynamic count"))?;
         let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
@@ -3122,7 +3128,7 @@ impl DynamicConstraint {
                 .map_err(|_| error("template dynamic length does not fit this platform"))?;
             let end = header_end.checked_add(length).ok_or_else(|| error("template dynamic length overflow"))?;
             let body = payload.get(header_end..end).ok_or_else(|| error("truncated template dynamic alternative"))?;
-            let constraint = match vocab { Some(vocab) => Constraint::load_embedded_with_vocab(body, vocab)?, None => Constraint::load_self_contained(body)? };
+            let constraint = Constraint::load_body_external_artifact(body, vocab)?;
             if !constraint.has_template_parser() || constraint.table.is_present() {
                 return Err(error("template dynamic alternative is not a table-free constraint"));
             }
@@ -3136,76 +3142,11 @@ impl DynamicConstraint {
         Ok(Self::from_constraints(constraints))
     }
 
-    /// Serialize this dynamic constraint to a versioned binary artifact.
+    /// Serialize this dynamic constraint without embedding the vocabulary.
+    ///
+    /// Load with [`Self::load`] and the exact original vocabulary.
     pub fn save(&self) -> Vec<u8> {
-        if self.inner.has_template_parser() || self.alternatives.iter().any(Constraint::has_template_parser) {
-            return self.save_template_alternatives(false);
-        }
-        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_ARTIFACT").is_some() {
-            for (index, constraint) in std::iter::once(&self.inner)
-                .chain(self.alternatives.iter())
-                .enumerate()
-            {
-                let (finalizer_bits, future_bits, max_finalizers, max_futures) =
-                    constraint.tokenizer.artifact_metadata_stats();
-                eprintln!(
-                    "[glrmask/profile][dynamic_artifact_metadata] alternative={} states={} terminals={} finalizer_bits={} future_bits={} max_finalizers={} max_futures={}",
-                    index,
-                    constraint.tokenizer.num_states(),
-                    constraint.tokenizer.num_terminals(),
-                    finalizer_bits,
-                    future_bits,
-                    max_finalizers,
-                    max_futures,
-                );
-            }
-        }
-        let constraints = std::iter::once(&self.inner)
-            .chain(self.alternatives.iter())
-            .collect::<Vec<_>>();
-        let share_vocab = constraints.first().is_none_or(|first| {
-            constraints
-                .iter()
-                .skip(1)
-                .all(|constraint| constraint.token_bytes == first.token_bytes)
-        });
-        // The self-contained wire has one shared dynamic-vocabulary slot.
-        // Ordinary alternatives can share the model-vocabulary trie, but
-        // grammar-quotiented alternatives may have different partitions. In
-        // that case omit the shared accelerator and let load lazily rebuild the
-        // full vocabulary per alternative; semantics stay exact, while the
-        // external-vocab transfer format below can retain each quotient
-        // independently.
-        let has_per_alternative_quotient = constraints.len() > 1
-            && constraints
-                .iter()
-                .any(|constraint| constraint.dynamic_mask_vocab.is_grammar_quotiented());
-        let dynamic_mask_vocab = (share_vocab && !has_per_alternative_quotient)
-            .then(|| {
-                if constraints.len() == 1 {
-                    constraints[0].dynamic_mask_vocab.to_artifact()
-                } else {
-                    constraints
-                        .iter()
-                        .find_map(|constraint| constraint.dynamic_mask_vocab.to_vocab_artifact())
-                }
-            })
-            .flatten();
-        let payload = DynamicConstraintPayloadV7 {
-            alternatives: constraints
-                .into_iter()
-                .map(Self::payload_v7_for_constraint)
-                .collect(),
-            dynamic_mask_vocab,
-        };
-        let payload = bincode::serialize(&payload)
-            .expect("DynamicConstraint serialization should succeed");
-        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
-        bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
-        bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&payload);
-        bytes
+        self.save_without_vocab()
     }
 
     pub(crate) fn dynamic_vocab_from_transfer_artifact(
@@ -3249,16 +3190,30 @@ impl DynamicConstraint {
         Ok(quotient)
     }
 
-    /// Load either a self-contained artifact or a transfer artifact whose
-    /// vocabulary bytes are supplied out of band.
+    /// Load a vocabulary-free transfer artifact with its exact vocabulary.
     pub(crate) fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
-        if !bytes.starts_with(&DYNAMIC_TRANSFER_MAGIC) {
-            let mut loaded = Self::load(bytes)?;
-            loaded
-                .bind_vocab_exact(vocab)
-                .map_err(crate::GlrMaskError::Serialization)?;
-            return Ok(loaded);
+        let mut loaded = Self::load_with_vocab_inner(bytes, vocab)?;
+        if std::iter::once(&loaded.inner)
+            .chain(&loaded.alternatives)
+            .any(|constraint| !constraint.late_grammar_slots.is_empty())
+        {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic constraint artifact has unresolved slots".to_owned(),
+            ));
         }
+        loaded.seed_late_bind_vocab(vocab);
+        Ok(loaded)
+    }
+
+    fn seed_late_bind_vocab(&mut self, vocab: &Vocab) {
+        for constraint in std::iter::once(&mut self.inner).chain(&mut self.alternatives) {
+            if constraint.late_bind_vocab.get().is_none() {
+                constraint.late_bind_vocab = std::sync::OnceLock::from(vocab.clone());
+            }
+        }
+    }
+
+    fn load_with_vocab_inner(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
         if bytes.len() < DYNAMIC_CONSTRAINT_HEADER_LEN {
             return Err(crate::GlrMaskError::Serialization(
                 "invalid dynamic transfer artifact header".to_owned(),
@@ -3285,7 +3240,7 @@ impl DynamicConstraint {
             ));
         }
         if version == TEMPLATE_DYNAMIC_TRANSFER_VERSION {
-            let mut loaded = Self::load_template_alternatives(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..], Some(vocab))?;
+            let mut loaded = Self::load_template_alternatives(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..], vocab)?;
             loaded.external_vocab_artifact_cache = Some(Arc::new(bytes.to_vec()));
             return Ok(loaded);
         }
@@ -3560,7 +3515,7 @@ impl DynamicConstraint {
                 deferred_terminal_exprs_compressed,
             )| -> crate::Result<Self> {
                 if let Some(recursive_artifact) = recursive_artifact {
-                    let mut inner = Constraint::load_embedded_with_vocab(recursive_artifact, vocab)?;
+                    let mut inner = Constraint::load_body_external_artifact(recursive_artifact, vocab)?;
                     if projected_terminal_quotients_prepared {
                         Self::restore_projected_terminal_quotients(
                             &mut inner,
@@ -3673,132 +3628,11 @@ impl DynamicConstraint {
     }
 
     /// Load an artifact produced by [`DynamicConstraint::save`].
-    pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        if bytes.len() < DYNAMIC_CONSTRAINT_HEADER_LEN
-            || !bytes.starts_with(&DYNAMIC_CONSTRAINT_MAGIC)
-        {
-            return Err(crate::GlrMaskError::Serialization(
-                "invalid dynamic constraint artifact header".to_owned(),
-            ));
-        }
-        let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if !matches!(version, DYNAMIC_CONSTRAINT_VERSION | TEMPLATE_DYNAMIC_CONSTRAINT_VERSION) {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic constraint artifact version {version}: recompile the pre-release artifact")));
-        }
-        let payload_len = usize::try_from(u64::from_le_bytes(
-            bytes[10..18]
-                .try_into()
-                .expect("dynamic constraint header has fixed width"),
-        ))
-        .map_err(|_| {
-            crate::GlrMaskError::Serialization(
-                "dynamic constraint payload length does not fit this platform".to_owned(),
-            )
-        })?;
-        if bytes.len() != DYNAMIC_CONSTRAINT_HEADER_LEN.saturating_add(payload_len) {
-            return Err(crate::GlrMaskError::Serialization(
-                "invalid dynamic constraint artifact payload length".to_owned(),
-            ));
-        }
-        match version {
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION => Self::load_template_alternatives(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..], None),
-            1 => {
-                let payload: LegacyDynamicConstraintPayloadV1 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_legacy_payload_v1(payload)
-            }
-            2 => {
-                let payload: LegacyDynamicConstraintPayloadV2 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_legacy_payload_v2(payload)
-            }
-            7 | 8 => Err(crate::GlrMaskError::Serialization(
-                "dynamic constraint artifact contains removed precompiled token programs; rebuild it"
-                    .to_owned(),
-            )),
-            9 => {
-                let payload: LegacyDynamicConstraintPayloadV9 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Ok(Self::from_payload_v2(DynamicConstraintPayloadV2 {
-                    v1: DynamicConstraintPayloadV1 {
-                        table: payload.v1.table,
-                        terminal_display_names: payload.v1.terminal_display_names,
-                        tokenizer: payload.v1.tokenizer,
-                        ignore_terminal: payload.v1.ignore_terminal,
-                        direct_regular_automaton: None,
-                        token_bytes: payload.v1.token_bytes,
-                        ignore_expr: None,
-                        terminal_exprs: None,
-                    },
-                    special_token_terminals: payload.special_token_terminals,
-                }))
-            }
-            10 => {
-                let payload: LegacyDynamicConstraintPayloadV10V3 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v3(Self::migrate_legacy_v10_payload(payload))
-            }
-            11 => {
-                let payload: LegacyDynamicConstraintPayloadV11V3 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v3(Self::migrate_legacy_v11_payload(payload))
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V12 => {
-                let payload: LegacyDynamicConstraintPayloadV12V3 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v3(Self::migrate_legacy_v12_payload(payload))
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V13 => {
-                let payload: DynamicConstraintPayloadV3 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v3(payload)
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14_MAIN => {
-                let payload: LegacyDynamicConstraintPayloadV14Main =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_legacy_payload_v14_main(payload)
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL => {
-                let payload: LegacyDynamicConstraintPayloadV15Residual =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_legacy_payload_v15_residual(payload)
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16 => {
-                let payload: DynamicConstraintPayloadV4 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v4(payload, false)
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17 => {
-                let payload: DynamicConstraintPayloadV5 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v5(payload, false)
-            }
-            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18 => {
-                let payload: DynamicConstraintPayloadV6 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v6(payload)
-            }
-            DYNAMIC_CONSTRAINT_VERSION => {
-                let payload: DynamicConstraintPayloadV7 =
-                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
-                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v7(payload)
-            }
-            _ => unreachable!("version was validated above"),
-        }
+    ///
+    /// `vocab` must be the exact vocabulary the constraint was compiled
+    /// against; the stored fingerprint covers the ID-to-bytes mapping.
+    pub fn load(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
+        Self::load_with_vocab(bytes, vocab)
     }
 
     /// Return the number of `u32` words required for a packed token mask.
@@ -3884,8 +3718,8 @@ mod parser_replacement_compile_tests {
         }
         let reference = ordinary.into_constraints().pop().unwrap();
         let candidate = replacement.into_constraints().pop().unwrap();
-        let restored = Constraint::load_without_vocab(candidate.save()).unwrap();
-        let external = Constraint::load_embedded_with_vocab(
+        let restored = Constraint::load(candidate.save(), &vocab).unwrap();
+        let external = Constraint::load_body_external_artifact(
             candidate.save(), &vocab,
         ).unwrap();
         for constraint in [&candidate, &restored, &external] {
@@ -4258,7 +4092,7 @@ mod tests {
         too_long.extend_from_slice(b"\"]");
         assert!(!accepts(&too_long));
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
 
@@ -4420,7 +4254,7 @@ mod tests {
         too_long.push(b'"');
         assert!(!accepts(&too_long));
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(
             !loaded
                 .inner
@@ -4474,7 +4308,7 @@ mod tests {
         assert!(accepts(br#""a.b""#));
         assert!(accepts(br#""a..b""#), "format is an annotation; length remains asserted");
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(
             loaded
                 .inner
@@ -4521,7 +4355,7 @@ mod tests {
         assert!(accepts(br#""bb""#));
         assert!(!accepts(br#""a.b""#));
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(
             loaded
                 .inner
@@ -4594,7 +4428,7 @@ mod tests {
                 "virtual residual constraints must not attach a physical observation quotient",
             );
 
-            let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+            let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
             assert!(
                 loaded
                     .inner
@@ -4662,7 +4496,7 @@ mod tests {
         assert!(!accepts(br#""bbb""#));
         assert!(!accepts(br#""ccc""#));
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(
             loaded
                 .inner
@@ -4732,7 +4566,7 @@ mod tests {
         .unwrap();
         let original = dynamic.clone().into_constraint();
         assert!(!original.tokenizer.virtual_runtime_metadata().is_empty());
-        let loaded = Constraint::load_without_vocab(original.save()).unwrap();
+        let loaded = Constraint::load(original.save(), &vocab).unwrap();
         assert_eq!(
             loaded.tokenizer.virtual_runtime_metadata(),
             original.tokenizer.virtual_runtime_metadata(),
@@ -4753,7 +4587,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let loaded = DynamicConstraint::load(&constraint.save()).unwrap();
+        let loaded = DynamicConstraint::load(&constraint.save(), &vocab).unwrap();
         assert!(constraint.inner.ignore_expr.is_some());
         assert_eq!(loaded.inner.ignore_expr, constraint.inner.ignore_expr);
         assert_eq!(
@@ -4769,15 +4603,15 @@ mod tests {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf_with_bounded_template_parser("start ::= 'a'+", &vocab).unwrap();
         let current = constraint.save();
-        assert_eq!(u16::from_le_bytes([current[8],current[9]]), TEMPLATE_DYNAMIC_CONSTRAINT_VERSION);
-        let loaded = DynamicConstraint::load(&current).unwrap();
+        assert_eq!(u16::from_le_bytes([current[8],current[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
+        let loaded = DynamicConstraint::load(&current, &vocab).unwrap();
         assert!(loaded.inner.dynamic_mask_vocab.to_artifact().is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
         let other_vocab = Vocab::new(vec![(0,b"z".to_vec())]);
         let other = DynamicConstraint::from_ebnf_with_bounded_template_parser("start ::= 'z'+", &other_vocab).unwrap();
         let malformed = DynamicConstraint::from_constraints(vec![constraint.into_constraint(), other.into_constraint()]).save();
-        let error = DynamicConstraint::load(&malformed).unwrap_err();
-        assert!(error.to_string().contains("alternatives have different token bytes"));
+        let error = DynamicConstraint::load(&malformed, &vocab).unwrap_err();
+        assert!(error.to_string().contains("vocabulary"), "{error}");
     }
 
     #[test]
@@ -4807,7 +4641,7 @@ mod tests {
         );
 
         let bytes = constraint.save();
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert!(
             loaded
                 .inner
@@ -4851,9 +4685,9 @@ mod tests {
         let saved = constraint.save();
         assert_eq!(
             u16::from_le_bytes([saved[8], saved[9]]),
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION,
+            TEMPLATE_DYNAMIC_TRANSFER_VERSION,
         );
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert_eq!(loaded.inner.tokenizer.virtual_runtime_metadata().len(), 2);
         assert_eq!(constraint.start().mask(), loaded.start().mask());
 
@@ -5042,8 +4876,8 @@ mod tests {
         assert_eq!(metadata[0].root_state, 0);
 
         let saved = constraint.save();
-        assert_eq!(u16::from_le_bytes([saved[8], saved[9]]), TEMPLATE_DYNAMIC_CONSTRAINT_VERSION);
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert_eq!(u16::from_le_bytes([saved[8], saved[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert_eq!(loaded.inner.tokenizer.virtual_runtime_metadata(), metadata);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
 
@@ -5108,12 +4942,10 @@ mod tests {
         let saved = constraint.save();
         assert_eq!(
             u16::from_le_bytes([saved[8], saved[9]]),
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION,
+            TEMPLATE_DYNAMIC_TRANSFER_VERSION,
         );
-        // This deliberately unlinked body is not a public closed root.
-        assert!(DynamicConstraint::load(&saved).is_err());
         assert_eq!(u32::from_le_bytes(saved[18..22].try_into().unwrap()), 1);
-        let mut loaded = DynamicConstraint::from_constraints(vec![Constraint::load_body_artifact(&saved[30..]).unwrap()]);
+        let mut loaded = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&saved[30..], &vocab).unwrap()]);
         loaded.inner.materialize_composition_link_metadata_for_compilation().unwrap();
         assert_eq!(loaded.inner.late_grammar_slots, constraint.inner.late_grammar_slots);
         assert_eq!(loaded.inner.tokenizer.virtual_runtime_metadata(), metadata);
@@ -5131,7 +4963,7 @@ mod tests {
             TEMPLATE_DYNAMIC_TRANSFER_VERSION,
         );
         assert!(DynamicConstraint::load_with_vocab(&transfer, &vocab).is_err());
-        let mut transferred = DynamicConstraint::from_constraints(vec![Constraint::load_body_artifact_with_vocab(&transfer[30..], &vocab).unwrap()]);
+        let mut transferred = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&transfer[30..], &vocab).unwrap()]);
         transferred.inner.materialize_composition_link_metadata_for_compilation().unwrap();
         assert_eq!(transferred.inner.tokenizer.virtual_runtime_metadata(), metadata);
         assert!(transferred.inner.dynamic_mask_vocab.has_terminal_observation_classes());
@@ -5177,7 +5009,7 @@ mod tests {
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&payload);
 
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert_eq!(loaded.inner.late_grammar_slots, constraint.inner.late_grammar_slots);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
@@ -5210,7 +5042,7 @@ mod tests {
         bytes.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V13.to_le_bytes());
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&payload);
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection()
             || loaded.inner.tokenizer.virtual_zero_min_unit_repeat_mask_tokenizer(2).is_some());
         assert_eq!(loaded.start().mask(), original_mask);
@@ -5413,7 +5245,7 @@ mod tests {
         assert!(constraint.inner.tokenizer.has_virtual_binary_repeat_intersection());
 
         let bytes = constraint.save();
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert!(
             loaded.inner.tokenizer.has_virtual_binary_repeat_intersection(),
             "load must reconstruct the lazy exact product sidecar",
@@ -5572,7 +5404,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
 
@@ -5646,7 +5478,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert!(
             loaded
@@ -5735,7 +5567,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
         let mut original_state = dynamic.start();
@@ -5807,7 +5639,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(!loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert!(
             loaded
@@ -5895,7 +5727,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(!loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert!(
             loaded
@@ -5955,7 +5787,7 @@ mod tests {
                 "empty/epsilon normalization should remove the giant repeat entirely",
             );
             let saved = dynamic.save();
-            let loaded = DynamicConstraint::load(&saved).unwrap();
+            let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
             assert_eq!(loaded.start().mask(), dynamic.start().mask());
         }
     }
@@ -6018,7 +5850,7 @@ mod tests {
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
         }
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -6206,7 +6038,7 @@ mod tests {
         accepted.commit_token(1).unwrap();
         assert!(accepted.is_accepting());
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), start_mask);
     }
@@ -6451,7 +6283,7 @@ mod tests {
         assert!(dynamic.inner.tokenizer.num_states() < 64);
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -6525,7 +6357,7 @@ mod tests {
         }
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(0).unwrap();
@@ -6693,7 +6525,7 @@ mod tests {
         assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
 
         let saved = dynamic.save();
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
         assert!(
             loaded.inner.tokenizer.has_virtual_residual_runtime(),
@@ -6771,7 +6603,7 @@ mod tests {
         assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
         assert_eq!(dynamic_state.mask(), oracle_state.mask());
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -6823,7 +6655,7 @@ mod tests {
         assert_eq!(dynamic.start().mask(), oracle.start().mask());
         assert!(dynamic.start().mask().iter().all(|&word| word == 0));
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -6875,7 +6707,7 @@ mod tests {
             "different uniquely-delimited literal suffixes make the intersection empty",
         );
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert_eq!(loaded.start().mask(), start_mask);
     }
 
@@ -7004,7 +6836,7 @@ mod tests {
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert_eq!(dynamic.start().mask(), loaded.start().mask());
         for token in [0u32, 1] {
@@ -7116,7 +6948,7 @@ mod tests {
             }
         }
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -7197,7 +7029,7 @@ mod tests {
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert_eq!(dynamic.start().mask(), loaded.start().mask());
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
@@ -7266,7 +7098,7 @@ mod tests {
             }
         }
 
-        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -7306,7 +7138,7 @@ mod tests {
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&payload);
 
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert!(loaded.inner.ignore_expr.is_none());
         assert_eq!(loaded.start().mask(), original_mask);
     }
@@ -7343,7 +7175,7 @@ mod tests {
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&payload);
 
-        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        let loaded = DynamicConstraint::load(&bytes, &vocab).unwrap();
         assert!(loaded.inner.tokenizer.terminal_exprs().is_none());
         assert_eq!(loaded.start().mask(), original_mask);
     }
@@ -7445,9 +7277,9 @@ mod tests {
         let saved = constraint.save();
         assert_eq!(
             u16::from_le_bytes([saved[8], saved[9]]),
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION,
+            TEMPLATE_DYNAMIC_TRANSFER_VERSION,
         );
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(
             loaded
                 .inner
@@ -7656,9 +7488,9 @@ mod tests {
         let saved = constraint.save();
         assert_eq!(
             u16::from_le_bytes([saved[8], saved[9]]),
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION,
+            TEMPLATE_DYNAMIC_TRANSFER_VERSION,
         );
-        let loaded = DynamicConstraint::load(&saved).unwrap();
+        let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert!(loaded.inner.dynamic_mask_vocab.projected_terminal_quotients_prepared());
         assert_eq!(
             bincode::serialize(
@@ -7731,7 +7563,7 @@ mod tests {
         constraint.external_vocab_artifact_cache = None;
         constraint.cache_external_vocab_artifact_for_save();
 
-        let loaded = DynamicConstraint::load(&constraint.save()).unwrap();
+        let loaded = DynamicConstraint::load(&constraint.save(), &vocab).unwrap();
         assert!(loaded.inner.dynamic_mask_vocab.projected_terminal_quotients_prepared());
         assert!(!loaded.inner.dynamic_mask_vocab.has_projected_terminal_quotients());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -7834,8 +7666,8 @@ nt start ::= A;
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
         let mut bytes = constraint.save();
         bytes[8..10].copy_from_slice(&8u16.to_le_bytes());
-        let error = DynamicConstraint::load(&bytes).unwrap_err().to_string();
-        assert!(error.contains("unsupported dynamic constraint artifact version 8"));
+        let error = DynamicConstraint::load(&bytes, &vocab).unwrap_err().to_string();
+        assert!(error.contains("unsupported dynamic transfer artifact version 8"));
         assert!(error.contains("recompile"));
     }
 
@@ -7966,7 +7798,7 @@ nt start ::= A;
         static_state.commit_token(0).unwrap();
         assert_eq!(static_state.mask(), after_third);
 
-        let loaded = crate::Constraint::load_without_vocab(&constraint.save()).unwrap();
+        let loaded = crate::Constraint::load(&constraint.save(), &vocab).unwrap();
         assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();

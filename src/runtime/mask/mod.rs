@@ -2084,7 +2084,7 @@ mod tests {
                 Grammar::glrm("glrm 1; start document; extern SPECIAL; nt document = \"a\" | SPECIAL;"),
                 &vocab,
             ).unwrap().bind_token("SPECIAL", [70, 130]).unwrap().build().unwrap().compile().unwrap();
-            let loaded = Constraint::load_without_vocab(original.save()).unwrap();
+            let loaded = Constraint::load(original.save(), &vocab).unwrap();
             for constraint in [&original, &loaded] {
                 let state = constraint.start();
                 for seed in [0u32, 0x5555_5555, 0xffff_ffff] {
@@ -2121,7 +2121,7 @@ mod tests {
         ), &vocab).unwrap();
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
+        let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound, &loaded] {
             let mut state = constraint.start();
             let mut unchanged_cache_reuses = 0;
@@ -2243,7 +2243,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut poisoned = Constraint::load_without_vocab(bound.save()).unwrap();
+        let mut poisoned = Constraint::load(bound.save(), &vocab).unwrap();
         poisoned.recursive_parser_layout().unwrap().unwrap();
         let root = poisoned
             .static_dynamic_overlay
@@ -2378,7 +2378,7 @@ mod tests {
                 "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";",
             ), &vocab).unwrap();
             let bound = outer_parent.bind_grammar_dynamic_boundary("middle", middle).unwrap();
-            let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
+            let loaded = Constraint::load(bound.save(), &vocab).unwrap();
             for constraint in [&bound, &loaded] {
                 assert!(constraint.uses_compact_segmented_parser_runtime());
                 let check = |state: &super::ConstraintState<'_>| {
@@ -2576,7 +2576,7 @@ mod tests {
         state.fill_mask(&mut actual);
         assert_eq!(actual, expected);
 
-        let loaded = Constraint::load_without_vocab(&constraint.save()).expect("empty-PM constraint should roundtrip");
+        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("empty-PM constraint should roundtrip");
         assert!(loaded.possible_matches.is_empty());
         let mut loaded_state = loaded.start_dynamic();
         let loaded_tokenizer_state = loaded.tokenizer.initial_state();

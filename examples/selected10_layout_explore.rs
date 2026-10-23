@@ -100,9 +100,9 @@ fn read_vocab_dump(path: &Path) -> Vocab {
     Vocab::new(entries)
 }
 
-fn load_constraint(path: &Path) -> Constraint {
+fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn save_constraint(path: &Path, constraint: &Constraint) {
@@ -251,7 +251,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
             eprintln!("[selected10] schema {index:02} {short_name}: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
             save_constraint(&path, &constraint);
         } else if upgrade_summaries {
-            let mut constraint = load_constraint(&path);
+            let mut constraint = load_constraint(&path, vocab);
             constraint.prepare_composition_grammar_summary().unwrap();
             save_constraint(&path, &constraint);
         }
@@ -261,7 +261,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
             let constraint = build_name_constraint(index, vocab);
             save_constraint(&name_path, &constraint);
         } else if upgrade_summaries {
-            let mut constraint = load_constraint(&name_path);
+            let mut constraint = load_constraint(&name_path, vocab);
             constraint.prepare_composition_grammar_summary().unwrap();
             save_constraint(&name_path, &constraint);
         }
@@ -272,7 +272,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         let schemas = SELECTED10
             .iter()
             .enumerate()
-            .map(|(index, (short_name, _))| load_constraint(&schema_cache_path(cache_dir, index, short_name)))
+            .map(|(index, (short_name, _))| load_constraint(&schema_cache_path(cache_dir, index, short_name), vocab))
             .collect::<Vec<_>>();
         let dispatch = if matches!(layout, Layout::Current | Layout::PublicOpen) {
             let parent_started = Instant::now();
@@ -298,7 +298,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         };
         save_constraint(&dispatch_path, &dispatch);
     } else if upgrade_summaries {
-        let mut dispatch = load_constraint(&dispatch_path);
+        let mut dispatch = load_constraint(&dispatch_path, vocab);
         dispatch.prepare_composition_grammar_summary().unwrap();
         save_constraint(&dispatch_path, &dispatch);
     }
@@ -310,7 +310,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         eprintln!("[selected10] JS core compile: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
         save_constraint(&core_path, &core);
     } else if upgrade_summaries {
-        let mut core = load_constraint(&core_path);
+        let mut core = load_constraint(&core_path, vocab);
         core.prepare_composition_grammar_summary().unwrap();
         save_constraint(&core_path, &core);
     }
@@ -414,8 +414,8 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
     for run in 0..runs {
         eprintln!("[selected10/debug] run={} before_load dispatch={dispatch_name}", run + 1);
         let load_started = Instant::now();
-        let mut core = Constraint::load_without_vocab(&core_bytes).unwrap();
-        let mut dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
+        let mut core = Constraint::load(&core_bytes, &vocab).unwrap();
+        let mut dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
         if std::env::var_os("SELECTED10_BIND_VOCAB_ON_LOAD").is_some() {
             core.bind_vocab_exact(vocab).unwrap();
             dispatch.bind_vocab_exact(vocab).unwrap();
@@ -537,7 +537,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
         };
         let save = save_started.elapsed();
         if std::env::var_os("SELECTED10_VALIDATE_SAVE_LOAD").is_some() {
-            let loaded = Constraint::load_without_vocab(&bytes).expect("reload composed constraint");
+            let loaded = Constraint::load(&bytes, &vocab).expect("reload composed constraint");
             for prefix in [
                 b"const x = tools".as_slice(),
                 b"const x = tools.tool_0".as_slice(),

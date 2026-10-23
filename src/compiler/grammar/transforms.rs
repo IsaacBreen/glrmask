@@ -1848,7 +1848,7 @@ mod tests {
         let mut errors = Vec::new();
         for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
             let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
-            let loaded = crate::Constraint::load_without_vocab(compiled.save()).unwrap();
+            let loaded = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
                 for depth in [0, 1, 17, 257] {
@@ -1861,7 +1861,7 @@ mod tests {
             }
         }
         let compiled = crate::DynamicConstraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
-        let loaded = crate::DynamicConstraint::load(&compiled.save()).unwrap();
+        let loaded = crate::DynamicConstraint::load(&compiled.save(), &vocab).unwrap();
         let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_without_vocab(), &vocab).unwrap();
         for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
             for depth in [0, 1, 17, 257] {
@@ -1885,7 +1885,7 @@ mod tests {
         after_bang[b'x' as usize / 32] = 1 << (b'x' % 32);
         for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
             let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
-            let loaded = crate::Constraint::load_without_vocab(compiled.save()).unwrap();
+            let loaded = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for constraint in [compiled, loaded, external] {
                 let mut state = constraint.start();
@@ -1901,7 +1901,7 @@ mod tests {
             }
         }
         let compiled = crate::DynamicConstraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
-        let loaded = crate::DynamicConstraint::load(&compiled.save()).unwrap();
+        let loaded = crate::DynamicConstraint::load(&compiled.save(), &vocab).unwrap();
         let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_without_vocab(), &vocab).unwrap();
         for constraint in [compiled, loaded, external] {
             let mut state = constraint.start();

@@ -73,6 +73,16 @@ pub(crate) fn decode_external(bytes: &[u8], vocab: &crate::Vocab) -> Result<Pars
     decode(&bytes[36..])
 }
 
+/// Decodes an external template section without checking its digest. Only the
+/// deferred prepared-artifact path uses this: the envelope fingerprint is
+/// checked before the body is ever compiled.
+pub(crate) fn decode_external_without_vocab(bytes: &[u8]) -> Result<ParserSeed, String> {
+    if bytes.len() < 36 || !bytes.starts_with(b"TPX1") {
+        return Err("invalid external-vocabulary template parser section".into());
+    }
+    decode(&bytes[36..])
+}
+
 struct Input<'a> { bytes: &'a [u8], offset: usize }
 impl Input<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], String> {

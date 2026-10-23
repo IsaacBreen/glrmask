@@ -104,7 +104,7 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
                     .compile_with_build_options(&vocab, options)
                     .unwrap();
                 let bytes = fresh.save();
-                let loaded = Constraint::load_without_vocab(&bytes).unwrap();
+                let loaded = Constraint::load(&bytes, &vocab).unwrap();
                 let cloned = loaded.clone();
                 assert_eq!(cloned.parser_backend(), backend);
                 transition_checks += assert_tokenizer_transition_cache(&fresh);
@@ -172,7 +172,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
             .compile_with_build_options(&vocab, options)
             .unwrap();
         let bytes = fresh.save();
-        let loaded = Constraint::load_without_vocab(&bytes).unwrap();
+        let loaded = Constraint::load(&bytes, &vocab).unwrap();
         let fresh_checks = assert_tokenizer_transition_cache(&fresh);
         let loaded_checks = assert_tokenizer_transition_cache(&loaded);
         assert!(

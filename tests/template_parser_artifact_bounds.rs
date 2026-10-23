@@ -50,23 +50,33 @@ fn fixture(optimization: MaskStrategy, external: bool) -> Vec<u8> {
     }
 }
 
+fn envelope_len(bytes: &[u8]) -> usize {
+    if bytes.starts_with(b"GLRCON02") { 40 } else { 0 }
+}
+
 fn parser_range(bytes: &[u8]) -> Range<usize> {
-    assert!(bytes.starts_with(b"GLRCONS\0"));
-    assert_eq!(&bytes[18..22], b"S30\0");
+    let offset = envelope_len(bytes);
+    let body = &bytes[offset..];
+    assert_eq!(&body[..8], b"GLRCONS\0");
+    assert_eq!(&body[18..22], b"S30\0");
     let length =
-        |i: usize| u64::from_le_bytes(bytes[22 + i * 8..30 + i * 8].try_into().unwrap()) as usize;
-    let start = 110 + length(0) + length(1);
-    start..start + length(2)
+        |i: usize| u64::from_le_bytes(body[22 + i * 8..30 + i * 8].try_into().unwrap()) as usize;
+    let section_start = offset + 110 + length(0) + length(1);
+    let start = if bytes[section_start..].starts_with(b"TPX1") { section_start + 36 } else { section_start };
+    start..section_start + length(2)
 }
 
 fn replace_parser(bytes: &[u8], parser: &[u8]) -> Vec<u8> {
+    let offset = envelope_len(bytes);
     let range = parser_range(bytes);
-    let mut result = bytes[..range.start].to_vec();
+    let prefix = if bytes[range.start - 36..range.start].starts_with(b"TPX1") { 36 } else { 0 };
+    let mut result = bytes[..range.start - prefix].to_vec();
+    result.extend_from_slice(&bytes[range.start - prefix..range.start]);
     result.extend_from_slice(parser);
     result.extend_from_slice(&bytes[range.end..]);
-    result[38..46].copy_from_slice(&(parser.len() as u64).to_le_bytes());
-    let payload_len = (result.len() - 18) as u64;
-    result[10..18].copy_from_slice(&payload_len.to_le_bytes());
+    result[offset + 38..offset + 46].copy_from_slice(&((parser.len() + prefix) as u64).to_le_bytes());
+    let payload_len = (result.len() - offset - 18) as u64;
+    result[offset + 10..offset + 18].copy_from_slice(&payload_len.to_le_bytes());
     result
 }
 
@@ -99,7 +109,7 @@ fn load(bytes: Vec<u8>, external: bool) -> glrmask::Result<Constraint> {
     if external {
         Constraint::load(bytes, &vocab())
     } else {
-        Constraint::load_without_vocab(bytes)
+        Constraint::load(bytes, &vocab())
     }
 }
 
@@ -120,9 +130,8 @@ fn every_compact_graph_phase_and_link_rejects_out_of_bounds_fields() {
         for external in [false, true] {
             let original = fixture(optimization, external);
             let parser = &original[parser_range(&original)];
-            let header = if external { 36 } else { 0 };
-            assert_eq!(&parser[header..header + 4], b"TPR7");
-            let mut offset = header + 4;
+            assert_eq!(&parser[..4], b"TPR7");
+            let mut offset = 4;
             let (alphabet, _) = read_var(parser, &mut offset);
             let (terminals, _) = read_var(parser, &mut offset);
             let (skips, _) = read_var(parser, &mut offset);
@@ -219,7 +228,7 @@ fn derived_certificate_limit_rejects_small_frames_before_large_allocation() {
         for external in [false, true] {
             let original = fixture(optimization, external);
             let parser = &original[parser_range(&original)];
-            let mut offset = if external { 40 } else { 4 };
+            let mut offset = 4;
             let (_, alphabet_range) = read_var(parser, &mut offset);
             let (terminals, _) = read_var(parser, &mut offset);
             let row_bytes = ((u64::from(terminals) + 1).div_ceil(64)) * 16 + 64;

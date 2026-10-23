@@ -19120,6 +19120,8 @@ fn build_composed_constraint_unfinalized(
         boundary_candidate_summary: std::sync::OnceLock::new(),
         late_grammar_slots: Vec::new(),
         late_bind_vocab: OnceLock::from(vocab.clone()),
+        pending_vocab_fingerprint: None,
+        pending_special_token_ids: None,
         scoped_ignore_only_tokens: Vec::new(),
         scoped_ignore_prefix_fusions: Vec::new(),
         parser_dwa,
@@ -24108,7 +24110,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let loaded_child = Constraint::load_without_vocab(&child.save()).unwrap();
+        let loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
         let children = [
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "LEFT"),
@@ -24438,7 +24440,7 @@ table: &child_tables[index],
         let outer = outer_parent
             .compose_linked_children_for_test_flattened(&[("CALL", &middle)], &vocab)
             .unwrap();
-        let loaded_middle = Constraint::load_without_vocab(&middle.save()).unwrap();
+        let loaded_middle = Constraint::load(&middle.save(), &vocab).unwrap();
         let outer_loaded = Constraint::from_glrm_grammar(
             r#"
                 start document;
@@ -25308,8 +25310,8 @@ table: &child_table,
             .compose_linked_children_for_test_owned(&[("SUB", &child)], &vocab)
             .unwrap();
 
-        let mut loaded_parent = Constraint::load_without_vocab(&parent.save()).unwrap();
-        let mut loaded_child = Constraint::load_without_vocab(&child.save()).unwrap();
+        let mut loaded_parent = Constraint::load(&parent.save(), &vocab).unwrap();
+        let mut loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
         loaded_parent.prepare_for_composition_internal(&vocab).unwrap();
         loaded_child.prepare_for_composition_internal(&vocab).unwrap();
         assert!(loaded_parent.packed_parser_dwa.is_some());
@@ -25585,7 +25587,7 @@ table: &child_table,
         let composed = parent
             .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed.save())
+        let loaded = Constraint::load(&composed.save(), &vocab)
             .expect("composed exact-special-token constraint must survive serialization");
 
         assert!(composed
@@ -25727,8 +25729,8 @@ table: &child_table,
         let mut prepared_child = child.clone();
         prepared_parent.ensure_composition_reset_tokens_by_terminal();
         prepared_child.ensure_composition_reset_tokens_by_terminal();
-        let mut prepared_parent = Constraint::load_without_vocab(&prepared_parent.save()).unwrap();
-        let mut prepared_child = Constraint::load_without_vocab(&prepared_child.save()).unwrap();
+        let mut prepared_parent = Constraint::load(&prepared_parent.save(), &vocab).unwrap();
+        let mut prepared_child = Constraint::load(&prepared_child.save(), &vocab).unwrap();
         prepared_parent
             .materialize_composition_metadata_for_compilation()
             .unwrap();
@@ -26071,7 +26073,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed_static.save()).unwrap();
+        let loaded = Constraint::load(&composed_static.save(), &vocab).unwrap();
 
         for constraint in [&composed_static, &loaded] {
             assert!(constraint.ignore_terminal.is_none());
@@ -26148,7 +26150,7 @@ table: &child_table,
 
     #[inline(never)]
     fn scoped_oracle_test_reload(source: &Constraint) -> Box<Constraint> {
-        Box::new(Constraint::load_without_vocab(&source.save()).unwrap())
+        Box::new(Constraint::load(&source.save(), &crate::public_api::constraint_vocab(source)).unwrap())
     }
 
     #[inline(never)]
@@ -26468,7 +26470,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         let make_states = || {
             let mut states = Vec::with_capacity(4);
             states.push(composed.start());
@@ -26653,7 +26655,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         // Keep the large ConstraintState objects off this test function's
         // stack. Several four-state inline arrays were enough to exceed the
         // default Rust test-thread stack on macOS before the first statement
@@ -27037,7 +27039,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
 
         for constraint in [&composed, &loaded] {
             assert!(!constraint.table.is_present());
@@ -27415,7 +27417,7 @@ table: &child_table,
             assert!(expected.is_accepting());
         }
 
-        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(0).unwrap();
@@ -27617,7 +27619,7 @@ table: &child_table,
             .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         assert_eq!(composed.embedded_end_token_ids(), vec![END_TOKEN]);
-        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
 
         for sequence in [vec![3, END_TOKEN, 2], vec![0, 1, END_TOKEN, 2]] {
@@ -27686,7 +27688,7 @@ table: &child_table,
             .compose_linked_children_for_test_dynamic(&[("CHILD", &nullable_child)], &vocab)
             .unwrap();
         assert!(middle.composition_start_nullable().unwrap());
-        let middle = Constraint::load_without_vocab(&middle.save()).unwrap();
+        let middle = Constraint::load(&middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
         let outer_parent = Constraint::from_glrm_grammar(
@@ -27901,7 +27903,7 @@ table: &child_table,
             segmented.uses_compact_segmented_parser_runtime(),
             "source-built dynamic composition should use compact parser coordinates",
         );
-        let loaded_segmented = Constraint::load_without_vocab(&segmented.save()).unwrap();
+        let loaded_segmented = Constraint::load(&segmented.save(), &vocab).unwrap();
         assert!(
             loaded_segmented.uses_compact_segmented_parser_runtime(),
             "v24 dynamic composition should restore compact parser coordinates",
@@ -28006,7 +28008,7 @@ table: &child_table,
                 }
             };
             assert_policy(&hybrid);
-            let loaded = Constraint::load_without_vocab(&hybrid.save()).unwrap();
+            let loaded = Constraint::load(&hybrid.save(), &vocab).unwrap();
             assert_policy(&loaded);
 
             for constraint in [&hybrid, &loaded] {
@@ -28415,7 +28417,7 @@ table: &child_table,
         )
         .unwrap();
         assert!(child.composition_start_nullable().unwrap());
-        let loaded_child = Constraint::load_without_vocab(&child.save()).unwrap();
+        let loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
         assert!(loaded_child.composition_start_nullable().unwrap());
 
         // Nullable bound children are outside the signed-transfer static
@@ -28531,7 +28533,7 @@ table: &child_table,
             .clone()
             .compose_linked_children_for_test_dynamic(&[("CALL", &dispatch_dynamic)], &vocab)
             .unwrap();
-        let loaded_dispatch = Constraint::load_without_vocab(&dispatch.save()).unwrap();
+        let loaded_dispatch = Constraint::load(&dispatch.save(), &vocab).unwrap();
         let composed_from_loaded = outer_parent
             .compose_linked_children_for_test(&[("CALL", &loaded_dispatch)], &vocab)
             .unwrap();
@@ -28688,7 +28690,7 @@ table: &child_table,
             .compose_linked_children_for_test(&[("LEAF", &leaf)], &vocab)
             .unwrap();
         assert!(middle.composition_start_nullable().unwrap());
-        let middle = Constraint::load_without_vocab(&middle.save()).unwrap();
+        let middle = Constraint::load(&middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
         let outer_parent = Constraint::from_glrm_grammar(
@@ -28734,7 +28736,7 @@ table: &child_table,
         assert_constraints_equivalent_on_reachable_prefixes(
             &static_composed, &monolithic, &vocab, 4,
         );
-        let reloaded_static = Constraint::load_without_vocab(static_composed.save()).unwrap();
+        let reloaded_static = Constraint::load(static_composed.save(), &vocab).unwrap();
         assert_constraints_equivalent_on_reachable_prefixes(
             &reloaded_static, &monolithic, &vocab, 4,
         );
@@ -31760,7 +31762,7 @@ table: &child_table,
         .expect("bind1")
         .constraint;
         let bytes = stage1.save();
-        let loaded = Constraint::load_without_vocab(bytes.as_slice()).expect("load composed parent");
+        let loaded = Constraint::load(bytes.as_slice(), &vocab).expect("load composed parent");
         assert!(
             loaded.has_recursive_segmented_parser_tree(),
             "loaded parent must retain its segmented tree",
@@ -31986,7 +31988,7 @@ table: &child_table,
         assert!(strict >= 1, "ablation must lose at least one admission");
         // The extended artifact itself round-trips with identical behavior.
         let reloaded =
-            Constraint::load_without_vocab(stage2.save().as_slice()).expect("reload extended composition");
+            Constraint::load(stage2.save().as_slice(), &vocab).expect("reload extended composition");
         assert_composed_masks_equal("post-serde-reload-bytes", &reloaded, &stage2_dyn, &prefixes);
         assert_composed_token_masks_equal(
             "post-serde-reload-tokens",
@@ -32234,7 +32236,7 @@ table: &child_table,
         let composed = parent
             .compose_linked_children_for_test(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
             .unwrap();
-        let loaded = Constraint::load_without_vocab(&composed.save())
+        let loaded = Constraint::load(&composed.save(), &vocab)
             .expect("composed constraints must survive serialization");
 
         for sequence in [[0, 1], [2, 3]] {
@@ -33577,7 +33579,7 @@ table: &child_table,
                 eprintln!("MINBOUND filtered_vocab tokens={}", vocab.entries_map().len());
             }
             let load = |name: &str| -> Constraint {
-                Constraint::load_without_vocab(&fs::read(std::path::Path::new(&root).join(name)).unwrap()).unwrap()
+                Constraint::load(&fs::read(std::path::Path::new(&root).join(name)).unwrap(), &vocab).unwrap()
             };
             let mut core = load("core.bin");
             let dispatch_name = std::env::var("GLRMASK_MINBOUND_DISPATCH")
@@ -35362,7 +35364,7 @@ table: &dispatch.table,
         let vocab_path = std::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
         let vocab = load_vocab(&vocab_path);
         let load = |name: &str| -> Constraint {
-            Constraint::load_without_vocab(&fs::read(format!("{root}\\{name}")).unwrap()).unwrap()
+            Constraint::load(&fs::read(format!("{root}\\{name}")).unwrap(), &vocab).unwrap()
         };
         // All terminal DWAs are now captured. The subtraction phase itself does
         // not invoke the terminal compiler at all.
@@ -35543,7 +35545,7 @@ table: &dispatch.table,
     // Phase 1 probe setup helpers (shared by both probe tests).
     fn phase1_load(root: &std::path::Path, name: &str) -> Constraint {
         let bytes = std::fs::read(root.join(name)).unwrap();
-        Constraint::load_without_vocab(&bytes).unwrap()
+        Constraint::load(&bytes, &load_vocab(&std::env::var("PHASE1_VOCAB").expect("PHASE1_VOCAB"))).unwrap()
     }
 
     // Mirror the MINBOUND deferred-data restoration (exprs + rules + metadata).

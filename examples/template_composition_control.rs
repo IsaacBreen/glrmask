@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = parser_backend_report(&candidate); assert_table_free(&report);
     fs::write(output.join("backend.json"), serde_json::to_vec_pretty(&report)?)?;
     let start = Instant::now(); let saved = candidate.save(); let save_ns = start.elapsed().as_nanos();
-    let start = Instant::now(); let loaded = Constraint::load_without_vocab(&saved)?; let load_ns = start.elapsed().as_nanos();
+    let start = Instant::now(); let loaded = Constraint::load(&saved, &vocab)?; let load_ns = start.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&loaded)); assert_eq!(saved, loaded.save());
     let external = candidate.save(); let external_loaded = Constraint::load(&external, &vocab)?;
     assert_table_free(&parser_backend_report(&external_loaded));

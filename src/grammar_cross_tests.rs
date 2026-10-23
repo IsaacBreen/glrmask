@@ -78,7 +78,7 @@ fn hash_collision_merge_keeps_exact_masks_commits_and_loaded_language() {
             _ => crate::compiler::pipeline::compile_owned(grammar.clone(), &vocab),
         };
         if mode == "o2" { assert!(constraint.has_template_parser() && !constraint.table.is_present()); }
-        let loaded = crate::Constraint::load_without_vocab(constraint.save()).unwrap();
+        let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
         for (variant, c) in [("built", &constraint), ("loaded", &loaded)] {
             for (prefix, expected) in prefixes.iter().zip(&expected_masks) {
                 let mut state = c.start(); state.commit_bytes(prefix).unwrap();

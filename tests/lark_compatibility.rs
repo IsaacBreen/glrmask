@@ -12,7 +12,7 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
             let c=lark(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([10])).unwrap();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
             for &id in &expected{assert!(accepts(&c,&[id,10]));}
-            let loaded=Constraint::load_without_vocab(c.save()).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
+            let loaded=Constraint::load(c.save(), &v).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
     assert!(lark("start: <[0-5]>").compile(&v).is_err());
@@ -57,7 +57,7 @@ fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
     assert_eq!(g.requirements().unwrap().len(),1);
     let child=Grammar::from_glrm("start root nt root=\"y\"");
     let p=g.prepare(&v).unwrap().bind_snapshot("payload",child.prepare(&v).unwrap()).unwrap();
-    let loaded=PreparedGrammar::load(p.save()).unwrap();
+    let loaded=PreparedGrammar::load(p.save(), &v).unwrap();
     for mode in MODES {
         let c=g.bind_snapshot("payload",&child).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(accepts(&c,&[2]));assert!(accepts(&loaded.link_with(BuildOptions::default().optimization(mode)).unwrap(),&[2]));

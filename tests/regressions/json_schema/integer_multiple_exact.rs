@@ -24,7 +24,7 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
             for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                 let constraint = Grammar::from_json_schema(&schema)
                     .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
-                let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
+                let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
                 for instance in [&constraint, &loaded] {
                     let mask = instance.start().mask();
                     for (id, &value) in values.iter().enumerate() {

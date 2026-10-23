@@ -507,7 +507,7 @@ mod tests {
             let reference=Grammar::from_ebnf(if nullable {r#"start ::= "x" ("a" | "") "y""#}
                 else {r#"start ::= "x" "a" "y""#})
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-            let loaded=Constraint::load_without_vocab(&candidate.save()).unwrap();
+            let loaded=Constraint::load(&candidate.save(), &vocab).unwrap();
             let mut words=vec![Vec::new()];
             for depth in 0..=4 {
                 let mut next=Vec::new();
@@ -539,7 +539,7 @@ mod tests {
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT = /a[ab]*/; nt root = TEXT "?";"#)
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-        let loaded_left=Constraint::load_without_vocab(&left.save()).unwrap();let loaded_right=Constraint::load_without_vocab(&right.save()).unwrap();
+        let loaded_left=Constraint::load(&left.save(), &vocab).unwrap();let loaded_right=Constraint::load(&right.save(), &vocab).unwrap();
         for leaves in [vec![&left,&right],vec![&loaded_left,&loaded_right],vec![&left,&loaded_right]] {
             let terminals=vec![0,leaves[0].tokenizer.num_terminals()];
             let inputs=leaves.iter().zip(&terminals).map(|(&leaf,&offset)|(leaf.tokenizer.as_ref(),offset)).collect::<Vec<_>>();

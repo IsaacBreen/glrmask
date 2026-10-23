@@ -1450,7 +1450,7 @@ fn forced_reports_deterministic_prefix() {
 fn save_load_roundtrip_preserves_behavior() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let bytes = constraint.save();
-    let loaded = Constraint::load_without_vocab(&bytes).unwrap();
+    let loaded = Constraint::load(&bytes, &vocab(&["a", "b"])).unwrap();
     assert_accepts_tokens(&loaded, &[0, 1]);
 }
 
@@ -1570,9 +1570,9 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
     dynamic_state.commit_token(7).unwrap();
     assert_eq!(static_state.mask(), dynamic_state.mask());
 
-    let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
+    let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
     assert_special_token_sequence(&loaded);
-    let dynamic_loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+    let dynamic_loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
     let mut dynamic_loaded_state = dynamic_loaded.start();
     dynamic_loaded_state.commit_token(0).unwrap();
     assert_eq!(allowed(&dynamic_loaded_state.mask()), vec![7]);
@@ -1771,7 +1771,7 @@ fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
         frontier = next;
     }
 
-    let loaded = Constraint::load_without_vocab(&isolated.save()).unwrap();
+    let loaded = Constraint::load(&isolated.save(), &vocab).unwrap();
     assert_eq!(loaded.start().mask(), isolated.start().mask());
 }
 

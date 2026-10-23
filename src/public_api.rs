@@ -281,6 +281,11 @@ pub struct PreparedGrammar {
     /// Authored interface, independent of optimization and runtime reachability.
     slot_kinds: Arc<BTreeMap<String, ExternalKind>>,
     slot_spans: Arc<BTreeMap<String,glrmask_grammar::SourceSpan>>,
+    /// Vocabulary-free artifact bytes retained by a deferred Module load.
+    /// `compile`/`precompile` rehydrates from these with the supplied vocabulary.
+    pub(crate) retained_artifact: Option<Arc<[u8]>>,
+    /// Fingerprint recorded by `retained_artifact`.
+    pub(crate) retained_vocab_fingerprint: Option<[u8; 32]>,
 }
 
 /// Unstable spelling retained only for repository tooling. The public type is
@@ -1008,6 +1013,8 @@ impl Grammar {
             boundary_trigger: options.boundary_trigger.unwrap_or_default(),
             slot_kinds,
             slot_spans,
+            retained_artifact: None,
+            retained_vocab_fingerprint: None,
         };
         module.validate_local_slot_manifest(vocab)?;
         let module=Arc::new(module);
@@ -2459,7 +2466,7 @@ impl DynamicConstraint {
     }
 }
 
-fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
+pub(crate) fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
     constraint
         .late_bind_vocab
         .get_or_init(|| {
@@ -2914,13 +2921,11 @@ impl PreparedGrammar {
         with_deep_stack(|| prepared_artifact::save(self))
     }
 
-    /// Rejects malformed or incompatible prepared artifacts. Open slots and shared definitions are preserved.
-    pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
-        with_deep_stack(|| prepared_artifact::load(bytes.into().as_ref(), None))
-    }
-
-    /// The supplied vocabulary must match the saved token-ID/byte mapping; loaded definitions share its caches.
-    pub fn load_with_vocab<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>, vocab: &Vocab) -> Result<Self> {
+    /// Rejects malformed or incompatible prepared artifacts. The supplied
+    /// vocabulary must match the saved token-ID/byte fingerprint; loaded
+    /// definitions share its caches. Open slots and shared definitions are
+    /// preserved.
+    pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>, vocab: &Vocab) -> Result<Self> {
         with_deep_stack(|| prepared_artifact::load(bytes.into().as_ref(), Some(vocab)))
     }
 
@@ -3153,7 +3158,7 @@ mod tests {
             .prepare(&vocab).unwrap();
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
             .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
-        let parent = PreparedGrammar::load_with_vocab(parent.save(), &vocab).unwrap();
+        let parent = PreparedGrammar::load(parent.save(), &vocab).unwrap();
         let child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         assert!(child.deferred_composition_metadata_blob.is_some());
         assert!(!child.composition_link_metadata_materialized);
@@ -3788,7 +3793,7 @@ mod tests {
         // case intentionally drops the per-alternative quotients and rebuilds
         // the full vocab lazily after load rather than applying one quotient to
         // every alternative.
-        let loaded = DynamicConstraint::load(&optimized.save()).unwrap();
+        let loaded = DynamicConstraint::load(&optimized.save(), &vocab).unwrap();
         assert_eq!(loaded.start().mask(), expected_mask);
 
         // The external-vocab transfer has per-alternative metadata and can keep
@@ -4212,7 +4217,7 @@ mod tests {
                 "fused parent/child token must be live before serialization",
             );
 
-            let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
+            let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
             let overlay = loaded
                 .static_dynamic_overlay
                 .as_ref()
@@ -4335,8 +4340,8 @@ mod tests {
             .expect("parent token trigger must be built")
             .contains(&2));
 
-        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
-        let loaded_child = RuntimeConstraint::load_without_vocab(child.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
+        let loaded_child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
             .unwrap();
@@ -4399,8 +4404,8 @@ mod tests {
             crate::runtime::BoundaryTrigger::Exact(_)
         ));
 
-        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
-        let loaded_child = RuntimeConstraint::load_without_vocab(child.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
+        let loaded_child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
             .unwrap();
@@ -4476,7 +4481,7 @@ mod tests {
         )
         .unwrap();
         let composed = outer
-            .bind_grammar_dynamic_boundary("inner", RuntimeConstraint::load_without_vocab(inner.save()).unwrap())
+            .bind_grammar_dynamic_boundary("inner", RuntimeConstraint::load(inner.save(), &vocab).unwrap())
             .unwrap();
         let reference = RuntimeConstraint::compile(
             Grammar::ebnf(r#"start ::= "<" "a" ">" "!""#),
@@ -4526,7 +4531,7 @@ mod tests {
         let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
             .unwrap();
 
-        let mut loaded = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
+        let mut loaded = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         loaded.build_exact_boundary_trigger().unwrap();
         assert!(matches!(
@@ -4538,7 +4543,7 @@ mod tests {
             "trigger upgrade should not force materialization of the heavy parser-cache section",
         );
 
-        let reloaded = RuntimeConstraint::load_body_artifact(loaded.save()).unwrap();
+        let reloaded = RuntimeConstraint::load_body_external_artifact(loaded.save(), &vocab).unwrap();
         let bound = reloaded
             .bind_grammar_dynamic_boundary("child", child)
             .unwrap();
@@ -4658,7 +4663,7 @@ mod tests {
             matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
         }));
 
-        let loaded_dynamic = DynamicConstraint::load(&dynamic_constraint.save()).unwrap();
+        let loaded_dynamic = DynamicConstraint::load(&dynamic_constraint.save(), &vocab).unwrap();
         assert!(loaded_dynamic.clone_constraints().iter_mut().all(|constraint| {
             constraint.materialize_composition_link_metadata_for_compilation().unwrap();
             matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
@@ -4748,7 +4753,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
         assert_recursive_compiler_views_detached(&bound);
         assert_recursive_compiler_views_detached(&loaded);
         let mut no_trigger = bound.clone();
@@ -4890,7 +4895,7 @@ mod tests {
         )
         .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
             for tokens in [
                 &[7][..],
                 &[0, 6][..],
@@ -4928,7 +4933,7 @@ mod tests {
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
 
-        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
         let mut no_outer_table = loaded.clone();
         assert_no_materialized_outer_table(&mut no_outer_table);
         for constraint in [&bound, &loaded, &no_outer_table] {
@@ -4982,11 +4987,11 @@ mod tests {
         assert!(static_bound.static_dynamic_overlay.as_ref().unwrap()
             .segmented_boundary_shards.iter().all(|shard| !matches!(
                 shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)));
-        let static_loaded = RuntimeConstraint::load_without_vocab(&static_bound.save()).unwrap();
+        let static_loaded = RuntimeConstraint::load(&static_bound.save(), &vocab).unwrap();
         let bound = parent
             .bind_grammar_dynamic_boundary("payload", child)
             .unwrap();
-        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
         // Keep the schema's exact internal regular nodes; source serialization
         // is not the composition protocol and may intentionally have a narrower
         // syntax than the JSON frontend's already constructed representation.
@@ -5101,7 +5106,7 @@ mod tests {
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
-        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         assert!(
             loaded
@@ -5234,7 +5239,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let monolithic = RuntimeConstraint::compile(
             Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\"? \"!\";"),
@@ -5303,7 +5308,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
             let layout = constraint
                 .recursive_parser_layout()
                 .unwrap()
@@ -5505,7 +5510,7 @@ mod tests {
                 + terminal(&outer_parent, "BANG"),
         ];
 
-        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
             let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
                 vec![0],
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
@@ -5597,7 +5602,7 @@ mod tests {
             half_offset + original_parent_offset + terminal(&parent, "GT"),
         ];
 
-        for constraint in [&full, &RuntimeConstraint::load_without_vocab(&full.save()).unwrap()] {
+        for constraint in [&full, &RuntimeConstraint::load(&full.save(), &vocab).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             assert_eq!(
                 layout
@@ -5691,7 +5696,7 @@ mod tests {
             .iter()
             .all(|component| component.global_to_local_parser_state.is_empty()));
 
-        let loaded_half = RuntimeConstraint::load_body_artifact(half.save()).unwrap();
+        let loaded_half = RuntimeConstraint::load_body_external_artifact(half.save(), &vocab).unwrap();
         let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
         let loaded_half_layout = loaded_half.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(
@@ -5814,7 +5819,7 @@ mod tests {
         let bang = outer_overlay.segmented_parser_components[0].terminal_offset
             + terminal(&outer_parent, "BANG");
 
-        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             let outer_link = layout
                 .links
@@ -5892,7 +5897,7 @@ mod tests {
         );
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
 
-        let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(loaded_overlay.segmented_boundary_parser.is_none());
         assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
@@ -5972,7 +5977,7 @@ mod tests {
             !parent.composition_reset_tokens_by_terminal.is_empty(),
             "late-bind parent compilation should precompute reset-token composition metadata",
         );
-        let mut cached_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
+        let mut cached_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
         cached_parent
             .materialize_composition_metadata_for_compilation()
             .unwrap();
@@ -6020,7 +6025,7 @@ mod tests {
             .iter()
             .all(|component| component.root_disallowed_terminal.is_none()));
 
-        let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let loaded_overlay = loaded
@@ -6107,7 +6112,7 @@ mod tests {
         let bound = parent
             .bind_grammar_dynamic_boundary("child", child)
             .unwrap();
-        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save(), &vocab).unwrap()] {
             let mut actual = constraint.start();
             let mut expected = monolithic.start();
             for token in [0, 1] {
@@ -6140,9 +6145,9 @@ mod tests {
         assert!(Arc::ptr_eq(&retained.entries_arc(), &vocab.entries_arc()));
 
         let loaded = DynamicConstraint::from_constraints(vec![
-            RuntimeConstraint::load_body_artifact(parent.inner.save()).unwrap(),
+            RuntimeConstraint::load_body_external_artifact(parent.inner.save(), &vocab).unwrap(),
         ]);
-        assert!(loaded.inner.late_bind_vocab.get().is_none());
+        assert!(loaded.inner.late_bind_vocab.get().is_some());
         let first = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let first_backing = loaded.inner.late_bind_vocab.get()
             .expect("prime retained loaded parent, not a throwaway clone").entries_arc();
@@ -6152,9 +6157,9 @@ mod tests {
         ));
         assert_eq!(first.start().mask(), second.start().mask());
         let reloaded = DynamicConstraint::from_constraints(vec![
-            RuntimeConstraint::load_body_artifact(loaded.inner.save()).unwrap(),
+            RuntimeConstraint::load_body_external_artifact(loaded.inner.save(), &vocab).unwrap(),
         ]);
-        assert!(reloaded.inner.late_bind_vocab.get().is_none(), "cache stays off wire");
+        assert!(reloaded.inner.late_bind_vocab.get().is_some(), "loaded vocab is runtime-only, never serialized");
         let rebound = reloaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
         assert_eq!(first.start().mask(), rebound.start().mask());
     }
@@ -6181,10 +6186,10 @@ mod tests {
             "fresh compilation should retain the supplied vocabulary for later binds",
         );
 
-        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
         assert!(
-            loaded_parent.late_bind_vocab.get().is_none(),
-            "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
+            loaded_parent.late_bind_vocab.get().is_some(),
+            "the loader supplies the vocabulary; it is runtime-only and never serialized",
         );
         let first = loaded_parent
             .bind_grammar_dynamic_boundary("child", &child)
@@ -6195,10 +6200,10 @@ mod tests {
             .unwrap();
         assert_eq!(first.start().mask(), second.start().mask());
 
-        let loaded = RuntimeConstraint::load_body_artifact(loaded_parent.save()).unwrap();
+        let loaded = RuntimeConstraint::load_body_external_artifact(loaded_parent.save(), &vocab).unwrap();
         assert!(
-            loaded.late_bind_vocab.get().is_none(),
-            "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
+            loaded.late_bind_vocab.get().is_some(),
+            "the loader supplies the vocabulary; it is runtime-only and never serialized",
         );
         let rebound = loaded
             .bind_grammar_dynamic_boundary("child", &child)
@@ -6260,7 +6265,7 @@ mod final_unlinked_optimization_tests {
         assert_static_boundary(&fast_runtime);
         assert_eq!(fast_build.start().mask(), fast_runtime.start().mask());
 
-        let loaded = PreparedGrammar::load(bound.save()).unwrap();
+        let loaded = PreparedGrammar::load(bound.save(), &vocab).unwrap();
         assert!(loaded.inner.late_grammar_slots.iter().any(|slot| slot.name == "child"));
         assert_dynamic_boundary(&loaded.link_with(
             BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
@@ -6345,7 +6350,7 @@ mod cached_parent_main_tests {
             .any(|slot| slot.name == "payload"));
 
         let saved = parent.save();
-        let loaded = RuntimeConstraint::load_body_artifact(&saved).unwrap();
+        let loaded = RuntimeConstraint::load_body_external_artifact(&saved, &vocab).unwrap();
         let loaded_with_a = loaded.bind_grammar("payload", &child_a).unwrap();
         assert!(accepts(&loaded_with_a, b"<a>"));
         assert!(!accepts(&loaded_with_a, b"<b>"));
@@ -6468,7 +6473,7 @@ mod cached_parent_main_tests {
         runtime_state.commit_token(2).unwrap();
         assert_eq!(build_state.is_accepting(), runtime_state.is_accepting());
 
-        let loaded = RuntimeConstraint::load_without_vocab(fast_build.save()).unwrap();
+        let loaded = RuntimeConstraint::load(fast_build.save(), &vocab).unwrap();
         assert!(loaded.uses_dynamic_runtime());
         assert_eq!(loaded.start().mask(), fast_runtime.start().mask());
     }
@@ -6524,7 +6529,7 @@ mod final_boundary_option_tests {
         let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
             .prepare_with(&v, BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Exact)).unwrap();
         assert!(matches!(parent.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
-        let parent = PreparedGrammar::load(parent.save()).unwrap();
+        let parent = PreparedGrammar::load(parent.save(), &v).unwrap();
         let child = Grammar::from_ebnf(r#"start ::= "y""#).prepare(&v).unwrap();
         let bound = parent.bind_snapshot("child", &child).unwrap();
         assert!(matches!(bound.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
@@ -6543,7 +6548,7 @@ mod final_boundary_option_tests {
         let child = Grammar::from_ebnf(r#"start ::= "y""#).prepare_with(&v,
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         parent.bindings.insert("child".to_owned(), ModuleBinding::Module(Arc::new(child)));
-        let parent = PreparedGrammar::load(parent.save()).unwrap();
+        let parent = PreparedGrammar::load(parent.save(), &v).unwrap();
         let linked = parent.clone().link_with(
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None),
         ).unwrap();
@@ -6617,7 +6622,7 @@ mod final_unsplit_dynamic_tests {
         let c=crate::import::compile_dynamic_named_single(named,&v,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false).unwrap();
         assert!(c.uses_dynamic_runtime());assert!(!c.has_template_parser());
-        for actual in [c.clone(),RuntimeConstraint::load_without_vocab(c.save()).unwrap(),
+        for actual in [c.clone(),RuntimeConstraint::load(c.save(), &v).unwrap(),
             RuntimeConstraint::load(c.save(),&v).unwrap()] {
             for prefix in [b"".as_slice(),b"a",b"aa",b"b",b"bb",b"ax",b"bx",b"ab",b"ba"] {
                 let mut a=actual.start();let mut o=oracle.start();
@@ -6664,7 +6669,7 @@ mod bare_direct_region_regression_tests {
             assert!(c.direct_regular_automaton.is_none()); assert!(!c.has_template_parser());
         }
         assert_eq!(union.start().mask(),vec![143]);
-        for actual in [single.clone(),RuntimeConstraint::load_without_vocab(single.save()).unwrap(),
+        for actual in [single.clone(),RuntimeConstraint::load(single.save(), &v).unwrap(),
             RuntimeConstraint::load(single.save(),&v).unwrap()] {
             for (prefix,mask,accept,reject) in [(b"".as_slice(),143,false,false),(b"a",133,true,false),
                 (b"aa",133,true,false),(b"b",10,true,false),(b"bb",10,true,false),
@@ -6694,7 +6699,7 @@ mod static_whole_token_regression_tests {
             for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
                 let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 assert!(c.direct_regular_automaton.is_some());
-                for c in [c.clone(),RuntimeConstraint::load_without_vocab(c.save()).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
+                for c in [c.clone(),RuntimeConstraint::load(c.save(), &v).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
                     state.commit_token(3).unwrap();assert!(state.is_accepting());assert!(!(state.mask().iter().all(|word| *word == 0)));
                 }

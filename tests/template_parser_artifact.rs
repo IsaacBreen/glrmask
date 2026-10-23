@@ -58,12 +58,12 @@ fn static_template_artifacts_roundtrip_without_lr_storage() {
     for source in GRAMMARS {
         let reference=Constraint::compile(Grammar::glrm(source),&v).unwrap();
         let native_bytes=reference.save();
-        assert_eq!(u16::from_le_bytes(native_bytes[8..10].try_into().unwrap()), 41);
-        compare_static(&reference,&Constraint::load_without_vocab(native_bytes).unwrap());
+        assert_eq!(u16::from_le_bytes(native_bytes[40+8..40+10].try_into().unwrap()), 42);
+        compare_static(&reference,&Constraint::load(native_bytes, &vocab()).unwrap());
         let template=reference.clone();
         let bytes=template.save();
-        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 41);
-        let loaded=Constraint::load_without_vocab(bytes.clone()).unwrap();
+        assert_eq!(u16::from_le_bytes(bytes[40+8..40+10].try_into().unwrap()), 42);
+        let loaded=Constraint::load(bytes.clone(), &vocab()).unwrap();
         assert_eq!(parser_backend_report(&loaded)["lr_table_present"],false);
         compare_static(&reference,&loaded);
         compare_static(&template,&loaded);
@@ -78,11 +78,11 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
         let reference=DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(source),&v).unwrap();
         let template=reference.clone();
         let bytes=template.save();
-        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 23);
+        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 16);
         let body=&bytes[30..]; // first native alternative after its length descriptor
-        assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()), 41);
+        assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 42);
         assert_eq!(&body[parser_range(body)][..4],b"TPR7");
-        let loaded=DynamicConstraint::load(&bytes).unwrap();
+        let loaded=DynamicConstraint::load(&bytes, &vocab()).unwrap();
         for report in dynamic_parser_backend_report(&loaded).as_array().unwrap() {
             assert_eq!(report["lr_table_present"],false);
         }
@@ -90,45 +90,52 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
         compare_dynamic(&template,&loaded);
         assert_eq!(loaded.save(),bytes);
         let transfer=template.save();
-        assert!(DynamicConstraint::load(&transfer).is_err());
         let transfer=<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&transfer,&v).unwrap();
         compare_dynamic(&template,&transfer);
     }
 }
 
+fn envelope_len(bytes:&[u8])->usize { if bytes.starts_with(b"GLRCON02") { 40 } else { 0 } }
 fn parser_range(bytes:&[u8])->std::ops::Range<usize> {
+    let offset=envelope_len(bytes); let bytes=&bytes[offset..];
     assert_eq!(&bytes[18..22],b"S30\0");
     let sizes:Vec<usize>=(0..11).map(|i|u64::from_le_bytes(bytes[22+i*8..30+i*8].try_into().unwrap()) as usize).collect();
-    let start=18+4+11*8+sizes[0]+sizes[1]; start..start+sizes[2]
+    let section_start=offset+18+4+11*8+sizes[0]+sizes[1];
+    let start=if bytes[section_start-offset..].starts_with(b"TPX1") { section_start+36 } else { section_start };
+    start..section_start+sizes[2]
 }
 fn replace_parser(bytes:&[u8], parser:&[u8])->Vec<u8> {
+    let offset=envelope_len(bytes);
     let range=parser_range(bytes);
-    let mut out=bytes[..range.start].to_vec(); out.extend_from_slice(parser); out.extend_from_slice(&bytes[range.end..]);
-    out[38..46].copy_from_slice(&(parser.len() as u64).to_le_bytes());
-    let size=(out.len()-18) as u64; out[10..18].copy_from_slice(&size.to_le_bytes()); out
+    let external=bytes[range.start..].starts_with(b"TPR7")
+        && bytes[range.start.saturating_sub(36)..range.start].starts_with(b"TPX1");
+    let prefix=if external { 36 } else { 0 };
+    let mut out=bytes[..range.start-prefix].to_vec(); out.extend_from_slice(&bytes[range.start-prefix..range.start]); out.extend_from_slice(parser); out.extend_from_slice(&bytes[range.end..]);
+    out[offset+38..offset+46].copy_from_slice(&((parser.len()+prefix) as u64).to_le_bytes());
+    let size=(out.len()-offset-18) as u64; out[offset+10..offset+18].copy_from_slice(&size.to_le_bytes()); out
 }
 #[test]
 fn malformed_template_parser_metadata_is_rejected_without_a_table_fallback() {
     let original=compact_fixture(); let parser=&original[parser_range(&original)];
     assert_eq!(&parser[..4],b"TPR7");
     for count in [0usize,1,3,4,7,15,parser.len()-1] {
-        assert!(Constraint::load_without_vocab(replace_parser(&original,&parser[..count])).is_err(),"accepted truncation {count}");
+        assert!(Constraint::load(replace_parser(&original,&parser[..count]), &vocab()).is_err(),"accepted truncation {count}");
     }
     let mut bad=parser.to_vec(); bad[0]=b'X';
-    assert!(Constraint::load_without_vocab(replace_parser(&original,&bad)).is_err());
+    assert!(Constraint::load(replace_parser(&original,&bad), &vocab()).is_err());
     let mut cursor=4;
     for field in ["stack alphabet", "terminal count", "skip count"] {
         let start=cursor; read_var(parser,&mut cursor);
         let bad=mutate_range(parser,start..cursor,&var_bytes(u32::MAX));
-        assert!(Constraint::load_without_vocab(replace_parser(&original,&bad)).is_err(),"accepted forged {field}");
+        assert!(Constraint::load(replace_parser(&original,&bad), &vocab()).is_err(),"accepted forged {field}");
     }
     let alphabet_end={let mut end=4; read_var(parser,&mut end); end};
     let bad=mutate_range(parser,4..alphabet_end,&var_bytes(0));
-    assert!(Constraint::load_without_vocab(replace_parser(&original,&bad)).is_err(),"accepted empty stack alphabet");
+    assert!(Constraint::load(replace_parser(&original,&bad), &vocab()).is_err(),"accepted empty stack alphabet");
     let mut bad=parser.to_vec(); bad.extend_from_slice(&[0]);
-    assert!(Constraint::load_without_vocab(replace_parser(&original,&bad)).is_err());
-    let mut bad=original.clone(); bad[8..10].copy_from_slice(&31u16.to_le_bytes());
-    assert!(Constraint::load_without_vocab(bad).is_err(),"current parser section accepted under an obsolete envelope");
+    assert!(Constraint::load(replace_parser(&original,&bad), &vocab()).is_err());
+    let mut bad=original.clone(); bad[40+8..40+10].copy_from_slice(&31u16.to_le_bytes());
+    assert!(Constraint::load(bad, &vocab()).is_err(),"current parser section accepted under an obsolete envelope");
 }
 
 #[test]
@@ -150,13 +157,13 @@ fn cyclic_or_out_of_domain_completion_program_is_rejected() {
                 let label=cursor; read_var(parser,&mut cursor); let label_end=cursor;
                 let target=cursor; read_var(parser,&mut cursor); let target_end=cursor;
                 let cycle=mutate_range(parser,target..target_end,&var_bytes(source));
-                let error=Constraint::load_without_vocab(replace_parser(&original,&cycle)).unwrap_err();
+                let error=Constraint::load(replace_parser(&original,&cycle), &vocab()).unwrap_err();
                 assert!(error.to_string().contains("cyclic"),"wrong completion-cycle rejection: {error}");
                 let missing=mutate_range(parser,target..target_end,&var_bytes(states));
-                let error=Constraint::load_without_vocab(replace_parser(&original,&missing)).unwrap_err();
+                let error=Constraint::load(replace_parser(&original,&missing), &vocab()).unwrap_err();
                 assert!(error.to_string().contains("missing state"),"wrong completion-target rejection: {error}");
                 let outside=mutate_range(parser,label..label_end,&var_bytes(alphabet+1));
-                let error=Constraint::load_without_vocab(replace_parser(&original,&outside)).unwrap_err();
+                let error=Constraint::load(replace_parser(&original,&outside), &vocab()).unwrap_err();
                 assert!(error.to_string().contains("alphabet"),"wrong completion-label rejection: {error}");
                 exercised=true; break 'phases;
             }
@@ -173,28 +180,26 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     let external = template.save();
     assert_eq!(&external[..8], b"GLRDXF\0\0");
     assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 16);
-    assert!(DynamicConstraint::load(&external).is_err(), "external artifact accepted without a vocabulary");
+    let no_vocab = DynamicConstraint::load(&external, &vocab()).unwrap();
+    compare_dynamic(&reference, &no_vocab);
     // First dynamic alternative: outer18 + count4 + descriptor8.
     let body = &external[30..];
-    assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()), 42);
-    let token_section_len = u64::from_le_bytes(body[22 + 5*8..30 + 5*8].try_into().unwrap());
+    assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 42);
+    let token_section_len = u64::from_le_bytes(body[40+22 + 5*8..40+30 + 5*8].try_into().unwrap());
     assert_eq!(token_section_len,0,"model-token bytes must really be absent");
-    let parser = &body[parser_range(body)];
-    assert_eq!(&parser[..4],b"TPX1");
-    assert_eq!(&parser[36..40],b"TPR7");
+    let range = parser_range(body);
+    assert_eq!(&body[range.start - 36..range.start][..4], b"TPX1");
+    assert_eq!(&body[range][..4], b"TPR7");
     let loaded = <DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external, &v).unwrap();
     compare_dynamic(&reference, &loaded);
     assert_eq!(loaded.save(), external,"external re-save must use same-mode backing bytes");
     for report in dynamic_parser_backend_report(&loaded).as_array().unwrap() {
         assert_eq!(report["lr_table_present"], false);
     }
-    // A mode switch must encode token bytes, not return cached external bytes
-    // under a self-contained API. The inverse conversion must remain exact too.
-    let self_contained = loaded.save();
-    assert_eq!(&self_contained[..8],b"GLRDYN\0\0");
-    let restored = DynamicConstraint::load(&self_contained).unwrap();
+    // Re-saving and reloading keeps the same vocabulary-free transfer format.
+    let external_again = loaded.save();
+    let restored = DynamicConstraint::load(&external_again, &v).unwrap();
     compare_dynamic(&template, &restored);
-    let external_again = restored.save();
     compare_dynamic(&template, &<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external_again,&v).unwrap());
     let mut mapping = v.iter().map(|(id,bytes)| (id,bytes.to_vec())).collect::<std::collections::BTreeMap<_,_>>();
     mapping.insert(0,b"different token bytes".to_vec());
@@ -220,7 +225,7 @@ fn malformed_external_template_binding_is_rejected() {
     let mut bad=external.clone(); bad[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&bad,&v).is_err());
     let range=parser_range(&external[30..]);
-    let mut bad=external.clone(); bad[30+range.start+4]^=1;
+    let mut bad=external.clone(); bad[30+range.start-36+4]^=1;
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&bad,&v).is_err(),"accepted forged vocabulary digest");
     let mut bad=external.clone(); bad[38..40].copy_from_slice(&37u16.to_le_bytes());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&bad,&v).is_err(),"accepted external parser as self-contained");
@@ -230,9 +235,9 @@ fn malformed_external_template_binding_is_rejected() {
 fn obsolete_lr_and_template_artifacts_are_rejected() {
     let v = vocab();
     let lr = include_bytes!("fixtures/template_parser_v1/static-v30-lr.bin");
-    assert!(Constraint::load_without_vocab(lr).is_err(), "obsolete Static LR artifacts remain unsupported");
-    assert!(Constraint::load_without_vocab(include_bytes!("fixtures/template_parser_v1/static-v31-tpr1.bin")).is_err());
-    assert!(DynamicConstraint::load(include_bytes!("fixtures/template_parser_v1/o2-v21-tpr1.bin")).is_err());
+    assert!(Constraint::load(lr, &vocab()).is_err(), "obsolete Static LR artifacts remain unsupported");
+    assert!(Constraint::load(include_bytes!("fixtures/template_parser_v1/static-v31-tpr1.bin"), &vocab()).is_err());
+    assert!(DynamicConstraint::load(include_bytes!("fixtures/template_parser_v1/o2-v21-tpr1.bin"), &vocab()).is_err());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(
         include_bytes!("fixtures/template_parser_v1/o2-transfer-v14-tpx1.bin"), &v).is_err());
 }
@@ -244,14 +249,14 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
     let current = static_constraint.save();
     for version in [35u16, 36u16] {
         let mut old = current.clone();
-        old[8..10].copy_from_slice(&version.to_le_bytes());
-        let error = Constraint::load_without_vocab(&old).unwrap_err();
+        old[40+8..40+10].copy_from_slice(&version.to_le_bytes());
+        let error = Constraint::load(&old, &vocab()).unwrap_err();
         assert!(error.to_string().contains("unsupported constraint artifact version"),
             "pre-fix boundary artifacts must fail before executing a stored exclusion: {error}");
         assert!(Constraint::load(&old, &v).is_err());
     }
     let mut external = static_constraint.save();
-    external[8..10].copy_from_slice(&36u16.to_le_bytes());
+    external[40+8..40+10].copy_from_slice(&36u16.to_le_bytes());
     assert!(Constraint::load(&external, &v).is_err());
 
     let dynamic = DynamicConstraint::compile_with_vocab_partition(
@@ -259,7 +264,7 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
     ).unwrap();
     let mut old_dynamic = dynamic.save();
     old_dynamic[38..40].copy_from_slice(&35u16.to_le_bytes());
-    assert!(DynamicConstraint::load(&old_dynamic).is_err());
+    assert!(DynamicConstraint::load(&old_dynamic, &vocab()).is_err());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&old_dynamic, &v).is_err());
     let mut old_external_dynamic = dynamic.save();
     old_external_dynamic[38..40].copy_from_slice(&36u16.to_le_bytes());
@@ -267,16 +272,16 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
 
     let mut old_module = Grammar::glrm(GRAMMARS[0]).compile_unlinked(&v).unwrap().save();
     let body_start = 16 + u64::from_le_bytes(old_module[8..16].try_into().unwrap()) as usize;
-    old_module[body_start + 8..body_start + 10].copy_from_slice(&35u16.to_le_bytes());
-    assert!(glrmask::UnlinkedConstraint::load(&old_module).is_err());
-    assert!(glrmask::UnlinkedConstraint::load_with_vocab(&old_module, &v).is_err());
+    old_module[body_start + 48..body_start + 50].copy_from_slice(&35u16.to_le_bytes());
+    assert!(glrmask::UnlinkedConstraint::load(&old_module, &vocab()).is_err());
+    assert!(glrmask::UnlinkedConstraint::load(&old_module, &v).is_err());
 }
 
 fn compact_fixture()->Vec<u8> {
     let source=Constraint::compile(Grammar::glrm(GRAMMARS[1]),&vocab()).unwrap();
     let bytes=source.save();
-    let loaded=Constraint::load_without_vocab(&bytes).expect("malformed cases must start from a valid current artifact");
-    assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 41);
+    let loaded=Constraint::load(&bytes, &vocab()).expect("malformed cases must start from a valid current artifact");
+    assert_eq!(u16::from_le_bytes(bytes[40+8..40+10].try_into().unwrap()), 42);
     assert_eq!(parser_backend_report(&loaded)["lr_table_present"],false);
     compare_static(&source,&loaded);
     assert_eq!(loaded.save(),bytes);
@@ -321,15 +326,15 @@ fn compact_template_programs_reject_noncanonical_counts_and_truncation() {
     let mut cursor=4;let alphabet=read_var(parser,&mut cursor);let first_end=cursor;
     for bad in [vec![128,0],vec![255,255,255,255,31],vec![128;6]] {
         let bad=mutate_range(parser,4..first_end,&bad);
-        let error=Constraint::load_without_vocab(replace_parser(&original,&bad)).unwrap_err();
+        let error=Constraint::load(replace_parser(&original,&bad), &vocab()).unwrap_err();
         assert!(error.to_string().contains("varint"),"wrong rejection for malformed varint: {error}");
     }
     assert!(alphabet>0);
     for length in 0..parser.len() {
-        assert!(Constraint::load_without_vocab(replace_parser(&original,&parser[..length])).is_err(),"accepted compact truncation{length}");
+        assert!(Constraint::load(replace_parser(&original,&parser[..length]), &vocab()).is_err(),"accepted compact truncation{length}");
     }
     let mut trailing=parser.to_vec();trailing.push(0);
-    assert!(Constraint::load_without_vocab(replace_parser(&original,&trailing)).is_err());
+    assert!(Constraint::load(replace_parser(&original,&trailing), &vocab()).is_err());
 }
 
 #[test]
@@ -350,13 +355,13 @@ fn compact_template_edges_reject_cycles_missing_targets_and_bad_labels() {
                     let label_start=cursor;read_var(parser,&mut cursor);let label_end=cursor;
                     let target_start=cursor;read_var(parser,&mut cursor);let target_end=cursor;
                     let bad=mutate_range(parser,target_start..target_end,&var_bytes(source));
-                    let error=Constraint::load_without_vocab(replace_parser(&original,&bad)).unwrap_err();
+                    let error=Constraint::load(replace_parser(&original,&bad), &vocab()).unwrap_err();
                     assert!(error.to_string().contains("cyclic"),"wrong self-cycle rejection: {error}");
                     let bad=mutate_range(parser,target_start..target_end,&var_bytes(states));
-                    let error=Constraint::load_without_vocab(replace_parser(&original,&bad)).unwrap_err();
+                    let error=Constraint::load(replace_parser(&original,&bad), &vocab()).unwrap_err();
                     assert!(error.to_string().contains("missing state"),"wrong missing-target rejection: {error}");
                     let bad=mutate_range(parser,label_start..label_end,&var_bytes(alphabet+1));
-                    let error=Constraint::load_without_vocab(replace_parser(&original,&bad)).unwrap_err();
+                    let error=Constraint::load(replace_parser(&original,&bad), &vocab()).unwrap_err();
                     assert!(error.to_string().contains("alphabet"),"wrong label rejection: {error}");
                     exercised=true;break 'programs;
                 }
@@ -375,7 +380,7 @@ fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     let reference=source.compile_with_build_options(&v,BuildOptions::default().end_tokens([77])).unwrap();
     let template=reference.clone();
     let saved=template.save();
-    assert_eq!(&saved[..8],b"GLRROOT2");
+    assert_eq!(&saved[40..48],b"GLRROOT2");
     let restored=Constraint::load(saved.clone(),&v).unwrap();
     assert_eq!(parser_backend_report(&restored)["lr_table_present"],false);
     let mut a=reference.start();let mut b=restored.start();
@@ -410,11 +415,11 @@ fn malformed_embedding_flags_slots_and_finish_graphs_are_rejected() {
     for (position, value) in [(composed, 2), (embedding, 2), (nullable, 2), (return_pop, 0), (return_pop, 3), (finish_alphabet, 0), (finish_alphabet, alphabet + 1)] {
         let mut end = position; read_var(parser, &mut end);
         let bad = mutate_range(parser, position..end, &var_bytes(value));
-        assert!(Constraint::load_without_vocab(replace_parser(&original, &bad)).is_err(), "accepted malformed embedding field {position}");
+        assert!(Constraint::load(replace_parser(&original, &bad), &vocab()).is_err(), "accepted malformed embedding field {position}");
     }
     let mut invalid_slot = var_bytes(1); invalid_slot.extend(var_bytes(terminals));
     let bad = mutate_range(parser, count_start..finish_start, &invalid_slot);
-    assert!(Constraint::load_without_vocab(replace_parser(&original, &bad)).is_err());
+    assert!(Constraint::load(replace_parser(&original, &bad), &vocab()).is_err());
     let mut exercised = false;
     'phases: for _ in 0..3 {
         let states = read_var(parser, &mut cursor); if states == 0 { continue; }
@@ -425,9 +430,9 @@ fn malformed_embedding_flags_slots_and_finish_graphs_are_rejected() {
                 let label = cursor; read_var(parser, &mut cursor); let label_end = cursor;
                 let target = cursor; read_var(parser, &mut cursor); let target_end = cursor;
                 let cycle = mutate_range(parser, target..target_end, &var_bytes(source));
-                assert!(Constraint::load_without_vocab(replace_parser(&original, &cycle)).is_err());
+                assert!(Constraint::load(replace_parser(&original, &cycle), &vocab()).is_err());
                 let outside = mutate_range(parser, label..label_end, &var_bytes(alphabet + 1));
-                assert!(Constraint::load_without_vocab(replace_parser(&original, &outside)).is_err());
+                assert!(Constraint::load(replace_parser(&original, &outside), &vocab()).is_err());
                 exercised = true; break 'phases;
             }
         }

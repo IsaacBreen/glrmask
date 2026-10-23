@@ -18,7 +18,7 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
     let reference = g.compile_with_build_options(&v, BuildOptions::default().end_tokens([100])).unwrap();
     for mode in MODES {
         let compiled = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
-        for c in [compiled.clone(), Constraint::load_without_vocab(compiled.save()).unwrap(),
+        for c in [compiled.clone(), Constraint::load(compiled.save(), &vocab()).unwrap(),
             Constraint::load(compiled.save(), &v).unwrap()] {
             for prefix in [b"".as_slice(),b"(",b"()",b"()(" ] {
                 let mut a = c.start(); let mut r = reference.start();
@@ -115,7 +115,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         let description=parent.clone().bind_snapshot("child",child).unwrap();
         let reference=description.compile(&v).unwrap();
         let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
-        for c in [actual.clone(),Constraint::load_without_vocab(actual.save()).unwrap(),
+        for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
             Constraint::load(actual.save(),&v).unwrap()] {
             compare_prefixes(&c,&reference,&[0,1,2,3,4,5,6,7,8,9,10,11,33,99],5);
         }
@@ -142,7 +142,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     let oracle=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([100])).unwrap();
     let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
-    for c in [actual.clone(),Constraint::load_without_vocab(actual.save()).unwrap(),
+    for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
         Constraint::load(actual.save(),&v).unwrap()] {
         for n in [0,1,15,29,30] {
             let prefix=vec![b'a';n]; let mut a=c.start();let mut o=oracle.start();
@@ -178,7 +178,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
         for mode in MODES {
             let compiled=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
-            for c in [compiled.clone(),Constraint::load_without_vocab(compiled.save()).unwrap(),
+            for c in [compiled.clone(),Constraint::load(compiled.save(), &vocab()).unwrap(),
                 Constraint::load(compiled.save(),&v).unwrap()] {
                 for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
                     let mut a=c.start();let mut expected=reference.start();

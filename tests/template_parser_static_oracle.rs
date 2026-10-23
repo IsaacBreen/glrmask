@@ -66,7 +66,7 @@ fn can_pop_the_bottom_marker_and_continue_from_an_empty_concrete_stack() {
     let (restored, accepting) = mask(&c, &[0, 1]);
     assert!(accepting);
     assert!(has(&restored, 0));
-    let d = Constraint::load_without_vocab(&c.save()).unwrap();
+    let d = Constraint::load(&c.save(), &vocab()).unwrap();
     assert_eq!(mask(&d, &[0]), mask(&c, &[0]));
 }
 
@@ -276,7 +276,7 @@ fn arbitrary_phase_programs_match_an_independent_full_token_mask_oracle() {
             StackTemplate::identity(),
         );
         let c = p.compile_static(&lexer(2), &vocab()).unwrap();
-        let loaded = Constraint::load_without_vocab(&c.save()).unwrap();
+        let loaded = Constraint::load(&c.save(), &vocab()).unwrap();
         let external = c.save();
         let external_loaded = Constraint::load(&external, &vocab()).unwrap();
         let mut pending = vec![(Vec::<u32>::new(), BTreeSet::from([vec![0]]))];
@@ -380,7 +380,7 @@ fn overlapping_terminal_lexer_and_ignored_whitespace_match_byte_language() {
         .unwrap()
         .compile_static(&lex, &vocab)
         .unwrap();
-    let loaded = Constraint::load_without_vocab(&fresh.save()).unwrap();
+    let loaded = Constraint::load(&fresh.save(), &vocab).unwrap();
     let external =
         Constraint::load(&fresh.save(), &vocab).unwrap();
     let mut prefixes = vec![(Vec::<u32>::new(), Vec::<u8>::new())];

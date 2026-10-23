@@ -78,7 +78,7 @@ fn review_nested_open_token_module_links_after_loading() {
     let top = Grammar::from_glrm(OUTER).bind_snapshot("middle", &open_source).unwrap();
     let nested = top.prepare(&v).unwrap();
     assert!(nested.link().is_err());
-    let loaded = PreparedGrammar::load(nested.save()).unwrap();
+    let loaded = PreparedGrammar::load(nested.save(), &vocab()).unwrap();
     assert!(loaded.link().is_err());
     let actual = loaded.bind_snapshot("middle::MARK", TokenSet::new([7, 33, 63])).unwrap().link().unwrap();
     let reference = Grammar::from_glrm(OUTER)
@@ -93,7 +93,7 @@ fn review_source_compiled_module_retains_open_token_metadata() {
     let child = Grammar::from_glrm(TOKEN);
     let open = Grammar::from_glrm(OUTER).bind_snapshot("middle", &child).unwrap().prepare(&v).unwrap();
     assert!(open.link().is_err());
-    let bound = PreparedGrammar::load(open.save()).unwrap().bind_snapshot("middle::MARK", glrmask::TokenSet::from(7)).unwrap().link().unwrap();
+    let bound = PreparedGrammar::load(open.save(), &vocab()).unwrap().bind_snapshot("middle::MARK", glrmask::TokenSet::from(7)).unwrap().link().unwrap();
     let expected = Grammar::from_glrm(OUTER)
         .bind_snapshot("middle", Grammar::from_glrm(TOKEN).bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap())
         .unwrap().compile(&v).unwrap();
@@ -110,8 +110,8 @@ fn review_token_and_grammar_binding_order_and_roundtrips_agree() {
         .bind_snapshot("child", Grammar::from_ebnf(r#"start ::= "b""#)).unwrap().compile(&v).unwrap();
     let token_first = host.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap();
     let grammar_first = host.bind_snapshot("child", &child).unwrap();
-    let a = PreparedGrammar::load(token_first.save()).unwrap().bind_snapshot("child", &child).unwrap().link().unwrap();
-    let b = PreparedGrammar::load(grammar_first.save()).unwrap().bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().link().unwrap();
+    let a = PreparedGrammar::load(token_first.save(), &vocab()).unwrap().bind_snapshot("child", &child).unwrap().link().unwrap();
+    let b = PreparedGrammar::load(grammar_first.save(), &vocab()).unwrap().bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().link().unwrap();
     compare_prefixes(&a, &expected, &[0, 1, 2, 3, 4, 7, 63], 4);
     compare_prefixes(&b, &expected, &[0, 1, 2, 3, 4, 7, 63], 4);
     assert!(host.link().is_err(), "original module must remain open");
@@ -124,7 +124,7 @@ fn review_multiple_exact_slots_remain_distinct_after_partial_save() {
     let original = source.prepare(&v).unwrap();
     let partial = original.bind_snapshot("A", glrmask::TokenSet::from(7)).unwrap();
     assert!(partial.link().is_err());
-    let loaded = PreparedGrammar::load(partial.save()).unwrap();
+    let loaded = PreparedGrammar::load(partial.save(), &vocab()).unwrap();
     assert!(loaded.bind_snapshot("A", glrmask::TokenSet::from(33)).is_err());
     let actual = loaded.bind_snapshot("B", TokenSet::new([33, 63])).unwrap().link().unwrap();
     let expected = source.bind_snapshot("A", glrmask::TokenSet::from(7)).unwrap()
@@ -137,7 +137,7 @@ fn review_bound_exact_child_can_be_reloaded_and_recomposed() {
     let v = vocab();
     let child = Grammar::from_glrm(TOKEN).prepare(&v).unwrap()
         .bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap();
-    let loaded = PreparedGrammar::load(child.save()).unwrap();
+    let loaded = PreparedGrammar::load(child.save(), &vocab()).unwrap();
     let actual = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &loaded).unwrap().link().unwrap();
     let expected = Grammar::from_glrm(OUTER)
         .bind_snapshot("middle", Grammar::from_glrm(TOKEN).bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap())
@@ -150,7 +150,7 @@ fn review_open_module_artifact_cannot_be_loaded_as_runnable_constraint() {
     let v = vocab();
     for source in [OUTER, TOKEN, BOTH] {
         let module = Grammar::from_glrm(source).prepare(&v).unwrap();
-        assert!(Constraint::load_without_vocab(module.save()).is_err(), "unbound module loaded as runnable: {source}");
+        assert!(Constraint::load(module.save(), &vocab()).is_err(), "unbound module loaded as runnable: {source}");
     }
 }
 
@@ -160,7 +160,7 @@ fn review_truncated_module_artifacts_fail_without_panics() {
     let module = Grammar::from_glrm(TOKEN).prepare(&v).unwrap();
     let bytes = module.save();
     for len in [0, 1, 4, 8, 16, bytes.len() / 2, bytes.len() - 1] {
-        let result = std::panic::catch_unwind(|| PreparedGrammar::load(bytes[..len].to_vec()));
+        let result = std::panic::catch_unwind(|| PreparedGrammar::load(bytes[..len].to_vec(), &vocab()));
         assert!(result.is_ok(), "panic loading truncated artifact of {len} bytes");
         assert!(result.unwrap().is_err(), "accepted truncated artifact of {len} bytes");
     }
@@ -193,7 +193,7 @@ fn review_repeated_same_open_child_keeps_per_slot_bindings_independent() {
     let child_open = child.prepare(&v).unwrap();
     let open = outer.bind_snapshot("left", &child).unwrap().bind_snapshot("right", &child).unwrap()
         .prepare(&v).unwrap();
-    let actual = PreparedGrammar::load(open.save()).unwrap()
+    let actual = PreparedGrammar::load(open.save(), &vocab()).unwrap()
         .bind_snapshot("left::MARK", glrmask::TokenSet::from(7)).unwrap()
         .bind_snapshot("right::MARK", glrmask::TokenSet::from(33)).unwrap().link().unwrap();
     let expected = outer.bind_snapshot("left", Grammar::from_glrm(TOKEN).bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()).unwrap()
@@ -220,7 +220,7 @@ fn review_nullable_child_preserves_cross_boundary_mask_after_load() {
     let v = vocab();
     let nullable = Grammar::from_glrm("glrm 1; start start; nt start = eps;").prepare(&v).unwrap();
     let m = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &nullable).unwrap();
-    let actual = PreparedGrammar::load(m.save()).unwrap().link().unwrap();
+    let actual = PreparedGrammar::load(m.save(), &vocab()).unwrap().link().unwrap();
     let expected = Grammar::from_ebnf(r#"start ::= "xy""#).compile(&v).unwrap();
     assert!(allowed(&actual.start().mask(), 11));
     compare_prefixes(&actual, &expected, &[0, 1, 3, 4, 11], 3);
@@ -231,7 +231,7 @@ fn review_end_tokens_are_root_only_and_survive_root_roundtrip() {
     let v = vocab();
     let prepared = Grammar::from_ebnf(r#"start ::= "a""#).prepare(&v).unwrap();
     let child = prepared.link_with(BuildOptions::default().end_tokens([127])).unwrap();
-    let loaded = Constraint::load_without_vocab(child.save()).unwrap();
+    let loaded = Constraint::load(child.save(), &vocab()).unwrap();
     for standalone in [&child, &loaded] {
         let mut state = standalone.start();
         assert!(!allowed(&state.mask(), 127));
@@ -241,7 +241,7 @@ fn review_end_tokens_are_root_only_and_survive_root_roundtrip() {
         state.commit_token(127).unwrap();
         assert!(state.mask().iter().all(|w| *w == 0));
     }
-    let actual = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &PreparedGrammar::load(prepared.save()).unwrap()).unwrap()
+    let actual = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &PreparedGrammar::load(prepared.save(), &vocab()).unwrap()).unwrap()
         .link_with(BuildOptions::default().end_tokens([63])).unwrap();
     let mut state = actual.start();
     assert!(allowed(&state.mask(), 4), "embedding imports body, not the child's EOS language");
@@ -292,7 +292,7 @@ fn review_parent_and_child_open_tokens_have_distinct_private_placeholders() {
     // Both component compilers independently choose the same first unused ID.
     // Public linking must use typed slot/terminal identity, not token-ID identity.
     let open = parent.bind_snapshot("child", &child).unwrap().prepare(&v).unwrap();
-    let actual = PreparedGrammar::load(open.save()).unwrap()
+    let actual = PreparedGrammar::load(open.save(), &vocab()).unwrap()
         .bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()
         .bind_snapshot("child::MARK", glrmask::TokenSet::from(33)).unwrap().link().unwrap();
     let expected = parent.bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()
@@ -326,14 +326,14 @@ fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
     // The parent is packed before the exact-token adapter is linked. A second
     // serialization must preserve each packed pool ID, not deduplicate the
     // intentionally-empty structural Weight placeholders.
-    let open = PreparedGrammar::load(source.prepare(&v).unwrap().save()).unwrap();
+    let open = PreparedGrammar::load(source.prepare(&v).unwrap().save(), &v).unwrap();
     let mut module = open.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap();
     for _ in 0..4 {
-        module = PreparedGrammar::load(module.save()).unwrap();
+        module = PreparedGrammar::load(module.save(), &v).unwrap();
         let mut actual = module.link().unwrap();
         compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
         for _ in 0..3 {
-            actual = Constraint::load_without_vocab(actual.save()).unwrap();
+            actual = Constraint::load(actual.save(), &v).unwrap();
             compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
         }
     }
@@ -364,7 +364,7 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
             }
             compare_prefixes(&requested, &plain, &[1, 2, 5, 7, 33], 3);
             assert_eq!(requested.save(), bytes, "matching must not materialize trigger metadata");
-            compare_prefixes(&Constraint::load_without_vocab(bytes).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);
+            compare_prefixes(&Constraint::load(bytes, &vocab()).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);
         }
     }
 }
@@ -384,7 +384,7 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
     assert_eq!(plain.requirements().unwrap(), explicit_none.requirements().unwrap());
     let child = Grammar::from_ebnf(r#"start ::= "a" "b"?"#).prepare(&v).unwrap();
     let default_link = plain.bind_snapshot("middle", &child).unwrap().link().unwrap();
-    let explicit_none_link = PreparedGrammar::load(explicit_none.save()).unwrap()
+    let explicit_none_link = PreparedGrammar::load(explicit_none.save(), &vocab()).unwrap()
         .bind_snapshot("middle", &child).unwrap().link().unwrap();
     compare_prefixes(&explicit_none_link, &default_link, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
     for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
@@ -392,10 +392,10 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
         assert!(module.link().is_err(), "trigger request cannot bypass unresolved slots");
         let saved = module.save();
         assert!(saved.starts_with(b"GLRMOD"));
-        let loaded = PreparedGrammar::load(saved.clone()).unwrap();
+        let loaded = PreparedGrammar::load(saved.clone(), &vocab()).unwrap();
         assert_eq!(loaded.save(), saved);
         let bound = loaded.bind_snapshot("middle", &child).unwrap();
-        let plain_loaded = PreparedGrammar::load(plain.save()).unwrap();
+        let plain_loaded = PreparedGrammar::load(plain.save(), &vocab()).unwrap();
         let reference = plain_loaded.bind_snapshot("middle", &child).unwrap().link().unwrap();
         let inherited = bound.link().unwrap();
         compare_prefixes(&inherited, &reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
@@ -405,10 +405,10 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
         let tokens_reference = plain_loaded.bind_snapshot("middle", &child).unwrap().link_with(
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         compare_prefixes(&tokens, &tokens_reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
-        let bound_loaded = PreparedGrammar::load(bound.save()).unwrap().link().unwrap();
+        let bound_loaded = PreparedGrammar::load(bound.save(), &vocab()).unwrap().link().unwrap();
         compare_prefixes(&bound_loaded, &inherited, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
         let mut invalid = saved;
         invalid[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(PreparedGrammar::load(invalid).is_err());
+        assert!(PreparedGrammar::load(invalid, &vocab()).is_err());
     }
 }

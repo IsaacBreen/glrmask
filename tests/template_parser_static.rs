@@ -20,7 +20,7 @@ fn compile_static(p: &ParserProgram, l: &LexerDefinition, v: &Vocab) -> Constrai
 
 fn representations(c: &Constraint, v: &Vocab) -> Vec<Constraint> {
     let bytes = c.save();
-    let loaded = Constraint::load_without_vocab(&bytes).unwrap();
+    let loaded = Constraint::load(&bytes, v).unwrap();
     assert_eq!(loaded.save(), bytes);
     vec![
         c.clone(),

@@ -242,13 +242,13 @@ fn exact_tokens_survive_static_and_dynamic_serialization() {
         .unwrap();
 
     let compiled = spec.compile().unwrap();
-    let loaded = Constraint::load_without_vocab(&compiled.save()).unwrap();
+    let loaded = Constraint::load(&compiled.save(), &vocab).unwrap();
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
     assert!(state.is_accepting());
 
     let compiled = spec.compile_dynamic().unwrap();
-    let loaded = DynamicConstraint::load(&compiled.save()).unwrap();
+    let loaded = DynamicConstraint::load(&compiled.save(), &vocab).unwrap();
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
     assert!(state.is_accepting());
@@ -324,10 +324,10 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     assert_dynamic_xy_matches(&reference, &dynamic_bound_dynamic_boundary);
 
     let loaded_dynamic_bound_static =
-        DynamicConstraint::load(&dynamic_bound_static_boundary.save()).unwrap();
+        DynamicConstraint::load(&dynamic_bound_static_boundary.save(), &vocab).unwrap();
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_static);
     let loaded_dynamic_bound_dynamic =
-        DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save()).unwrap();
+        DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save(), &vocab).unwrap();
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
 
     let loaded_static_parent = PreparedGrammar::load(
@@ -335,6 +335,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
             .prepare(&vocab)
             .unwrap()
             .save(),
+        &vocab,
     )
     .unwrap();
     let loaded_static_bound = loaded_static_parent
@@ -344,7 +345,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         .unwrap();
     assert_static_xy_matches(&reference, &loaded_static_bound);
 
-    let error = DynamicConstraint::load(&dynamic_parent.save()).unwrap_err();
+    let error = DynamicConstraint::load(&dynamic_parent.save(), &vocab).unwrap_err();
     assert!(
         error.to_string().contains("unresolved slots"),
         "an unresolved parent must not load as a runnable constraint: {error}",
@@ -354,6 +355,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
             .prepare(&vocab)
             .unwrap()
             .save(),
+        &vocab,
     )
     .unwrap();
     let loaded_dynamic_bound = loaded_dynamic_parent
@@ -385,7 +387,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
     // An unresolved grammar slot belongs to PreparedGrammar, never Constraint. Its
     // private linker coordinate survives PreparedGrammar persistence without becoming
     // part of the public model-token mask.
-    let loaded = PreparedGrammar::load(parent.save()).unwrap();
+    let loaded = PreparedGrammar::load(parent.save(), &vocab).unwrap();
     let child = Grammar::from_ebnf(r#"start ::= "y""#)
         .prepare(&vocab)
         .unwrap();
@@ -498,7 +500,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
     let bound = parent
         .bind_grammar_dynamic_boundary("child", &child)
         .unwrap();
-    let loaded = Constraint::load_without_vocab(&bound.save()).unwrap();
+    let loaded = Constraint::load(&bound.save(), &vocab).unwrap();
 
     for tokens in [
         &[5][..],
@@ -533,7 +535,7 @@ fn compiled_children_are_authoritative_and_compose_both_directions() {
         .unwrap();
     let static_child = child_spec.compile().unwrap();
     let dynamic_child = glrmask::__private::into_dynamic_template_parser(child_spec.compile_dynamic().unwrap()).unwrap();
-    let loaded_dynamic_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
+    let loaded_dynamic_child = DynamicConstraint::load(&dynamic_child.save(), &vocab).unwrap();
     let parent_source = r#"
 glrm 1;
 start document;
@@ -612,7 +614,7 @@ fn loaded_direct_regular_dynamic_child_remains_composable() {
         &vocab,
     )
     .unwrap();
-    let loaded_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
+    let loaded_child = DynamicConstraint::load(&dynamic_child.save(), &vocab).unwrap();
     let parent_source = "glrm 1; start start; extern grammar payload; nt start = payload;";
     let spec = ConstraintSpec::builder(Grammar::glrm(parent_source), &vocab)
         .unwrap()
@@ -752,7 +754,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     // Independent open components may reuse the same private sentinel token
     // number. Terminal IDs, not those hidden token IDs, are the linker
     // coordinate; qualified nested slots must survive serialization and bind.
-    let open = PreparedGrammar::load(open.save()).unwrap();
+    let open = PreparedGrammar::load(open.save(), &vocab).unwrap();
     let leaf = Grammar::from_ebnf(r#"start ::= "x""#)
         .prepare(&vocab)
         .unwrap();

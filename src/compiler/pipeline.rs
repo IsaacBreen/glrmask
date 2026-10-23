@@ -6238,6 +6238,8 @@ fn compile_prepared_with_profile_and_table_construction(
             boundary_candidate_summary: std::sync::OnceLock::new(),
             late_grammar_slots: Vec::new(),
             late_bind_vocab: std::sync::OnceLock::from(vocab.clone()),
+            pending_vocab_fingerprint: None,
+            pending_special_token_ids: None,
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,

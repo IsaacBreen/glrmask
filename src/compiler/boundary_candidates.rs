@@ -1627,7 +1627,7 @@ mod tests {
 
         let (fresh, _) = boundary_candidate_ids(&composed, &vocab);
         assert_eq!(fresh, Some(vec![0, 1]));
-        let mut loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
+        let mut loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         assert!(
             loaded.boundary_candidate_summary.get().is_none(),
             "current artifacts deliberately defer composition-link metadata",
@@ -1721,7 +1721,7 @@ mod preparation_tests {
             assert!(!expected.is_empty());
             assert!(expected.len() < vocab.len());
 
-            let loaded = Constraint::load_without_vocab(&source.save()).unwrap();
+            let loaded = Constraint::load(&source.save(), &vocab).unwrap();
             assert!(!loaded.table.is_present());
             assert!(loaded.boundary_candidate_summary.get().is_none());
             assert!(loaded.deferred_composition_metadata_blob.is_some());

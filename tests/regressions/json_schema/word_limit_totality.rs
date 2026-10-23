@@ -70,7 +70,7 @@ fn word_limit_totality_default_and_loaded_public_constraints() {
                 .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode))
                 .unwrap();
             assert_last_word_masks(&constraint, words);
-            let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
+            let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
             assert_last_word_masks(&loaded, words);
         }
     }
@@ -86,7 +86,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,
     ).prepare(&vocab).unwrap();
-    let loaded_host = UnlinkedConstraint::load(host.save()).unwrap();
+    let loaded_host = UnlinkedConstraint::load(host.save(), &vocab).unwrap();
     for parent in [&host, &loaded_host] {
         let bound = parent.bind_snapshot("child", &child).unwrap().link().unwrap();
         let mut state = bound.start();
@@ -105,7 +105,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
 
         // Repeat the support check through an already-linked, serialized
         // component. The virtual lexer is now a nested leaf, not the root.
-        let saved_bound = Constraint::load_without_vocab(bound.save()).unwrap();
+        let saved_bound = Constraint::load(bound.save(), &vocab).unwrap();
         let nested = parent.bind_snapshot("child", &saved_bound).unwrap().link().unwrap();
         let mut state = nested.start();
         for id in [8, 8, 10] {

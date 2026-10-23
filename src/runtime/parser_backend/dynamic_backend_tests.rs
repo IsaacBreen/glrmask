@@ -282,7 +282,7 @@ fn self_contained_roundtrip_preserves_backend_and_behavior() {
     let source = r#"start ::= "(" start ")" start? | "a""#;
     for backend in [ParserBackend::LrTable, ParserBackend::TemplateDfa] {
         let constraint = compile(&vocab, source, backend);
-        let loaded = Constraint::load_without_vocab(constraint.save()).expect("self-contained roundtrip");
+        let loaded = Constraint::load(constraint.save(), &vocab).expect("self-contained roundtrip");
         assert_eq!(loaded.parser_backend(), backend, "backend identity changed");
         assert_pair_trace(&constraint, &loaded, &[2, 0, 3], true);
         // A second, longer balanced sentence.
@@ -302,8 +302,6 @@ fn external_vocab_roundtrip_preserves_backend_and_behavior() {
         assert_eq!(loaded.parser_backend(), backend, "backend identity changed");
         assert_pair_trace(&constraint, &loaded, &[2, 0, 3], true);
         assert_pair_trace(&constraint, &loaded, &[2, 2, 0, 3, 3, 0], true);
-        // The external envelope requires its exact vocabulary.
-        assert!(Constraint::load_without_vocab(bytes).is_err(), "missing external vocabulary must be rejected");
     }
 }
 
@@ -352,11 +350,11 @@ fn development_toggle_is_compile_only_and_o2_static_are_isolated() {
         let static_constraint = Grammar::from_ebnf(source).compile_with_build_options(&vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         assert_eq!(static_constraint.parser_backend(), ParserBackend::TemplateDfa);
-        let loaded = Constraint::load_without_vocab(std::fs::read(directory.join("lr.constraint")).unwrap()).unwrap();
+        let loaded = Constraint::load(std::fs::read(directory.join("lr.constraint")).unwrap(), &vocab).unwrap();
         assert_eq!(loaded.parser_backend(), ParserBackend::LrTable);
         assert!(loaded.start().is_accepting());
         let loaded_dynamic = crate::DynamicConstraint::load(
-            &std::fs::read(directory.join("lr.dynamic")).unwrap()).unwrap();
+            &std::fs::read(directory.join("lr.dynamic")).unwrap(), &vocab).unwrap();
         assert_eq!(loaded_dynamic.into_constraint().parser_backend(), ParserBackend::LrTable);
         if expected == ParserBackend::TemplateDfa {
             std::fs::write(directory.join("native.constraint"), dynamic.clone().into_constraint().save()).unwrap();
@@ -379,10 +377,10 @@ fn development_toggle_is_compile_only_and_o2_static_are_isolated() {
             .status().unwrap();
         assert!(status.success(), "backend isolation child {value} failed");
     }
-    let native = Constraint::load_without_vocab(std::fs::read(directory.join("native.constraint")).unwrap()).unwrap();
+    let native = Constraint::load(std::fs::read(directory.join("native.constraint")).unwrap(), &vocab).unwrap();
     assert_eq!(native.parser_backend(), ParserBackend::TemplateDfa);
     let native_dynamic = crate::DynamicConstraint::load(
-        &std::fs::read(directory.join("native.dynamic")).unwrap()).unwrap();
+        &std::fs::read(directory.join("native.dynamic")).unwrap(), &vocab).unwrap();
     assert_eq!(native_dynamic.into_constraint().parser_backend(), ParserBackend::TemplateDfa);
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -397,7 +395,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
     let native = Grammar::from_lark(source).compile_with_build_options(&vocab,
         BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([END_TOKEN])).unwrap();
     for constraint in [&lr, &native] {
-        for loaded in [Constraint::load_without_vocab(constraint.save()).unwrap(),
+        for loaded in [Constraint::load(constraint.save(), &vocab).unwrap(),
             Constraint::load(constraint.save(), &vocab).unwrap()] {
             for (trace, accepting) in [(&[][..], true), (&[1][..], true), (&[2][..], false),
                 (&[1, 2, 1][..], false), (&[2, 1, 3, 1][..], true)] {
@@ -445,7 +443,7 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
         let transfer = dynamic.save_without_vocab();
         let version = u16::from_le_bytes(transfer[8..10].try_into().unwrap());
         assert_eq!(version, if backend == ParserBackend::LrTable { 17 } else { 16 });
-        let self_loaded = crate::DynamicConstraint::load(&dynamic.save()).unwrap();
+        let self_loaded = crate::DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
         let external_loaded = crate::DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert_eq!(external_loaded.save_without_vocab(), transfer);
         for compiled in [&dynamic, &self_loaded, &external_loaded] {
@@ -500,7 +498,7 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
     }
     for compiled in constraints {
         for constraint in [&compiled,
-            &Constraint::load_without_vocab(compiled.save()).unwrap(),
+            &Constraint::load(compiled.save(), &vocab).unwrap(),
             &Constraint::load(compiled.save(), &vocab).unwrap()] {
             for (prefix, accepting) in [(b"".as_slice(),true),(b"(",false),(b"()",true)] {
                 let mut state = constraint.start();state.commit_bytes(prefix).unwrap();
@@ -534,7 +532,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
     for compiled in constraints {
-        for constraint in [&compiled,&Constraint::load_without_vocab(compiled.save()).unwrap(),
+        for constraint in [&compiled,&Constraint::load(compiled.save(), &vocab).unwrap(),
             &Constraint::load(compiled.save(),&vocab).unwrap()] {
             let mut state=constraint.start();assert!(!allowed(&state.mask(),25));
             state.commit_token(0).unwrap();assert!(allowed(&state.mask(),25));
@@ -560,7 +558,7 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
     }
     for constraint in &compiled {
         assert!(std::sync::Arc::ptr_eq(&constraint.empty_byte_token_ids, &expected));
-        let self_loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
+        let self_loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         let external_loaded = Constraint::load(
             constraint.save(), &vocab,
         ).unwrap();

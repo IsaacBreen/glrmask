@@ -10417,6 +10417,12 @@ pub struct Constraint {
     /// binds share `Vocab`'s pure derived-artifact cache (adjacent-byte index,
     /// tries, etc.) instead of rebuilding those structures for every child.
     pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
+    /// Fingerprint recorded by a vocabulary-free artifact that has not yet
+    /// been rehydrated with its vocabulary. Runtime-only.
+    pub(crate) pending_vocab_fingerprint: Option<[u8; 32]>,
+    /// Exact-only token IDs recorded by a pending artifact's root policy.
+    /// Runtime-only.
+    pub(crate) pending_special_token_ids: Option<Vec<u32>>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore
@@ -10792,6 +10798,10 @@ pub(crate) struct ConstraintSerde {
     pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
     #[serde(skip, default)]
     pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
+    #[serde(skip, default)]
+    pub(crate) pending_vocab_fingerprint: Option<[u8; 32]>,
+    #[serde(skip, default)]
+    pub(crate) pending_special_token_ids: Option<Vec<u32>>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore

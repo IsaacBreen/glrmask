@@ -27,7 +27,7 @@ fn main() -> glrmask::Result<()> {
         state.commit_token(4)?; // The child body can be empty.
         assert!(state.is_accepting());
     
-        let loaded = Constraint::load_without_vocab(linked.save())?;
+        let loaded = Constraint::load(linked.save(), &vocab)?;
         let mut state = loaded.start();
         state.commit_token(3)?;
         assert!(state.is_accepting());

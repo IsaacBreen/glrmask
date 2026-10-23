@@ -126,10 +126,9 @@ fn source_graph_is_resolved_not_flattened_and_callback_is_compile_time_only() {
     for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"ab", b"abab"]);
-        let saved = c.save(); let reloaded = Constraint::load_without_vocab(&saved).unwrap();
+        let saved = c.save(); let reloaded = Constraint::load(&saved, &v).unwrap();
         check_words(&reloaded, &bytes, &[b"ab", b"abab"]); assert_eq!(reloaded.save(), saved);
         let external = c.save();
-        assert!(Constraint::load_without_vocab(&external).is_err());
         check_words(&Constraint::load(external, &v).unwrap(), &bytes, &[b"ab", b"abab"]);
     }
     assert_eq!(calls.get(), 1);
@@ -176,7 +175,7 @@ fn zero_terminal_epsilon_and_empty_languages_are_distinct() {
         let parser = p.compile_parser(&finite_compiler).unwrap();
         for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
             let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
-            for c in [&c, &Constraint::load_without_vocab(c.save()).unwrap()] {
+            for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
                 let state = c.start(); assert_eq!(state.is_accepting(), accepts);
                 let mask = state.mask(); assert_eq!(bit(&mask, 512), accepts);
                 assert!((0..138).all(|token| !bit(&mask, token)));
@@ -226,7 +225,7 @@ fn exact_token_binding_is_not_its_vocabulary_byte_spelling() {
     let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (70, b"a".to_vec())]);
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
-        for c in [&c, &Constraint::load_without_vocab(c.save()).unwrap()] {
+        for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
             let mut state = c.start(); let mask = state.mask(); assert!(bit(&mask, 70)); assert!(!bit(&mask, 0));
             state.commit_token(70).unwrap(); assert!(!state.is_accepting()); assert!(bit(&state.mask(), 1));
             state.commit_token(1).unwrap(); assert!(state.is_accepting());
@@ -272,7 +271,7 @@ fn expression_automaton_preserves_epsilon_edges_shared_symbols_and_empty_languag
     for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"a", b"b"]);
-        check_words(&Constraint::load_without_vocab(c.save()).unwrap(), &bytes, &[b"a", b"b"]);
+        check_words(&Constraint::load(c.save(), &v).unwrap(), &bytes, &[b"a", b"b"]);
     }
     let mut invalid = graph.clone(); invalid.nfa.states[0].epsilons = vec![99];
     assert!(PreparedParserGrammar::from_named(&named(vec![("root", false, E::ExprNFA(Box::new(invalid)))])).is_err());

@@ -20,14 +20,14 @@ fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
             for child_mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                 let child = source.compile_with_build_options(&vocab, BuildOptions::default()
                     .optimization(child_mode).parser_backend(backend)).unwrap();
-                let saved_child = Constraint::load_without_vocab(child.save()).unwrap();
+                let saved_child = Constraint::load(child.save(), &vocab).unwrap();
                 for child in [&child, &saved_child] {
                     let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap()
                         .bind_snapshot("child", child).unwrap();
                     for link_mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                         let linked = bound.link_with(BuildOptions::default()
                             .optimization(link_mode).parser_backend(backend)).unwrap();
-                        let loaded = Constraint::load_without_vocab(linked.save()).unwrap();
+                        let loaded = Constraint::load(linked.save(), &vocab).unwrap();
                         let external = Some(Constraint::load(
                             linked.save(), &vocab).unwrap());
                         for c in [&linked, &loaded].into_iter().chain(external.as_ref()) {
@@ -96,16 +96,16 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
             let linked = legacy.link_with(BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
             assert_language(&linked, &tokens, words);
-            assert_language(&Constraint::load_without_vocab(linked.save()).unwrap(), &tokens, words);
+            assert_language(&Constraint::load(linked.save(), &vocab).unwrap(), &tokens, words);
         }
         let child = into_template_parser(source).unwrap();
         assert_eq!(parser_backend_report(&child)["finite_embedding"], true);
-        let child = Constraint::load_without_vocab(child.save()).unwrap();
+        let child = Constraint::load(child.save(), &vocab).unwrap();
         let host = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
         for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = host.link_with(BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
-            let loaded = Constraint::load_without_vocab(c.save()).unwrap();
+            let loaded = Constraint::load(c.save(), &vocab).unwrap();
             let external = Constraint::load(c.save(), &vocab).unwrap();
             for c in [&c, &loaded, &external] { assert_language(c, &tokens, words); }
             let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
@@ -116,7 +116,7 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
             }).collect::<Vec<_>>();
             let nested_words = nested_words.iter().map(Vec::as_slice).collect::<Vec<_>>();
             assert_language(&outer, &tokens, &nested_words);
-            assert_language(&Constraint::load_without_vocab(outer.save()).unwrap(), &tokens, &nested_words);
+            assert_language(&Constraint::load(outer.save(), &vocab).unwrap(), &tokens, &nested_words);
             if mode == MaskStrategy::ParserDwa { assert_static_boundaries(&outer); }
         }
     }
@@ -154,7 +154,7 @@ fn static_composition_with_no_crossing_tokens_needs_no_boundary_shards() {
             for child in children { check_empty_shards(child); }
         }
     }
-    for c in [&outer, &Constraint::load_without_vocab(outer.save()).unwrap(),
+    for c in [&outer, &Constraint::load(outer.save(), &vocab).unwrap(),
         &Constraint::load(outer.save(), &vocab).unwrap()] {
         check_empty_shards(&glrmask::__private::parser_backend_report(c));
         assert_language(c, &tokens, &[b"pxayq"]);
@@ -204,7 +204,7 @@ fn strict_static_crossings_preserve_delayed_lexemes_sparse_ids_and_aliases() {
         let child = Grammar::from_glrm(source).compile_with_build_options(&vocab, options()).unwrap();
         let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
         let candidate = bound.link_with(options()).unwrap();
-        let loaded = Constraint::load_without_vocab(candidate.save()).unwrap();
+        let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
         let external = Constraint::load(candidate.save(), &vocab).unwrap();
         for candidate in [&candidate, &loaded, &external] {
             assert_static_boundaries(candidate);
@@ -234,11 +234,11 @@ fn strict_static_table_free_nested_composition_uses_no_dynamic_boundary() {
     // construction must materialize that boundary too, not hide a fallback.
     let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(build(MaskStrategy::TokenClassTrie)).unwrap();
-    let middle = Constraint::load_without_vocab(middle.save()).unwrap();
+    let middle = Constraint::load(middle.save(), &vocab).unwrap();
     let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
         .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap().link_with(build(MaskStrategy::ParserDwa)).unwrap();
     let words: &[&[u8]] = &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"];
-    let loaded = Constraint::load_without_vocab(outer.save()).unwrap();
+    let loaded = Constraint::load(outer.save(), &vocab).unwrap();
     let external = Constraint::load(outer.save(), &vocab).unwrap();
     for candidate in [&outer, &loaded, &external] {
         assert_static_boundaries(candidate);
@@ -275,7 +275,7 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
     let c = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
     let words = (0..=64).map(|count| format!("x{}y", "a".repeat(count)).into_bytes()).collect::<Vec<_>>();
     let words = words.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let loaded = Constraint::load_without_vocab(c.save()).unwrap();
+    let loaded = Constraint::load(c.save(), &vocab).unwrap();
     let external = Constraint::load(c.save(), &vocab).unwrap();
     for c in [&c, &loaded, &external] { assert_static_boundaries(c); assert_language(c, &tokens, &words); }
 
@@ -284,7 +284,7 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child* "y";"#)
         .prepare(&vocab).unwrap();
     let c = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
-    let loaded = Constraint::load_without_vocab(c.save()).unwrap();
+    let loaded = Constraint::load(c.save(), &vocab).unwrap();
     fn viable(word: &[u8]) -> bool {
         if word.is_empty() { return true; }
         if word[0] != b'x' { return false; }
@@ -314,12 +314,12 @@ fn nullable_nested_table_free_children_keep_every_repetition_count() {
     let leaf = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with_build_options(&vocab, options()).unwrap();
     let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = leaf leaf;"#)
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
-    for middle in [&middle, &Constraint::load_without_vocab(middle.save()).unwrap()] {
+    for middle in [&middle, &Constraint::load(middle.save(), &vocab).unwrap()] {
         let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
             .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap().link_with(options()).unwrap();
         let words: &[&[u8]] = &[b"xy", b"xay", b"xaay", b"xaaay", b"xaaaay"];
         assert_language(&outer, &tokens, words);
-        assert_language(&Constraint::load_without_vocab(outer.save()).unwrap(), &tokens, words);
+        assert_language(&Constraint::load(outer.save(), &vocab).unwrap(), &tokens, words);
     }
 }
 
@@ -348,13 +348,13 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
             let middle = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
                 .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
                 .link_with(options(middle_mode)).unwrap();
-            let reloaded_middle = Constraint::load_without_vocab(middle.save()).unwrap();
+            let reloaded_middle = Constraint::load(middle.save(), &vocab).unwrap();
             for middle in [&middle, &reloaded_middle] {
                 for outer_mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
                     let linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
                         .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap()
                         .link_with(options(outer_mode)).unwrap();
-                    let loaded = Constraint::load_without_vocab(linked.save()).unwrap();
+                    let loaded = Constraint::load(linked.save(), &vocab).unwrap();
                     let external = Constraint::load(linked.save(), &vocab).unwrap();
                     if outer_mode == MaskStrategy::ParserDwa { assert_static_boundaries(&linked); }
                     for constraint in [&linked, &loaded, &external] {
@@ -394,7 +394,7 @@ fn scoped_ignores_match_the_independent_lr_composition() {
     let child = grammar.compile_with_build_options(&vocab, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let candidate = parent.bind_snapshot("child", &child).unwrap().link_with(BuildOptions::default()
         .optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa)).unwrap();
-    let loaded = Constraint::load_without_vocab(candidate.save()).unwrap();
+    let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
     let external = Constraint::load(candidate.save(), &vocab).unwrap();
     let mut prefixes = vec![vec![]]; let mut layer = vec![vec![]];
     for _ in 0..4 {
@@ -428,7 +428,7 @@ fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
     let parent = Grammar::from_glrm(HOST).prepare(&vocab).unwrap();
     let result = parent.bind_snapshot("child", &child).unwrap().link_with(BuildOptions::default()
         .optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa).end_tokens([700])).unwrap();
-    let loaded = Constraint::load_without_vocab(result.save()).unwrap();
+    let loaded = Constraint::load(result.save(), &vocab).unwrap();
     for c in [&result, &loaded] {
         for (special, letter) in [(600, b'a'), (601, b'b')] {
             let mut state = c.start(); state.commit_bytes(b"x").unwrap();
@@ -451,7 +451,7 @@ fn already_table_free_children_link_without_reconstructing_tables() {
             let source = if nullable { r#"start ::= "a"?"# } else { r#"start ::= "a" | "b" | "a" "b""# };
             let child = Grammar::from_ebnf(source).compile_with_build_options(&vocab, BuildOptions::default()
                 .optimization(child_mode).parser_backend(ParserBackend::TemplateDfa)).unwrap();
-            let loaded = Constraint::load_without_vocab(child.save()).unwrap();
+            let loaded = Constraint::load(child.save(), &vocab).unwrap();
             for child in [&child, &loaded] {
                 assert_eq!(glrmask::__private::parser_backend_report(child)["finite_embedding"], true);
                 let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", child).unwrap();
@@ -460,7 +460,7 @@ fn already_table_free_children_link_without_reconstructing_tables() {
                         .parser_backend(ParserBackend::TemplateDfa)).unwrap();
                     let words: &[&[u8]] = if nullable { &[b"xy", b"xay"] } else { &[b"xay", b"xby", b"xaby"] };
                     assert_language(&result, &tokens, words);
-                    assert_language(&Constraint::load_without_vocab(result.save()).unwrap(), &tokens, words);
+                    assert_language(&Constraint::load(result.save(), &vocab).unwrap(), &tokens, words);
                 }
             }
         }
@@ -474,12 +474,12 @@ fn table_free_composition_can_itself_be_reused_as_a_child() {
     let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).compile_with_build_options(&vocab, options()).unwrap();
     let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
-    for middle in [&middle, &Constraint::load_without_vocab(middle.save()).unwrap()] {
+    for middle in [&middle, &Constraint::load(middle.save(), &vocab).unwrap()] {
         let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
             .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap().link_with(options()).unwrap();
         let words: &[&[u8]] = &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"];
         assert_language(&outer, &tokens, words);
-        assert_language(&Constraint::load_without_vocab(outer.save()).unwrap(), &tokens, words);
+        assert_language(&Constraint::load(outer.save(), &vocab).unwrap(), &tokens, words);
     }
 }
 
@@ -504,7 +504,7 @@ fn nested_repeated_child_retains_scope_across_token_boundaries_and_reload() {
         let candidate = outer.link_with(BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_language(&candidate, &tokens, &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"]);
-        let loaded = Constraint::load_without_vocab(candidate.save()).unwrap();
+        let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
         assert_language(&loaded, &tokens, &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"]);
     }
 }
@@ -547,7 +547,7 @@ fn compiled_child_composition_uses_templates_for_advance_and_masks() {
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_language(&candidate, &tokens, &[b"xay", b"xby", b"xaby"]);
         let saved = candidate.save();
-        let loaded = Constraint::load_without_vocab(&saved).unwrap();
+        let loaded = Constraint::load(&saved, &vocab).unwrap();
         assert_language(&loaded, &tokens, &[b"xay", b"xby", b"xaby"]);
         assert_eq!(saved, loaded.save());
         assert_eq!(child.parser_backend(), ParserBackend::TemplateDfa, "link must not mutate a shared child");
@@ -563,7 +563,7 @@ fn source_bound_composition_uses_template_backend() {
         let candidate = source.compile_with_build_options(&vocab, BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_language(&candidate, &tokens, &[b"xay", b"xby", b"xaby"]);
-        let loaded = Constraint::load_without_vocab(candidate.save()).unwrap();
+        let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
         assert_language(&loaded, &tokens, &[b"xay", b"xby", b"xaby"]);
     }
 }
@@ -577,7 +577,7 @@ fn nullable_child_controls_preserve_empty_body_and_parent_suffix() {
         let candidate = bound.link_with(BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_language(&candidate, &tokens, &[b"xy", b"xay"]);
-        let loaded = Constraint::load_without_vocab(candidate.save()).unwrap();
+        let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
         assert_language(&loaded, &tokens, &[b"xy", b"xay"]);
     }
 }
@@ -644,7 +644,7 @@ fn nested_artifact_loads_preserve_exact_language_on_default_rayon_stacks() {
             for _round in 0..8 {
                 pool.install(|| {
                     (0..16usize).into_par_iter().for_each(|_| {
-                        let loaded = Constraint::load_without_vocab(&saved).unwrap();
+                        let loaded = Constraint::load(&saved, &vocab).unwrap();
                         assert_language(&loaded, &tokens, words);
                         assert_eq!(saved, loaded.save());
                     });

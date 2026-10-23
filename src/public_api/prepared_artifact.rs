@@ -5,8 +5,9 @@
 use super::*;
 use std::collections::HashMap;
 
-const MAGIC: &[u8; 8] = b"GLRMOD14";
-const HEADER: usize = 16;
+const MAGIC: &[u8; 8] = b"GLRMOD15";
+const FINGERPRINT_LEN: usize = 32;
+const HEADER: usize = 16 + FINGERPRINT_LEN;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Definition {
@@ -122,11 +123,20 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
     let mut definitions = Vec::new();
     let mut bodies = Vec::<Vec<u8>>::new();
     let mut ids = HashMap::<(usize, bool), u32>::new();
+    let mut fingerprint = None;
     let mut definition = |value: &Arc<RuntimeConstraint>, runnable: bool| -> u32 {
         let key = (Arc::as_ptr(value) as usize, runnable);
         if let Some(&id) = ids.get(&key) { return id; }
         let id = definitions.len() as u32;
-        let body = if runnable { value.save_self_contained() } else { value.save_body() };
+        let body = value.save_body_external_artifact();
+        let recorded = value.vocab_fingerprint();
+        match fingerprint {
+            Some(expected) => assert_eq!(
+                expected, recorded,
+                "prepared definitions must target one vocabulary"
+            ),
+            None => fingerprint = Some(recorded),
+        }
         definitions.push(Definition {
             bytes: body.len() as u64,
             runnable,
@@ -160,8 +170,10 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
         });
     }
     let manifest = bincode::serialize(&Manifest { definitions, instances }).expect("prepared manifest is serializable");
+    let fingerprint = fingerprint.expect("prepared artifact has at least one definition");
     let mut result = Vec::with_capacity(HEADER + manifest.len() + bodies.iter().map(Vec::len).sum::<usize>());
     result.extend_from_slice(MAGIC); result.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
+    result.extend_from_slice(&fingerprint);
     result.extend_from_slice(&manifest);
     for body in bodies { result.extend_from_slice(&body); }
     result
@@ -173,6 +185,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
         return Err(error("unsupported prepared-grammar artifact version"));
     }
     if data.len() < HEADER || !data.starts_with(MAGIC) { return Err(error("invalid prepared-grammar artifact header")); }
+    let mut recorded_fingerprint = [0u8; FINGERPRINT_LEN];
+    recorded_fingerprint.copy_from_slice(&data[16..HEADER]);
     let manifest_len = u64::from_le_bytes(data[8..16].try_into().unwrap());
     if data.len()>1<<30 || manifest_len>1<<30 {return Err(error("excessive prepared artifact length"));}
     let start = usize::try_from(manifest_len).ok().and_then(|n|n.checked_add(HEADER))
@@ -195,24 +209,34 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     if offset!=data.len() { return Err(error("trailing data in prepared-grammar artifact")); }
     let mut definitions=Vec::<Arc<RuntimeConstraint>>::with_capacity(slices.len());
     for (definition,range) in manifest.definitions.iter().zip(slices) {
-        let mut inner=if definition.runnable { RuntimeConstraint::load_self_contained(&data[range])? }
-            else { RuntimeConstraint::load_body_artifact(&data[range])? };
+        let bytes=&data[range];
+        let inner=match supplied {
+            Some(vocab) => RuntimeConstraint::load_body_external_artifact(bytes, vocab)?,
+            None => {
+                let (inner, fingerprint) =
+                    RuntimeConstraint::load_deferred_body(bytes, definition.runnable)?;
+                if fingerprint != recorded_fingerprint {
+                    return Err(error("prepared definition targets a different vocabulary"));
+                }
+                inner
+            }
+        };
         if definition.runnable {
             if !definition.exact_only_token_ids.is_empty() { return Err(error("runnable definition has duplicate event-domain metadata")); }
-            if let Some(vocab)=supplied { inner.bind_vocab_exact(vocab).map_err(error)?; }
+            if !inner.late_grammar_slots.is_empty() {
+                return Err(error("runnable definition has unresolved slots"));
+            }
         } else {
             let mut previous=None;
             for &id in &definition.exact_only_token_ids {
-                if inner.token_bytes_for_id(id).is_some() || previous.is_some_and(|p|p>=id) {
+                if previous.is_some_and(|p|p>=id) {
+                    return Err(error("invalid prepared exact-only token domain"));
+                }
+                if inner.token_bytes_for_id(id).is_some() {
                     return Err(error("invalid prepared exact-only token domain"));
                 }
                 previous=Some(id);
             }
-            let retained=Vocab::new(inner.token_bytes_iter().map(|(id,bytes)|(id,bytes.to_vec())).collect()).with_special_tokens(definition.exact_only_token_ids.iter().copied());
-            if supplied.is_some_and(|vocab|!retained.same_model_vocab(vocab)) {
-                return Err(error("prepared artifact targets an incompatible vocabulary"));
-            }
-            inner.bind_vocab_exact(supplied.unwrap_or(&retained)).map_err(error)?;
         }
         definitions.push(Arc::new(inner));
     }
@@ -251,7 +275,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
         let slot_kinds = instance.slot_kinds.into_iter().map(|(name, kind)| (name, kind.into())).collect();
         let slot_spans = instance.slot_spans.into_iter().map(|(name, span)| (name, span.into())).collect();
         instances.push(Arc::new(PreparedGrammar {inner:definitions[def].clone(),bindings,boundary_trigger,
-            slot_kinds:Arc::new(slot_kinds),slot_spans:Arc::new(slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone()}));
+            slot_kinds:Arc::new(slot_kinds),slot_spans:Arc::new(slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone(),
+            retained_artifact: None, retained_vocab_fingerprint: None}));
         heights.push(height);edges.push(children);
     }
     let mut reached=vec![false;instances.len()];let mut pending=vec![instances.len()-1];
@@ -259,7 +284,12 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     if reached.iter().any(|seen|!seen) { return Err(error("unreachable instances in prepared artifact")); }
     let root=instances.pop().unwrap();
     root.validate_slot_manifest()?;
-    Ok(Arc::try_unwrap(root).unwrap_or_else(|root|root.as_ref().clone()))
+    let mut root=Arc::try_unwrap(root).unwrap_or_else(|root|root.as_ref().clone());
+    if supplied.is_none() {
+        root.retained_artifact = Some(Arc::from(data));
+        root.retained_vocab_fingerprint = Some(recorded_fingerprint);
+    }
+    Ok(root)
 }
 
 #[cfg(test)]
@@ -273,6 +303,7 @@ mod tests {
         let encoded = bincode::serialize(&manifest).unwrap();
         let mut result = MAGIC.to_vec();
         result.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+        result.extend_from_slice(&bytes[16..HEADER]);
         result.extend_from_slice(&encoded); result.extend_from_slice(&bytes[HEADER+size..]); result
     }
 
@@ -298,6 +329,6 @@ mod tests {
         for (index,mutation) in mutations.into_iter().enumerate() {
             assert!(load(&corrupt(&bytes,mutation),None).is_err(),"corruption {index}");
         }
-        assert!(load(&bytes,None).is_ok());
+        assert!(load(&bytes,None).is_ok(), "{:?}", load(&bytes,None).err());
     }
 }

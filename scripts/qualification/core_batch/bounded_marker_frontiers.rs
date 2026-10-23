@@ -16,7 +16,7 @@ fn main(){
     "start root t WS=/ +/ ignore WS nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2)",
    ]{
     let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
-    let loaded=Constraint::load_without_vocab(c.save()).unwrap();
+    let loaded=Constraint::load(c.save(), &vocab).unwrap();
     for c in [&c,&loaded]{
      for ids in [&[][..],&[0][..],&[0,1][..],&[0,2][..],&[0,3][..],&[0,3,1][..]]{
       let mut state=c.start();let mut alive=true;

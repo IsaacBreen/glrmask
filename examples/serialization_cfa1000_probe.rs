@@ -53,7 +53,7 @@ fn main() {
         for _ in 0..load_iters {
             let copy = artifact.clone();
             let started = Instant::now();
-            let loaded = Constraint::load_without_vocab(copy).unwrap();
+            let loaded = Constraint::load(copy, &vocab).unwrap();
             loads.push(started.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(loaded);
         }

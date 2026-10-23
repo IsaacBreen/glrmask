@@ -297,7 +297,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
                 "static"
             };
             assert_eq!(c.parser_backend(), ParserBackend::TemplateDfa);
-            let loaded = Constraint::load_without_vocab(&c.save()).unwrap();
+            let loaded = Constraint::load(&c.save(), &vocab).unwrap();
             let external =
                 Constraint::load(&c.save(), &vocab)
                     .unwrap();
@@ -510,7 +510,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
             } else {
                 "static"
             };
-            let loaded = Constraint::load_without_vocab(c.save()).unwrap();
+            let loaded = Constraint::load(c.save(), &vocab).unwrap();
             let external =
                 Constraint::load(c.save(), &vocab).unwrap();
             parsers.extend([

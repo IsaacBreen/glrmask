@@ -95,9 +95,22 @@ pub(crate) struct Node {
 
 pub(crate) trait RetainedPreparation: Send + Sync + std::fmt::Debug {
     fn prepared(&self) -> &PreparedGrammar;
+    /// Rehydrates a vocabulary-free retained body, or returns an equivalent
+    /// already-bound preparation.
+    fn rehydrate_vocab(&self, vocab: &Vocab) -> Result<Arc<dyn RetainedPreparation>>;
 }
 impl RetainedPreparation for PreparedGrammar {
     fn prepared(&self) -> &PreparedGrammar { self }
+    fn rehydrate_vocab(&self, vocab: &Vocab) -> Result<Arc<dyn RetainedPreparation>> {
+        let Some(wire) = self.retained_artifact.as_ref() else {
+            return Ok(Arc::new(self.clone()));
+        };
+        if self.retained_vocab_fingerprint != Some(crate::compiler::compile::vocab_fingerprint(vocab)) {
+            return Err(error("module retained work was precompiled for a different vocabulary"));
+        }
+        prepared_artifact::load(wire.as_ref(), Some(vocab))
+            .map(|prepared| Arc::new(prepared) as Arc<dyn RetainedPreparation>)
+    }
 }
 impl std::ops::Deref for dyn RetainedPreparation {
     type Target = PreparedGrammar;
@@ -375,7 +388,12 @@ impl Module {
             BIND_WORK.with(|c| c.set(c.get() + 1));
             let mut c = Certificate { instances: 1, ports: self.node.bindings.len() as u128, ..Certificate::default() };
             for p in self.node.prepared.values() {
-                c.target(&constraint_vocab(&p.inner))?;
+                // A vocabulary-free retained body has no token bytes yet; its
+                // vocabulary is checked in `validate_retained_vocab` at
+                // compile/precompile time.
+                if p.inner.pending_vocab_fingerprint.is_none() {
+                    c.target(&constraint_vocab(&p.inner))?;
+                }
             }
             if let Some(t) = &self.node.source.exact_value { c.tokens(t)?; }
             for value in self.node.bindings.values() {
@@ -450,7 +468,11 @@ impl Module {
         let expected = crate::compiler::compile::vocab_fingerprint(vocab);
         for module in &self.index()? {
             for prepared in module.node.prepared.values() {
-                if prepared.prepared().inner.vocab_fingerprint() != expected {
+                let prepared = prepared.prepared();
+                let recorded = prepared
+                    .retained_vocab_fingerprint
+                    .unwrap_or_else(|| prepared.inner.vocab_fingerprint());
+                if recorded != expected {
                     return Err(error(
                         "module retained work was precompiled for a different vocabulary",
                     ));
@@ -478,6 +500,37 @@ impl Module {
         with_deep_stack(|| self.precompile_on_stack(vocab, &options, true, false))
     }
 
+    /// Rehydrates vocabulary-free retained work loaded from a Module artifact.
+    ///
+    /// Deferred bodies are decoded once here, against the vocabulary that
+    /// `validate_retained_vocab` has already checked.
+    fn rehydrate_retained(&self, vocab: &Vocab) -> Result<Module> {
+        let modules = self.index()?;
+        let mut instances = HashMap::<usize, Module>::new();
+        for m in modules {
+            let mut next = m.clone();
+            let mut c = m.certificate()?.as_ref().clone();
+            c.target(vocab)?;
+            let node = Arc::make_mut(&mut next.node);
+            for (&engine, prepared) in &m.node.prepared {
+                node.prepared.insert(engine, prepared.rehydrate_vocab(vocab)?);
+            }
+            node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
+            for (name, value) in &m.node.bindings {
+                if let BoundValue::Module(child) = value {
+                    node.bindings.insert(
+                        name.clone(),
+                        BoundValue::Module(instances[&(Arc::as_ptr(&child.node) as usize)].clone()),
+                    );
+                }
+            }
+            instances.insert(Arc::as_ptr(&m.node) as usize, next);
+        }
+        instances
+            .remove(&(Arc::as_ptr(&self.node) as usize))
+            .ok_or_else(|| error("missing rehydrated Module root"))
+    }
+
     /// Internal compile preparation: retain compilation artifacts and the
     /// default boundary token set.
     fn precompile_for_compile(&mut self, vocab: &Vocab, options: &CompileOptions, mixed: bool) -> Result<()> {
@@ -487,6 +540,11 @@ impl Module {
     fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool, mixed: bool) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
+        if self.index()?.iter().any(|module| module.node.prepared.values().any(|prepared| {
+            prepared.prepared().retained_artifact.is_some()
+        })) {
+            *self = self.rehydrate_retained(vocab)?;
+        }
         let modules = self.index()?;
         let resolved = resolve_compile_strategy(options.mask_strategy, &modules);
         let target_b = target_boundary();
@@ -682,6 +740,8 @@ impl Module {
             boundary_trigger: target_b,
             slot_kinds: Arc::new(declared.kinds.clone()),
             slot_spans: Arc::new(declared.spans.clone()),
+            retained_artifact: None,
+            retained_vocab_fingerprint: None,
         };
         prepared.validate_local_slot_manifest(vocab)?;
         prepared.validate_slot_manifest()?;
@@ -1172,7 +1232,7 @@ mod precompile_boundary_tests {
         assert_eq!(loaded_trigger.as_ref(), prepared_trigger.as_ref());
 
         let constraint_bytes = compiled.save();
-        let mut loaded_constraint = RuntimeConstraint::load_without_vocab(&constraint_bytes).expect("Constraint round-trip");
+        let mut loaded_constraint = RuntimeConstraint::load(&constraint_bytes, &vocab).expect("Constraint round-trip");
         loaded_constraint
             .materialize_composition_metadata_for_compilation()
             .expect("materialize loaded metadata");

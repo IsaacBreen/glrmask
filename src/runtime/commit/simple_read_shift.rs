@@ -328,7 +328,7 @@ mod tests {
                 TemplateBuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
             )
             .unwrap();
-        let loaded = Constraint::load_without_vocab(fresh.save()).unwrap();
+        let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
         let external =
             Constraint::load(fresh.save(), &vocab).unwrap();
         for constraint in [&fresh, &loaded, &external] {
@@ -527,7 +527,7 @@ mod tests {
                     TemplateBuildOptions::default().optimization(optimization),
                 )
                 .unwrap();
-            let loaded = Constraint::load_without_vocab(fresh.save()).unwrap();
+            let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
             let external =
                 Constraint::load(fresh.save(), &vocab)
                     .unwrap();
