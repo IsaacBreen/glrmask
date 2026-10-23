@@ -145,8 +145,12 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     assert!(allowed(&mask, 99));
     assert!(!allowed(&mask, 1));
 
-    let wrong = Vocab::new(vec![(7, b"different".to_vec())]).with_special_tokens([99]);
-    assert!(loaded.compile(&wrong).is_err());
+    // A token-set binding is a set of IDs; byte spellings are not part of its
+    // identity, but every ID must exist in the compile vocabulary.
+    let renamed = Vocab::new(vec![(7, b"different".to_vec())]).with_special_tokens([99]);
+    assert!(loaded.compile(&renamed).is_ok());
+    let missing = Vocab::new(vec![(7, b"different".to_vec())]);
+    assert!(loaded.compile(&missing).is_err());
 
     let mut wide = Module::new(&Grammar::from_glrm(OPEN));
     wide.bind("item", TokenSet::from(7)).unwrap();
@@ -206,7 +210,8 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert!(parent.precompile(&wrong).is_err());
     assert_eq!(parent.save(), original);
 
-    assert!(parent.bind("child", TokenSet::new([0])).is_err());
+    // A token set whose ID is outside the parent's target vocabulary.
+    assert!(parent.bind("child", TokenSet::new([42])).is_err());
     assert_eq!(parent.save(), original);
 
     let mut child = Module::new(&a());

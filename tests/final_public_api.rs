@@ -172,8 +172,6 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     let mut corrupt = bytes.clone();
     corrupt[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(Module::load(&corrupt).is_err());
-    let incompatible = Vocab::new(vec![(7, b"different".to_vec())]);
-    assert!(Module::load(&bytes).is_err());
 }
 
 #[test]
@@ -195,16 +193,16 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert!(allowed(&state.mask(), 255));
         let mut other = state.clone();
         state.commit_token(130).unwrap();
-        assert!(state.is_accepting() && !(state.mask().iter().all(|word| *word == 0)));
+        assert!(state.is_accepting());
         assert_eq!(state.mask(), vec![0; 8]);
         assert!(state.forced_canonical_reference().is_empty());
         assert!(state.commit_token(1).is_err());
         assert!(state.commit_bytes(b"a").is_err());
-        assert!(other.is_accepting() && !(other.mask().iter().all(|word| *word == 0)));
+        assert!(other.is_accepting());
         assert!(allowed(&other.mask(), 130));
         assert!(allowed(&other.mask(), 255));
         other.commit_token(255).unwrap();
-        assert!(other.is_accepting() && !(other.mask().iter().all(|word| *word == 0)));
+        assert!(other.is_accepting());
         assert_eq!(other.mask(), vec![0; 8]);
         assert!(other.commit_token(1).is_err());
         constraint = Constraint::load(constraint.save(), &v).unwrap();
@@ -222,15 +220,15 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 1));
     assert!(!allowed(&state.mask(), 7));
-    state.commit_token(7).unwrap();
-    assert!((state.mask().iter().all(|word| *word == 0)));
-    assert!(!state.is_accepting());
+    // An end token before a complete match is a failed commit.
+    assert!(state.commit_token(7).is_err());
     assert!(state.mask().iter().all(|word| *word == 0));
+    assert!(!state.is_accepting());
     let mut valid = constraint.start();
     valid.commit_token(1).unwrap();
     assert!(allowed(&valid.mask(), 7));
     valid.commit_token(7).unwrap();
-    assert!(valid.is_accepting() && !(valid.mask().iter().all(|word| *word == 0)));
+    assert!(valid.is_accepting());
     assert!(valid.mask().iter().all(|word| *word == 0));
     assert!(valid.commit_token(1).is_err());
     assert!(Grammar::from_ebnf(r#"start ::= "a""#)

@@ -94,7 +94,10 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         checked += 1;
         assert!(checked < 20_000, "bounded finite-tape test exceeded its intended workload");
         assert_eq!(state.is_accepting(), accepting(&words), "{label}; trace={trace:?}");
-        assert_eq!((state.mask().iter().all(|word| *word == 0)), words.is_empty(), "{label}; trace={trace:?}");
+        // A rejected state has no allowed tokens. An accepting state may also
+        // have an empty mask when no further token is possible.
+        let rejected = !state.is_accepting() && state.mask().iter().all(|word| *word == 0);
+        assert_eq!(rejected, words.is_empty(), "{label}; trace={trace:?}");
         let original_mask = state.mask();
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);

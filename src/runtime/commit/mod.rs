@@ -8546,6 +8546,7 @@ impl<'a> ConstraintState<'a> {
     fn reject_after_failed_commit(&mut self) {
         self.state.clear();
         self.terminated = false;
+        if let Some(markers) = self.markers.as_deref_mut() { markers.begin(); }
         self.buffers.reset_all();
         self.generation = self.generation.wrapping_add(1);
         *self.mask_cache.lock().unwrap() = None;

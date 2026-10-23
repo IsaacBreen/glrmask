@@ -6,12 +6,18 @@ const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie, M
 fn allows(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)
 }
+/// A rejected state cannot accept and has no allowed tokens. A live accepting
+/// state legitimately has an empty mask when the grammar is complete.
+fn assert_live(state: &glrmask::ConstraintState<'_>) {
+    assert!(state.is_accepting() || !state.mask().iter().all(|word| *word == 0),
+        "a successful commit left a rejected state");
+}
 fn replay(state: &glrmask::ConstraintState<'_>, ids: &[u32]) {
     let before=state.mask();let mut next=state.clone();
     for &id in ids {
         assert!(!next.is_accepting(), "forced beyond an accepting boundary");
         assert!(allows(&next.mask(),id), "forcing selected an unadmitted ID {id}");
-        next.commit_token(id).unwrap();assert!(!(next.mask().iter().all(|word| *word == 0)));
+        next.commit_token(id).unwrap();assert_live(&next);
     }
     assert_eq!(state.mask(),before,"forcing/replay mutated source state");
 }
@@ -24,13 +30,13 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
-    assert!(!(state.mask().iter().all(|word| *word == 0)));
+    assert_live(&state);
     let mut replay = state.clone();
     for &id in &ids {
         assert!(!replay.is_accepting(), "forced past an accepting token boundary");
         assert!(allows(&replay.mask(), id), "forced ID {id} is excluded by the authoritative mask");
         replay.commit_token(id).unwrap();
-        assert!(!(replay.mask().iter().all(|word| *word == 0)));
+        assert_live(&replay);
     }
     ids
 }

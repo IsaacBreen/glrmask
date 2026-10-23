@@ -2466,7 +2466,7 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
 fn commit_tokens_commits_in_order_and_post_end_commits_error() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
         .with_special_tokens([7]);
-    let constraint = glrmask::Grammar::ebnf(r#""a" "b""#)
+    let constraint = glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)
         .compile_with(&vocab, glrmask::CompileOptions::default().end_tokens([7]))
         .unwrap();
     let mut state = constraint.start();
@@ -2502,7 +2502,7 @@ fn constraint_artifacts_require_the_exact_vocabulary() {
 #[test]
 fn module_retained_work_is_checked_against_the_compile_vocabulary() {
     let vocab = vocab(&["a", "b"]);
-    let mut module = glrmask::Module::new(&glrmask::Grammar::ebnf(r#""a" "b""#));
+    let mut module = glrmask::Module::new(&glrmask::Grammar::ebnf(r#"start ::= "a" "b""#));
     module.precompile(&vocab).unwrap();
     let loaded = glrmask::Module::load(module.save()).unwrap();
     assert_eq!(

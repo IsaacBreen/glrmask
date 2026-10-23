@@ -70,16 +70,15 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Commit EOS 99
             state.commit_token(99).unwrap();
             assert!(state.is_accepting());
-            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(state.mask().iter().all(|&w| w == 0));
-            assert!(state.commit_token(1).is_err());
-            assert!(state.commit_bytes(b"b").is_err());
 
-            // Terminated clone behavior
+            // Terminated clone behavior (clone before failing commits, which
+            // reject the state).
             let mut clone = state.clone();
             assert!(clone.is_accepting());
-            assert!(!(clone.mask().iter().all(|word| *word == 0)));
             assert!(clone.mask().iter().all(|&w| w == 0));
+            assert!(state.commit_token(1).is_err());
+            assert!(state.commit_bytes(b"b").is_err());
             assert!(clone.commit_token(1).is_err());
             assert!(clone.commit_bytes(b"b").is_err());
         }
@@ -103,17 +102,16 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Commit EOS 99
             state.commit_token(99).unwrap();
             assert!(state.is_accepting());
-            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(state.mask().iter().all(|&w| w == 0));
+
+            // Terminated clone behavior (clone before failing commits, which
+            // reject the state).
+            let mut clone = state.clone();
+            assert!(clone.is_accepting());
+            assert!(clone.mask().iter().all(|&w| w == 0));
             assert!(state.commit_token(0).is_err());
             assert!(state.commit_token(1).is_err());
             assert!(state.commit_bytes(b"a").is_err());
-
-            // Terminated clone behavior
-            let mut clone = state.clone();
-            assert!(clone.is_accepting());
-            assert!(!(clone.mask().iter().all(|word| *word == 0)));
-            assert!(clone.mask().iter().all(|&w| w == 0));
             assert!(clone.commit_token(0).is_err());
             assert!(clone.commit_bytes(b"a").is_err());
         }

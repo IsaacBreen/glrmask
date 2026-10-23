@@ -106,7 +106,11 @@ fn clone_masks_forcing_errors_and_eos_obey_batch_lifecycle() {
         assert_eq!(events(&fork),[(1,1),(2,2)]);assert_eq!(s.marker_events(),initial);
         s.commit_token(0).unwrap();let observed=s.marker_events().to_vec();
         let _=s.mask();let _=s.forced_tokens().unwrap();assert_eq!(s.marker_events(),observed);
-        assert!(s.commit_token(99999).is_err());assert!(events(&s).is_empty());
+        // A failed commit kills the state, so continue from a clone taken first.
+        let mut rejected_batch=s.clone();
+        assert!(rejected_batch.commit_token(99999).is_err());
+        assert!(events(&rejected_batch).is_empty());
+        assert!(rejected_batch.mask().iter().all(|word| *word == 0));
         s.commit_token(1).unwrap();assert_eq!(events(&s),[(2,2)]);
         s.commit_token(4).unwrap();assert!(s.is_accepting());assert!(events(&s).is_empty());
         assert!(s.commit_token(0).is_err());assert!(events(&s).is_empty());

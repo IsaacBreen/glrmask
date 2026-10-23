@@ -63,7 +63,6 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
         state.commit_token(2).unwrap();
         assert!(state.is_accepting());
-        assert!(!(state.mask().iter().all(|word| *word == 0)));
     }
 }
 
@@ -102,5 +101,4 @@ fn compile_options_never_invalidate_retained_work() {
     assert!(state.is_accepting());
     state.commit_token(5).unwrap();
     assert!(state.is_accepting());
-    assert!(!(state.mask().iter().all(|word| *word == 0)));
 }

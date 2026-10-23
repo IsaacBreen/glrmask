@@ -121,10 +121,12 @@ impl Certificate {
             return Err(error("module graph targets incompatible vocabularies"));
         }
         if self.target.is_none() {
+            // The first supplied vocabulary must validate every pending token
+            // set. Set the target first so `tokens` checks rather than requeues.
+            self.target = Some(vocab.clone());
             for set in std::mem::take(&mut self.pending_sets) {
                 self.tokens(&set)?;
             }
-            self.target = Some(vocab.clone());
         }
         Ok(())
     }

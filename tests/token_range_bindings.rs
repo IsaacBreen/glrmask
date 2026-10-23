@@ -128,7 +128,9 @@ fn range_construction_normalizes_and_validates_membership_at_compile() {
     let outside = Grammar::from_glrm(ONE).bind_snapshot("T", TokenSet::from_ranges([79..=80])).unwrap();
     assert!(outside.compile(&vocab).is_err(), "an ID outside the vocabulary is rejected");
     let different = Vocab::new(vec![(0, b"different".to_vec())]).with_special_tokens(1..80);
-    assert!(Grammar::from_glrm(ONE).bind_snapshot("T", ranges).unwrap().compile(&different).is_err());
+    // A token set is IDs only: different byte spellings do not matter, but every
+    // ID must be defined by the target vocabulary.
+    Grammar::from_glrm(ONE).bind_snapshot("T", ranges).unwrap().compile(&different).unwrap();
     // The same IDs remain valid against any vocabulary that defines them.
     let same_ids = Vocab::new(vec![(0, b"elsewhere".to_vec())]).with_special_tokens(1..80);
     Grammar::from_glrm(ONE).bind_snapshot("T", TokenSet::from_ranges([5..=25])).unwrap().compile(&same_ids).unwrap();
@@ -234,8 +236,8 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
         assert_mask(&repeated, &[7], 16, |id| id != 8);
         assert_mask(&repeated, &[7, 9], 16, |id| id == 8);
         let mut early = repeated.start();
-        early.commit_token(8).unwrap();
-        assert!((early.mask().iter().all(|word| *word == 0)));
+        // An end token before a complete match is a failed commit.
+        assert!(early.commit_token(8).is_err());
         assert!(!early.is_accepting());
         assert!(early.mask().iter().all(|&word| word == 0));
         let mut state = repeated.start();

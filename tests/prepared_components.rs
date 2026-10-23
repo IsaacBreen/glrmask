@@ -53,8 +53,8 @@ fn explicit_exact_adapter_has_event_not_spelling_semantics() {
         let mask=c.start().mask();assert!(!allowed(&mask,0));assert!(allowed(&mask,2));assert!(allowed(&mask,4));assert!(!allowed(&mask,5));
         for id in [2,4] {let mut s=c.start();s.commit_token(id).unwrap();assert!(s.is_accepting());}
     }
-    let other=Vocab::new(vec![(0,b"different".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]).with_special_tokens([4,5]);
-    assert!(event.prepare(&other).is_err());
+    let other=Vocab::new(vec![(0,b"different".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]);
+    assert!(event.prepare(&other).is_err(), "ID 4 is absent from the target vocabulary");
 }
 #[test]
 fn unused_parameters_still_belong_to_the_interface() {

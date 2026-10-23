@@ -238,10 +238,10 @@ fn known_invalid_commit_drives_fail_state_like_native() {
 }
 
 #[test]
-fn unknown_token_id_is_rejected_without_mutating_state() {
+fn unknown_token_id_is_rejected_and_kills_the_state() {
     // An ID neither present in the vocabulary nor declared by a special-token
     // terminal must error through the existing knows-token check and leave the
-    // state usable. This is separate from the known-invalid fail-state policy.
+    // state rejected. This is separate from a known-invalid token.
     let vocab = vocab();
     let source = r#"start ::= "a" "b""#;
     let lr = compile(&vocab, source, ParserBackend::LrTable);
@@ -249,18 +249,17 @@ fn unknown_token_id_is_rejected_without_mutating_state() {
     const UNKNOWN: u32 = 4095;
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
-        let before = state.mask();
         assert!(
             state.commit_token(UNKNOWN).is_err(),
             "unknown token ID must be rejected",
         );
-        assert_eq!(state.mask(), before, "unknown token must not mutate state");
-        // The state remains usable and identical to a fresh state.
+        assert!(state.mask().iter().all(|word| *word == 0), "a failed commit kills the state");
+        assert!(!state.is_accepting());
     }
     let mut left = lr.start();
     let mut right = native.start();
     assert_eq!(left.commit_token(UNKNOWN).is_err(), right.commit_token(UNKNOWN).is_err());
-    assert_eq!(left.commit_token(0).is_ok(), right.commit_token(0).is_ok());
+    assert_eq!(left.commit_token(0).is_err(), right.commit_token(0).is_err());
     assert_eq!(left.mask(), right.mask());
 }
 
