@@ -3,8 +3,8 @@
 Use `extern token NAME` for a one-event exact-token contract and
 `extern grammar NAME` for a general byte/event grammar fragment. Bind
 children to a `Module`. A child must have every extern bound before it is
-attached. Modules keep their own local compilation settings; `Grammar` does not
-store those settings:
+attached. Modules keep bindings and retained work; strategy values are supplied
+to the compile call, and `Grammar` stores no settings:
 
 ```rust
 use glrmask::{Grammar, Module, Result, Vocab};
@@ -37,7 +37,7 @@ unresolved externs; `m.externs()` (Python: `m.externs`) also includes bound
 declarations. Qualified `::` paths are not supported; each extern is bound once
 on the module that declared it. Final compilation requires every declared
 extern to be resolved. `Module.save()` and `Module.load()` preserve source,
-settings, bindings and retained work with the same vocabulary identity.
+bindings and retained work with the same vocabulary identity.
 Vocabulary is supplied to root compilation operations, not every cold child
 constructor.
 
@@ -68,16 +68,21 @@ segmented dynamic boundary and builds faster. `Auto` (the default) uses
 `ParserDwa` and falls back to `TokenTrie` for a boundary whose static parser
 declines on budget.
 
-Each Module captures its own settings via `set_mask_strategy` and
-`set_boundary_mask_strategy` (in Python: constructor keywords or properties).
-Compile options apply to the root compile call only:
+These strategies are compile settings, supplied on the compile call (in Python:
+keyword arguments to `compile` and `precompile`). One value applies to the whole
+compile, including every composed child. `CompileOptions::end_tokens` applies to
+the root compile call only; `precompile_with` accepts the same options so that
+precompilation decides which static parts are built. A part that already has a
+static preparation is never downgraded to `TokenTrie`:
 
 ```rust
-# use glrmask::{CompileOptions, Grammar, Result, Vocab};
+# use glrmask::{CompileOptions, Grammar, MaskStrategy, Result, Vocab};
 # fn demo(grammar: &Grammar<'_>, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
-    CompileOptions::default(),
+    CompileOptions::default()
+        .mask_strategy(MaskStrategy::FAST_RUNTIME)
+        .end_tokens([99]),
 )?;
 # let _ = constraint;
 # Ok(())

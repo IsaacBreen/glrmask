@@ -5,8 +5,8 @@ See [the module API guide](module-api.md) for the representation-compatibility
 matrix and Python examples.
 
 `Grammar` describes a source language. It does not store compilation settings.
-`Module` owns a snapshot of that language, its local settings, its external
-bindings and any retained compilation work. `Constraint` is the runnable result.
+`Module` owns a snapshot of that language, its external bindings and any
+retained compilation work. `Constraint` is the runnable result.
 
 Creating a cold module requires no vocabulary and performs no grammar
 compilation. Binding a child captures its current state, not a live mutable
@@ -15,11 +15,9 @@ snapshots. A failed binding leaves the receiving handle unchanged.
 
 ## Local options and root options
 
-Rust uses `ModuleOptions` for local compilation choices and `CompileOptions` for
-the final root's stopping policy. The local optimization and boundary-metadata
-choices are existing compilation controls, not a second set of backend flags.
-An explicitly configured child keeps its own settings. Raw grammar children use
-their own default local settings; they do not inherit a parent's overrides.
+Rust uses `CompileOptions` for the mask strategy, boundary strategy and the
+final root's stopping policy. Strategy values are compile settings, not module
+state: one value applies to the whole compile, including every composed child.
 
 The instance method `with_options` returns a configured snapshot. `set_options`
 updates an existing module in place. Both reject changes incompatible with
@@ -85,8 +83,8 @@ event domain. An incompatible vocabulary is an error; matching decoded
 spellings alone are not sufficient. A cold child may still require the full
 vocabulary even when its parent has already been precompiled.
 
-Module serialization preserves source, local settings, attachment snapshots,
-target identity and retained work. Loading does not compile. Malformed graph
+Module serialization preserves source, attachment snapshots, target identity
+and retained work. Loading does not compile. Malformed graph
 references, excessive expansion and unsupported versions are errors. Saving a
 module with unbound slots does not make it runnable.
 
@@ -122,7 +120,7 @@ assert!(module.unbound()?.is_empty());
 
 Rust collections containing different operand types need an explicit common
 `Expr` representation; `IntoExpr` provides that conversion. A configured or
-precompiled `Module` may be an expression leaf, retaining its settings and work.
+precompiled `Module` may be an expression leaf, retaining its bindings and work.
 Converting such an expression into a source-only `Grammar` is an error rather
 than silently discarding information. Source-only expressions support
 `Grammar::from_expr` and direct source binding.

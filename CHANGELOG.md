@@ -6,7 +6,7 @@
   composition. `Grammar` is immutable source without settings or bindings;
   `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a
   default `Module`.
-- `Module` holds per-module settings, bindings and retained work.
+- `Module` holds bindings and retained work.
   `Module::bind` mutates in place and is atomic; each extern is bound once on
   its declaring module, and qualified `::` paths are rejected. A bound child
   must have no unbound externs. `precompile` retains local work while externs
@@ -14,31 +14,42 @@
 - `MaskStrategy` (`Auto`, `ParserDwa`, `TokenTrie`, `TokenClassTrie`, with
   aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`) replaces
   `Optimization`; `Balanced` is removed. Explicit strategies error instead of
-  silently falling back. `TokenTrie` parts cannot be combined with `ParserDwa`
-  or `TokenClassTrie` parts in one composition.
+  silently falling back; `Auto` may fall back to `TokenTrie`.
 - `BoundaryMaskStrategy` (`Auto`, the default, `ParserDwa`, and `TokenTrie`,
   with aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`)
   selects the boundary parser for composed grammars. The boundary token trigger
-  is always the LLM token set and no longer derives from this setting. `Auto`
+  is always the LLM token set and does not derive from this setting. `Auto`
   uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static
   parser declines on budget; an explicit `ParserDwa` budget decline is a typed
   compile error.
-- The bindings now expose the same strategy names: Python
+- Strategies are compile settings, not `Module` state: `Module` no longer has
+  `mask_strategy` or `boundary_mask_strategy` getters or setters. `CompileOptions`
+  carries both, and `Module::precompile_with` mirrors `compile_with`; the
+  bindings expose the same values as Python keywords on `compile`/`precompile`,
+  Node.js `{ maskStrategy, boundaryMaskStrategy }` options, C
+  `glrmask_compile_options` fields, and C++ `CompileOptions` members. One value
+  applies to the whole compile, including every composed child.
+- Precompilation decides which static parts are built. Compilation uses every
+  static part that already exists and never downgrades one to dynamic
+  `TokenTrie` compilation, so a `TokenTrie` request after a static precompile
+  keeps the static parts and produces the same masks; the options govern only
+  the parts not yet built.
+- The bindings expose the same strategy names: Python
   `BoundaryMaskStrategy.AUTO`/`PARSER_DWA`/`TOKEN_TRIE`, Node.js
   `Auto`/`ParserDwa`/`TokenTrie`, and C/C++
   `..._AUTO`/`..._PARSER_DWA`/`..._TOKEN_TRIE`, with the
   fast-build/fast-runtime aliases retained.
 - `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
   externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
-  applied only to the root.
+  applied only to the root, alongside the two strategies.
 - Saved modules preserve cold, open, partly compiled and mixed graphs,
   including exact vocabulary identity, bindings and retained work.
 - `Expr.choice`, `Expr.sequence` and `Expr.literal` compose grammars without
   adding a namespace per operator; model-token spellings may cross leaves.
-- Python: `Module(grammar, *, mask_strategy=..., boundary_mask_strategy=...)`
-  with assignable properties, `bind(name, value)` and atomic `bind(**bindings)`,
-  an `externs` `Mapping` with `.unbound`, and `copy()` replacing `clone()`.
-  C/C++ and Node.js bindings expose the same model.
+- Python: `Module(grammar)`, strategy keywords on `precompile` and `compile`,
+  `bind(name, value)` and atomic `bind(**bindings)`, an `externs` `Mapping`
+  with `.unbound`, and `copy()` replacing `clone()`. C/C++ and Node.js
+  bindings expose the same model.
 - The epsilon-free grammar prepass is on by default; set
   `GLRMASK_EPSFREE_PREPASS=0` to opt out. It fixes grammars that previously
   declined at the build budget.

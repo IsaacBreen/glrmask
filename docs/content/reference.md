@@ -38,10 +38,10 @@ An arbitrary grammar cannot bind a token-valued extern.
 
 ### Configure, precompile, attach and execute
 
-`Module` is a reusable, independently configured grammar snapshot. Constructing
-one from a `Grammar` needs no vocabulary and does no grammar compilation.
-Compilation settings belong to the module, never to the source `Grammar`.
-The parent may have unresolved externs while precompiling.
+`Module` is a reusable grammar snapshot. Constructing one from a `Grammar`
+needs no vocabulary and does no grammar compilation. Strategy settings belong to
+the compile call, never to the module or the source `Grammar`. The parent may
+have unresolved externs while precompiling.
 `bind(name, value)` mutates the receiving handle and returns `Result<()>` in Rust
 or `None` in Python. In Python, `bind` also supports atomic keyword arguments
 (`m.bind(**bindings)`).
@@ -96,12 +96,12 @@ assert state.is_accepting()
 
 Rust uses `Module::new(&grammar)`, `precompile(&vocab)?`,
 `bind(name, &child)?`, and `compile(&vocab)?` or `compile_with(&vocab, options)?`.
-Module settings are configured via `set_mask_strategy` and
-`set_boundary_mask_strategy` (in Python: constructor keywords or properties
-`m.mask_strategy = ...`). Each explicitly configured child keeps its own
-settings; a raw grammar child receives default local settings, not an inherited
-parent override. Every child must be closed (have no unbound externs) before
-attachment. Each extern is bound once on the module that declared it; qualified
+Strategies are configured on the compile call via `CompileOptions`
+(`mask_strategy` and `boundary_mask_strategy`; in Python: keyword arguments to
+`compile` and `precompile`). One value applies to the whole compile, including
+every composed child, and a part that already has a static preparation is never
+downgraded to the dynamic `TokenTrie` path. Every child must be closed (have no
+unbound externs) before attachment. Each extern is bound once on the module that declared it; qualified
 `::` paths are rejected.
 
 Inline grammars (`g name = { ... }`) cannot refer to anything outside
@@ -118,7 +118,7 @@ in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`,
 ### Persistence and root policy
 
 Modules can be saved while incomplete, including mixed raw and precompiled
-children. Retained work, settings and source identities survive the round-trip:
+children. Retained work and source identities survive the round-trip:
 
 ```python
 saved = package.save()
@@ -151,7 +151,8 @@ bytes without whitespace or ignore inserted between parts. Leaves can be
 plain string raises `TypeError` (use `Expr.literal`). Parts with open externs
 raise an error immediately. An expression can be bound directly into a
 module extern (`m.bind("name", expr)`). Whole grammar and module leaves keep
-their own lexical scopes, bindings and settings. Intermediate expression
+their own lexical scopes and bindings; the compile options apply to them all.
+Intermediate expression
 operators add neither scope nor public path segments.
 
 ### Determined output

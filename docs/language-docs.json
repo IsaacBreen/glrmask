@@ -1,7 +1,7 @@
 {
   "schema": "glrmask-language-docs-v1",
   "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: the source-language definition, without compilation settings.\n- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.\n- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: the source-language definition, without compilation settings.\n- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.\n- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -57,13 +57,11 @@
     "Expr.choice": "Creates a union without ordered-choice priority.\n\nAn empty choice matches nothing; open parts raise `ValueError` immediately.",
     "Expr.sequence": "Creates a concatenation; a model token may cross any number of operand boundaries.\n\nAn empty sequence is epsilon; open parts raise `ValueError` immediately.",
     "Expr.literal": "Matches exact bytes, with no whitespace or ignore inserted.\n\n`str` is UTF-8 encoded.",
-    "Module": "A reusable, independently configured grammar with bindings and any retained compilation work.\n\nMay still have unresolved externs.",
-    "Module.__init__": "Creates a module from a source grammar with default settings.",
-    "Module.mask_strategy": "The mask computation strategy.",
-    "Module.boundary_mask_strategy": "The boundary parser strategy.",
+    "Module": "A reusable grammar with bindings and any retained compilation work.\n\nMay still have unresolved externs.",
+    "Module.__init__": "Creates a module from a source grammar.",
     "Module.bind": "Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.\n\nFails if an extern is undeclared or already bound; names containing `::` are rejected.",
-    "Module.precompile": "Retains vocabulary-specific compilation artifacts for this module.\n\nA module using `TOKEN_TRIE` retains no work and compiles from source.",
-    "Module.compile": "Compiles the module assembly against `vocab`.\n\nRequires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping.",
+    "Module.precompile": "Retains vocabulary-specific compilation artifacts for this module.\n\nThe strategies decide which static parts are built. A module resolved to `TOKEN_TRIE` retains no work and compiles from source.",
+    "Module.compile": "Compiles the module assembly against `vocab`.\n\nRequires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.",
     "Module.externs": "A view over the module's declared externs, in declaration order.",
     "Module.copy": "An independent snapshot sharing immutable source and retained work.",
     "Module.__copy__": "An independent snapshot.",
@@ -219,8 +217,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "0184b138ecce3431fb7a7c7c1963b7cfe4c35fb77cc4ecb5abcf15d777b673a0",
-    "bindings/node/README.md": "24b72a6b9c046f84a32de7a132650d0d8c27cf501169a521880ed30ae9f4c130",
+    "bindings/cpp/README.md": "efe6ab3974c0ccc34ee6ebffda82f1a0ad65da21d6b30b3269ea451944b40ea0",
+    "bindings/node/README.md": "ae1be08211fbeddf26523d440828f5f02f42d2c55e431a2150076d1b25d38bcb",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -228,5 +226,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "a7274094292234c37505ca807bd99a57cde7f1a23ff7f22b25ef56c088728e43"
+  "content_sha256": "73bd56fd00add6115c763620b244d0d3c575f07132facf095799d7cf1b0bbeca"
 }

@@ -38,25 +38,26 @@ auto grammar = glrmask::Grammar::from_lark("start: <|begin|>", lark);
 
 ## Modules and expressions
 
-The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots, local mask settings, and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging their lexical scopes.
+The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging their lexical scopes.
 
 ```cpp
 glrmask::Vocab module_vocab({{0, "x"}, {1, "a"}, {2, "y"}, {3, "b"}});
 auto child = glrmask::Module(glrmask::Grammar::from_ebnf(R"(start ::= "a")"));
-child.set_mask_strategy(glrmask::MaskStrategy::TokenClassTrie);
-child.precompile(module_vocab);
+glrmask::CompileOptions options;
+options.mask_strategy = glrmask::MaskStrategy::TokenClassTrie;
+child.precompile(module_vocab, options);
 
 auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
     R"(extern grammar child
        start root
        nt root = "x" child "y")"));
 parent.bind("child", child);
-auto constraint = parent.compile(module_vocab);
+auto constraint = parent.compile(module_vocab, options);
 ```
 
 `bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
-`externs()` returns an `Externs` snapshot of `name`, `kind`, and optional `source_span`; `unbound()` contains only unresolved entries. `set_mask_strategy` and `set_boundary_mask_strategy` change future compilation without discarding retained work. Final `CompileOptions` carries root `end_tokens`:
+`externs()` returns an `Externs` snapshot of `name`, `kind`, and optional `source_span`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile, plus root `end_tokens`; an option never downgrades a part that already has a static preparation:
 
 ```cpp
 auto expression = glrmask::Expr::choice({

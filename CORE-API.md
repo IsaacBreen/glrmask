@@ -32,12 +32,14 @@ impl BoundaryMaskStrategy {
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
 }
 
-// Root compile options
+// Compile settings
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompileOptions { /* private root-only end_tokens */ }
+pub struct CompileOptions { /* private end_tokens and strategies */ }
 impl CompileOptions {
     pub fn end_tokens(self, ids: impl IntoIterator<Item = u32>) -> Self;
+    pub fn mask_strategy(self, strategy: MaskStrategy) -> Self;
+    pub fn boundary_mask_strategy(self, strategy: BoundaryMaskStrategy) -> Self;
 }
 
 // Module binding value wrapper
@@ -47,13 +49,9 @@ pub struct Binding { /* private fields */ }
 impl Module {
     pub fn new(grammar: &Grammar<'_>) -> Self;
 
-    pub fn mask_strategy(&self) -> MaskStrategy;
-    pub fn set_mask_strategy(&mut self, strategy: MaskStrategy) -> Result<()>;
-    pub fn boundary_mask_strategy(&self) -> BoundaryMaskStrategy;
-    pub fn set_boundary_mask_strategy(&mut self, strategy: BoundaryMaskStrategy) -> Result<()>;
-
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()>;
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()>;
+    pub fn precompile_with(&mut self, vocab: &Vocab, options: &CompileOptions) -> Result<()>;
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint>;
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint>;
 
@@ -100,14 +98,13 @@ impl Expr {
 ## Rules and semantics
 
 ### Settings
-- Settings are per Module: `mask_strategy` (replaces `Optimization`; `Balanced` is removed) and `boundary_mask_strategy` (replaces `BoundaryTriggerDetail`; default is `FastBuild`).
-- `precompile` and `compile` build each part of the graph at that part's own settings; cold parts build in parallel.
-- `mask_strategy` is resolved at compile time, so changing it never invalidates or discards precompiled work.
+- Strategies are compile settings: `mask_strategy` (replaces `Optimization`; `Balanced` is removed) and `boundary_mask_strategy` (replaces `BoundaryTriggerDetail`; default is `Auto`). Both default to `Auto`.
+- `precompile` / `precompile_with` take the same options as `compile` / `compile_with`. One value applies to the whole compile, including every composed child; cold parts build in parallel.
+- `precompile` is what decides which static parts get built and stored. `compile` uses every static part that already exists: a `TokenTrie` request after a static precompile keeps the static parts and produces the same masks rather than downgrading to dynamic compilation. The compile options govern only the parts not yet built.
 - `boundary_mask_strategy` is a minimum: raising it builds more later; lowering it never removes built metadata, and the best metadata built is always used.
-- `MaskStrategy` explicit requests (`ParserDwa`, `TokenTrie`, `TokenClassTrie`) never fall back silently. If the engine cannot handle the grammar or cannot link with neighbouring parts, compilation errors explicitly.
-- `TokenTrie` compiles the whole composition from source; `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; explicit `ParserDwa`/`TokenClassTrie` parts cannot be combined with `TokenTrie` parts.
-- Implicit modules (a bare `Grammar` or `Expr` used as a binding or part) receive default settings.
-- `end_tokens` is a root compile setting configured via `CompileOptions` (`CompileOptions::default().end_tokens(...)`). It applies only to the root of that `compile` call and is not inherited by children.
+- `MaskStrategy` explicit requests (`ParserDwa`, `TokenTrie`, `TokenClassTrie`) never fall back silently. If the engine cannot handle the grammar, compilation errors explicitly; `Auto` may fall back to `TokenTrie`.
+- `TokenTrie` compiles the whole composition from source, so `precompile` retains no work for it.
+- `end_tokens` is configured via `CompileOptions` (`CompileOptions::default().end_tokens(...)`). It applies only to the root of that `compile` call and is not inherited by children.
 
 ### Binding and composition
 - `Module::bind` mutates `self` atomically: on error the module is unchanged.

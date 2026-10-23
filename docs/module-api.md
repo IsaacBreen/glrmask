@@ -5,48 +5,47 @@ The GLRMask v1 API structures grammar processing into three stages:
 
 `Grammar` describes an immutable source language without compilation settings
 or bindings. Use `grammar.compile(vocab)` for a closed source grammar and
-`Module` when a grammar needs independently configured settings, late binding,
-or reusable precompilation work. A `Constraint` is always fully runnable:
+`Module` when a grammar needs late binding or reusable precompilation work. A `Constraint` is always fully runnable:
 starting a state, calculating a mask, or committing a token never compiles
 deferred grammar definitions.
 
-## Construction and local settings
+## Construction and compile options
 
-Rust wraps a source grammar with `Module::new` and configures settings via
-methods on the module:
+Rust wraps a source grammar with `Module::new`:
 
 ```rust
-use glrmask::{Grammar, MaskStrategy, Module};
+use glrmask::{CompileOptions, Grammar, MaskStrategy, Module};
 
-fn configured(source: &Grammar<'_>) -> glrmask::Result<Module> {
-    let mut module = Module::new(source);
-    module.set_mask_strategy(MaskStrategy::FAST_RUNTIME)?;
-    // The source grammar is unchanged.
-    Ok(module)
+fn compile(source: &Grammar<'_>, vocab: &glrmask::Vocab) -> glrmask::Result<glrmask::Constraint> {
+    let module = Module::new(source);
+    // The source grammar and module are unchanged.
+    module.compile_with(
+        vocab,
+        CompileOptions::default().mask_strategy(MaskStrategy::FAST_RUNTIME),
+    )
 }
 ```
 
 Creating a module does not require a vocabulary or perform grammar compilation.
-It captures an owned source snapshot. Settings belong to the module, never to the
-source `Grammar`. Setters (`set_mask_strategy`, `set_boundary_mask_strategy`)
-update the receiving module in place and return a `Result<()>`.
+It captures an owned source snapshot. Strategies belong to the compile call,
+never to the `Module` or the source `Grammar`.
 
-Python uses constructor keywords and properties:
+Python supplies the same settings as keywords on `compile` and `precompile`:
 
 ```python
-from glrmask import Grammar, MaskStrategy, Module
+from glrmask import Grammar, MaskStrategy, Module, Vocab
 
 source = Grammar.from_glrm('start root nt root = /[0-9]+/')
-module = Module(source, mask_strategy=MaskStrategy.FAST_RUNTIME)
+module = Module(source)
+constraint = module.compile(vocab, mask_strategy=MaskStrategy.FAST_RUNTIME)
 ```
 
-Settings on a module apply to its own compilation unit. Attaching that module to
-a parent does not change its settings. An attached child must have all of its
-own externs resolved before attachment. Implicit modules (a bare `Grammar` or
-`Expr` passed as a binding) use default settings, not the parent's settings.
-Final root controls, such as end tokens, are supplied to the root compilation
-call via `CompileOptions` (Python: `end_tokens` keyword) and apply only to that
-root compilation.
+One strategy value applies to the whole compile, including every composed
+child. An attached child must have all of its own externs resolved before
+attachment. Implicit modules (a bare `Grammar` or `Expr` passed as a binding)
+are compiled with the same options as the rest of the assembly. `end_tokens`
+also comes from `CompileOptions` (Python: `end_tokens` keyword) and applies only
+to that root compilation.
 
 ## Open preparation and late binding
 
@@ -116,7 +115,7 @@ whole graph; callers do not pass one to every constructor.
 - `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
 - `TokenClassTrie`: token-trie walk over token equivalence classes.
 
-`TokenTrie` compiles the whole composition as one grammar: bound children are inlined at source level, so `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; an explicit `ParserDwa` or `TokenClassTrie` part cannot be combined with a `TokenTrie` part, and compilation reports an error.
+`TokenTrie` compiles the whole composition as one grammar: bound children are inlined at source level, so `precompile` retains no work for a `TokenTrie` compile. A part that already has a static preparation is never downgraded: if `precompile` built `ParserDwa` (or `TokenClassTrie`) work and `compile` requests `TokenTrie`, the compile uses the retained static parts and produces the same masks as a static compile. The options govern only the parts not yet built. `precompile` takes the same options through `precompile_with` (Python: `precompile(vocab, mask_strategy=...)`).
 
 `BoundaryMaskStrategy` selects the boundary parser for crossings between composed
 grammars:
