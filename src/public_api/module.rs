@@ -4,6 +4,8 @@ use super::expr::check_expr_unbound;
 use std::collections::{HashMap, BTreeMap, BTreeSet};
 mod artifact;
 #[cfg(test)]
+mod mixed_validation;
+#[cfg(test)]
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 
@@ -790,7 +792,17 @@ impl Module {
             // mixed compile; the whole assembly then uses the retained static
             // engine, which never discards static work.
             let attempt = match build(mixed) {
-                Err(_) if mixed => build(false),
+                Err(error) if mixed => {
+                    // A failed mixed build is retried as the all-static build.
+                    // Record the reason so callers never have to infer a
+                    // fallback from timing or engine shape.
+                    #[cfg(test)]
+                    mixed_compile_probe::record(&error);
+                    if crate::compiler::compile::compile_profile_enabled() {
+                        eprintln!("[glrmask/profile][mixed_compile] outcome=fallback error={error}");
+                    }
+                    build(false)
+                }
                 attempt => attempt,
             };
             match attempt {
@@ -1026,6 +1038,26 @@ pub(super) mod static_build_probe {
     pub(crate) fn record(m: &Module) { *counts().lock().unwrap().entry(key(m)).or_default() += 1; }
     /// Static preparations built so far for this module's grammar.
     pub(crate) fn builds(m: &Module) -> usize { counts().lock().unwrap().get(&key(m)).copied().unwrap_or(0) }
+}
+
+/// Records mixed-compile fallbacks on the calling test thread.
+///
+/// `build(mixed)` is matched on the caller, so a thread-local log attributes a
+/// fallback to the compile that triggered it even when test threads run in
+/// parallel.
+#[cfg(test)]
+pub(crate) mod mixed_compile_probe {
+    use super::*;
+    thread_local! {
+        static FALLBACKS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    pub(crate) fn record(error: &Error) {
+        FALLBACKS.with(|log| log.borrow_mut().push(error.to_string()));
+    }
+    /// Drains the fallback reasons recorded since the last call.
+    pub(crate) fn take() -> Vec<String> {
+        FALLBACKS.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    }
 }
 
 #[cfg(test)]
