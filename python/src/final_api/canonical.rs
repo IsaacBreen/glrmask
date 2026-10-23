@@ -82,6 +82,7 @@ impl PyExterns {
             .ok_or_else(|| PyKeyError::new_err(key.to_string()))
     }
 
+    /// The extern named `key`, or `default` if there is none.
     #[pyo3(signature = (key, default = None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if let Some(e) = self.entries.iter().find(|e| e.name == key) {
@@ -98,14 +99,17 @@ impl PyExterns {
         Ok(py_list.call_method0("__iter__")?.unbind())
     }
 
+    /// The extern names, in declaration order.
     fn keys(&self) -> Vec<String> {
         self.entries.iter().map(|e| e.name.clone()).collect()
     }
 
+    /// The externs, in declaration order.
     fn values(&self) -> Vec<PyExtern> {
         self.entries.clone()
     }
 
+    /// `(name, extern)` pairs, in declaration order.
     fn items(&self) -> Vec<(String, PyExtern)> {
         self.entries
             .iter()

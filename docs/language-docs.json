@@ -46,6 +46,10 @@
     "Externs.__getitem__": "The extern named `key`. Raises `KeyError` if there is none.",
     "Externs.__iter__": "The extern names, in declaration order.",
     "Externs.__len__": "The number of externs.",
+    "Externs.get": "The extern named `key`, or `default` if there is none.",
+    "Externs.keys": "The extern names, in declaration order.",
+    "Externs.values": "The externs, in declaration order.",
+    "Externs.items": "`(name, extern)` pairs, in declaration order.",
     "Externs.__repr__": "The debug representation.",
     "Externs.__eq__": "Whether both list the same externs in the same order.",
     "Expr": "A choice or sequence of grammars, modules, token sets and literals.\n\nEach grammar keeps its own rules, including which whitespace it ignores.",
@@ -231,5 +235,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "af47396531e28ccf7ba2942fff4a5d18c10433734c56ae50772221757748b3c8"
+  "content_sha256": "d02e21001a0c8a2f3ffb1f3ea8975bb5c567c64f06760f0f37ada432314b1d28"
 }

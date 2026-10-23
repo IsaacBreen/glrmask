@@ -38,7 +38,7 @@ assert state.is_accepting()
 
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://glrmask.com/api/python/)
 """
-from collections.abc import Mapping
+from collections.abc import Mapping as _Mapping
 from ._glrmask import (
     BoundaryMaskStrategy,
     Constraint,
@@ -54,7 +54,7 @@ from ._glrmask import (
     _internal,
 )
 
-Mapping.register(Externs)
+_Mapping.register(Externs)
 
 __all__ = [
     "BoundaryMaskStrategy",
