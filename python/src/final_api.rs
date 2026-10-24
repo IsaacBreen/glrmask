@@ -161,11 +161,15 @@ impl PyTokenTrie {
         self.merge_equivalent_tokens
     }
 
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        other
-            .extract::<PyRef<'_, Self>>()
-            .map(|other| other.inner == self.inner)
-            .unwrap_or(false)
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(other) => Ok(pyo3::types::PyBool::new(py, other.inner == self.inner)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            Err(_) => Ok(py.NotImplemented()),
+        }
     }
 
     fn __hash__(&self) -> u64 {
@@ -282,8 +286,15 @@ impl PyTokenSet {
         }
     }
 
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(other) => Ok(pyo3::types::PyBool::new(py, self.inner == other.inner)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            Err(_) => Ok(py.NotImplemented()),
+        }
     }
 }
 
@@ -310,6 +321,10 @@ impl PyGrammar {
     }
     pub(super) fn as_rust(&self) -> glrmask::Result<glrmask::Grammar> {
         Ok(self.inner.clone())
+    }
+    fn replace(&mut self, py: Python<'_>, next: glrmask::Grammar) {
+        let previous = std::mem::replace(&mut self.inner, next);
+        py.detach(move || drop(previous));
     }
 }
 
@@ -369,9 +384,43 @@ impl PyGrammar {
         })
     }
 
-    /// Binds one declared extern. Accepts `Grammar`, `Expr`, or `TokenSet`.
-    fn bind(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        canonical::bind_grammar(&mut self.inner, name, value)
+    /// Binds the extern `name` to `value`: a grammar, expression, token set or token ID.
+    ///
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn bind(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        let request = canonical::bind_arguments(args, kwargs, "Grammar.bind")?;
+        let mut bindings = Vec::with_capacity(match &request {
+            canonical::BindArguments::Single(..) => 1,
+            canonical::BindArguments::Many(items) => items.len(),
+        });
+        match request {
+            canonical::BindArguments::Single(name, value) => {
+                bindings.push((name, canonical::extract_grammar_binding(&value)?));
+            }
+            canonical::BindArguments::Many(items) => {
+                for (name, value) in items {
+                    bindings.push((name, canonical::extract_grammar_binding(&value)?));
+                }
+            }
+        }
+        let mut target = slf.try_borrow_mut()?;
+        let mut next = target.inner.clone();
+        let next = py
+            .detach(move || {
+                for (name, binding) in bindings {
+                    binding.bind(&mut next, &name)?;
+                }
+                Ok::<_, glrmask::Error>(next)
+            })
+            .map_err(api_error)?;
+        target.replace(py, next);
+        Ok(())
     }
 
     /// The grammar's declared externs, in declaration order.
@@ -427,19 +476,21 @@ impl PyGrammar {
         Ok(canonical::PyModule::from_inner(module))
     }
 
-    fn __copy__(&self) -> Self {
+    /// A copy of the grammar. Binding the copy does not change the original.
+    fn copy(&self) -> Self {
         Self {
             inner: self.inner.clone(),
         }
     }
 
+    /// Same as `copy()`.
+    fn __copy__(&self) -> Self {
+        self.copy()
+    }
+
+    /// Same as `copy()`.
     fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
-        let copy = Py::new(
-            slf.py(),
-            Self {
-                inner: slf.try_borrow()?.inner.clone(),
-            },
-        )?;
+        let copy = Py::new(slf.py(), slf.try_borrow()?.copy())?;
         memo.set_item(slf.as_ptr() as usize, &copy)?;
         Ok(copy)
     }

@@ -58,143 +58,159 @@ int main() {
 
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [C++ API reference](https://glrmask.com/api/cpp/) · [Benchmarks](https://glrmask.com/#benchmarks)
 
-## Vocabulary and token sets
+## Vocabularies and token sets
 
-`Vocab` maps original `uint32_t` token IDs to the exact bytes that tokenizer produces. Bytes may be partial UTF-8 or contain NUL; do not normalize them or reconstruct them from a display spelling. The string-view constructor copies exactly the supplied range, so use `Bytes` or an explicitly sized `std::string_view` for embedded NUL. Different IDs may have identical bytes.
+`Vocab(entries, special_token_ids)` takes `{id, bytes}` entries, with each token's exact bytes as `Bytes` or a
+`std::string_view`. Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character
+or contain NUL. IDs need not be contiguous, and two tokens may have the same bytes. `special_token_ids` adds tokens that
+have no bytes, such as end-of-sequence or tool-call tokens. An ID can't appear twice.
 
 ```cpp
 glrmask::Vocab vocab({
     {0, glrmask::Bytes{0xc3}},
     {1, glrmask::Bytes{0xa9}},
-    {31, glrmask::Bytes{0xc3, 0xa9}},
-}, {99});  // 99 is a special control token with no byte spelling.
+    {2, "é"},
+}, {3});
 ```
 
-Duplicate byte-backed IDs, duplicate special IDs, and overlap between those two domains are rejected. `vocab.size()` counts byte-backed entries, not special controls.
-
-`TokenSet(ids)` holds a set of original token IDs; `TokenSet::from_ranges({{first, last}, ...})` takes inclusive endpoints. Overlapping or adjacent ranges merge without expanding every ID. Set membership is checked against the compile vocabulary, token identity is preserved even when another ID has the same bytes, and an empty set denotes an empty event language, not epsilon. Each match consumes one chosen token event. A single ID can be bound directly, for example `module.bind("MARK", 9)`.
-
-Exact-token events cannot be reproduced by committing their decoded bytes. Use `commit_token` for exact controls and end tokens; `commit_bytes` advances ordinary byte input only.
+`vocab.size()` counts the tokens with bytes. `TokenSet(ids)` is a set of token IDs, and
+`TokenSet::from_ranges({{first, last}})` builds one from ranges that include `last`. See [token
+sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Grammars
 
 | Factory | Input |
 | --- | --- |
-| `Grammar::from_ebnf(source)` | EBNF text |
-| `Grammar::from_glrm(source)` | Native GLRM text |
-| `Grammar::from_json_schema(source)` | JSON Schema encoded as JSON text |
-| `Grammar::from_lark(source)` | Lark text |
+| `Grammar::from_ebnf(source)` | EBNF |
+| `Grammar::from_glrm(source)` | [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) |
+| `Grammar::from_json_schema(source)` | JSON Schema, as JSON text |
+| `Grammar::from_lark(source)` | [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) |
 
-The constructors own their source text, so temporary strings need not outlive the returned grammar. Import capabilities and limitations are the same as the Rust core. See the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md). The binding does not add a full JSON Schema validator or a parse-tree API.
-
-Lark code uses one dialect; the GLRMask extensions are always available. A named token atom declares a token extern that is bound on the module:
+## Composing grammars
 
 ```cpp
-auto grammar = glrmask::Grammar::from_lark("start: <|begin|>");
-auto module = glrmask::Module(grammar);
-module.bind("begin", glrmask::TokenSet({99}));
+std::vector<glrmask::VocabEntry> entries;
+for (glrmask::TokenId id = 0; id < 256; ++id) entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});
+glrmask::Vocab vocab(entries);
+
+glrmask::Module weather(glrmask::Grammar::from_json_schema(R"({
+    "type": "object", "properties": {"city": {"type": "string"}},
+    "required": ["city"], "additionalProperties": false})"));
+weather.precompile(vocab);
+
+glrmask::Module call(glrmask::Grammar::from_glrm(R"(
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS "</weather>")"));
+call.bind("ARGS", weather);
+auto constraint = call.compile(vocab);
 ```
 
-## Modules and expressions
+`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, `TokenSet` or token ID. It changes the grammar or module in
+place; if it fails, nothing changes. Copy a grammar or module first to bind the same one in different ways. `externs()`
+lists the declared externs, and `externs().unbound()` the ones not yet bound.
 
-The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, and `TokenSet` pieces without merging their lexical scopes.
+`Expr::choice`, `Expr::sequence` and `Expr::literal` combine grammars without writing a new one:
 
 ```cpp
-glrmask::Vocab module_vocab({{0, "x"}, {1, "a"}, {2, "y"}, {3, "b"}});
-auto child = glrmask::Module(glrmask::Grammar::from_ebnf(R"(start ::= "a")"));
+auto reply = glrmask::Expr::choice({
+    glrmask::Grammar::from_ebnf(R"(start ::= "yes")"), glrmask::Grammar::from_ebnf(R"(start ::= "no")")});
+auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({glrmask::Expr::literal("Answer: "), reply}));
+```
+
+## Mask strategies
+
+`compile` and `precompile` take a `CompileOptions` with `mask_strategy`, `boundary_mask_strategy` and `token_trie`.
+
+| `MaskStrategy` | |
+| --- | --- |
+| `Auto` | The default. Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. |
+| `ParserDwa` | Slowest to compile, with the fastest masks. |
+| `TokenTrie` | Fastest to compile, with slower masks. |
+
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. `token_trie` holds `TokenTrie`'s settings,
+`parser_backend` and `merge_equivalent_tokens`; leave it at its defaults with any other strategy. `BoundaryMaskStrategy`
+has the same three values, for the boundaries where a grammar meets a bound extern. See [mask
+strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
+
+```cpp
 glrmask::CompileOptions options;
-options.mask_strategy = glrmask::MaskStrategy::ParserDwa;
-child.precompile(module_vocab, options);
-
-auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
-    R"(extern grammar child
-       start root
-       nt root = "x" child "y")"));
-parent.bind("child", child);
-auto constraint = parent.compile(module_vocab);
+options.mask_strategy = glrmask::MaskStrategy::TokenTrie;
+options.token_trie.parser_backend = glrmask::ParserBackend::TemplateDfa;
+auto constraint = grammar.compile(vocab, options);
 ```
 
-`bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
-
-`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` holds `mask_strategy`, `boundary_mask_strategy` and `token_trie`, and applies to the whole compile, including bound grammars:
+## Generating
 
 ```cpp
-auto expression = glrmask::Expr::choice({
-    child, glrmask::Grammar::from_ebnf(R"(start ::= "b")")});
-auto sequence = glrmask::Expr::sequence({
-    glrmask::Expr::literal("x"), expression, glrmask::Expr::literal("y")});
-```
-
-| `MaskStrategy` | Value | Behavior |
-| --- | --- | --- |
-| `Auto` | `0` | Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. |
-| `ParserDwa` | `1` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
-| `TokenTrie` | `2` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
-
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`; in C they are `GLRMASK_MASK_STRATEGY_FAST_MASKS` and `GLRMASK_MASK_STRATEGY_FAST_COMPILE`. `token_trie` holds the settings for `MaskStrategy::TokenTrie` and must be left at its defaults for any other strategy. `token_trie.parser_backend` chooses how the parser is represented: `ParserBackend::LrTable`, the default, or `ParserBackend::TemplateDfa`, which is slower to compile, with faster masks. `token_trie.merge_equivalent_tokens = true` merges tokens that the grammar treats the same, so masks walk fewer tokens; tokens are not merged in a composition that includes precompiled parts. Precompiled work is never thrown away: each precompiled part keeps its masks unless you request a faster strategy for it, and parts compiled now that link with precompiled parts use `TemplateDfa`.
-
-`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` is slower to compile, with faster masks, and throws `Error` if it would be too large; `TokenTrie` is faster to compile, with slower masks; `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
-
-## Decoding
-
-A `Constraint` is immutable and reusable. `start()` creates an independent sequence state. Each state owns its parser snapshot and keeps the compiled constraint alive after the C++ owner is destroyed, moved from, or disposed. `clone()` on a state gives an independent speculative branch.
-
-```cpp
-auto constraint = grammar.compile(vocab);
 auto state = constraint.start();
-std::vector<glrmask::TokenId> mask(constraint.mask_len());
+std::vector<std::uint32_t> mask(constraint.mask_len());
 state.fill_mask(mask);
-if ((mask[0] & 1) != 0) state.commit_token(0);
-// commit_bytes advances ordinary byte input; exact and end tokens use commit_token.
+glrmask::TokenId id = 42;
+bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 ```
 
-Masks are packed original-ID bitsets. Bit `id % 32` of word `id / 32` is set when token `id` is allowed. The word count is `constraint.mask_len()`, not `vocab.size()`; sparse or very large IDs still require a dense output buffer. `fill_mask(pointer, word_count)` and `fill_mask(vector)` zero extra words. An undersized buffer throws `glrmask::Error` with `status() == GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` is the allocating convenience form.
+A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of word `id / 32` is set. `fill_mask` writes it
+into a buffer you reuse; `mask()` returns a new one.
 
-A failed `commit_token`, `commit_bytes` or `commit_tokens` returns `glrmask::Error` and leaves the state unusable: later commits fail and the mask is empty. Clone the state before a speculative commit. `forced_tokens()` performs read-only bounded lookahead and does not advance the state. `marker_ids()` and `marker_events()` expose possible recognition observations from the initial or latest commit. A marker event carries an `id` and a `uint64_t` byte offset; these are not final parse captures.
+`commit_token`, `commit_tokens` and `commit_bytes` return whether the input was allowed. A failed commit ends the state,
+so copy it first to try a token without committing to it. Commit special tokens and token sets with `commit_token`;
+bytes never match them.
 
-## End tokens
+`is_accepting()` says whether the input so far is a complete match, and `is_terminated()` whether nothing more can be
+committed. `forced_tokens()` returns the tokens that must come next. `marker_events()` lists the markers the last commit
+passed, each with an `id` and a `byte_offset`.
 
-`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
+[examples/generate.cpp](https://github.com/IsaacBreen/glrmask/blob/main/bindings/cpp/examples/generate.cpp) is a
+complete generation loop.
 
-After an end token added with `Expr::sequence` is committed, or after a commit fails, the mask is empty and no further commit succeeds.
-
-## Persistence
+## Saving
 
 ```cpp
 auto bytes = constraint.save();
 auto restored = glrmask::Constraint::load(bytes, vocab);
 
-auto module_bytes = parent.save();
+auto module_bytes = call.save();
 auto module = glrmask::Module::load(module_bytes);
-auto compiled = module.compile(vocab);
 ```
 
-Saved bytes are the same in every binding, so a constraint saved from Python loads in C++. A saved constraint doesn't include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't load saved bytes from untrusted sources.
+Saved bytes are the same in every binding, so a constraint saved from Python loads in C++. A saved constraint doesn't
+include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records
+the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in
+the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
+load saved bytes from untrusted sources.
 
-## Errors and ownership
+## Errors
 
-Fallible C++ operations throw `glrmask::Error`; `status()` returns the underlying C status and `what()` owns the diagnostic text. Copies clone a handle and moves transfer it. Using a moved-from or disposed object throws `GLRMASK_CLOSED`. `dispose()` and normal RAII destruction release ownership, and repeated C++ disposal is harmless.
+Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message, and `status()` one of:
 
-A Rust unwinding panic is contained at the boundary and reported as `GLRMASK_PANIC`; discard any state it affected. Process aborts, allocation failure, stack overflow, and invalid foreign memory are not recoverable this way. Immutable constraints may be shared between threads with independent states. Do not concurrently mutate a grammar, module, or state, and do not destroy a handle while another thread uses it.
-
-## C interface
-
-`glrmask.h` is the complete C ABI and is valid C. It exposes opaque owning handles, length-delimited text and bytes, borrowed result views, and status-returning functions. The header's ownership comment is part of the contract: free each handle exactly once with its matching `_free`, keep result views until their result handle is freed, and do not use a C++ allocator on Rust-owned memory.
-
-| Status | Meaning |
+| Status | |
 | --- | --- |
-| `GLRMASK_OK` | Success. |
-| `GLRMASK_INVALID_ARGUMENT` | Invalid pointer, length, UTF-8, option, or vocabulary input. |
-| `GLRMASK_ENGINE_ERROR` | Grammar, state, vocabulary-identity, or artifact error from the core. |
-| `GLRMASK_PANIC` | A contained unwinding panic; discard affected state. |
-| `GLRMASK_BUFFER_TOO_SMALL` | Caller mask capacity is insufficient. |
-| `GLRMASK_CLOSED` | A disposed or moved-from high-level object was used. |
+| `GLRMASK_ENGINE_ERROR` | A grammar, binding, compile or load failed. The message says why. |
+| `GLRMASK_INVALID_ARGUMENT` | An argument is invalid. The message says which. |
+| `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `mask_len()`. |
+| `GLRMASK_CLOSED` | The object was moved from or disposed. |
+| `GLRMASK_PANIC` | An internal error. Discard the object; please report it. |
 
-Output handles are null on failure. `glrmask_error_message()` is thread-local and valid only until the next GLRMask call on that thread. Vocabulary and committed bytes are arbitrary binary data; all other lengths are element counts. Option structs must carry the `struct_size` returned by their default constructors, and a null compile-options pointer selects defaults. A state handle independently retains its constraint. The C++ facade adds RAII and exceptions; exceptions never cross the C ABI.
+## Objects and threads
+
+Every object owns its native handle and frees it when destroyed; `dispose()` frees it sooner. Copying a `Module`,
+`Grammar` or state gives an independent copy. A state keeps its constraint alive.
+
+A `Constraint` can be shared between threads, each with its own states. Don't use one grammar, module or state from two
+threads at once.
+
+## C
+
+`glrmask.h` is the C interface; the C++ header is built on it. Each function returns a `glrmask_status`, and on failure
+`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread. Free each object once
+with its `_free` function. Start a `glrmask_compile_options` from `glrmask_default_compile_options()`, or pass a null pointer for the
+defaults. The header documents ownership in full.
 
 ## Building from source
 
-Building from source requires a current stable Rust toolchain, CMake 3.20 or newer, and the platform C/C++ compiler. C++ consumers need C++17. On Windows, run from a Visual Studio Developer PowerShell or Developer Command Prompt with the MSVC toolchain.
+You need a stable Rust toolchain, CMake 3.20 or newer, and a C/C++ compiler. On Windows, use a Visual Studio Developer
+PowerShell with the MSVC build tools.
 
 ```sh
 cmake -S bindings/cpp -B build/native -DCMAKE_BUILD_TYPE=Release
@@ -202,11 +218,6 @@ cmake --build build/native --config Release
 cmake --install build/native --config Release --prefix /absolute/path/glrmask-install
 ```
 
-The default is a static library; add `-DGLRMASK_SHARED=ON` for a shared build. The installed package exports `glrmask::glrmask` for C++17 and `glrmask::c` for C:
-
-```cmake
-find_package(glrmask 0.4 CONFIG REQUIRED)
-target_link_libraries(application PRIVATE glrmask::glrmask)
-```
-
-Configure the consuming project with `-DCMAKE_PREFIX_PATH=/absolute/path/glrmask-install`. A Windows shared deployment needs `glrmask_c.dll` beside the executable or on `PATH`; Unix shared deployments use the normal runtime library path. The macOS shared library uses `@rpath`. Use matching headers and binaries from the same build.
+This builds a static library; add `-DGLRMASK_SHARED=ON` for a shared one. Then use it as in
+[Installation](#installation), with `-DCMAKE_PREFIX_PATH=/absolute/path/glrmask-install`. A shared build on Windows
+needs `glrmask_c.dll` next to the executable or on `PATH`.

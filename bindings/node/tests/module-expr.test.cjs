@@ -129,6 +129,30 @@ test('Module: atomic multi-bind',()=>{
   assert.equal(m.externs.unbound.size,0);
 });
 
+test('Grammar: clone is independent and multi-bind is atomic',()=>{
+  const v=vocab();
+  const g=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  const copy=g.clone();
+  copy.bind('a',1);
+  assert.equal(g.externs.unbound.size,2);
+  assert.equal(copy.externs.unbound.size,1);
+  assert.ok(copy.externs.unbound.has('b'));
+  assert.throws(()=>g.compileSync(v),/extern "a" is unbound/);
+  assert.throws(()=>copy.compileSync(v),/extern "b" is unbound/);
+
+  const m=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  assert.throws(()=>m.bind({a:new TokenSet([1]),b:'not_a_valid_binding'}));
+  assert.equal(m.externs.unbound.size,2);
+  assert.ok(m.externs.unbound.has('a'));
+  assert.ok(m.externs.unbound.has('b'));
+  // The failed batch left both externs unbound; 'a' would be named first if it had been bound.
+  assert.throws(()=>m.compileSync(v),/extern "a" is unbound/);
+
+  m.bind({a:new TokenSet([1]),b:new TokenSet([2])});
+  const state=m.compileSync(v).start();
+  assert.ok(state.commitToken(1));assert.ok(state.commitToken(2));assert.ok(state.isAccepting());
+});
+
 for(const parentPrepared of [false,true])for(const childPrepared of [false,true]){
   test(`Module: saved mixed graph parent=${parentPrepared}, child=${childPrepared}`,async()=>{
     const v=vocab(),parent=new Module(host()),child=new Module(mark());

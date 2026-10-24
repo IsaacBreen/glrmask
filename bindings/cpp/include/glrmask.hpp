@@ -16,6 +16,8 @@
 namespace glrmask {
 /// An original model token ID.
 using TokenId = std::uint32_t;
+/// A marker ID, from `@mark(id)` in the grammar.
+using MarkerId = std::uint32_t;
 /// Token IDs from `first` to `last`, inclusive.
 using TokenRange = glrmask_token_range;
 /// A marker passed by a commit.
@@ -251,6 +253,14 @@ public:
     static TokenSet from_ranges(const std::vector<TokenRange>& ranges) {
         glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_from_ranges(ranges.data(), ranges.size(), &p)); return TokenSet(p);
     }
+    /// Whether both sets contain the same IDs.
+    friend bool operator==(const TokenSet& a, const TokenSet& b) {
+        std::uint32_t equal = 0;
+        detail::check(glrmask_token_set_equal(a.native_handle(), b.native_handle(), &equal));
+        return equal != 0;
+    }
+    /// Whether the sets differ.
+    friend bool operator!=(const TokenSet& a, const TokenSet& b) { return !(a == b); }
 private:
     static glrmask_token_set* create_ids(const std::vector<TokenId>& ids) {
         glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_new(ids.data(), ids.size(), &p)); return p;
@@ -263,16 +273,16 @@ private:
 /// `"Ġhello"`. IDs need not be contiguous.
 class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone> {
     using Base = detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone>;
-    static glrmask_vocab* create(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special) {
+    static glrmask_vocab* create(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special_token_ids) {
         std::vector<glrmask_vocab_entry> native; native.reserve(entries.size());
         for (const auto& e : entries) native.push_back({e.id, e.bytes.data(), e.bytes.size()});
         glrmask_vocab* p = nullptr;
-        detail::check(glrmask_vocab_new(native.data(), native.size(), special.data(), special.size(), &p)); return p;
+        detail::check(glrmask_vocab_new(native.data(), native.size(), special_token_ids.data(), special_token_ids.size(), &p)); return p;
     }
 public:
     /// Creates a vocabulary from `entries`, plus special tokens that have no
     /// bytes.
-    explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special = {}) : Base(create(entries, special)) {}
+    explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special_token_ids = {}) : Base(create(entries, special_token_ids)) {}
     /// The number of tokens with bytes; special tokens are not counted.
     std::size_t size() const { std::size_t n = 0; detail::check(glrmask_vocab_len(native_handle(), &n)); return n; }
 };
@@ -319,9 +329,15 @@ public:
     }
     /// The grammar's externs, in declaration order.
     Externs externs() const {
-        glrmask_externs* p = nullptr;
-        detail::check(glrmask_grammar_externs(native_handle(), &p));
-        return Externs(detail::take_externs(p));
+        glrmask_externs* p_all = nullptr;
+        detail::check(glrmask_grammar_externs(native_handle(), &p_all));
+        auto all_items = detail::take_externs(p_all);
+
+        glrmask_externs* p_unbound = nullptr;
+        detail::check(glrmask_grammar_unbound_externs(native_handle(), &p_unbound));
+        auto unbound_items = detail::take_externs(p_unbound);
+
+        return Externs(std::move(all_items), std::move(unbound_items));
     }
     /// Compiles the grammar for `vocab`.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
@@ -492,7 +508,7 @@ public:
     /// The number of `uint32_t` words in a mask.
     std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_len(native_handle(), &n)); return n; }
     /// The IDs of the grammar's markers, in ascending order.
-    std::vector<TokenId> marker_ids() const { glrmask_u32s* p = nullptr; detail::check(glrmask_constraint_marker_ids(native_handle(), &p)); return detail::take_ids(p); }
+    std::vector<MarkerId> marker_ids() const { glrmask_u32s* p = nullptr; detail::check(glrmask_constraint_marker_ids(native_handle(), &p)); return detail::take_ids(p); }
     /// Saves the constraint as bytes, without the vocabulary.
     ///
     /// Bytes saved by one GLRMask version may not load in another.
@@ -549,7 +565,7 @@ public:
     /// Commits one token.
     ///
     /// Returns `false` if it is not allowed, leaving the state unusable. To try a
-    /// token safely, commit it on a clone.
+    /// token safely, commit it on a copy.
     [[nodiscard]] bool commit_token(TokenId id) { return commit_status(glrmask_state_commit_token(native_handle(), id)); }
     /// Commits the tokens in order.
     ///

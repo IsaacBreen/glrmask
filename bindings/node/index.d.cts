@@ -162,7 +162,7 @@ export declare class Grammar implements Disposable {
   static fromLark(source: string): Grammar;
   /** The grammar's externs, in declaration order. */
   readonly externs: Externs;
-  /** A new handle to the same object. */
+  /** A copy of the grammar. Binding the copy does not change the original. */
   clone(): Grammar;
   /** Creates a grammar from an expression.
    *
@@ -172,8 +172,10 @@ export declare class Grammar implements Disposable {
   static fromExpr(expr: Expr | Grammar | TokenSet): Grammar;
   /** Binds the extern `name` to `value`: a grammar, expression, token set or token ID.
    *
-   * Throws if `name` is undeclared or already bound, or if `value` is the wrong kind for it. */
+   * Throws if `name` is undeclared or already bound, or if `value` is the wrong kind for it. A token extern takes only a token set or token ID. */
   bind(name: string, value: ExprPart): void;
+  /** Binds several externs at once; if one fails, none is bound. */
+  bind(bindings: Record<string, ExprPart>): void;
   /** Like `precompileSync`, but returns a promise and doesn't block the event loop. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<Module>;
   /** Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.

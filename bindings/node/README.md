@@ -55,140 +55,167 @@ assert.equal(state.isAccepting(), true);
 
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [JavaScript API reference](https://glrmask.com/api/javascript/) · [Benchmarks](https://glrmask.com/#benchmarks)
 
-## Vocabulary and token sets
+## Vocabularies and token sets
 
-`new Vocab(entries, options?)` maps original token IDs to the exact bytes from the tokenizer. Each entry is `[id, bytes]`, where `id` is an integer in `0..4294967295` and `bytes` is a `Uint8Array` or `Buffer`. Inputs are copied. Partial UTF-8, embedded NUL, sparse IDs, and different IDs with identical bytes are valid; do not normalize the bytes or reconstruct them from a display string. Duplicate IDs, duplicate special IDs, and overlap between the two domains are rejected.
+`new Vocab(entries, options?)` takes `[id, bytes]` pairs, with each token's exact bytes as a `Uint8Array` or `Buffer`.
+Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character. IDs need not be
+contiguous, and two tokens may have the same bytes. `specialTokenIds` adds tokens that have no bytes, such as
+end-of-sequence or tool-call tokens. An ID can't appear twice.
 
 ```js
 const vocab = new Vocab([
   [0, Uint8Array.of(0xc3)],
   [1, Uint8Array.of(0xa9)],
-  [31, Buffer.from('é')],
-], { specialTokenIds: [99] });
+  [2, Buffer.from('é')],
+], { specialTokenIds: [3] });
 ```
 
-`vocab.size` counts byte-backed entries, not special controls. `new TokenSet(ids)` holds a set of original token IDs, and `TokenSet.fromRanges([{start, end}])` uses half-open ranges; `end` may be `4294967296` to include ID `4294967295`. Overlapping or adjacent ranges merge without expanding every ID. Set membership is checked against the compile vocabulary, token identity is preserved even when another ID has the same bytes, and an empty set matches no event. Each match consumes one chosen token event.
-
-Token-set and end-token events must be committed with `commitToken`. `commitBytes` advances ordinary byte input and cannot stand in for a token event.
+`vocab.size` counts the tokens with bytes. `new TokenSet(ids)` is a set of token IDs, and
+`TokenSet.fromRanges([{start, end}])` builds one from ranges that exclude `end`. See [token
+sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Grammars
 
 | Factory | Input |
 | --- | --- |
-| `Grammar.fromEbnf(source)` | EBNF text |
-| `Grammar.fromGlrm(source)` | Native GLRM text |
-| `Grammar.fromJsonSchema(schema)` | JSON text or a JSON-serializable value |
-| `Grammar.fromLark(source)` | Lark text |
+| `Grammar.fromEbnf(source)` | EBNF |
+| `Grammar.fromGlrm(source)` | [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) |
+| `Grammar.fromJsonSchema(schema)` | JSON Schema, as JSON text or a value |
+| `Grammar.fromLark(source)` | [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) |
 
-Factories copy and own their source text. Frontend semantics and limitations match the Rust core; see the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md). The JSON Schema importer is not a complete validator, and the addon does not expose parse trees.
-
-Lark code uses one dialect; the GLRMask extensions are always available. A named token atom declares a token extern that is bound on the module:
+## Composing grammars
 
 ```js
-const grammar = Grammar.fromLark('start: <|begin|>');
-const module = new Module(grammar);
-module.bind('begin', new TokenSet([99]));
+import { Module, Expr, Constraint } from '@glrmask/node';
+
+const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
+const weather = new Module(Grammar.fromJsonSchema({
+  type: 'object',
+  properties: { city: { type: 'string' } },
+  required: ['city'],
+  additionalProperties: false,
+}));
+await weather.precompile(vocab);
+
+const call = new Module(Grammar.fromGlrm(`
+  extern grammar ARGS
+  start call
+  nt call = "<weather>" ARGS "</weather>"
+`));
+call.bind('ARGS', weather);
+const constraint = await call.compile(vocab);
 ```
 
-## Modules and expressions
+`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, `TokenSet` or token ID, and `bind({A: a, B: b})` binds several
+at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
+same one in different ways. `externs` is a read-only `Map` of the declared externs, and `externs.unbound` holds the ones
+not yet bound.
 
-The lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable bindings and retained compilation work; `Expr` composes whole `Grammar`, `Module`, `Expr`, and `TokenSet` pieces without merging lexical scopes.
+`Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
 
 ```js
-const moduleVocab = new Vocab([
-  [0, Buffer.from('x')], [1, Buffer.from('a')],
-  [2, Buffer.from('y')], [3, Buffer.from('b')],
-]);
-const child = new Module(Grammar.fromEbnf('start ::= "a"'));
-await child.precompile(moduleVocab, { maskStrategy: MaskStrategy.ParserDwa });
-
-const parent = new Module(Grammar.fromGlrm(
-  'extern grammar child; start root; nt root = "x" child "y";'));
-parent.bind('child', child);
-const constraint = await parent.compile(moduleVocab);
+const reply = Expr.choice(Grammar.fromEbnf('start ::= "yes"'), Grammar.fromEbnf('start ::= "no"'));
+const grammar = Grammar.fromExpr(Expr.sequence(Expr.literal('Answer: '), reply));
 ```
 
-`bind` and `precompile` mutate atomically. A failed `bind` leaves the receiver unchanged; `copy()` gives an independent binding snapshot, and attaching a child snapshots that occurrence. Accepted bindings are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Qualified descendant paths using `::` are unsupported, each extern binds once, and a child with unbound externs cannot be attached.
+## Mask strategies
 
-`precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
+`compile` and `precompile` take `{maskStrategy, boundaryMaskStrategy}`.
 
-`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. `precompile` and `compile` take an options object, `{maskStrategy, boundaryMaskStrategy}`, which applies to the whole compile, including bound grammars:
-
-```js
-const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));
-const sequence = Expr.sequence(Expr.literal('x'), expression, Expr.literal('y'));
-```
-
-| `MaskStrategy` | Value | Behavior |
+| `MaskStrategy` | Value | |
 | --- | --- | --- |
-| `Auto` | `auto` | Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. |
-| `ParserDwa` | `parser-dwa` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
-| `TokenTrie` | `token-trie` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
+| `Auto` | `'auto'` | The default. Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. |
+| `ParserDwa` | `'parser-dwa'` | Slowest to compile, with the fastest masks. |
+| `TokenTrie` | `'token-trie'` | Fastest to compile, with slower masks. |
 
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. To change `TokenTrie`'s settings, pass `{kind: 'token-trie', parserBackend, mergeEquivalentTokens}` as `maskStrategy`. `parserBackend` chooses how the parser is represented: `ParserBackend.LrTable` (`lr-table`), the default, or `ParserBackend.TemplateDfa` (`template-dfa`), which is slower to compile, with faster masks. `mergeEquivalentTokens: true` merges tokens that the grammar treats the same, so masks walk fewer tokens; tokens are not merged in a composition that includes precompiled parts. Precompiled work is never thrown away: each precompiled part keeps its masks unless you request a faster strategy for it, and parts compiled now that link with precompiled parts use `TemplateDfa`.
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. To change `TokenTrie`'s settings, pass
+`{kind: 'token-trie', parserBackend: ParserBackend.TemplateDfa, mergeEquivalentTokens: true}` as `maskStrategy`.
+`BoundaryMaskStrategy` has the same three values, for the boundaries where a grammar meets a bound extern. See [mask
+strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
-`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` (`parser-dwa`) is slower to compile, with faster masks, and throws `GlrMaskError` if it would be too large; `TokenTrie` (`token-trie`) is faster to compile, with slower masks; `Auto` (`auto`), the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
-
-## Decoding
-
-An immutable `Constraint` starts any number of independent states. `state.clone()` copies the parser snapshot without sharing mutable sequence state, and a state keeps its native constraint alive after the JavaScript owner is disposed. All mask, commit, and state-query methods are synchronous native calls.
+## Generating
 
 ```js
 const state = constraint.start();
 const mask = new Uint32Array(constraint.maskLength);
-const id = 0;
 state.fillMask(mask);
-const allowed = (mask[Math.floor(id / 32)] & (1 << (id % 32))) !== 0;
-if (allowed) state.commitToken(id);
+const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 ```
 
-Masks use original token IDs. Bit `id % 32` of word `Math.floor(id / 32)` is set when token `id` is allowed, and `maskLength` counts words rather than vocabulary entries or bytes. JavaScript bitwise results are signed 32-bit values, so test a bit with `!== 0` rather than `> 0`. `fillMask(output)` writes directly into a caller-owned `Uint32Array` and zeros surplus words. An undersized buffer throws a `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` allocates a new array.
+A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set.
+`fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-A failed `commitToken`, `commitBytes` or `commitTokens` throws and leaves the state unusable: later commits throw and the mask is empty. Clone the state before a speculative commit. `forcedTokens()` performs read-only bounded lookahead. `markerIds()` and `markerEvents()` expose possible recognition observations from the initial or latest commit. A marker is `{id, byteOffset}` with a `bigint` offset; these are not final parse captures.
+`commitToken`, `commitTokens` and `commitBytes` return whether the input was allowed. A failed commit ends the state, so
+`clone()` it first to try a token without committing to it. Commit special tokens and token sets with `commitToken`;
+bytes never match them.
 
-## End tokens
+`isAccepting()` says whether the input so far is a complete match, and `isTerminated()` whether nothing more can be
+committed. `forcedTokens()` returns the tokens that must come next. `markerEvents()` lists the markers the last commit
+passed, each `{id, byteOffset}` with a `bigint` offset.
 
-`isAccepting()` means the input so far is a complete match, which may still allow more input. `isTerminated()` says whether anything more can be committed.
+[examples/generate.mjs](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/examples/generate.mjs) is a
+complete generation loop.
 
-After an end token added with `Expr.sequence` is committed, or after a commit fails, the mask is empty and no further commit succeeds.
+## Async and sync
 
-## Persistence
+`compile`, `precompile`, `save` and `load` return promises and run off the main thread. `compileSync`, `precompileSync`,
+`saveSync` and `loadSync` do the same work and block. Everything else is synchronous.
+
+An async call works on a snapshot of its inputs, so changing or disposing them afterwards doesn't affect it. If a module
+is bound while its `precompile` is running, the promise rejects; precompile it again.
+
+## Saving
 
 ```js
 const bytes = await constraint.save();
 const restored = await Constraint.load(bytes, vocab);
 
-const moduleBytes = await parent.save();
+const moduleBytes = await call.save();
 const module = await Module.load(moduleBytes);
 ```
 
-`saveSync` and `loadSync` do the same without promises. Saved bytes are the same in every binding, so a constraint saved from Python loads in Node. A saved constraint doesn't include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't load saved bytes from untrusted sources.
+Saved bytes are the same in every binding, so a constraint saved from Python loads in Node. A saved constraint doesn't
+include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records
+the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in
+the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
+load saved bytes from untrusted sources.
 
-## Errors and ownership
+## Errors
 
-Wrong JavaScript types and option spellings raise `TypeError`; invalid numeric IDs raise `RangeError`. Native failures are `GlrMaskError` values with a `code`:
+Arguments of the wrong type throw `TypeError`, and token IDs out of range throw `RangeError`. Everything else throws a
+`GlrMaskError`, whose `code` is one of:
 
-| Code | Meaning |
+| Code | |
 | --- | --- |
-| `GLRMASK_INVALID_ARGUMENT` | Invalid native argument or unsupported buffer backing. |
-| `GLRMASK_ENGINE_ERROR` | Core grammar, state, vocabulary-identity, or artifact error. |
-| `GLRMASK_PANIC` | A contained unwinding panic; discard affected state. |
-| `GLRMASK_BUFFER_TOO_SMALL` | Caller mask capacity is insufficient. |
-| `GLRMASK_CLOSED` | A disposed object was used. |
+| `GLRMASK_ENGINE_ERROR` | A grammar, binding, compile or load failed. The message says why. |
+| `GLRMASK_INVALID_ARGUMENT` | An argument is invalid. The message says which. |
+| `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `maskLength`. |
+| `GLRMASK_CLOSED` | The object was disposed. |
+| `GLRMASK_PANIC` | An internal error. Discard the object; please report it. |
 
-Classes that own native memory support `dispose()` and `[Symbol.dispose]()`. Disposal is idempotent and does not invalidate already materialized arrays or independently owned states. Async methods reject their promises with these errors. A contained panic does not protect against process aborts, allocation failure, or stack overflow.
+Async methods reject with the same errors.
+
+## Freeing memory
+
+Objects hold native memory, freed when they are garbage collected. `dispose()`, or a `using` declaration, frees it
+straight away. Disposing twice is harmless. A state keeps its constraint alive, so disposing the constraint doesn't affect
+states already started.
 
 ## API reference
 
-The public surface is exported from `index.cjs` and declared in [index.d.cts](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/index.d.cts). CommonJS and ESM share the same classes and declaration types. Runnable examples are in [bindings/node/examples](https://github.com/IsaacBreen/glrmask/tree/main/bindings/node/examples).
+[index.d.cts](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/index.d.cts) documents every class and method.
+CommonJS and ESM export the same API.
 
 ## Building from source
 
-Use Node.js 22 or newer, a current stable Rust toolchain, and the platform C/C++ compiler and linker. On Windows, use a Visual Studio Developer PowerShell with the MSVC build tools.
+You need Node.js 22 or newer, a stable Rust toolchain, and a C/C++ compiler. On Windows, use a Visual Studio Developer
+PowerShell with the MSVC build tools.
 
 ```sh
 npm ci --ignore-scripts --prefix bindings/node
 npm run build --prefix bindings/node
 ```
 
-`npm run build` compiles the addon and places `glrmask.<tag>.node` beside the package loader. Local source binaries take priority over installed platform packages. To create an installable package, run `npm pack --prefix bindings/node` and install the resulting tarball. A package built for one platform does not run on another.
+`npm run build` puts the compiled addon next to the package's loader, where it takes priority over an installed platform
+package. `npm pack --prefix bindings/node` makes a package you can install elsewhere. A build runs only on the platform it
+was built for.

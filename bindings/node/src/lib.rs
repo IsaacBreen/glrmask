@@ -160,6 +160,10 @@ impl NativeGrammar {
     pub fn externs(&self) -> napi::Result<Vec<NativeExtern>> {
         call(|| Ok(externs_to_native(live(&self.inner)?.externs().iter())))
     }
+    #[napi]
+    pub fn unbound_externs(&self) -> napi::Result<Vec<NativeExtern>> {
+        call(|| Ok(externs_to_native(live(&self.inner)?.externs().unbound().iter())))
+    }
     #[napi(factory)]
     pub fn from_expr(value: &NativeExpr) -> napi::Result<Self> {
         call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(live(&value.inner)?.clone())?) }))

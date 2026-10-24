@@ -164,192 +164,154 @@ fn main() -> glrmask::Result<()> {
 }
 ```
 
-### Isolated components and typed bindings
+## Generating
 
-GLRM distinguishes two external contracts. `extern token NAME` consumes one exact
-model-token event from a bound ID set. `extern grammar NAME` invokes a separately
-scoped grammar, which can contain bytes, exact events, or epsilon. Binding a value
-of the wrong kind is an error; an exact ID is never replaced by its decoded text.
+Each sequence has its own `ConstraintState`. At each step, mask the model's scores, choose a token and commit it. Stop
+when nothing more can be committed:
 
-```rust
-use glrmask::{Grammar, Module, Result, Vocab};
+```python
+import numpy as np
+import glrmask
 
-# fn demo(vocab: &Vocab, end_id: u32) -> Result<()> {
-let grammar = Grammar::from_glrm(r#"
-    extern grammar PAYLOAD
-    extern token END
-    start response
-    nt response = PAYLOAD END
-"#)?;
-let mut parent = Module::new(&grammar);
-let child = Grammar::from_json_schema(r#"{"type":"null"}"#)?;
-parent.bind("PAYLOAD", &child)?;
-parent.bind("END", glrmask::TokenSet::from(end_id))?;
-let constraint = parent.compile(vocab)?;
-# let _ = constraint;
-# Ok(())
-# }
+chars = b"0123456789+*()"
+eos = len(chars)
+vocab = glrmask.Vocab.from_id_to_bytes(
+    {i: bytes([c]) for i, c in enumerate(chars)}, special_token_ids=[eos])
+
+arithmetic = glrmask.Grammar.from_glrm(r'''
+    start sum
+    t NUMBER = /[0-9]+/
+    nt sum = product | sum "+" product
+    nt product = atom | product "*" atom
+    nt atom = NUMBER | "(" sum ")"
+''')
+grammar = glrmask.Grammar.from_expr(glrmask.Expr.sequence(arithmetic, glrmask.TokenSet([eos])))
+constraint = grammar.compile(vocab)
+
+rng = np.random.default_rng(0)
+state = constraint.start()
+text = b""
+while not state.is_terminated():
+    logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
+    logits[~state.mask(size=len(logits))] = -np.inf
+    token = int(logits.argmax())
+    assert state.commit_token(token)
+    text += chars[token:token + 1]
+print(text.decode())
 ```
 
-Use `TokenSet::new(ids)` or `TokenSet::from_ranges(ranges)` for token sets. Rust
-ranges are inclusive (`0..=9`) or half-open (`0..10`); Python `range` stops are
-exclusive and `TokenSet.from_ranges` takes a list of them. The set consumes
-**one** ID, not a sequence. Every ID must exist in the compile vocabulary.
-IDs with the same spelling remain distinct, and spelling-less special IDs are
-not epsilon. See [token sets](docs/exact-token-ranges.md).
+`mask()` returns a Boolean array indexed by token ID; `size` makes it as long as your logits. `fill_mask` is faster: it
+writes a packed bitmask, 32 tokens to a word, into a buffer you reuse. `Constraint.mask_len()` gives the buffer's length
+in words. In Rust, Node.js, C and C++, masks are always packed.
 
-A grammar-valued extern also accepts a `TokenSet` directly: this widens a token
-event into a general fragment without changing its meaning. The conversion does
-not use decoded token spelling.
-An arbitrary grammar cannot bind a token-valued extern.
+`commit_token` returns whether the token was allowed. `commit_tokens` commits several in order, and `commit_bytes`
+commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
+token without committing to it, copy the state first.
 
-### Configure, precompile, attach and execute
+### Ending
 
-`Module` is a reusable grammar snapshot. Constructing one from a `Grammar`
-needs no vocabulary and does no grammar compilation. Strategy settings belong to
-the compile call, never to the module or the source `Grammar`. The parent may
-have unresolved externs while precompiling.
-`bind(name, value)` mutates the receiving handle and returns `Result<()>` in Rust
-or `None` in Python. In Python, `bind` also supports atomic keyword arguments
-(`m.bind(**bindings)`).
-Each successful bind publishes a new shared snapshot; an error leaves the previous
-configuration intact. Attaching a child captures its current configuration, not
-a live reference to later edits. Every child must have all of its externs bound
-before it is attached. In Rust, use `clone()` to specialize an independent
-snapshot; in Python, use `copy()`.
+`is_accepting()` says whether the text so far is a complete match. More may still be allowed: `1+2` is complete, but
+`1+23` is too. `is_terminated()` says whether nothing more can be committed.
+
+GLRMask has no end-token setting. To require an end-of-sequence token, put it after the grammar, as above. It's allowed
+once the grammar is complete, and nothing is allowed after it. If the token has no bytes, add it as a special token:
+`special_token_ids` in Python, `with_special_tokens` in Rust, `specialTokenIds` in Node.js.
+
+### Forced tokens
+
+`forced_tokens()` returns the tokens that must come next, without committing them, so you can commit them without
+running the model. When the forced text could be tokenized in several ways, it takes the longest token at each step.
+See [forced tokens](docs/forcing.md).
+
+## Composing grammars
+
+A grammar can declare externs: named slots that you bind later.
+
+- `extern grammar NAME` takes a grammar, module, expression or token set.
+- `extern token NAME` takes a token ID or token set, and matches exactly one of those tokens. It never matches their text.
 
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({
-    0: b"x", 1: b"|", 2: b"x", 4: b"", 5: b"",
-})
-leaf1 = glrmask.Module(glrmask.Grammar.from_glrm('''
-    extern token MARK
-    start body
-    nt body = "x" MARK
-'''))
-leaf1.bind("MARK", glrmask.TokenSet([4]))
-leaf1.precompile(vocab)
+weather = glrmask.Grammar.from_json_schema(
+    '{"type": "object", "properties": {"city": {"type": "string"}},'
+    ' "required": ["city"], "additionalProperties": false}')
+search = glrmask.Grammar.from_json_schema(
+    '{"type": "object", "properties": {"query": {"type": "string"}},'
+    ' "required": ["query"], "additionalProperties": false}')
+call_format = glrmask.Grammar.from_glrm('''
+    extern grammar WEATHER_ARGS
+    extern grammar SEARCH_ARGS
+    start call
+    nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
+''')
 
-leaf2 = glrmask.Module(glrmask.Grammar.from_glrm('''
-    extern token MARK
-    start body
-    nt body = "x" MARK
-'''))
-leaf2.bind("MARK", glrmask.TokenSet([5]))
-leaf2.precompile(vocab)
+call = call_format.copy()
+call.bind(WEATHER_ARGS=weather, SEARCH_ARGS=search)
 
-parent = glrmask.Module(glrmask.Grammar.from_glrm('''
-    extern grammar LEFT
-    extern grammar RIGHT
-    start pair
-    nt pair = LEFT "|" RIGHT
-'''))
-parent.precompile(vocab)
-
-package = parent.copy()
-assert list(package.externs.unbound) == ["LEFT", "RIGHT"]
-package.bind(LEFT=leaf1, RIGHT=leaf2)
-assert len(package.externs.unbound) == 0
-
-constraint = package.compile(vocab)
-state = constraint.start()
-for token_id in [0, 4, 1, 2, 5]:
-    assert state.mask()[token_id]
-    state.commit_token(token_id)
+vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(256)})
+state = call.compile(vocab).start()
+assert state.commit_bytes(b'<weather>{"city": "Perth"}</weather>')
 assert state.is_accepting()
 ```
 
-Rust uses `Module::new(&grammar)`, `precompile(&vocab)?`,
-`bind(name, &child)?`, and `compile(&vocab)?` or `compile_with(&vocab, options)?`.
-Strategies are configured on the compile call via `CompileOptions`
-(`mask_strategy` and `boundary_mask_strategy`; in Python: keyword arguments to
-`compile` and `precompile`). One value applies to the whole compile, including
-every composed child, and a part that already has a static preparation is never
-downgraded to the dynamic `TokenTrie` path. Every child must be closed (have no
-unbound externs) before attachment. Each extern is bound once on the module that declared it; qualified
-`::` paths are rejected.
+Each grammar keeps its own rules, including the whitespace it ignores, and one model token can span the boundary
+between parts.
 
-Inline grammars (`g name = { ... }`) cannot refer to anything outside
-themselves, including outer rules, terminals, or externs. An outer reference
-is an undefined-name error. The keywords `use`, `export`, `import`, and `super`
-are reserved.
+`bind` changes the grammar or module in place; copy it first to bind the same one in different ways. Each extern is
+bound once, on the grammar or module that declares it. A value can't be bound while it has unbound externs of its own.
+`externs` lists the externs in declaration order, and `externs.unbound` the ones not yet bound (in Rust, `externs()`
+and `externs().unbound()`).
 
-Rust `m.externs().unbound()` (Python: `m.externs.unbound`) reports unresolved
-externs. Rust `m.externs()` (Python: `m.externs`) reports all declared externs
-in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`). Precompilation is allowed while externs remain open; final
-`compile()` requires every declared extern to be bound.
+### Modules
 
-### Persistence and root policy
-
-Modules can be saved while incomplete, including mixed raw and precompiled
-children. Retained work and source identities survive the round-trip:
+A `Module` holds a grammar, its bindings and any precompiled work. `precompile(vocab)` compiles as much as it can now,
+even with externs unbound, and `compile` reuses that work. Use modules when the same parts appear in many grammars. Tool
+calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 
 ```python
-saved = package.save()
-restored = glrmask.Module.load(saved)
-assert len(restored.externs.unbound) == 0
+weather_args = glrmask.Module(weather)
+weather_args.precompile(vocab)
+search_args = glrmask.Module(search)
+search_args.precompile(vocab)
+
+call = glrmask.Module(call_format)
+call.precompile(vocab)
+call.bind(WEATHER_ARGS=weather_args, SEARCH_ARGS=search_args)
+constraint = call.compile(vocab)
 ```
 
-Runnable constraints separately support `save()` and `Constraint.load(data, vocab)`.
-Artifacts preserve original token coordinates and vocabulary identity, not merely
-a set of decoded spellings. Unsupported older pre-release formats are rejected.
-Retained compiled work is vocabulary-specific, not portable across arbitrary models.
-The vocabulary is supplied once to each root `precompile` or `compile` operation,
-not once per child. Final compilation handles outstanding work, so attaching a
-cold child never requires a separate manual precompilation step. Incompatible
-retained representations or targets produce errors, not implicit loss of work.
+`grammar.precompile(vocab)` is short for creating a module from the grammar and precompiling it.
 
-To require an end-of-sequence token, put it after the grammar with `Grammar::from_expr(Expr::sequence(...))`. The token is allowed once the grammar is complete. After it is committed the mask is empty. If the token has no bytes, add its ID with `with_special_tokens`.
+`module.save()` returns bytes, and `Module.load(data)` restores the module with its bindings and precompiled work. A
+module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling it with another is an error.
 
-`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
+`constraint.save()` and `Constraint.load(data, vocab)` save and load a compiled constraint. The vocabulary isn't saved,
+and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another.
 
-### Lightweight expressions
+### Expressions
 
-`Expr.choice` is unordered context-free alternation, and `Expr.sequence` is
-language concatenation. In Python, both accept positional parts:
-`Expr.choice(*parts)` and `Expr.sequence(*parts)`. `Expr.literal` matches exact
-bytes without whitespace or ignore inserted between parts. Leaves can be
-`Grammar`, `Module`, `Expr`, or `TokenSet`. In Python, passing a
-plain string raises `TypeError` (use `Expr.literal`). Parts with open externs
-raise an error immediately. An expression can be bound directly into a
-module extern (`m.bind("name", expr)`). Whole grammar and module leaves keep
-their own lexical scopes and bindings; the compile options apply to them all.
-Intermediate expression
-operators add neither scope nor public path segments.
+`Expr.choice(*parts)` matches any one of its parts, `Expr.sequence(*parts)` matches them one after another, and
+`Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, expressions and
+token sets; in Rust and Node.js, token IDs too. `Grammar.from_expr` makes a grammar from an expression, and an
+expression can be bound to a grammar extern directly.
 
-### Determined output
+## Token sets
 
-`state.forced_tokens()` returns a read-only library-canonical prefix for genuinely
-forced ordinary text. It greedily chooses the longest admitted nonempty spelling,
-then the lowest original-ID alias. Exact-token events retain their IDs, and the
-query stops before root acceptance or an intermediate event opportunity that a
-greedy text token would cross. It returns a list of token IDs in every language. The result is one canonical
-sequence, not an exhaustive tree of equivalent token histories. See
-[forcing contracts](docs/forcing.md).
+A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
+`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges exclude their end in Python and
+Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. Every ID must be in the vocabulary when you compile.
 
-### Streaming markers
+Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. Add them to the vocabulary so
+that token sets can use them; they never match text. Two tokens with the same bytes are still different tokens to a
+token set. See [token sets](docs/token-sets.md).
 
-Place `@mark(id)` in a parser expression to observe possible input boundaries.
-`constraint.marker_ids()` lists the numeric IDs. `state.marker_events()` returns
-the events from `start()` or the most recent commit, including markers inside a
-model token. Copy a batch before the next commit when retaining history.
-
-Markers only read the parsing frontier; they never consume a model token or
-select a derivation. An event can come from an alternative that later fails.
-There is no automatic pairing, capture nesting, or ambiguity resolution. The
-[marker reference](docs/markers.md) defines ignored-input behavior, byte offsets,
-composition, persistence, and the Rust/Python APIs.
-
-### Build/runtime trade-off
-
-GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).
+## Mask strategies
 
 `MaskStrategy` chooses how masks are computed:
 
 - `ParserDwa` builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
-- `TokenTrie` computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+- `TokenTrie` computes each mask by walking the vocabulary. Fastest to compile, with slower masks. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).
 - `Auto`, the default, reuses any precompiled work; otherwise it uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
 `FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
@@ -359,54 +321,59 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 - `parser_backend` chooses how the parser is represented: `LrTable`, the default, or `TemplateDfa`, which is slower to compile, with faster masks.
 - `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default. Tokens are not merged in a composition that includes precompiled parts.
 
+```python
+constraint = grammar.compile(vocab, mask_strategy=glrmask.TokenTrie(
+    parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
+```
+
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
 
-- `ParserDwa` builds a parser DWA across each boundary. Slower to compile, with faster masks. It fails with `ErrorKind::ResourceLimit` if it would be too large.
+- `ParserDwa` builds a parser DWA across each boundary. Slower to compile, with faster masks.
 - `TokenTrie` walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
 - `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
-Every strategy produces the same masks; they differ only in speed.
+Every strategy produces the same masks; they differ only in speed. A strategy you choose explicitly reports an error if
+it can't be used, for example because its automaton would be too large. Only `Auto` falls back.
 
-Precompiled work is never thrown away. Each precompiled part keeps its masks unless you request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with precompiled parts use `TemplateDfa`.
+Pass strategies to `compile` and `precompile` (in Python, as keyword arguments). They apply to the whole compile,
+including bound grammars. Precompiled work is never thrown away. Each precompiled part keeps its masks unless you
+request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with
+precompiled parts use `TemplateDfa`.
+
+## Markers
+
+`@mark(id)` in a GLRM rule marks a point in the grammar. After each commit, `state.marker_events()` lists the markers
+the commit passed, with their byte offsets. `constraint.marker_ids()` lists the grammar's marker IDs. A marker means
+some parse reached that point; that parse may still fail later. Markers never change what's allowed. See
+[markers](docs/markers.md).
+
+## Errors
+
+Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
+Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
+Python raises `ValueError`, Node.js throws a `GlrMaskError`, C returns a status and sets `glrmask_error_message()`, and
+C++ throws `glrmask::Error`. In Rust, `Error::kind()` gives the kind of error and `source_span()` its place in the source.
 
 ## Grammar formats
 
-**JSON Schema acceptance policy.**
-Compilation enforces supported assertions or reports an unsupported-feature error.
-An absent `$schema` selects Draft 2020-12; explicit Draft 4, 6, 7, 2019-09, and
-2020-12 declarations select their dialect semantics. `format` is annotation-only;
-required format-assertion and unknown required vocabularies are unsupported.
-`oneOf` remains exclusive, with no approximation mode. Existing canonical
-serialization limits remain documented in the [acceptance policy](https://github.com/IsaacBreen/glrmask/pull/13).
+**JSON Schema.** Drafts 4, 6, 7, 2019-09 and 2020-12, chosen by `$schema`; without one, 2020-12. `format` is treated as
+an annotation, and `oneOf` requires exactly one match. A schema feature GLRMask can't enforce is an error.
 
-GLRM is the native recognition language. A version header and statement semicolons
-are not required; canonical source uses explicit declarations and insignificant
-line breaks:
+**GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, markers, scoped grammars, and
+regular-expression intersection and subtraction. See [GLRM](docs/glrm-format.md).
 
 ```glrm
 start value
-internal t DIGIT = /[0-9]/
 t INTEGER = /-?(0|[1-9][0-9]*)/
 nt value = INTEGER | "null"
 ```
 
-It retains `internal t`, unordered context-free alternatives, scoped grammars,
-regular intersection/subtraction, structural nonterminal-alternative subtraction,
-separated sequences, explicit finite automata and Unicode/byte expressions.
-Use regular-language subtraction for prefix-minimal matching. See [the native format](docs/glrm-format.md).
+**Lark**, with GLRMask's additions: `<|name|>` for a token extern, `@name` for a grammar extern, `%json` for an inline
+JSON Schema and `[lazy]` for a terminal that ends as soon as it can. See [Lark](docs/lark-dialect.md).
 
-Lark is a recognition-focused frontend with selected GLRMask extensions. It adds
-exact-token syntax, named token externs, `@name` grammar externs and isolated inline
-`%json` schemas. Those literal families are **not native GLRM syntax**; native
-callers provide equivalent components through typed host bindings. The regular-body
-`[lazy]` annotation uses the same shortest terminal operation. See
-[the Lark dialect](docs/lark-dialect.md).
+**EBNF**, in the `rule ::= ...` form.
 
-Regex-internal reluctant quantifiers, priorities, captures, substring generation,
-sampling annotations and grammar token/character budgets are not supported.
-Unsupported semantic features produce errors rather than being silently discarded.
-The Lark frontend does not claim Python regex endpoint ordering or compatibility
-with every Python Lark lexer mode.
+Features GLRMask doesn't support, such as Lark priorities, are errors. They are never silently ignored.
 
 ## Design principles
 

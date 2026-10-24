@@ -42,7 +42,11 @@ impl TokenSet {
         let mut pairs = Vec::new();
         for range in ranges {
             let start = match range.start_bound() {
-                Bound::Included(&start) | Bound::Excluded(&start) => start,
+                Bound::Included(&start) => start,
+                Bound::Excluded(&start) => match start.checked_add(1) {
+                    Some(start) => start,
+                    None => continue,
+                },
                 Bound::Unbounded => 0,
             };
             let end = match range.end_bound() {
@@ -281,14 +285,12 @@ impl Vocab {
         bytes
     }
 
-    /// Number of byte-backed entries; special IDs are not counted.
-    #[doc(hidden)]
+    /// The number of tokens with bytes; special tokens are not counted.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether there are no byte-backed entries.
-    #[doc(hidden)]
+    /// Whether no token has bytes.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -468,6 +470,16 @@ mod tests {
             "TokenSet[0..=9, 20..=29]");
         assert_eq!(TokenSet::from_ranges([5..=3]).range_pairs(), &[]);
         assert_eq!(TokenSet::from_ranges([5..5]).range_pairs(), &[]);
+        // An excluded start bound starts after that ID, not at it.
+        assert_eq!(
+            TokenSet::from_ranges([(Bound::Excluded(1), Bound::Included(3))]),
+            TokenSet::from_ranges([2..=3]),
+        );
+        assert_eq!(
+            TokenSet::from_ranges([(Bound::Excluded(u32::MAX), Bound::Included(u32::MAX))])
+                .range_pairs(),
+            &[],
+        );
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 7])), None);
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 9])), Some(9));
     }
