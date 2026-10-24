@@ -231,11 +231,10 @@ impl<'a> GrammarMachine<'a> {
             let dot = self.position_dot[position];
             let rule = &self.rules[rule_index];
             if dot == rule.rhs.len() {
-                if !self.is_augmented_completion(position) {
-                    if let Some(continuations) = self.returns.get(&rule.lhs) {
+                if !self.is_augmented_completion(position)
+                    && let Some(continuations) = self.returns.get(&rule.lhs) {
                         pending.extend(continuations.iter().copied());
                     }
-                }
                 continue;
             }
             match &rule.rhs[dot] {
@@ -980,7 +979,7 @@ impl DeferredBoundaryRecipe for NativeCompositionBoundaryRecipe {
         let mut ids = proof.0;
         ids.sort_unstable(); ids.dedup();
         Some(BoundaryCandidateSummary::Known {
-            fingerprint: self.fingerprint.clone(),
+            fingerprint: self.fingerprint,
             tokens: OriginalTokenSet::from_sorted_unique(ids, self.vocab.max_token_id()),
             precision: if proof.1 { SummaryPrecision::BudgetWidenedUpperBound }
                 else { SummaryPrecision::RegularUpperBound },
@@ -1629,7 +1628,7 @@ mod tests {
 
         let (fresh, _) = boundary_candidate_ids(&composed, &vocab);
         assert_eq!(fresh, Some(vec![0, 1]));
-        let mut loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let mut loaded = Constraint::load(composed.save(), &vocab).unwrap();
         assert!(
             loaded.boundary_candidate_summary.get().is_none(),
             "current artifacts deliberately defer composition-link metadata",
@@ -1687,10 +1686,10 @@ mod preparation_tests {
         source.boundary_candidate_summary.set(BoundaryCandidateSummary::Unknown {
             reason:SummaryUnavailable::Disabled,
         }).unwrap();
-        let mut loaded=Constraint::load(&source.save(),&vocab).unwrap();
+        let mut loaded=Constraint::load(source.save(),&vocab).unwrap();
         loaded.prepare_for_composition_internal(&vocab).unwrap();
         assert!(matches!(loaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
-        let mut reloaded=Constraint::load(&loaded.save(),&vocab).unwrap();
+        let mut reloaded=Constraint::load(loaded.save(),&vocab).unwrap();
         reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
         assert!(matches!(reloaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
         assert!(boundary_candidate_ids(&reloaded,&vocab).0.is_none());
@@ -1722,7 +1721,7 @@ mod preparation_tests {
             assert!(!expected.is_empty());
             assert!(expected.len() < vocab.len());
 
-            let loaded = Constraint::load(&source.save(), &vocab).unwrap();
+            let loaded = Constraint::load(source.save(), &vocab).unwrap();
             assert!(!loaded.table.is_present());
             assert!(loaded.boundary_candidate_summary.get().is_none());
             assert!(loaded.deferred_composition_metadata_blob.is_some());

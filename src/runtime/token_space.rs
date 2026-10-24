@@ -190,14 +190,13 @@ impl Constraint {
 		if let (Some(&start), Some(&end)) = (
 			self.state_internal_tsid_offsets.get(state),
 			self.state_internal_tsid_offsets.get(state + 1),
-		) {
-			if let Some(tsids) = self
+		)
+			&& let Some(tsids) = self
 				.state_internal_tsids
 				.get(start as usize..end as usize)
 			{
 				return tsids;
 			}
-		}
 		self.state_to_internal_tsid
 			.get(state)
 			.map(std::slice::from_ref)
@@ -299,11 +298,10 @@ impl Constraint {
 				self.max_token_byte_len(),
 			);
 		}
-		if let Some(impossible) = ordinary_impossible {
-			if impossible {
+		if let Some(impossible) = ordinary_impossible
+			&& impossible {
 				return Some(true);
 			}
-		}
 		if !self.possible_matches_complete {
 			return None;
 		}

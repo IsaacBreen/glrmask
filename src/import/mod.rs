@@ -2203,6 +2203,13 @@ impl DynamicConstraint {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn compile_dynamic_named_union_for_test(
+    named: ast::NamedGrammar, vocab: &crate::Vocab,
+) -> crate::Result<DynamicConstraint> {
+    compile_dynamic_from_named(named, vocab, GlrTableConstruction::ExperimentalCoreMerged, &[])
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2246,7 +2253,7 @@ mod tests {
             .link_grammar.as_ref().unwrap();
         let analyzed = source.analyze(constraint.terminal_display_names.clone());
         let table = crate::compiler::glr::table::GLRTable::build_with_default_construction(
-            &analyzed, construction.clone(),
+            &analyzed, construction,
         );
         assert_eq!(table.construction, construction);
         assert_eq!(table.admission_policy, compiler_admission);
@@ -2254,7 +2261,7 @@ mod tests {
         assert_eq!(constraint.parser_terminal_count(), table.num_terminals);
         drop(table);
 
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(constraint)).unwrap();
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(constraint)).unwrap();
         assert_eq!(constraint.start().mask(), loaded.start().mask());
         for native in [constraint, &loaded] {
             assert!(native.has_template_parser());
@@ -2282,8 +2289,7 @@ mod tests {
             &condition,
             &vocab,
         )
-        .err()
-        .expect("programmatic JSON schema values must be unsupported");
+        .expect_err("programmatic JSON schema values must be unsupported");
         match error.kind() {
             crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
@@ -2297,8 +2303,7 @@ mod tests {
             &dynamic,
             &vocab,
         )
-        .err()
-        .expect("dynamic-value JSON schema must be unsupported");
+        .expect_err("dynamic-value JSON schema must be unsupported");
         match error.kind() {
             crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
@@ -2313,8 +2318,7 @@ mod tests {
             &vocab,
             &[],
         )
-        .err()
-        .expect("dynamic-value JSON schema with end tokens must be unsupported");
+        .expect_err("dynamic-value JSON schema with end tokens must be unsupported");
         match error.kind() {
             crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
@@ -3000,7 +3004,7 @@ mod tests {
             composed.parser_control_terminals().is_empty(),
             "a child followed directly by an end token must compile linker controls away",
         );
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
 
         for constraint in [&composed, &loaded] {
             let mut state = constraint.start();
@@ -3026,11 +3030,4 @@ mod tests {
             b"aa",
         );
     }
-}
-
-#[cfg(test)]
-pub(crate) fn compile_dynamic_named_union_for_test(
-    named: ast::NamedGrammar, vocab: &crate::Vocab,
-) -> crate::Result<DynamicConstraint> {
-    compile_dynamic_from_named(named, vocab, GlrTableConstruction::ExperimentalCoreMerged, &[])
 }

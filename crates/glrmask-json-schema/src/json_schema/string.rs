@@ -3023,8 +3023,8 @@ fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> Im
                 .cloned()
                 .map(|part| lower_string_pattern_branch_parts(part, context))
                 .collect::<ImportResult<Vec<_>>>()?;
-            if let Some((_, anchored_start, anchored_end)) = alternatives.first() {
-                if alternatives
+            if let Some((_, anchored_start, anchored_end)) = alternatives.first()
+                && alternatives
                     .iter()
                     .all(|(_, branch_start, branch_end)| branch_start == anchored_start && branch_end == anchored_end)
                 {
@@ -3040,7 +3040,6 @@ fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> Im
                         context,
                     ));
                 }
-            }
 
             let wrapped = alternatives
                 .iter()
@@ -3087,8 +3086,8 @@ fn string_pattern_hir_as_body_regex_with_anchors(
             let common_anchored_end = alternatives
                 .iter()
                 .all(|(_, _, anchored_end)| *anchored_end);
-            if let Some((_, anchored_start, anchored_end)) = alternatives.first() {
-                if alternatives.iter().all(|(_, branch_start, branch_end)| {
+            if let Some((_, anchored_start, anchored_end)) = alternatives.first()
+                && alternatives.iter().all(|(_, branch_start, branch_end)| {
                     branch_start == anchored_start && branch_end == anchored_end
                 }) {
                     let lowered = alternatives
@@ -3107,7 +3106,6 @@ fn string_pattern_hir_as_body_regex_with_anchors(
                         common_anchored_end,
                     });
                 }
-            }
 
             let wrapped = alternatives
                 .iter()
@@ -3592,11 +3590,7 @@ fn repetition_choice_count(
 ) -> usize {
     let min = repetition.min as usize;
     let max_by_syntax = repetition.max.map(|value| value as usize);
-    let max_by_length = if sub_min_chars == 0 {
-        max_length
-    } else {
-        max_length / sub_min_chars
-    };
+    let max_by_length = max_length.checked_div(sub_min_chars).unwrap_or(max_length);
     let effective_max = max_by_syntax.unwrap_or(max_by_length).min(max_by_length);
     effective_max.saturating_sub(min).saturating_add(1).max(1)
 }
@@ -4028,8 +4022,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
         || (matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
             && matches!(context, JsonStringContext::Value)
             && contains_control
-            && !class_is_ascii_hex_subset(class)
-            && (!class_contains_url_punctuation(class) || contains_control));
+            && !class_is_ascii_hex_subset(class));
     if is_dot_like_unicode_class(class) {
         return json_string_body_dot_regex_in_mode(json_string_compat_mode(), context).to_string();
     }
@@ -4477,12 +4470,11 @@ fn hex_low_nibble_set_regex_fragment(lows: &BTreeSet<u8>) -> String {
     let mut range_start = None;
     let mut previous = None;
     for low in lows.iter().copied() {
-        if let Some(prev) = previous {
-            if low != prev + 1 {
+        if let Some(prev) = previous
+            && low != prev + 1 {
                 push_hex_nibble_class_range(range_start.take().unwrap(), prev, &mut parts);
                 range_start = Some(low);
             }
-        }
         if range_start.is_none() {
             range_start = Some(low);
         }
@@ -4620,7 +4612,7 @@ fn llguidance_compat_enabled_from_env() -> bool {
     //
     // Set GLRMASK_LLGUIDANCE_COMPAT=0 to opt into the historical full JSON
     // lexical language when alternate spellings are required.
-    std::env::var_os(GLRMASK_LLGUIDANCE_COMPAT_ENV).map_or(true, |value| {
+    std::env::var_os(GLRMASK_LLGUIDANCE_COMPAT_ENV).is_none_or(|value| {
         let value = value.to_string_lossy();
         !value.is_empty() && value != "0"
     })

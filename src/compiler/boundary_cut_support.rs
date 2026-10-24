@@ -371,7 +371,7 @@ fn crossing_support_with_flat(
         return None;
     }
     let mut all = vec![u64::MAX; width];
-    if nt % 64 != 0 {
+    if !nt.is_multiple_of(64) {
         *all.last_mut()? = (1u64 << (nt % 64)) - 1;
     }
     let foreign = (0..nt)

@@ -1563,8 +1563,7 @@ pub fn synthesize_bounded_terminal_expressions(
             // large, input-sensitive planning costs. Check the full expression
             // shape before compiling any repeat-body DFA.
             if !conservative_pathological
-                && !structural_pair_component_count(expression, expression)
-                    .is_some_and(|components| components >= 2)
+                && structural_pair_component_count(expression, expression).is_none_or(|components| components < 2)
             {
                 return None;
             }

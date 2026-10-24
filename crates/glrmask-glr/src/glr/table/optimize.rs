@@ -686,9 +686,15 @@ impl GLRTable {
             let mut matched_rows = 0usize;
 
             let has_advance_rows = self.advance.len() == self.num_states as usize;
-            for state in 0..self.num_states as usize {
+            for (state, (action_row, goto_row)) in self
+                .action
+                .iter()
+                .zip(&self.goto)
+                .enumerate()
+                .take(self.num_states as usize)
+            {
                 let advance_row = has_advance_rows.then(|| &self.advance[state]);
-                let fingerprint = row_fingerprint(&self.action[state], &self.goto[state], advance_row);
+                let fingerprint = row_fingerprint(action_row, goto_row, advance_row);
                 let Some(&first_rep) = sig_to_first_rep.get(&fingerprint) else {
                     sig_to_first_rep.insert(fingerprint, state as u32);
                     continue;
@@ -696,8 +702,8 @@ impl GLRTable {
                 fingerprint_collisions += 1;
                 let row_matches = |rep: u32| {
                     rows_equal(
-                        &self.action[state],
-                        &self.goto[state],
+                        action_row,
+                        goto_row,
                         advance_row,
                         &self.action[rep as usize],
                         &self.goto[rep as usize],
@@ -752,8 +758,12 @@ impl GLRTable {
             let mut new_id = 0u32;
             let mut rep_to_new: FxHashMap<u32, u32> = FxHashMap::default();
             let mut kept: Vec<u32> = Vec::new();
-            for state in 0..self.num_states as usize {
-                if remap[state] == state as u32 {
+            for (state, &rep) in remap
+                .iter()
+                .enumerate()
+                .take(self.num_states as usize)
+            {
+                if rep == state as u32 {
                     rep_to_new.insert(state as u32, new_id);
                     kept.push(state as u32);
                     new_id += 1;
@@ -2804,14 +2814,14 @@ impl GLRTable {
                         .map(|(tid, action)| {
                             let remapped = match action {
                                 Action::Reduce(nt, len) => {
-                                    let canon = nt_remap.get(&nt).copied().unwrap_or(*nt);
+                                    let canon = nt_remap.get(nt).copied().unwrap_or(*nt);
                                     Action::Reduce(canon, *len)
                                 }
                                 Action::StackShifts(shifts) => Action::StackShifts(shifts.clone()),
                                 Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(shifts.clone()),
                                 Action::Split { shift, reduces, accept } => {
                                     let reduces = reduces
-                                        .into_iter()
+                                        .iter()
                                         .map(|(nt, len)| {
                                             let canon = nt_remap.get(nt).copied().unwrap_or(*nt);
                                             (canon, *len)
@@ -2837,11 +2847,10 @@ impl GLRTable {
                 // Rewrite rule RHS nonterminals to use canonical NTs.
                 for rule in &mut self.rules {
                     for sym in &mut rule.rhs {
-                        if let Symbol::Nonterminal(nt) = sym {
-                            if let Some(&canon) = nt_remap.get(nt) {
+                        if let Symbol::Nonterminal(nt) = sym
+                            && let Some(&canon) = nt_remap.get(nt) {
                                 *nt = canon;
                             }
-                        }
                     }
                 }
 
@@ -2968,11 +2977,10 @@ impl GLRTable {
                 let mut set = BTreeSet::new();
                 for s in 0..nstates2 {
                     for (t, a) in &self.action[s] {
-                        if let Action::Split { shift, reduces: _, accept } = a {
-                            if shift.is_none() && !*accept {
+                        if let Action::Split { shift, reduces: _, accept } = a
+                            && shift.is_none() && !*accept {
                                 set.insert((s, t));
                             }
-                        }
                     }
                 }
                 set
@@ -4018,7 +4026,7 @@ fn normalized_remapped_stack_shifts<'a>(
     let mut normalized = shifts.iter().collect::<SmallVec<[&StackShift; 2]>>();
     normalized.sort_unstable_by(|left, right| remapped_stack_shift_cmp(left, right, mapping));
     normalized.dedup_by(|left, right| {
-        remapped_stack_shift_cmp(*left, *right, mapping) == std::cmp::Ordering::Equal
+        remapped_stack_shift_cmp(left, right, mapping) == std::cmp::Ordering::Equal
     });
     normalized
 }
@@ -4112,10 +4120,8 @@ fn row_fingerprint(
     goto_row: &GotoRow,
     advance_row: Option<&BitSet>,
 ) -> u64 {
-    let (action_sum, action_xor) = unordered_row_hash(
-        action_row.iter().map(|(terminal, action)| (terminal, action)),
-        action_row.len(),
-    );
+    let (action_sum, action_xor) =
+        unordered_row_hash(action_row.iter(), action_row.len());
     let (goto_sum, goto_xor) = unordered_row_hash(
         goto_row.iter().map(|(nonterminal, target)| (*nonterminal, target)),
         goto_row.len(),
@@ -5410,18 +5416,16 @@ fn build_control_elimination_predecessors(
         let mut depth_cache = FxHashMap::<(u32, u32), Vec<u64>>::default();
         for &(source_component, pop, destination_component) in &deep_rules {
             let key = (source_component, pop);
-            if !depth_cache.contains_key(&key) {
-                let bases = dense_predecessor_states_at_depth(
+            let bases = depth_cache.entry(key).or_insert_with(|| {
+                dense_predecessor_states_at_depth(
                     &component_predecessors,
                     &state_to_component,
                     source_component,
                     pop,
                     &mut component_marks,
                     &mut mark_generation,
-                );
-                depth_cache.insert(key, bases);
-            }
-            let bases = depth_cache.get(&key).expect("depth cache was populated");
+                )
+            });
             if component_predecessors.union_words_into(destination_component, bases) {
                 changed_deep_rules += 1;
                 dirty_components[destination_component as usize] = true;
@@ -5433,10 +5437,14 @@ fn build_control_elimination_predecessors(
             let mut result = Vec::with_capacity(table.num_states as usize);
             let mut predecessor_edges = 0usize;
             let mut max_predecessors = 0usize;
-            for state in 0..table.num_states as usize {
+            for (state, &component) in state_to_component
+                .iter()
+                .enumerate()
+                .take(table.num_states as usize)
+            {
                 let mut row = PredecessorSet::new();
                 for_each_set_bit(
-                    component_predecessors.row_words(state_to_component[state]),
+                    component_predecessors.row_words(component),
                     table.num_states as usize,
                     |predecessor| row.push(predecessor),
                 );
@@ -5614,7 +5622,7 @@ fn control_effect_closure(
         closure_pops += 1;
         // Cache-hit closure steps burn no visits; check the wall backstop
         // directly so a giant sparse-control closure cannot stall.
-        if closure_pops % 16_384 == 0 && !budget.check_elapsed() {
+        if closure_pops.is_multiple_of(16_384) && !budget.check_elapsed() {
             return Err(control_elimination_failure(
                 budget,
                 origin_state,
@@ -6712,7 +6720,7 @@ fn apply_reduce_to_frame(
     let mut frames = Vec::new();
     for ((target, replace), froms) in by_target {
         let mut next_frame = frame.clone();
-        if needs_guard && !add_guard_to_frame(&mut next_frame, guard_pop, froms.into_iter()) {
+        if needs_guard && !add_guard_to_frame(&mut next_frame, guard_pop, froms) {
             continue;
         }
         push_transition_to_frame(&mut next_frame, target, replace);
@@ -7535,7 +7543,7 @@ mod tests {
 
             for state in 0..nstates {
                 for terminal in 0..4 {
-                    if next(&mut seed) % 3 != 0 {
+                    if !next(&mut seed).is_multiple_of(3) {
                         action[state].insert(
                             terminal,
                             random_action(&mut seed, nstates as u32),
@@ -7884,7 +7892,7 @@ mod tests {
             let mut goto_rows = vec![GotoRow::default(); nstates];
             for state in 0..nstates {
                 for terminal in 0..3 {
-                    if next(&mut seed) % 4 != 0 {
+                    if !next(&mut seed).is_multiple_of(4) {
                         action_rows[state].insert(terminal, action(&mut seed, nstates as u32));
                     }
                 }

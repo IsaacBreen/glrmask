@@ -327,21 +327,21 @@ mod tests {
         let bytes = module.save();
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().bindings[0].1 = Value::Module(1);
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().prepared[0].1 = 99;
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().source = 999;
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
         let mut m = read(&bytes);
         let binding = m.instances.last_mut().unwrap().bindings.pop().unwrap();
         m.instances.last_mut().unwrap().bindings.push((binding.0.clone(), Value::Module(0)));
         m.instances.last_mut().unwrap().bindings.push((binding.0, Value::Module(0)));
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
         let mut m = read(&bytes);
         m.prepared[0].bytes.truncate(20);
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
     }
     #[test]
     fn token_set_ranges_are_validated() {
@@ -351,7 +351,7 @@ mod tests {
         let bytes = module.save();
         let mut m = read(&bytes);
         if let Value::Exact(e) = &mut m.instances[0].bindings[0].1 { e.ranges = vec![(7, 7), (7, 7)]; }
-        assert!(Module::load(&write(&m)).is_err());
+        assert!(Module::load(write(&m)).is_err());
 
     }
     #[test]
@@ -394,7 +394,7 @@ mod tests {
         let mut manifest = read(&shell.save());
         assert_eq!(manifest.prepared[0].engine, 2);
         manifest.prepared[0].bytes = static_bytes;
-        let error = Module::load(&write(&manifest)).unwrap_err().to_string();
+        let error = Module::load(write(&manifest)).unwrap_err().to_string();
         assert!(
             error.contains("corrupt module: a TokenTrie part has the wrong runtime"),
             "{error}",
@@ -429,11 +429,11 @@ mod tests {
             retained_vocab_fingerprint: None,
         };
         m.prepared[0].bytes = non_native.save();
-        let error = Module::load(&write(&m)).unwrap_err().to_string();
+        let error = Module::load(write(&m)).unwrap_err().to_string();
         assert!(error.contains("corrupt module: a precompiled part has an LR table"), "{error}");
         let mut m = read(&module.save());
         m.instances[0].source = 1;
         m.sources.push(Source::Ebnf("start ::= \"b\"".into()));
-        assert!(Module::load(&write(&m)).is_err(), "preparation must match its immutable source reference");
+        assert!(Module::load(write(&m)).is_err(), "preparation must match its immutable source reference");
     }
 }

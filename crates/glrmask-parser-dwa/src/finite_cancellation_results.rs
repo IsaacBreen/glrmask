@@ -50,7 +50,7 @@ impl PackedHandle {
         Some(Self((u64::from(target) << 32) | u64::from(weight)))
     }
     fn span(start: usize, len: usize, limit: usize) -> Option<Self> {
-        if len < 2 || len >= (1usize << 31) || start.checked_add(len)? > limit.min(MAX_PAIRS) {
+        if !(2..(1usize << 31)).contains(&len) || start.checked_add(len)? > limit.min(MAX_PAIRS) {
             return None;
         }
         let start = u32::try_from(start).ok()?;

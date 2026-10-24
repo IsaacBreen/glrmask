@@ -141,9 +141,8 @@ impl Constraint {
                 if terminal < count { support.set(terminal as usize); }
             }
             // Provider-owned ignores can supply Identity without a table cell.
-            if let Some(ignore) = tables.component_ignore_terminal(owner) {
-                if ignore < count { support.set(ignore as usize); }
-            }
+            if let Some(ignore) = tables.component_ignore_terminal(owner)
+                && ignore < count { support.set(ignore as usize); }
         }
         Some(ScopedAdmissionSupport { root: self, layout, closed, leaf: leaf as u32, offset, support })
     }

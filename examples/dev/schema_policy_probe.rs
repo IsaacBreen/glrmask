@@ -59,7 +59,7 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskMode) -> Value {
             for byte in bytes {
                 let id = u32::from(byte);
                 let mask = state.mask();
-                if !mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0) {
+                if mask.get(id as usize / 32).is_none_or(|word| word & (1 << (id % 32)) == 0) {
                     return Ok(false);
                 }
                 if !state.commit_token(id) {

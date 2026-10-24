@@ -115,7 +115,7 @@ impl<'a> ExactSubtractionResolver<'a> {
         let mut remaining_indices = (0..lhs_alts.len()).collect::<Vec<_>>();
         let mut removed_indices = Vec::new();
 
-        for remove_alt in self.exact_subtraction_alternatives(lhs_name, exclude)? {
+        for remove_alt in self.exact_subtraction_alternatives(exclude)? {
             let remove_alt_key = self.canonical_exact_expr(&remove_alt);
             let Some(position) = remaining_indices
                 .iter()
@@ -135,14 +135,13 @@ impl<'a> ExactSubtractionResolver<'a> {
 
     fn exact_subtraction_alternatives(
         &self,
-        lhs_name: &str,
         exclude: &GrammarExpr,
     ) -> Result<Vec<GrammarExpr>> {
         match exclude {
             GrammarExpr::Choice(options) => {
                 let mut out = Vec::new();
                 for option in options {
-                    out.extend(self.exact_subtraction_alternatives(lhs_name, option)?);
+                    out.extend(self.exact_subtraction_alternatives(option)?);
                 }
                 Ok(out)
             }
@@ -406,9 +405,8 @@ fn build_helpers_for_lhs(
             let included = partitions
                 .iter()
                 .map(|partition| {
-                    !removal_set
-                        .binary_search(&partition.alt_indices[0])
-                        .is_ok()
+                    removal_set
+                        .binary_search(&partition.alt_indices[0]).is_err()
                 })
                 .collect::<Vec<_>>();
             let refs = cover_included_partitions(&included, &mut tree, allocator, &mut rules);
@@ -533,17 +531,15 @@ fn rewrite_expr(
     resolver: &ExactSubtractionResolver<'_>,
     rewrite_targets: &HashMap<String, HashMap<Vec<usize>, String>>,
 ) -> Result<()> {
-    if allow_exact_subtractions {
-        if let Some(resolved) = resolver.resolve_site(expr)? {
-            if let Some(name) = rewrite_targets
+    if allow_exact_subtractions
+        && let Some(resolved) = resolver.resolve_site(expr)?
+            && let Some(name) = rewrite_targets
                 .get(&resolved.lhs_name)
                 .and_then(|sites| sites.get(&resolved.removed_indices))
             {
                 *expr = GrammarExpr::Ref(name.clone());
                 return Ok(());
             }
-        }
-    }
 
     match expr {
         GrammarExpr::Shortest(_) => Ok(()),

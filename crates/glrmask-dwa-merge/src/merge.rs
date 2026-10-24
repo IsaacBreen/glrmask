@@ -273,12 +273,11 @@ fn build_local_to_global_tsid_runs(
         .map(|globals| {
             let mut runs = SmallVec::<[(u32, u32); 1]>::new();
             for &global_tsid in globals {
-                if let Some((_, end)) = runs.last_mut() {
-                    if global_tsid == end.saturating_add(1) {
+                if let Some((_, end)) = runs.last_mut()
+                    && global_tsid == end.saturating_add(1) {
                         *end = global_tsid;
                         continue;
                     }
-                }
                 runs.push((global_tsid, global_tsid));
             }
             runs
@@ -2362,7 +2361,7 @@ fn build_unified_global_id_map_fast(
     let mut state_reps: Vec<u32> = Vec::new();
     let mut class_keys = Vec::<SmallVec<[u32; 16]>>::new();
 
-    for state in 0..num_tokenizer_states {
+    for (state, state_slot) in state_o2i.iter_mut().enumerate() {
         let mut composite = SmallVec::<[u32; 16]>::with_capacity(inputs.len());
         composite.extend(
             inputs
@@ -2380,7 +2379,7 @@ fn build_unified_global_id_map_fast(
             state_reps.push(state as u32);
             class
         };
-        state_o2i[state] = class;
+        *state_slot = class;
         state_i2o[class as usize].push(state as u32);
     }
 
@@ -2851,7 +2850,7 @@ fn build_unified_global_id_map(
     let mut state_i2o: Vec<Vec<u32>> = Vec::new();
     let mut state_reps: Vec<u32> = Vec::new();
 
-    for state in 0..num_tokenizer_states {
+    for (state, state_slot) in state_o2i.iter_mut().enumerate() {
         let composite: CompositeClassKey = inputs
             .iter()
             .map(|input| input.tokenizer_states.original_to_internal[state])
@@ -2862,7 +2861,7 @@ fn build_unified_global_id_map(
             state_reps.push(state as u32);
             next_id
         });
-        state_o2i[state] = class;
+        *state_slot = class;
         state_i2o[class as usize].push(state as u32);
     }
 
@@ -3414,14 +3413,12 @@ fn remap_weight_with_tsid_runs(
         let Some(last_global_tsid) = global_tsid_count.checked_sub(1).map(|count| count as u32) else {
             return Weight::empty();
         };
-        return (!all_global_tokens.is_empty())
-            .then(|| Weight::from_uniform(0..=last_global_tsid, all_global_tokens))
-            .unwrap_or_else(Weight::empty);
+        return if !all_global_tokens.is_empty() { Weight::from_uniform(0..=last_global_tsid, all_global_tokens) } else { Weight::empty() };
     }
 
     let mut intervals = SmallVec::<[(u32, u32, Arc<RangeSetBlaze<u32>>); 16]>::new();
     for (start, end, tokens) in weight.range_entries() {
-        let token_key = Arc::as_ptr(&tokens) as usize;
+        let token_key = Arc::as_ptr(tokens) as usize;
         let mapped_tokens = token_remap.map_tokens(token_key, tokens.as_ref(), token_cache);
         if mapped_tokens.is_empty() {
             continue;
@@ -3554,14 +3551,13 @@ fn remap_weight_with_token_remap(
 
     let mut merged_by_global_tsid = Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new();
     for (global_tsid, tokens) in tokens_by_global_tsid {
-        if let Some((last_tsid, last_tokens)) = merged_by_global_tsid.last_mut() {
-            if *last_tsid == global_tsid {
+        if let Some((last_tsid, last_tokens)) = merged_by_global_tsid.last_mut()
+            && *last_tsid == global_tsid {
                 if !Arc::ptr_eq(last_tokens, &tokens) && last_tokens.as_ref() != tokens.as_ref() {
                     *last_tokens = shared_rangeset(last_tokens.as_ref() | tokens.as_ref());
                 }
                 continue;
             }
-        }
         merged_by_global_tsid.push((global_tsid, tokens));
     }
 
@@ -3667,7 +3663,7 @@ mod tests {
         }
         fn weight(seed: &mut u64) -> Weight {
             let bits = next(seed);
-            if bits % 11 == 0 { return Weight::all(); }
+            if bits.is_multiple_of(11) { return Weight::all(); }
             Weight::from_per_tsid_token_sets((0..2).map(|tsid| {
                 let tokens = (0..3).filter(|token| bits & (1 << (tsid * 3 + token)) != 0);
                 (tsid, RangeSetBlaze::from_iter(tokens))
@@ -3680,7 +3676,7 @@ mod tests {
                 if next(seed) & 1 != 0 { result.set_final_weight(state, weight(seed)); }
                 for label in [0, 7, 8, DEFAULT_LABEL] {
                     if state == 3 { continue; }
-                    if next(seed) % 3 == 0 { continue; }
+                    if next(seed).is_multiple_of(3) { continue; }
                     let target = state + 1 + (next(seed) % u64::from(3 - state)) as u32;
                     result.add_transition(state, label, target, weight(seed));
                 }
@@ -4314,11 +4310,10 @@ mod tests {
 
         for word in all_words(&[7, 8, 9, 10], 3) {
             let mut actual = merged.artifact().eval_word(&word);
-            if let [label] = word.as_slice() {
-                if let Some(weight) = overlay.get(label) {
+            if let [label] = word.as_slice()
+                && let Some(weight) = overlay.get(label) {
                     actual = actual.union(weight);
                 }
-            }
             assert_eq!(actual, generic.eval_word(&word), "word={word:?}");
         }
     }
@@ -4357,11 +4352,10 @@ mod tests {
 
         for word in all_words(&[7, 8, 9], 3) {
             let mut actual = merged.artifact().eval_word(&word);
-            if let [label] = word.as_slice() {
-                if let Some(weight) = overlay.get(label) {
+            if let [label] = word.as_slice()
+                && let Some(weight) = overlay.get(label) {
                     actual = actual.union(weight);
                 }
-            }
             assert_eq!(actual, generic.eval_word(&word), "word={word:?}");
         }
     }

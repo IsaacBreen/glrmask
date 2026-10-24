@@ -505,7 +505,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn terminal_is_active(&self, terminal: TerminalID) -> bool {
-        self.active_terminals.as_ref().map_or(true, |active| {
+        self.active_terminals.as_ref().is_none_or(|active| {
             active.get(terminal as usize).copied().unwrap_or(false)
         })
     }
@@ -517,7 +517,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .or_insert_with(|| {
                 self.tokenizer
                     .possible_future_terminals_iter(tokenizer_state)
-                    .filter(|&terminal| active.as_ref().map_or(true, |mask| {
+                    .filter(|&terminal| active.as_ref().is_none_or(|mask| {
                         mask.get(terminal as usize).copied().unwrap_or(false)
                     }))
                     .collect()
@@ -647,12 +647,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return;
         }
 
-        if let Some(ignore_terminal) = self.ignore_terminal {
-            if self.ignore_terminal_possible_for_state(tokenizer_state) {
+        if let Some(ignore_terminal) = self.ignore_terminal
+            && self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_leaf_token_from_sources(sources, ignore_terminal, internal_token_id);
             }
-        }
 
         let colors = self.future_terminal_colors_for_state(tokenizer_state);
         for color in colors {
@@ -678,12 +677,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return;
         }
 
-        if let Some(ignore_terminal) = self.ignore_terminal {
-            if self.ignore_terminal_possible_for_state(tokenizer_state) {
+        if let Some(ignore_terminal) = self.ignore_terminal
+            && self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_match_from_sources(sources, ignore_terminal, self.leaf_state, weight);
             }
-        }
 
         let colors = self.future_terminal_colors_for_state(tokenizer_state);
         for color in colors {
@@ -870,7 +868,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         let mut accessible = node.reachable_token_ids().clone();
         if node.has_token() {
-            accessible.remove(node.token_id() as usize);
+            accessible.remove(node.token_id());
         }
         if accessible.is_empty() {
             return;
@@ -1001,7 +999,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for ((source, tokenizer_state, color), buffered) in buffer {
-            if buffered.token_ids.is_empty() && buffered.weight.as_ref().map_or(true, |w| w.is_empty()) {
+            if buffered.token_ids.is_empty() && buffered.weight.as_ref().is_none_or(|w| w.is_empty()) {
                 continue;
             }
             let terminals = &terminal_cache[&(tokenizer_state, color)];
@@ -1093,6 +1091,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     /// Phase 1: Walk all (token, state) pairs, collecting:
     ///   - Terminal matches at token endpoint → direct leaf buffering
     ///   - Alive pairs grouped by (start_state, end_state) → batched token lists
+    ///
     /// Phase 2: Process grouped alive pairs, adding future leaves in batch.
     pub fn build_l1_fast(
         &mut self,
@@ -1398,11 +1397,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     // L1 terminals never appear in multi-terminal paths, so
                     // skip continuation processing (no second terminal will
                     // follow within the same token).
-                    if let Some(ref lengths) = self.terminal_path_lengths {
-                        if let Some(&TerminalPathLength::One) = lengths.get(matched.id as usize) {
+                    if let Some(ref lengths) = self.terminal_path_lengths
+                        && let Some(&TerminalPathLength::One) = lengths.get(matched.id as usize) {
                             continue;
                         }
-                    }
 
                     let continuation_weight_started_at =
                         self.profile_timing.then(std::time::Instant::now);
@@ -2243,8 +2241,7 @@ mod tests {
 
         assert_eq!(
             merged
-                .deferred_uncolored_future_leaf_buffer
-                .get(0)
+                .deferred_uncolored_future_leaf_buffer.first()
                 .and_then(|groups| groups.iter().find(|(state, _)| *state == 7))
                 .map(|(_, ids)| ids.as_slice()),
             Some(&[11, 12][..]),

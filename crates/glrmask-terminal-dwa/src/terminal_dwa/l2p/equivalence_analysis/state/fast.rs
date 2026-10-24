@@ -1082,7 +1082,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         .then(|| super::super::compat::compute_byte_classes(dfa));
     let byte_to_class: &[u8; 256] = compatible_shared_base
         .map(SharedVocabDfaBase::byte_to_class_ref)
-        .or_else(|| computed_byte_class.as_ref())
+        .or(computed_byte_class.as_ref())
         .unwrap_or(&identity_byte_class);
     let num_bc = compatible_shared_base
         .map(|base| base.num_classes)
@@ -1161,15 +1161,13 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     // The complete pass still covers every token and is the only pass counted
     // toward exact-coverage/early-stop accounting. Refinement is monotone, so
     // replaying sampled tokens is safe.
-    let discovery_sample = max_batches
-        .is_none()
-        .then(|| {
+    let discovery_sample = if max_batches
+        .is_none() { {
             build_discovery_sample(
                 &sorted_tokens,
                 discovery_sample_size(total_tokens, states.len()),
             )
-        })
-        .unwrap_or_default();
+        } } else { Default::default() };
 
     let needed_token_flags = if let Some(max) = max_batches {
         let mut flags = vec![false; total_tokens];
@@ -1303,13 +1301,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         if active_indices.is_empty() {
             break;
         }
-        if counts_toward_coverage {
-            if let Some(max) = max_batches {
-                if batches_processed >= max {
+        if counts_toward_coverage
+            && let Some(max) = max_batches
+                && batches_processed >= max {
                     break;
                 }
-            }
-        }
 
         let batch_len = batch_indices.len();
         if batch_len == 0 {

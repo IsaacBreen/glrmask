@@ -210,7 +210,7 @@ fn strict_static_crossings_preserve_delayed_lexemes_sparse_ids_and_aliases() {
         for candidate in [&candidate, &loaded, &external] {
             assert_static_boundaries(candidate);
             assert_language(candidate, &tokens, words);
-            assert!(!candidate.start().mask().get(999 / 32).is_some_and(|word| word & (1 << (999 % 32)) != 0));
+            assert!(candidate.start().mask().get(999 / 32).is_none_or(|word| word & (1 << (999 % 32)) == 0));
         }
     }
 }

@@ -272,9 +272,8 @@ fn assemble_impl(
         for _ in 0..depths { ports.push(arena.add_state()); }
         // Token admission observes no trailing control closure: a lexical
         // final can publish only immediately after its consuming transition.
-        if let Some(weight) = &row.final_weight {
-            if !weight.is_empty() { arena.set_final_weight(ports[index * depths], weight.clone()); }
-        }
+        if let Some(weight) = &row.final_weight
+            && !weight.is_empty() { arena.set_final_weight(ports[index * depths], weight.clone()); }
     }
     let start = *ports.get(lexical.start_state() as usize * depths)
         .ok_or("static template query has no start port")?;
@@ -289,8 +288,8 @@ fn assemble_impl(
         for (terminal, target, weight) in row.transitions.entries() {
             if terminal < 0 { return Err("static lexical query contains a negative terminal label".into()); }
             if weight.is_empty() { continue; }
-            if let (Some(admissions),Some(sink))=(admissions,sink) {
-                if lexical.states().get(target as usize).and_then(|row|row.final_weight.as_ref())
+            if let (Some(admissions),Some(sink))=(admissions,sink)
+                && lexical.states().get(target as usize).and_then(|row|row.final_weight.as_ref())
                     .is_some_and(|final_weight|weight.is_subset(final_weight)) {
                     let template=admissions.get(&(terminal as u32))
                         .ok_or_else(||format!("static query has no admission for terminal {terminal}"))?;
@@ -302,7 +301,6 @@ fn assemble_impl(
                     }}
                     continue;
                 }
-            }
             let template = templates.get(&(terminal as u32))
                 .ok_or_else(|| format!("static query has no template for terminal {terminal}"))?;
             let continuation = *ports.get(target as usize * depths)

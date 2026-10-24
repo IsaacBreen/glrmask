@@ -59,7 +59,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
 
 fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn save_constraint(path: &Path, constraint: &Constraint) {
@@ -262,8 +262,8 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
     for run in 0..runs {
         eprintln!("[selected10/debug] run={} before_load dispatch={dispatch_name}", run + 1);
         let load_started = Instant::now();
-        let core = Constraint::load(&core_bytes, &vocab).unwrap();
-        let dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
+        let core = Constraint::load(&core_bytes, vocab).unwrap();
+        let dispatch = Constraint::load(&dispatch_bytes, vocab).unwrap();
         let load = load_started.elapsed();
         eprintln!("[selected10/debug] run={} after_load ms={:.3}", run + 1, load.as_secs_f64() * 1000.0);
 

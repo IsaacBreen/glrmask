@@ -58,7 +58,7 @@ fn mix_u64(mut x: u64) -> u64 {
 }
 
 fn is_active_group(group_id: usize, active_groups: Option<&[bool]>) -> bool {
-    active_groups.map_or(true, |groups| {
+    active_groups.is_none_or(|groups| {
         groups.get(group_id).copied().unwrap_or(false)
     })
 }
@@ -131,7 +131,7 @@ fn build_initial_label_partition(
     let mut previous_state: Option<usize> = None;
 
     for state in order {
-        let starts_new_label = previous_state.map_or(true, |prev| {
+        let starts_new_label = previous_state.is_none_or(|prev| {
             finalizer_labels[state] != finalizer_labels[prev]
                 || future_labels[state] != future_labels[prev]
                 || has_any_transition[state] != has_any_transition[prev]
@@ -147,7 +147,7 @@ fn build_initial_label_partition(
 }
 
 fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
-    relevant_bytes.map_or(true, |bytes| bytes[byte])
+    relevant_bytes.is_none_or(|bytes| bytes[byte])
 }
 
 pub fn active_byte_representatives(
@@ -309,7 +309,7 @@ fn refine_once_sorted(
     let mut previous_state: Option<usize> = None;
 
     for &state in order.iter() {
-        let starts_new_block = previous_state.map_or(true, |prev| {
+        let starts_new_block = previous_state.is_none_or(|prev| {
             if row_hashes[state] != row_hashes[prev] {
                 return true;
             }

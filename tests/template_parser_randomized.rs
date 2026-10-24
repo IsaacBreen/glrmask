@@ -41,12 +41,12 @@ fn random_template(s: &mut u64) -> StackTemplate {
         g.start = rank[0] as u32;
         for at in 0..n {
             let id = rank[at];
-            g.states[id].accepting = next(s) % 4 == 0;
+            g.states[id].accepting = next(s).is_multiple_of(4);
             if at + 1 == n {
                 continue;
             }
             for symbol in 0..3 {
-                if next(s) % 4 == 0 {
+                if next(s).is_multiple_of(4) {
                     let target = rank[at + 1 + next(s) as usize % (n - at - 1)];
                     g.states[id].transitions.push(StackTransition {
                         label: StackLabel::Symbol(symbol),
@@ -54,7 +54,7 @@ fn random_template(s: &mut u64) -> StackTemplate {
                     });
                 }
             }
-            if phase == 0 && next(s) % 3 == 0 {
+            if phase == 0 && next(s).is_multiple_of(3) {
                 let target = rank[at + 1 + next(s) as usize % (n - at - 1)];
                 g.states[id].transitions.push(StackTransition {
                     label: StackLabel::Default,
@@ -67,7 +67,7 @@ fn random_template(s: &mut u64) -> StackTemplate {
     for link in [&mut t.pop_to_read, &mut t.pop_to_push, &mut t.read_to_push] {
         *link = (0..n)
             .map(|_| {
-                if next(s) % 3 == 0 {
+                if next(s).is_multiple_of(3) {
                     Some((next(s) % n as u64) as u32)
                 } else {
                     None
@@ -101,11 +101,10 @@ fn apply(t: &StackTemplate, stack: &[u32]) -> BTreeSet<Vec<u32>> {
                     todo.push((target_phase, *to, word.clone()));
                 }
             }
-        } else if phase == 1 {
-            if let Some(Some(to)) = t.read_to_push.get(id as usize) {
+        } else if phase == 1
+            && let Some(Some(to)) = t.read_to_push.get(id as usize) {
                 todo.push((2, *to, word.clone()));
             }
-        }
         if phase == 2 {
             for e in &q.transitions {
                 let StackLabel::Symbol(label) = e.label else {
@@ -202,7 +201,7 @@ fn check(
             "mask case{case} {representation} prefix{prefix:?} token{id}={bytes:?} words{expected:?} templates={ts:?}"
         );
         *checks += 1;
-        if yes && *id != 255 && case % 4 == 0 {
+        if yes && *id != 255 && case.is_multiple_of(4) {
             let next_words = advance(ts, expected, bytes);
             let next_complete = next_words.iter().any(|w| !apply(done, w).is_empty());
             let mut next_state = state.clone();
@@ -300,9 +299,9 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
                 "static"
             };
             assert_eq!(c.parser_backend(), ParserBackend::TemplateDfa);
-            let loaded = Constraint::load(&c.save(), &vocab).unwrap();
+            let loaded = Constraint::load(c.save(), &vocab).unwrap();
             let external =
-                Constraint::load(&c.save(), &vocab)
+                Constraint::load(c.save(), &vocab)
                     .unwrap();
             compiled.extend([
                 (format!("{name}-fresh"), c),

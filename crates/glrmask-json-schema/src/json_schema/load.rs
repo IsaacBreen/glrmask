@@ -507,12 +507,14 @@ fn load_trivial_homogeneous_array_schema(
 }
 
 fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<SchemaAssertions> {
-    let mut assertions = SchemaAssertions::default();
-    assertions.types = load_types(object, location)?;
-    assertions.const_value = object.get("const").cloned();
-    assertions.enum_values = load_enum_values(object, location)?;
-    assertions.any_of = load_schema_array(object, "anyOf", location)?;
-    assertions.one_of = load_schema_array(object, "oneOf", location)?;
+    let mut assertions = SchemaAssertions {
+        types: load_types(object, location)?,
+        const_value: object.get("const").cloned(),
+        enum_values: load_enum_values(object, location)?,
+        any_of: load_schema_array(object, "anyOf", location)?,
+        one_of: load_schema_array(object, "oneOf", location)?,
+        ..Default::default()
+    };
     if one_of_mixes_ref_and_inline_branches(&assertions.one_of) {
         // Normalize the narrow safe subset where local $ref branches are mixed
         // with object-shaped, array-shaped, or null-only inline branches.
@@ -898,14 +900,13 @@ fn load_array_keywords(
         }
     }
 
-    if let Some(additional_items) = object.get("additionalItems") {
-        if !schema.prefix_items.is_empty() {
+    if let Some(additional_items) = object.get("additionalItems")
+        && !schema.prefix_items.is_empty() {
             schema.items = Box::new(load_schema_at(
                 additional_items,
                 &format!("{location}/additionalItems"),
             )?);
         }
-    }
 
     schema.min_items = read_usize_keyword(object, "minItems", location)?.unwrap_or(0);
     schema.max_items = read_usize_keyword(object, "maxItems", location)?;

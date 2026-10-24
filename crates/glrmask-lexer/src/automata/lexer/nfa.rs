@@ -32,7 +32,7 @@ pub(super) struct CompactNFA {
 }
 
 #[derive(Debug, Clone)]
-pub struct NFA {
+pub struct Nfa {
     pub(super) states: Vec<NFAState>,
     pub(super) start_state: u32,
 }
@@ -45,7 +45,7 @@ fn build_states(count: usize) -> Vec<NFAState> {
     states
 }
 
-impl NFA {
+impl Nfa {
     pub fn new(num_states: usize) -> Self {
         let count = num_states.max(1);
         Self {

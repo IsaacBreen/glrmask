@@ -552,9 +552,7 @@ mod tests {
             let family: Vec<_> = nonempty_subsets
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, set)| {
-                    (family_bits & (1usize << idx) != 0).then(|| set.clone())
-                })
+                .filter(|&(idx, set)| family_bits & (1usize << idx) != 0 ).map(|(idx, set)| set.clone())
                 .collect();
             let pair_weights = build_token_cooccurrence_pair_weights(&family, num_groups);
             let exact_layout = exact_layout_from_pair_weights_or_panic(
@@ -607,9 +605,9 @@ mod tests {
         let num_groups = 6;
         let mut pair_weights = vec![0usize; num_groups * num_groups];
         // Component {0, 1, 2}
-        pair_weights[0 * num_groups + 1] = 7;
-        pair_weights[1 * num_groups + 0] = 7;
-        pair_weights[1 * num_groups + 2] = 5;
+        pair_weights[1] = 7;
+        pair_weights[num_groups] = 7;
+        pair_weights[num_groups + 2] = 5;
         pair_weights[2 * num_groups + 1] = 5;
         // Component {3, 4}; node 5 is an isolated singleton component.
         pair_weights[3 * num_groups + 4] = 9;

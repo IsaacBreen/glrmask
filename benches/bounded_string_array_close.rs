@@ -126,7 +126,7 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
     cfa_sweep::assert_release_benchmark("bounded_string_array_close");
     let vocab = cfa_sweep::load_llama3_vocab();
     assert_eq!(vocab.len(), 128_002, "expected the full Llama 3 vocabulary");
-    let mask_words = (vocab.len() + 31) / 32;
+    let mask_words = vocab.len().div_ceil(32);
     let mut group = c.benchmark_group("bounded_string_array_close");
 
     for case in CASES {

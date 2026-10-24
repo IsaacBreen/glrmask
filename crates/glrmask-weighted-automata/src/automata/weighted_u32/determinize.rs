@@ -175,11 +175,10 @@ fn final_weight_intersection(
     final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
     max_indexed_path_ranges: usize,
 ) -> Weight {
-    if path_weight.outer_range_count() <= max_indexed_path_ranges {
-        if let Some(index) = final_weight_indices.get(&state_final.ptr_key()) {
+    if path_weight.outer_range_count() <= max_indexed_path_ranges
+        && let Some(index) = final_weight_indices.get(&state_final.ptr_key()) {
             return path_weight.intersection_with_index(index);
         }
-    }
     path_weight.intersection(state_final)
 }
 
@@ -704,11 +703,10 @@ fn determinize_impl_with_options(
         // Fast path: single-state seed with no epsilon transitions (99.6% of calls)
         if seed.len() == 1 {
             let (&state_id, _) = seed.iter().next().unwrap();
-            if let Some(state) = nwa.states().get(state_id as usize) {
-                if state.epsilons.is_empty() {
+            if let Some(state) = nwa.states().get(state_id as usize)
+                && state.epsilons.is_empty() {
                     return seed;
                 }
-            }
         }
 
         let mut closure = seed;
@@ -1192,12 +1190,11 @@ fn determinize_impl_with_options(
                 let mut next_key: Vec<(u32, Weight)> =
                     Vec::with_capacity(sorted_targets.len());
                 for (dst, weight) in sorted_targets {
-                    if let Some((last_dst, last_weight)) = next_key.last_mut() {
-                        if *last_dst == dst {
+                    if let Some((last_dst, last_weight)) = next_key.last_mut()
+                        && *last_dst == dst {
                             *last_weight = last_weight.union(&weight);
                             continue;
                         }
-                    }
                     next_key.push((dst, weight));
                 }
                 let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
@@ -1235,12 +1232,11 @@ fn determinize_impl_with_options(
                 // quadratic growth from repeatedly rebuilding wide weights.
                 let mut duplicate_weights: Option<FxHashMap<u32, SmallVec<[Weight; 2]>>> = None;
                 for (dst, weight) in target_contributions {
-                    if let Some(duplicates) = duplicate_weights.as_mut() {
-                        if let Some(weights) = duplicates.get_mut(&dst) {
+                    if let Some(duplicates) = duplicate_weights.as_mut()
+                        && let Some(weights) = duplicates.get_mut(&dst) {
                             weights.push(weight);
                             continue;
                         }
-                    }
 
                     match target_subset.entry(dst) {
                         HashMapEntry::Vacant(vacant) => {
@@ -1618,24 +1614,24 @@ mod tests {
 
             for from in 0..4usize {
                 for to in (from + 1)..5usize {
-                    if (case + (from * 7 + to * 11) as u32) % 3 == 0 {
+                    if (case + (from * 7 + to * 11) as u32).is_multiple_of(3) {
                         continue;
                     }
                     let label = ((case + (from * 3 + to) as u32) % 4) as i32;
                     let first = (case + (from * 5 + to) as u32) % 6;
                     let second = (first + 1 + case % 3) % 7;
                     nwa.add_transition(states[from], label, states[to], tokens([first, second]));
-                    if (case + from as u32 + to as u32) % 5 == 0 {
+                    if (case + from as u32 + to as u32).is_multiple_of(5) {
                         let extra = (second + 2) % 8;
                         nwa.add_transition(states[from], label, states[to], tokens([extra]));
                     }
                 }
             }
 
-            for state in 0..5usize {
-                if (case + state as u32) % 2 == 0 {
+            for (state, &state_id) in states.iter().enumerate().take(5) {
+                if (case + state as u32).is_multiple_of(2) {
                     let first = (case + state as u32) % 7;
-                    nwa.set_final_weight(states[state], tokens([first]));
+                    nwa.set_final_weight(state_id, tokens([first]));
                 }
             }
 

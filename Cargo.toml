@@ -14,6 +14,9 @@ keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
 include = ["/src/**", "/benches/*.rs", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
+[lints]
+workspace = true
+
 [features]
 default = []
 internal-api = []
@@ -357,6 +360,15 @@ path = "tests/regressions/terminal_interchangeability/separator_transport.rs"
 [[test]]
 name = "snowplow_hostname_replay_mre"
 path = "tests/regressions/replay/snowplow_hostname.rs"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+module_inception = "allow"
+new_without_default = "allow"
+len_without_is_empty = "allow"
 
 [workspace]
 members = [

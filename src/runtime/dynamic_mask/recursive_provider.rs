@@ -560,7 +560,7 @@ fn with_provider_and_baseline(
             static GENERATIONS: OnceLock<Vec<u64>> = OnceLock::new();
             let generations = GENERATIONS.get_or_init(|| crate::env::var("GLRMASK_PROFILE_CLOSED_SUPPORT")
                 .unwrap_or_default().split(',').filter_map(|n|n.parse().ok()).collect());
-            generations.contains(&(state.generation as u64)).then(ScopedSupportProfile::default)
+            generations.contains(&{ state.generation }).then(ScopedSupportProfile::default)
         },
         projected_resets: FxHashMap::default(),
         project_resets: crate::env::var_os("GLRMASK_PROFILE_SCOPED_RESET_PROJECTION").is_some(),

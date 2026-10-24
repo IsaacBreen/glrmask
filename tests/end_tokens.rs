@@ -29,7 +29,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
     let allowed = |mask: &[u32], token: u32| -> bool {
         let word_idx = token as usize / 32;
         let bit = token % 32;
-        mask.get(word_idx).map_or(false, |w| (w & (1 << bit)) != 0)
+        mask.get(word_idx).is_some_and(|w| (w & (1 << bit)) != 0)
     };
 
     let modes = MaskMode::ALL;

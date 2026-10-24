@@ -1192,10 +1192,10 @@ pub struct TemplateDfaGroup {
 
 type CompiledCharacterization = (Vec<TerminalID>, UnweightedDfa, Option<NWA>, TemplateCompilationSample);
 
-fn try_compile_characterization_groups<'a>(
-    characterizations: &'a BTreeMap<TerminalID, TerminalCharacterization>,
+fn try_compile_characterization_groups(
+    characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     include_skeletons: bool,
-) -> Result<(Vec<(&'a TerminalCharacterization, Vec<TerminalID>)>, Vec<CompiledCharacterization>, TemplateCompileProfile), String> {
+) -> Result<(Vec<(&TerminalCharacterization, Vec<TerminalID>)>, Vec<CompiledCharacterization>, TemplateCompileProfile), String> {
     use rayon::prelude::*;
     let skip_minimize = skip_template_minimization_enabled();
     let mut grouped = BTreeMap::<&TerminalCharacterization, Vec<TerminalID>>::new();
@@ -1204,7 +1204,7 @@ fn try_compile_characterization_groups<'a>(
     }
     let groups: Vec<_> = grouped.into_iter().collect();
     let build = |(characterization, terminals): &(&TerminalCharacterization, Vec<TerminalID>)| {
-        let result = try_compile_template_dfa_with_profile(*characterization, skip_minimize)
+        let result = try_compile_template_dfa_with_profile(characterization, skip_minimize)
             .map(|(dfa, sample)| {
                 let skeleton = include_skeletons.then(|| dfa_to_nwa_skeleton(&dfa));
                 (terminals.clone(), dfa, skeleton, sample)
@@ -2121,7 +2121,7 @@ mod tests {
             assert_eq!(super::find_nfa_dfa_language_mismatch(&nfa,&dfa),None);
             for index in 0..dfa.states.len() {
                 let mut changed=dfa.clone();
-                changed.states[index].is_accepting=!changed.states[index].is_accepting;
+                changed.states[index].is_accepting = !changed.states[index].is_accepting;
                 assert_eq!(super::find_nfa_dfa_language_mismatch(&nfa,&changed),reference_nfa_dfa_mismatch(&nfa,&changed));
                 changed.states[index].transitions.remove(&1);
                 assert_eq!(super::find_nfa_dfa_language_mismatch(&nfa,&changed),reference_nfa_dfa_mismatch(&nfa,&changed));
@@ -2165,9 +2165,9 @@ mod tests {
             for _ in 1..17 { source.add_state(); }
             source.start_state = (random(&mut seed) % 17) as u32;
             for state in 0..17 {
-                source.states[state].is_accepting = random(&mut seed) % 3 == 0;
+                source.states[state].is_accepting = random(&mut seed).is_multiple_of(3);
                 for label in [i32::MIN, i32::MIN + 1, -3, 0, 1, 7, 19] {
-                    if random(&mut seed) % 3 != 0 {
+                    if !random(&mut seed).is_multiple_of(3) {
                         source.add_transition(state as u32, label, (random(&mut seed) % 17) as u32);
                     }
                 }

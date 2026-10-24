@@ -108,6 +108,6 @@ python scripts/sync-benchmarks.py
 python scripts/sync-guide.py
 ```
 
-See [documentation synchronization](documentation-sync.md) for the optional
+See [documentation synchronization](design/documentation-sync.md) for the optional
 website consistency check and the distinction between shared content and
 website presentation.

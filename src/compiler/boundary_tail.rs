@@ -713,13 +713,11 @@ fn summarize_flat_module_r1_reusing_proof(
     checked_fingerprint: Option<crate::compiler::boundary_candidates::BoundaryFingerprintForQuery<'_>>,
 ) -> Result<(BytePhaseSummary, usize, bool), String> {
     let identity = flat_r1_identity(constraint, vocab, checked_fingerprint);
-    if let Some((grammar, fingerprint, nullable, terminal_count)) = identity {
-        if let Some(proof) = grammar.flat_boundary_tail_r1.get() {
-            if proof.matches(fingerprint, nullable, terminal_count) {
+    if let Some((grammar, fingerprint, nullable, terminal_count)) = identity
+        && let Some(proof) = grammar.flat_boundary_tail_r1.get()
+            && proof.matches(fingerprint, nullable, terminal_count) {
                 return Ok(proof.summary);
             }
-        }
-    }
     let summary = summarize_rules_module_r1(constraint, &BTreeMap::new(), &BTreeSet::new())?;
     if let Some((grammar, fingerprint, nullable, terminal_count)) = identity {
         let _ = grammar.flat_boundary_tail_r1.set(FlatBoundaryTailR1 {
@@ -735,16 +733,14 @@ fn candidate_ids_for_r1_reusing_proof(
     checked_fingerprint: Option<crate::compiler::boundary_candidates::BoundaryFingerprintForQuery<'_>>,
 ) -> Vec<u32> {
     if let Some((grammar, fingerprint, nullable, terminal_count)) =
-        flat_r1_identity(constraint, vocab, checked_fingerprint) {
-        if let Some(proof) = grammar.flat_boundary_tail_r1.get() {
-            if proof.matches(fingerprint, nullable, terminal_count) {
+        flat_r1_identity(constraint, vocab, checked_fingerprint)
+        && let Some(proof) = grammar.flat_boundary_tail_r1.get()
+            && proof.matches(fingerprint, nullable, terminal_count) {
                 // Cache only the original component's vocabulary mapping. The
                 // root-CALL intersection and child-entry proof remain link-local.
                 return proof.candidate_ids.get_or_init(||
                     std::sync::Arc::from(candidate_ids_for_r1(vocab, language))).to_vec();
             }
-        }
-    }
     candidate_ids_for_r1(vocab, language)
 }
 
@@ -923,11 +919,10 @@ fn nonempty_entry_prefix_cover(expr: &Expr) -> Option<Vec<Vec<u8>>> {
         Expr::Repeat { expr, min, .. } if *min > 0 => nonempty_entry_prefix_cover(expr),
         Expr::Seq(parts) => {
             for part in parts {
-                if let Some(words) = finite_literal_words(part, FINITE_EXPR_WORD_CAP) {
-                    if !words.is_empty() && words.iter().all(Vec::is_empty) {
+                if let Some(words) = finite_literal_words(part, FINITE_EXPR_WORD_CAP)
+                    && !words.is_empty() && words.iter().all(Vec::is_empty) {
                         continue;
                     }
-                }
                 return nonempty_entry_prefix_cover(part);
             }
             None
@@ -967,14 +962,12 @@ fn component_entry_prefix_cover_reusing_proof(
     checked: Option<crate::compiler::boundary_candidates::BoundaryFingerprintForQuery<'_>>,
 ) -> Option<Vec<Vec<u8>>> {
     let identity = flat_r1_identity(constraint, vocab, checked);
-    if let Some((grammar, fingerprint, nullable, terminal_count)) = identity {
-        if let Some(proof) = grammar.entry_prefix_cover.get() {
-            if proof.fingerprint == fingerprint && proof.nullable == nullable
+    if let Some((grammar, fingerprint, nullable, terminal_count)) = identity
+        && let Some(proof) = grammar.entry_prefix_cover.get()
+            && proof.fingerprint == fingerprint && proof.nullable == nullable
                 && proof.terminal_count == terminal_count {
                 return proof.prefixes.clone();
             }
-        }
-    }
     let prefixes = component_entry_prefix_cover(constraint);
     if let Some((grammar, fingerprint, nullable, terminal_count)) = identity {
         let _ = grammar.entry_prefix_cover.set(EntryPrefixCoverProof {
@@ -1593,8 +1586,8 @@ fn terminal_summary2(
             tail_to_event: Tail2Language::empty(),
         };
     }
-    if let Some(expr) = constraint.retained_terminal_expr(terminal) {
-        if let Some(words) = finite_literal_words(expr, FINITE_EXPR_WORD_CAP) {
+    if let Some(expr) = constraint.retained_terminal_expr(terminal)
+        && let Some(words) = finite_literal_words(expr, FINITE_EXPR_WORD_CAP) {
             let normal = Tail2Language::from_words(&words);
             let mut tails = Tail2Language::epsilon();
             for word in &words {
@@ -1611,7 +1604,6 @@ fn terminal_summary2(
                 tail_to_event: Tail2Language::empty(),
             };
         }
-    }
     // Unsupported lexical atom: retain the r=1 facts and widen only the
     // unknown byte to the left.
     PhaseSummary2::from_r1_upper(byte_terminal_summary(
@@ -2360,7 +2352,7 @@ fn pure_cut_postings_preserve_binary_sparse_same_cut_predicates() {
         let index = std::sync::Arc::new(VocabProperCutPostings::build(&vocab).unwrap());
         vocab.vocab_derived_cache_set(index);
         let mut exits = ByteSet::default();
-        for byte in 0..=255u8 { if (byte as u32 + case) % 7 == 0 { exits.insert(byte); } }
+        for byte in 0..=255u8 { if (byte as u32 + case).is_multiple_of(7) { exits.insert(byte); } }
         let mut prefixes = vec![vec![0], vec![1, 2], vec![3, 4, 5], vec![255, 0]];
         prefixes.sort_unstable();
         for cover in [Some(prefixes.clone()), Some(vec![]), Some(vec![vec![]]),

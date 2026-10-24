@@ -124,13 +124,12 @@ fn compare_parser_mask_prefix_languages_history_reference(
         for (dwa, state, remaining) in [
             (left, current.left, &left_remaining), (right, current.right, &right_remaining),
         ] {
-            if !remaining.is_empty() {
-                if let Some(row) = state.and_then(|state| dwa.states().get(state as usize)) {
+            if !remaining.is_empty()
+                && let Some(row) = state.and_then(|state| dwa.states().get(state as usize)) {
                     labels.extend(row.transitions.keys().filter_map(|&label| {
                         (label != DEFAULT_LABEL).then_some(label as u32)
                     }));
                 }
-            }
         }
         let mut unnamed = 0u32;
         for &label in &labels {

@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let n: u32 = args.next().as_deref().unwrap_or("131072").parse()?;
     let repetitions: usize = args.next().as_deref().unwrap_or("2000").parse()?;
-    if n < 64 || n % 16 != 0 || repetitions < 10 || args.next().is_some() {
+    if n < 64 || !n.is_multiple_of(16) || repetitions < 10 || args.next().is_some() {
         return Err("usage: exact_token_range_bench [vocabulary-size-divisible-by-16 >=64] [repetitions >=10]".into());
     }
     let mut rows = Vec::new();

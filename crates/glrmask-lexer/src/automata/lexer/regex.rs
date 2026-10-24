@@ -188,14 +188,12 @@ pub fn validate_regular_regex(pattern: &str) -> Result<(), String> {
 pub fn parse_regex(pattern: &str, utf8: bool) -> Expr {
     // Mode-qualified source patterns use the checked parser. The internal legacy
     // parser remains separate, including historical raw-byte escape semantics.
-    if let Some(rest) = pattern.strip_prefix("(?") {
-        if let Some((flags, _)) = rest.split_once(':') {
-            if !flags.is_empty() && flags.chars().all(|c| "uisx-".contains(c))
+    if let Some(rest) = pattern.strip_prefix("(?")
+        && let Some((flags, _)) = rest.split_once(':')
+            && !flags.is_empty() && flags.chars().all(|c| "uisx-".contains(c))
                 && ['u','i','s','x'].into_iter().all(|flag|flags.contains(flag)) {
                 return parse_checked_regex(pattern).expect("source regex was validated before lowering");
             }
-        }
-    }
 
     let bytes = pattern.as_bytes();
     let (expr, pos) = parse_alternation(bytes, 0, utf8);
@@ -519,13 +517,12 @@ fn parse_byte_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) 
     }
     let mut set = U8Set::empty();
     while pos < input.len() && input[pos] != b']' {
-        if input[pos] == b'\\' {
-            if let Some((escape_set, next_pos)) = parse_escape_class_set(input, pos) {
+        if input[pos] == b'\\'
+            && let Some((escape_set, next_pos)) = parse_escape_class_set(input, pos) {
                 set = set.union(&escape_set);
                 pos = next_pos;
                 continue;
             }
-        }
 
         let Some((start, next_pos)) = parse_char_class_byte(input, pos) else {
             break;
@@ -660,13 +657,12 @@ fn parse_unicode_char_class(input: &[u8], pos: usize) -> (Expr, usize) {
     let mut byte_set = U8Set::empty();
     let mut unicode_ranges = Vec::new();
     while cursor < input.len() && input[cursor] != b']' {
-        if input[cursor] == b'\\' {
-            if let Some((escape_set, next)) = parse_escape_class_set(input, cursor) {
+        if input[cursor] == b'\\'
+            && let Some((escape_set, next)) = parse_escape_class_set(input, cursor) {
                 byte_set = byte_set.union(&escape_set);
                 cursor = next;
                 continue;
             }
-        }
 
         let Some((start, next)) = parse_utf8_class_atom(input, cursor) else {
             break;
@@ -675,13 +671,11 @@ fn parse_unicode_char_class(input: &[u8], pos: usize) -> (Expr, usize) {
         if cursor + 1 < input.len()
             && input[cursor] == b'-'
             && input[cursor + 1] != b']'
-        {
-            if let Some((end, next)) = parse_utf8_class_atom(input, cursor + 1) {
+            && let Some((end, next)) = parse_utf8_class_atom(input, cursor + 1) {
                 add_utf8_class_range(start, end, &mut byte_set, &mut unicode_ranges);
                 cursor = next;
                 continue;
             }
-        }
         add_utf8_class_atom(start, &mut byte_set, &mut unicode_ranges);
     }
     if cursor < input.len() && input[cursor] == b']' {

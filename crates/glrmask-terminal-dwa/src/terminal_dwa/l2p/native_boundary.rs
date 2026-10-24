@@ -105,12 +105,11 @@ impl Pool {
         if b == 0 || lo > hi {
             return;
         }
-        if let Some(last) = out.last_mut() {
-            if last.hi.checked_add(1) == Some(lo) && last.b == b {
+        if let Some(last) = out.last_mut()
+            && last.hi.checked_add(1) == Some(lo) && last.b == b {
                 last.hi = hi;
                 return;
             }
-        }
         out.push(Run { lo, hi, b })
     }
     fn import(&mut self, w: &Weight) -> Option<u32> {
@@ -1226,7 +1225,7 @@ mod tests {
         Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
             let t = toks
                 .into_iter()
-                .filter(|_| next(seed) % 3 == 0)
+                .filter(|_| next(seed).is_multiple_of(3))
                 .collect::<range_set_blaze::RangeSetBlaze<_>>();
             (!t.is_empty()).then_some((r, t))
         }))
@@ -1316,22 +1315,22 @@ mod tests {
             }
             nwa.set_start_states(vec![0]);
             for dst in 1..n {
-                if next(&mut seed) % 3 == 0 {
+                if next(&mut seed).is_multiple_of(3) {
                     let w = weight(&mut seed);
                     nwa.add_epsilon(0, dst as u32, w);
                 }
             }
             for s in 0..n {
-                if next(&mut seed) % 2 == 0 {
+                if next(&mut seed).is_multiple_of(2) {
                     let w = weight(&mut seed);
                     nwa.set_final_weight(s as u32, w)
                 }
                 for d in s + 1..n {
-                    if next(&mut seed) % 3 != 0 {
+                    if !next(&mut seed).is_multiple_of(3) {
                         continue;
                     }
                     for label in 0..3 {
-                        if next(&mut seed) % 2 == 0 {
+                        if next(&mut seed).is_multiple_of(2) {
                             nwa.add_transition(s as u32, label, d as u32, weight(&mut seed));
                         }
                     }
@@ -1395,10 +1394,10 @@ mod tests {
             for k in 0..width {
                 let rows = [0u32, 1, 2, 3, 4, 5, 6, 7];
                 let ts = Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
-                    if next(&mut seed) % 3 == 0 {
+                    if next(&mut seed).is_multiple_of(3) {
                         return None;
                     }
-                    Some((r, (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect()))
+                    Some((r, (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect()))
                 }));
                 nwa.add_epsilon(0, 1 + k as u32, ts);
             }
@@ -1407,9 +1406,9 @@ mod tests {
                     let st = 1 + level * width + k;
                     let finalw = Weight::from_uniform(
                         0..=7,
-                        (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect(),
+                        (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
                     );
-                    if level == layers - 1 || next(&mut seed) % 3 == 0 {
+                    if level == layers - 1 || next(&mut seed).is_multiple_of(3) {
                         nwa.set_final_weight(st as u32, finalw);
                     }
                     if level + 1 == layers {
@@ -1420,7 +1419,7 @@ mod tests {
                             let dst = 1 + (level + 1) * width + next(&mut seed) % width;
                             let ew = Weight::from_uniform(
                                 0..=7,
-                                (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect(),
+                                (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
                             );
                             nwa.add_transition(st as u32, label, dst as u32, ew);
                         }

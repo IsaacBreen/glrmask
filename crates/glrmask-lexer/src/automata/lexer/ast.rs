@@ -139,12 +139,11 @@ fn flatten_sequence_parts(exprs: Vec<Expr>) -> Vec<Expr> {
 
 fn simplify_single_byte_classes(exprs: &mut [Expr]) {
     for expr in exprs {
-        if let Expr::U8Class(set) = expr {
-            if set.len() == 1 {
+        if let Expr::U8Class(set) = expr
+            && set.len() == 1 {
                 let byte = set.iter().next().unwrap();
                 *expr = Expr::U8Seq(vec![byte]);
             }
-        }
     }
 }
 

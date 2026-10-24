@@ -17,7 +17,7 @@ fn is_terminal_name(name: &str) -> bool {
 enum Token {
     Ident(String),
     Literal(String),
-    SpecialToken(u32),
+    Special(u32),
     Marker(u32),
     CharClass { def: String, negate: bool },
     LParen,
@@ -231,7 +231,7 @@ impl<'a> Lexer<'a> {
             ));
         }
         self.pos += 1;
-        Ok(if marker { Token::Marker(token_id) } else { Token::SpecialToken(token_id) })
+        Ok(if marker { Token::Marker(token_id) } else { Token::Special(token_id) })
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
@@ -404,7 +404,7 @@ impl Parser {
             self.peek(),
             Some(Token::Ident(_))
                 | Some(Token::Literal(_))
-                | Some(Token::SpecialToken(_))
+                | Some(Token::Special(_))
                 | Some(Token::Marker(_))
                 | Some(Token::CharClass { .. })
                 | Some(Token::LParen)
@@ -435,7 +435,7 @@ impl Parser {
             Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
             Some(Token::Marker(id)) => Ok(GrammarExpr::marker(id)),
-            Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
+            Some(Token::Special(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
             Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate, utf8: true }),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => self.parse_group(),

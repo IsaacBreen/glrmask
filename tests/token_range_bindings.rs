@@ -47,7 +47,7 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
             assert!(state.is_accepting(), "{mode:?}, {id}");
             assert!(state.mask().iter().all(|word| *word == 0));
         }
-        let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
+        let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         assert_mask(&loaded, &[], 96, accepts);
         let external = constraint.save();
         let external = Constraint::load(&external, &vocab).unwrap();
@@ -100,7 +100,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         let mut state = outer.start();
         for id in [0, 120, 5, 1] { assert!(state.commit_token(id)); }
         assert!(state.is_accepting());
-        let outer_loaded = Constraint::load(&outer.save(), &vocab).unwrap();
+        let outer_loaded = Constraint::load(outer.save(), &vocab).unwrap();
         assert_mask(&outer_loaded, &[0, 120], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
     }
     // Binding is immutable: the original description is still open.
@@ -281,7 +281,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
                 .bind_snapshot("B", TokenSet::from_ranges([b])).unwrap();
             let options = mode.build_options().end_tokens([15]);
             let constraint = grammar.compile_with_build_options(&vocab, options).unwrap();
-            for constraint in [constraint.clone(), Constraint::load(&constraint.save(), &vocab).unwrap()] {
+            for constraint in [constraint.clone(), Constraint::load(constraint.save(), &vocab).unwrap()] {
                 assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
                 let mut state = constraint.start();
                 assert!(state.commit_token(0));
@@ -305,7 +305,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
             .bind_snapshot("B", TokenSet::from_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1])).unwrap();
         let original = grammar.compile_with_build_options(&vocab,
             mode.build_options().end_tokens([n])).unwrap();
-        for constraint in [original.clone(), Constraint::load(&original.save(), &vocab).unwrap()] {
+        for constraint in [original.clone(), Constraint::load(original.save(), &vocab).unwrap()] {
             assert_mask(&constraint, &[], n + 1, |id| id < n);
             assert_mask(&constraint, &[0], n + 1, |id| id < n && id != n / 2);
             assert_mask(&constraint, &[0, n - 1], n + 1, |id| id == n);

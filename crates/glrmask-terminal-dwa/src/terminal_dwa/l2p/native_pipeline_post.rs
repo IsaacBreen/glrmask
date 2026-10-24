@@ -73,14 +73,14 @@ fn canonicalize(a:&mut Arena,p:&mut Pool)->Option<()>{
  if a.states.len()<=1{return Some(())}reachable(a);let order=topo(a);if order.len()!=a.states.len(){return None}
  let mut mapped=vec![u32::MAX;a.states.len()];let mut states=Vec::<Row>::with_capacity(a.states.len());let mut seen=FxHashMap::<Row,u32>::default();let mut merged=0;
  let mut remap_branches=|bs:&[(u32,u32)],mapped:&[u32]|->Branches{
-  if p.bulk{if bs.is_empty(){return Branches::new()}if bs.len()==1{return smallvec![(mapped[bs[0].0 as usize],bs[0].1)];}}
+  if p.bulk{if bs.is_empty(){return Branches::new()}else if bs.len()==1{return smallvec![(mapped[bs[0].0 as usize],bs[0].1)];}}
   let mut pairs=bs.iter().map(|&(d,w)|(mapped[d as usize],w)).collect::<Vec<_>>();pairs.sort_by_key(|x|x.0);let mut out=Branches::with_capacity(pairs.len());
-  for(d,w)in pairs{if let Some((last,weight))=out.last_mut(){if *last==d{*weight=p.join(*weight,w);continue}}out.push((d,w));}out
+  for(d,w)in pairs{if let Some((last,weight))=out.last_mut()&& *last==d{*weight=p.join(*weight,w);continue}out.push((d,w));}out
  };
  for s in order.into_iter().rev(){let original=&a.states[s];let eps=remap_branches(&original.eps,&mapped);let edges=original.edges.iter().filter_map(|(l,bs)|{let v=remap_branches(bs,&mapped);(!v.is_empty()).then_some((*l,v))}).collect();let row=Row{final_w:original.final_w,eps,edges};
   let id=if let Some(&id)=seen.get(&row){merged+=1;id}else{let id=states.len()as u32;seen.insert(row.clone(),id);states.push(row);id};mapped[s]=id;
  }
- if p.failed{return None}if merged!=0{let mut starts=Vec::new();for&s in &a.starts{let id=mapped[s as usize];if !starts.contains(&id){starts.push(id)}}a.starts=starts;a.states=states;}Some(())
+ if p.failed{return None}else if merged!=0{let mut starts=Vec::new();for&s in &a.starts{let id=mapped[s as usize];if !starts.contains(&id){starts.push(id)}}a.starts=starts;a.states=states;}Some(())
 }
 fn crossing(a:Arena,owner:&[u32],start_owner:u32)->Option<Arena>{
  if a.states.len()>MAX_STATES{return None}let mut ids=vec![u32::MAX;a.states.len()*2];let mut payload=Vec::<(u32,bool)>::new();let mut states=Vec::<Row>::new();
@@ -132,54 +132,6 @@ fn finish_arena(a:Arena,p:Pool,stats:PostProfile)->Option<(DWA,PostProfile,Profi
  let(dwa,core)=run_imported(states,&a.starts,p,true,ms(t))?;Some((dwa,stats,core))
 }
 
-#[cfg(test)] mod tests {
-use super::*;
-use crate::terminal_dwa::{l2p::postprocess as original,scope::{BoundaryOwnership,ImmediateComponentId}};
-fn reference(n:&NWA,rows:&BTreeMap<u32,BitSet>,count:usize,ignore:Option<u32>,transparent:Option<&BitSet>,owner:&[u32],start:u32)->NWA{
- let mut offsets=Vec::new();let mut os=Vec::new();for(t,&o)in owner.iter().enumerate(){if t==0||owner[t-1]!=o{offsets.push(t as u32);os.push(ImmediateComponentId(o));}}
- let ownership=BoundaryOwnership::from_leaf_layout(&offsets,count as u32,&os,owner.iter().max().unwrap()+1).unwrap();
- let mut result=n.clone();original::apply_disallowed_follow_constraints(&mut result,rows,count,ignore,transparent);original::prune_non_coreachable_states(&mut result);original::canonicalize_acyclic_nwa(&mut result);result=original::filter_nwa_to_crossing_paths(&result,&ownership,ImmediateComponentId(start));original::prune_non_coreachable_states(&mut result);result
-}
-fn next(seed:&mut u64)->usize{*seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(*seed>>32)as usize}
-fn w(seed:&mut u64)->Weight{
- match next(seed)%9{0=>Weight::empty(),1=>Weight::all(),_=>Weight::from_per_tsid_token_sets([0u32,3,4,u32::MAX].into_iter().map(|row|(row,[0u32,1,63,64,255,256,511].into_iter().filter(|_|next(seed)%2==0).collect()))) }
-}
-#[test]fn native_post_matches_every_original_row_on_generated_dags(){
- let mut rng=723419u64;let mut fused_eligible=0;
- for case in 0..512{
-  let n=3+next(&mut rng)%23;let count=7;let mut nwa=NWA::new(0,0);for _ in 0..n{nwa.add_state();}
-  nwa.set_start_states(if case%19==0{vec![]}else if case%13==0{vec![0,1,0]}else{vec![0]});
-  for s in 0..n{
-   if next(&mut rng)%3!=0{nwa.set_final_weight(s as u32,w(&mut rng));}
-   for d in s+1..n{if next(&mut rng)%7==0{nwa.add_epsilon(s as u32,d as u32,w(&mut rng));}
-    if next(&mut rng)%4==0{let l=next(&mut rng)%count;let weight=w(&mut rng);nwa.add_transition(s as u32,l as i32,d as u32,weight.clone());if case%11==0{nwa.add_transition(s as u32,l as i32,d as u32,weight);}}
-   }
-   if case%17==0{nwa.states_mut()[s].transitions.entry(6).or_default();}
-  }
-  let mut rows=BTreeMap::new();if case%23!=0{for t in 0..count{let mut row=BitSet::new(count);for l in 0..count{if next(&mut rng)%3==0{row.set(l)}}rows.insert(t as u32,row);}}
-  let mut transparent=BitSet::new(count);if case%2==0{transparent.set(5);}let transparent=(case%5!=0).then_some(&transparent);let ignore=(case%3==0).then_some(1u32);
-  let owner=(0..count).map(|l|((l+case)%3)as u32).collect::<Vec<_>>();let start=(case%3)as u32;
-  let before=(nwa.start_states().to_vec(),nwa.states().to_vec());let baseline=reference(&nwa,&rows,count,ignore,transparent,&owner,start);
-  let(candidate,_)=prepare_export(&nwa,&rows,count,ignore,transparent,&owner,start).expect("bounded supported input");
-  assert_eq!(baseline.start_states(),candidate.start_states(),"starts case={case}");assert_eq!(baseline.states(),candidate.states(),"every row case={case}");
-  if let Some((a,_,_))=compile(&nwa,&rows,count,ignore,transparent,&owner,start){
-   let b=super::super::compile_sparse(&baseline).expect("same native eligibility").0;
-   assert!(super::super::graph_isomorphism(&a,&b).is_ok(),"fused case={case}");fused_eligible+=1;
-  }
-  assert_eq!(before,(nwa.start_states().to_vec(),nwa.states().to_vec()),"mutation case={case}");
- }
- eprintln!("NATIVE_POST 512 whole-array comparisons, fused_eligible={fused_eligible}");
-}
-#[test]fn native_post_declines_unsupported_without_mutation(){
- let rows=BTreeMap::new();let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![0]);n.add_transition(0,0,0,Weight::all());assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
- let mut n=NWA::new(0,0);n.add_state();n.add_state();n.set_start_states(vec![0]);n.add_transition(0,0,1,Weight::from_token_set_for_tsid(0,[512].into_iter().collect()));assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
- let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![99]);assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
- let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![0]);n.add_transition(0,-1,0,Weight::all());assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
- assert!(prepare_export(&n,&rows,2,None,None,&[0],0).is_none());
-}
-
-}
-
 
 /// Owns the exact seeded graph and finite coefficients throughout lexical
 /// event emission, postprocessing, determinization, and minimization.
@@ -219,7 +171,7 @@ impl NativeSink {
   let id=self.arena.states.len() as u32;self.arena.states.push(Row::default());id
  }
  fn coefficient(&mut self,end:u32,valid:bool,bits:&[u64;8])->u32 {
-  if !valid{self.pool.failed=true;return 0}if bits.iter().all(|&b|b==0){return 0}if end!=self.num_tsids-1 {self.pool.failed=true;return 0}
+  if !valid{self.pool.failed=true;return 0}else if bits.iter().all(|&b|b==0){return 0}else if end!=self.num_tsids-1 {self.pool.failed=true;return 0}
   let b=self.pool.intern_bits(*bits);
   if b==0 {0}else{self.pool.intern(smallvec![Run{lo:0,hi:end,b}])}
  }
@@ -245,10 +197,58 @@ impl NativeSink {
   for s in topo(&a).into_iter().rev() {
    let mut d=a.states[s].final_w.filter(|&w|w!=0).map(|_|0usize);
    for &(t,_) in &a.states[s].eps {if let Some(x)=depth[t as usize]{d=Some(d.unwrap_or(0).max(x));}}
-   for &(_,ref bs) in &a.states[s].edges {for &(t,_) in bs {if let Some(x)=depth[t as usize]{d=Some(d.unwrap_or(0).max(x+1));}}}
+   for (_,bs) in &a.states[s].edges {for &(t,_) in bs {if let Some(x)=depth[t as usize]{d=Some(d.unwrap_or(0).max(x+1));}}}
    depth[s]=d;
   }
   if a.starts.iter().filter_map(|&s|depth[s as usize]).max().is_none_or(|d|d<=2){return None}
   finish_arena(a,p,stats)
  }
+}
+
+#[cfg(test)] mod tests {
+use super::*;
+use crate::terminal_dwa::{l2p::postprocess as original,scope::{BoundaryOwnership,ImmediateComponentId}};
+fn reference(n:&NWA,rows:&BTreeMap<u32,BitSet>,count:usize,ignore:Option<u32>,transparent:Option<&BitSet>,owner:&[u32],start:u32)->NWA{
+ let mut offsets=Vec::new();let mut os=Vec::new();for(t,&o)in owner.iter().enumerate(){if t==0||owner[t-1]!=o{offsets.push(t as u32);os.push(ImmediateComponentId(o));}}
+ let ownership=BoundaryOwnership::from_leaf_layout(&offsets,count as u32,&os,owner.iter().max().unwrap()+1).unwrap();
+ let mut result=n.clone();original::apply_disallowed_follow_constraints(&mut result,rows,count,ignore,transparent);original::prune_non_coreachable_states(&mut result);original::canonicalize_acyclic_nwa(&mut result);result=original::filter_nwa_to_crossing_paths(&result,&ownership,ImmediateComponentId(start));original::prune_non_coreachable_states(&mut result);result
+}
+fn next(seed:&mut u64)->usize{*seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(*seed>>32)as usize}
+fn w(seed:&mut u64)->Weight{
+ match next(seed)%9{0=>Weight::empty(),1=>Weight::all(),_=>Weight::from_per_tsid_token_sets([0u32,3,4,u32::MAX].into_iter().map(|row|(row,[0u32,1,63,64,255,256,511].into_iter().filter(|_|next(seed).is_multiple_of(2)).collect()))) }
+}
+#[test]fn native_post_matches_every_original_row_on_generated_dags(){
+ let mut rng=723419u64;let mut fused_eligible=0;
+ for case in 0..512{
+  let n=3+next(&mut rng)%23;let count=7;let mut nwa=NWA::new(0,0);for _ in 0..n{nwa.add_state();}
+  nwa.set_start_states(if case%19==0{vec![]}else if case%13==0{vec![0,1,0]}else{vec![0]});
+  for s in 0..n{
+   if !next(&mut rng).is_multiple_of(3){nwa.set_final_weight(s as u32,w(&mut rng));}
+   for d in s+1..n{if next(&mut rng).is_multiple_of(7){nwa.add_epsilon(s as u32,d as u32,w(&mut rng));}
+    if next(&mut rng).is_multiple_of(4){let l=next(&mut rng)%count;let weight=w(&mut rng);nwa.add_transition(s as u32,l as i32,d as u32,weight.clone());if case%11==0{nwa.add_transition(s as u32,l as i32,d as u32,weight);}}
+   }
+   if case%17==0{nwa.states_mut()[s].transitions.entry(6).or_default();}
+  }
+  let mut rows=BTreeMap::new();if case%23!=0{for t in 0..count{let mut row=BitSet::new(count);for l in 0..count{if next(&mut rng).is_multiple_of(3){row.set(l)}}rows.insert(t as u32,row);}}
+  let mut transparent=BitSet::new(count);if case%2==0{transparent.set(5);}let transparent=(case%5!=0).then_some(&transparent);let ignore=(case%3==0).then_some(1u32);
+  let owner=(0..count).map(|l|((l+case)%3)as u32).collect::<Vec<_>>();let start=(case%3)as u32;
+  let before=(nwa.start_states().to_vec(),nwa.states().to_vec());let baseline=reference(&nwa,&rows,count,ignore,transparent,&owner,start);
+  let(candidate,_)=prepare_export(&nwa,&rows,count,ignore,transparent,&owner,start).expect("bounded supported input");
+  assert_eq!(baseline.start_states(),candidate.start_states(),"starts case={case}");assert_eq!(baseline.states(),candidate.states(),"every row case={case}");
+  if let Some((a,_,_))=compile(&nwa,&rows,count,ignore,transparent,&owner,start){
+   let b=super::super::compile_sparse(&baseline).expect("same native eligibility").0;
+   assert!(super::super::graph_isomorphism(&a,&b).is_ok(),"fused case={case}");fused_eligible+=1;
+  }
+  assert_eq!(before,(nwa.start_states().to_vec(),nwa.states().to_vec()),"mutation case={case}");
+ }
+ eprintln!("NATIVE_POST 512 whole-array comparisons, fused_eligible={fused_eligible}");
+}
+#[test]fn native_post_declines_unsupported_without_mutation(){
+ let rows=BTreeMap::new();let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![0]);n.add_transition(0,0,0,Weight::all());assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
+ let mut n=NWA::new(0,0);n.add_state();n.add_state();n.set_start_states(vec![0]);n.add_transition(0,0,1,Weight::from_token_set_for_tsid(0,[512].into_iter().collect()));assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
+ let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![99]);assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
+ let mut n=NWA::new(0,0);n.add_state();n.set_start_states(vec![0]);n.add_transition(0,-1,0,Weight::all());assert!(prepare_export(&n,&rows,2,None,None,&[0,1],0).is_none());
+ assert!(prepare_export(&n,&rows,2,None,None,&[0],0).is_none());
+}
+
 }

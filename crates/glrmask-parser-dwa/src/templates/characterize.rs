@@ -841,11 +841,10 @@ fn find_nonterminal_cycle(adjacency: &NtAdjacency) -> Option<Vec<NonterminalID>>
     let mut path = Vec::new();
 
     for &nonterminal in adjacency.keys() {
-        if colors.get(&nonterminal).copied().unwrap_or(0) == 0 {
-            if let Some(cycle) = dfs_nonterminal_cycle(nonterminal, adjacency, &mut colors, &mut path) {
+        if colors.get(&nonterminal).copied().unwrap_or(0) == 0
+            && let Some(cycle) = dfs_nonterminal_cycle(nonterminal, adjacency, &mut colors, &mut path) {
                 return Some(cycle);
             }
-        }
     }
 
     None
@@ -1001,7 +1000,7 @@ fn reduce_crossing_pattern(config: &RelationConfig, reduce_len: usize) -> Vec<St
     debug_assert!(reduce_len >= config.segment.len());
 
     let mut pop = config.input.clone();
-    pop.extend(std::iter::repeat(StackMatcher::Any).take(reduce_len - config.segment.len()));
+    pop.extend(std::iter::repeat_n(StackMatcher::Any, reduce_len - config.segment.len()));
     pop
 }
 
@@ -1027,11 +1026,10 @@ fn stack_effect_edits(
         let depth = guard.pop as usize;
         let allowed = guard.states.as_slice();
 
-        if let Some(previous) = previous_depth {
-            if depth < previous {
+        if let Some(previous) = previous_depth
+            && depth < previous {
                 return Vec::new();
             }
-        }
         previous_depth = Some(depth);
 
         if depth > shift_pop || allowed.is_empty() {

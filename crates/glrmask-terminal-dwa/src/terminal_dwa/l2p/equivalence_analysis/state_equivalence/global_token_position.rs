@@ -866,9 +866,7 @@ fn state_partial_signature(
         .map(|partition| partition.class_by_state[state])
         .collect::<PositionSignature>();
     signature.push(
-        tail_active[state]
-            .then_some(state as u32)
-            .unwrap_or(u32::MAX),
+        if tail_active[state] { state as u32 } else { u32::MAX },
     );
     signature
 }

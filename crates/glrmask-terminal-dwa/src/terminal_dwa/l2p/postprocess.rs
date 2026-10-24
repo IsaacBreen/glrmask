@@ -202,31 +202,28 @@ fn compute_forward_reachable(nwa: &NWA) -> Vec<bool> {
     let mut queue = VecDeque::new();
 
     for &start in nwa.start_states() {
-        if let Some(flag) = reachable.get_mut(start as usize) {
-            if !*flag {
+        if let Some(flag) = reachable.get_mut(start as usize)
+            && !*flag {
                 *flag = true;
                 queue.push_back(start);
             }
-        }
     }
 
     while let Some(state_id) = queue.pop_front() {
         let state = &nwa.states()[state_id as usize];
         for (target, _) in &state.epsilons {
-            if let Some(flag) = reachable.get_mut(*target as usize) {
-                if !*flag {
+            if let Some(flag) = reachable.get_mut(*target as usize)
+                && !*flag {
                     *flag = true;
                     queue.push_back(*target);
                 }
-            }
         }
         for (target, _) in state.transitions.values().flatten() {
-            if let Some(flag) = reachable.get_mut(*target as usize) {
-                if !*flag {
+            if let Some(flag) = reachable.get_mut(*target as usize)
+                && !*flag {
                     *flag = true;
                     queue.push_back(*target);
                 }
-            }
         }
     }
 
@@ -922,7 +919,7 @@ mod tests {
         nwa.add_transition(start, ignore as i32, after_ignore, Weight::all());
         nwa.add_transition(
             after_ignore,
-            real_terminal as i32,
+            real_terminal,
             accept,
             Weight::all(),
         );
@@ -941,7 +938,7 @@ mod tests {
 
         let dwa = determinize(&nwa).unwrap();
         assert!(
-            !dwa.eval_word(&[ignore as i32, real_terminal as i32]).is_empty(),
+            !dwa.eval_word(&[ignore as i32, real_terminal]).is_empty(),
             "an initial labelled ignore must be transparent to follow pruning"
         );
     }

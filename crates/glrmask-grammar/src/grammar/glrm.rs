@@ -491,7 +491,7 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
         .states
         .iter()
         .enumerate()
-        .filter_map(|(state_id, state)| state.is_accepting.then(|| expr_nfa.state_name(state_id as u32)))
+        .filter(|&(state_id, state)| state.is_accepting).map(|(state_id, state)| expr_nfa.state_name(state_id as u32))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("  accept {};\n\n", accepts));

@@ -553,7 +553,7 @@ fn random_small_grammars_preserve_language() {
                 let len = (next(&mut seed) % 4) as usize; // 0..=3
                 let mut rhs = Vec::new();
                 for _ in 0..len {
-                    if next(&mut seed) % 2 == 0 {
+                    if next(&mut seed).is_multiple_of(2) {
                         rhs.push(t((next(&mut seed) % 3) as u32));
                     } else {
                         rhs.push(nt((next(&mut seed) % n as u64) as u32));

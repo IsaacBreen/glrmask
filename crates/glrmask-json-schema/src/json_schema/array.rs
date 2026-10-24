@@ -63,8 +63,7 @@ impl<'a> Lowerer<'a> {
             && schema.prefix_items.is_empty()
             && let Some(max) = schema.max_items
             && max >= 2
-        {
-            if self.should_terminalize_bounded_scalar_array(max)
+            && self.should_terminalize_bounded_scalar_array(max)
                 && let Some((item, partition_class)) =
                     self.lower_inline_bounded_array_string_item_expr(&schema.items)?
             {
@@ -72,7 +71,6 @@ impl<'a> Lowerer<'a> {
                     lowerer.bounded_homogeneous_array_terminal(item, schema.min_items, max)
                 }));
             }
-        }
         if !self.dynamic_value_enabled()
             && schema.prefix_items.is_empty()
             && schema.min_items == 0

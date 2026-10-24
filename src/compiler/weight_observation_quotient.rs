@@ -30,8 +30,8 @@ impl WeightObservationQuotient {
         let mut unique = Vec::new();
         let mut source_ids = FxHashMap::default();
         for weight in sources {
-            if !source_ids.contains_key(&weight.ptr_key()) {
-                source_ids.insert(weight.ptr_key(), unique.len());
+            if let std::collections::hash_map::Entry::Vacant(e) = source_ids.entry(weight.ptr_key()) {
+                e.insert(unique.len());
                 unique.push(weight.clone());
             }
         }

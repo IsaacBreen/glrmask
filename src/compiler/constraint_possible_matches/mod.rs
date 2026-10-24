@@ -602,7 +602,7 @@ pub(crate) fn prepared_proper_prefix_byte_candidates(
 }
 
 #[allow(dead_code)]
-pub(crate) fn dense_word_count(token_slots: u32) -> usize { (token_slots as usize + 63) / 64 }
+pub(crate) fn dense_word_count(token_slots: u32) -> usize { (token_slots as usize).div_ceil(64) }
 
 #[allow(dead_code)]
 pub(crate) fn max_original_token_slot(token_bytes: &BTreeMap<u32, Vec<u8>>) -> u32 {
@@ -1631,7 +1631,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
             if !entries.is_empty() {
                 bitmask_unique_masks = shared_token_set_by_mask.len();
             }
-            (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+            (terminal_id, Weight::from_per_tsid_shared(entries))
         }).filter(|(_, weight)| !weight.is_empty()).collect()
     } else {
         ids_by_label.into_iter().map(|(terminal_id, by_state)| {
@@ -1646,7 +1646,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
                     entries.push((state, shared_rangeset(token_set)));
                 }
             }
-            (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+            (terminal_id, Weight::from_per_tsid_shared(entries))
         }).filter(|(_, weight)| !weight.is_empty()).collect()
     };
     let terminal_ids = possible_matches.len();
@@ -1919,7 +1919,7 @@ fn build_legacy_possible_match_vocab_and_weights_from_interval_maps(
                 entries.push((state, shared_rangeset(token_set)));
             }
         }
-        (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+        (terminal_id, Weight::from_per_tsid_shared(entries))
     }).filter(|(_, weight)| !weight.is_empty()).collect();
 
     (PossibleMatchVocabMap { original_to_internal, internal_to_originals }, possible_matches)
@@ -3488,15 +3488,13 @@ fn llg_master_max_safe_chars_for_artifacts(artifacts: &OrderedVocabTrieArtifacts
             .ordered_vocab
             .ordered_token_bytes
             .iter()
-            .filter_map(|token| {
-                safe_plus.is_match(token).then(|| {
+            .filter(|&token| safe_plus.is_match(token)).map(|token| {
                     let chars = std::str::from_utf8(token)
                         .expect("safe-string UTF-8 regex matched invalid UTF-8")
                         .chars()
                         .count();
                     u16::try_from(chars).expect("model token exceeds u16 Unicode-scalar count")
                 })
-            })
             .max()
             .unwrap_or(0)
     })
@@ -4256,6 +4254,23 @@ pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
     let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
 }
 
+
+/// Read-only byte-ordered vocabulary data that compilation already prepared.
+/// A cold bounded-token query must not build or sort a whole new vocabulary.
+pub(crate) struct PreparedOrderedTokens { data:Arc<OrderedVocabTrieArtifacts> }
+impl PreparedOrderedTokens {
+    pub(crate) fn len(&self)->usize {self.data.ordered_vocab.ordered_token_bytes.len()}
+    pub(crate) fn bytes(&self,index:usize)->&[u8] {&self.data.ordered_vocab.ordered_token_bytes[index]}
+    pub(crate) fn originals(&self,index:usize)->&[u32] {&self.data.ordered_vocab.ordered_to_originals[index]}
+    pub(crate) fn child_end(&self,start:usize,end:usize,offset:usize)->usize {
+        let byte=self.bytes(start)[offset];
+        start+self.data.ordered_vocab.ordered_token_bytes[start..end].partition_point(|b|b[offset]==byte)
+    }
+}
+pub(crate) fn prepared_ordered_tokens(vocab:&Vocab)->Option<PreparedOrderedTokens> {
+    vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>().map(|data|PreparedOrderedTokens {data})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4669,21 +4684,4 @@ mod tests {
             "PM vocab equivalence must include terminal IDs above the old u128 ceiling",
         );
     }
-}
-
-
-/// Read-only byte-ordered vocabulary data that compilation already prepared.
-/// A cold bounded-token query must not build or sort a whole new vocabulary.
-pub(crate) struct PreparedOrderedTokens { data:Arc<OrderedVocabTrieArtifacts> }
-impl PreparedOrderedTokens {
-    pub(crate) fn len(&self)->usize {self.data.ordered_vocab.ordered_token_bytes.len()}
-    pub(crate) fn bytes(&self,index:usize)->&[u8] {&self.data.ordered_vocab.ordered_token_bytes[index]}
-    pub(crate) fn originals(&self,index:usize)->&[u32] {&self.data.ordered_vocab.ordered_to_originals[index]}
-    pub(crate) fn child_end(&self,start:usize,end:usize,offset:usize)->usize {
-        let byte=self.bytes(start)[offset];
-        start+self.data.ordered_vocab.ordered_token_bytes[start..end].partition_point(|b|b[offset]==byte)
-    }
-}
-pub(crate) fn prepared_ordered_tokens(vocab:&Vocab)->Option<PreparedOrderedTokens> {
-    vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>().map(|data|PreparedOrderedTokens {data})
 }

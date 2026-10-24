@@ -32,6 +32,7 @@ use self::load::{load_document_with_features, scan_document_features};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub enum JsonNameDomain {
     /// Canonical JSON spelling emitted for an exact fixed property name.
     KeyCanonical,
@@ -398,7 +399,8 @@ mod lexer_partition_policy_tests {
 
     #[test]
     fn final_pattern_singletons_follow_resolved_terminal_identity() {
-        assert!(JSON_PATTERN_SINGLETONS_DEFAULT);
+        let default_pattern_singletons = JSON_PATTERN_SINGLETONS_DEFAULT;
+        assert!(default_pattern_singletons);
         let mut grammar = NamedGrammar {
             rules: vec![
                 terminal("A", GrammarExpr::RawRegex("[a-z]+".to_string())),

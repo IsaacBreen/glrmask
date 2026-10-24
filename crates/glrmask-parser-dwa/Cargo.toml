@@ -29,3 +29,6 @@ rayon = "1"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive"] }
 smallvec = { version = "1", features = ["serde"] }
+
+[lints]
+workspace = true

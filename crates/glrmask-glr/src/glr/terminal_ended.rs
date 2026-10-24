@@ -1029,9 +1029,9 @@ fn construct(
     // terminal_exits[B] = (T, a) with T -> a and R[B, T].
     let mut terminal_exits: Vec<Vec<(NtIx, TerminalID)>> = vec![Vec::new(); n];
     for &(lhs, terminal) in &grammar.terminal_rules {
-        for b in 0..n {
+        for (b, exits) in terminal_exits.iter_mut().enumerate().take(n) {
             if closures.right[b].contains(lhs as usize) {
-                terminal_exits[b].push((lhs, terminal));
+                exits.push((lhs, terminal));
             }
         }
     }
@@ -1043,9 +1043,9 @@ fn construct(
     // last_binary[C] = (D, B, E) with D -> B E and U[E, C].
     let mut last_binary: Vec<Vec<(NtIx, NtIx, NtIx)>> = vec![Vec::new(); n];
     for &(d, b, e) in &grammar.binary_rules {
-        for c in 0..n {
-            if closures.unit[e as usize].contains(c as usize) {
-                last_binary[c].push((d, b, e));
+        for (c, binaries) in last_binary.iter_mut().enumerate().take(n) {
+            if closures.unit[e as usize].contains(c) {
+                binaries.push((d, b, e));
             }
         }
     }
@@ -1128,9 +1128,10 @@ fn assemble(
     let mut pairs: Vec<PairKey> = builder.demanded.iter().copied().collect();
     pairs.sort_unstable();
 
-    let mut cursor: u64 = max_source_nt as u64 + 1;
+    let base_cursor: u64 = max_source_nt as u64 + 1;
     let mut id_of = BTreeMap::new();
-    for pair in &pairs {
+    for (offset, pair) in pairs.iter().enumerate() {
+        let cursor = base_cursor + offset as u64;
         if cursor > u32::MAX as u64 {
             return Err(CompileDecline::ResourceLimit {
                 stage: Stage::Construct,
@@ -1140,7 +1141,6 @@ fn assemble(
             });
         }
         id_of.insert(Name::Pair(*pair), cursor as NonterminalID);
-        cursor += 1;
     }
 
     let convert = |symbol: &Sym| -> Symbol {

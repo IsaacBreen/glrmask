@@ -181,7 +181,7 @@ impl Masks {
         value.hash(&mut hasher);
         let hash = hasher.finish();
         #[cfg(test)]
-        { return hash & self.fingerprint_mask; }
+        { hash & self.fingerprint_mask}
         #[cfg(not(test))]
         { hash }
     }
@@ -641,10 +641,10 @@ fn minimize_final_union_impl(
     for state in input.states() {
         edges = edges.checked_add(state.transitions.len())?;
         if edges > MAX_EDGES { return None; }
-        if let Some(weight)=&state.final_weight {
-            if !finals.contains_key(&weight.ptr_key()) {
+        if let Some(weight)=&state.final_weight
+            && let std::collections::hash_map::Entry::Vacant(e) = finals.entry(weight.ptr_key()) {
                 if !fits_finite_point_budget(weight, MAX_POINTS) { return None; }
-                finals.insert(weight.ptr_key(), weight);
+                e.insert(weight);
                 batch.push(weight);
                 if batch.len() == 64 {
                     let next = Weight::union_all(batch.iter().copied().chain(std::iter::once(&domain)));
@@ -653,7 +653,6 @@ fn minimize_final_union_impl(
                     domain = next;
                 }
             }
-        }
     }
     batch.push(&domain);
     let domain = Weight::union_all(batch);
@@ -1456,7 +1455,7 @@ fn repeated_support_rows_preserve_original_prefix_masks() {
             for label in 0..64 {
                 let target=source+1+(next()as usize%(n-source-1));
                 let weight=&weights[((label/8+case)%8)as usize];
-                states[source].transitions.insert(label as i32,(target as u32,weight.clone()));
+                states[source].transitions.insert(label,(target as u32,weight.clone()));
             }
             if source%2==0 {
                 states[source].transitions.insert(2147483646,((n-1)as u32,Weight::empty()));

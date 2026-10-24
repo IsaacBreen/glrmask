@@ -87,9 +87,9 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
         for view in composition.outer_views.iter().chain(&composition.views)
             .chain(composition.completion_view.iter()) {
             let key = Arc::as_ptr(&view.source) as usize;
-            if !dictionary.contains_key(&key) {
+            if let std::collections::btree_map::Entry::Vacant(e) = dictionary.entry(key) {
                 let id = templates.len() as u32 + 1 + extras.len() as u32;
-                dictionary.insert(key, id); extras.push(Arc::clone(&view.source));
+                e.insert(id); extras.push(Arc::clone(&view.source));
             }
         }
         count(&mut out, extras.len());
@@ -216,8 +216,8 @@ impl Input<'_> {
         }
         let source_program = sources.get(source as usize).ok_or("scoped source reference outside dictionary")?;
         let key = (source, symbols);
-        if !prepared.contains_key(&key) {
-            prepared.insert(key, ScopedProgram::prepare(Arc::clone(source_program), symbols)
+        if let std::collections::btree_map::Entry::Vacant(e) = prepared.entry(key) {
+            e.insert(ScopedProgram::prepare(Arc::clone(source_program), symbols)
                 .map_err(|error| error.to_string())?);
         }
         let mut view = prepared[&key].clone();

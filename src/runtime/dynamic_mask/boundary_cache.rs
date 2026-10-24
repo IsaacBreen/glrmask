@@ -83,11 +83,10 @@ impl FullWalkBoundaryDirectCache {
             let mut dense = vec![0; self.width].into_boxed_slice();
             for &cell in &row.cells {
                 let retained = (cell & 3) as u8;
-                if retained != 0 {
-                    if let Some(target) = dense.get_mut((cell >> 2) as usize) {
+                if retained != 0
+                    && let Some(target) = dense.get_mut((cell >> 2) as usize) {
                         *target = retained;
                     }
-                }
             }
             self.dense_bytes += self.width;
             row.dense = Some(dense);

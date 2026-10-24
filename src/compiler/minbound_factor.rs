@@ -448,7 +448,7 @@ fn mb_exact_bounded_factor_words(
             break;
         }
         assert!(iterations < 256, "bounded factor summary did not converge");
-        if iterations <= 4 || iterations % 10 == 0 {
+        if iterations <= 4 || iterations.is_multiple_of(10) {
             let factor_cells = summaries.iter().map(|summary| summary.factor.len()).sum::<usize>();
             eprintln!(
                 "MINBOUND bounded_factor_iteration iteration={} factor_cells={} ms={:.3}",

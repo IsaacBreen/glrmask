@@ -66,7 +66,7 @@ pub(super)fn apply(states:&mut[FastBoundaryNwaState],pool:&mut FastBoundaryWeigh
         }
         // New row padding duplicates class zero rather than inventing a
         // fresh ghost truth assignment. This keeps ALL/equality/subset exact.
-        if groups.len()%64!=0 && value[0]&1!=0{
+        if !groups.len().is_multiple_of(64) && value[0]&1!=0{
             value[new_rows-1]|=u64::MAX<<(groups.len()%64);
         }
         map[weight]=new.intern(value);

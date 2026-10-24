@@ -140,11 +140,9 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn remove(&mut self, key: &K) -> Option<V> {
         match self {
             CompactMap::Inline(sv) => {
-                if let Some(pos) = sv.iter().position(|(k, _)| k == key) {
-                    Some(sv.swap_remove(pos).1)
-                } else {
-                    None
-                }
+                sv.iter()
+                    .position(|(k, _)| k == key)
+                    .map(|pos| sv.swap_remove(pos).1)
             }
             CompactMap::Large(m) => m.remove(key),
         }
@@ -807,7 +805,7 @@ where
     children
         .values()
         .flat_map(|kids| kids.values())
-        .map(|c| depth_of(c))
+        .map(depth_of)
         .max()
         .map_or(0, |d| d + 1)
 }
@@ -989,18 +987,18 @@ fn new_lower<T: Clone + Eq + Hash>(mut children: Children<T, Lower<T>>, empty: b
 
 fn new_segment<T: Clone + Eq + Hash>(values: SV<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
     // Merge with child segment if possible and fits.
-    if let Lower::Segment(child_seg) = &*next {
-        if let Some(merged) = child_seg.values.try_append(&values) {
-            let max_depth = child_seg.next.max_depth() + merged.len() as u32;
-            let segments_len = merged.len() + child_seg.next.segments_len();
-            return Arc::new(Lower::Segment(Arc::new(Segment {
-                values: merged,
-                next: child_seg.next.clone(),
-                max_depth,
-                segments_len,
-                rest: OnceLock::new(),
-            })));
-        }
+    if let Lower::Segment(child_seg) = &*next
+        && let Some(merged) = child_seg.values.try_append(&values)
+    {
+        let max_depth = child_seg.next.max_depth() + merged.len() as u32;
+        let segments_len = merged.len() + child_seg.next.segments_len();
+        return Arc::new(Lower::Segment(Arc::new(Segment {
+            values: merged,
+            next: child_seg.next.clone(),
+            max_depth,
+            segments_len,
+            rest: OnceLock::new(),
+        })));
     }
     let max_depth = next.max_depth() + values.len() as u32;
     let segments_len = values.len() + next.segments_len();
@@ -2515,7 +2513,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             lower: &Arc<Lower<T>>,
             nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
             lower_ids: &mut FxHashMap<usize, u32>,
-            upper_ids: &mut FxHashMap<usize, u32>,
         ) -> u32 {
             let ptr = lower_node_id(lower);
             if let Some(id) = lower_ids.get(&ptr) {
@@ -2528,7 +2525,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         for child in kids.values() {
                             indexed_children.push((
                                 value.clone(),
-                                index_lower(child, nodes, lower_ids, upper_ids),
+                                index_lower(child, nodes, lower_ids),
                             ));
                         }
                     }
@@ -2541,7 +2538,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
                     source: IndexedLowerIdentity::new(lower),
                     values: segment.values.iter().cloned().collect::<Vec<_>>(),
-                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                    next: index_lower(&segment.next, nodes, lower_ids),
                 },
             };
             let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
@@ -2578,7 +2575,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
                     accumulator: interface.acc.clone(),
-                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                    lower: index_lower(&interface.inner, nodes, lower_ids),
                 },
             };
             let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
@@ -2628,7 +2625,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             lower: &Arc<Lower<T>>,
             nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
             lower_ids: &mut FxHashMap<usize, u32>,
-            upper_ids: &mut FxHashMap<usize, u32>,
         ) -> u32 {
             let ptr = lower_node_id(lower);
             if let Some(id) = lower_ids.get(&ptr) {
@@ -2641,7 +2637,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         for child in kids.values() {
                             indexed_children.push((
                                 value.clone(),
-                                index_lower(child, nodes, lower_ids, upper_ids),
+                                index_lower(child, nodes, lower_ids),
                             ));
                         }
                     }
@@ -2654,7 +2650,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
                     source: IndexedLowerIdentity::new(lower),
                     values: segment.values.iter().cloned().collect::<Vec<_>>(),
-                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                    next: index_lower(&segment.next, nodes, lower_ids),
                 },
             };
             let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
@@ -2691,7 +2687,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
                     accumulator: interface.acc.clone(),
-                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                    lower: index_lower(&interface.inner, nodes, lower_ids),
                 },
             };
             let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
@@ -2884,12 +2880,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             }
         }
         // If values was exactly drained, advance to next Segment so top() works.
-        if self.values.is_empty() && self.pending_top.is_none() {
-            if let Lower::Segment(seg) = &*self.next {
+        if self.values.is_empty() && self.pending_top.is_none()
+            && let Lower::Segment(seg) = &*self.next {
                 self.values = seg.values.clone();
                 self.next = seg.next.clone();
             }
-        }
         remaining
     }
 
@@ -4675,8 +4670,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                     }
 
-                    if let Some(acc) = &b.empty {
-                        if k == 1 {
+                    if let Some(acc) = &b.empty
+                        && k == 1 {
                             let terminal_lower = new_lower(CompactMap::new(), true);
                             let terminal_upper = new_interface(terminal_lower, acc.clone());
                             merged = Some(match merged {
@@ -4684,7 +4679,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                                 None => terminal_upper,
                             });
                         }
-                    }
 
                     if let Some(merged) = merged {
                         try_promote(&merged)
@@ -5247,7 +5241,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Lower::General { .. } => lower_general_nodes += 1,
             }
             // Walk through this node and any owned segment chain below it.
-            let mut current: &Lower<T> = &*node;
+            let mut current: &Lower<T> = &node;
             loop {
                 match current {
                     Lower::Segment(seg) => {
@@ -5904,7 +5898,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return items.into_iter().next().unwrap();
         }
         while items.len() > 1 {
-            let mut next = Vec::with_capacity((items.len() + 1) / 2);
+            let mut next = Vec::with_capacity(items.len().div_ceil(2));
             let mut iter = items.into_iter();
             while let Some(a) = iter.next() {
                 if let Some(b) = iter.next() {
@@ -5919,11 +5913,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn fuse(&self, levels: Option<isize>) -> Self {
-        if let Some(l) = levels {
-            if l <= 0 {
+        if let Some(l) = levels
+            && l <= 0 {
                 return self.clone();
             }
-        }
 
         // Fast path for fuse(Some(1)): children see remain=0 → identity.
         // So fuse is a no-op iff the top node has no multi-depth slots.
@@ -5956,11 +5949,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             T: Clone + Eq + Hash,
             A: Merge + Clone + Eq + Hash,
         {
-            if let Some(r) = remain {
-                if r == 0 {
+            if let Some(r) = remain
+                && r == 0 {
                     return node.clone();
                 }
-            }
             let key = (lower_node_id(node), remain);
             if let Some(cached) = memo.get(&key) {
                 return cached.clone();
@@ -6033,11 +6025,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             T: Clone + Eq + Hash,
             A: Merge + Clone + Eq + Hash,
         {
-            if let Some(r) = remain {
-                if r == 0 {
+            if let Some(r) = remain
+                && r == 0 {
                     return node.clone();
                 }
-            }
             let key = (Arc::as_ptr(node) as usize, remain);
             if let Some(cached) = memo_upper.get(&key) {
                 return cached.clone();
@@ -6557,11 +6548,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             match &**node {
                 Upper::Interface(iface) => pred(&iface.acc),
                 Upper::Branch(b) => {
-                    if let Some(acc) = &b.empty {
-                        if !pred(acc) {
+                    if let Some(acc) = &b.empty
+                        && !pred(acc) {
                             return false;
                         }
-                    }
                     for kids in b.children.values() {
                         for child in kids.values() {
                             if !check(child, pred) {
@@ -6971,19 +6961,19 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         })
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn try_replace_predecessors_below_top(
         &self,
         top: &T,
         mut replacement: impl FnMut(&T) -> Result<Option<T>, ()>,
     ) -> Result<Self, ()> {
-        fn append_replacements<T, A>(
+        fn append_replacements<T>(
             node: &Arc<Lower<T>>,
             replacement: &mut impl FnMut(&T) -> Result<Option<T>, ()>,
             shifted: &mut Children<T, Lower<T>>,
         ) -> Result<(), ()>
         where
             T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
         {
             match &**node {
                 Lower::Segment(_) => {
@@ -7028,14 +7018,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     return Ok(Self::empty());
                 }
                 let below_top = interface.inner.segment_rest_arc();
-                append_replacements::<T, A>(&below_top, &mut replacement, &mut shifted)?;
+                append_replacements::<T>(&below_top, &mut replacement, &mut shifted)?;
             }
             Lower::General { children, .. } => {
                 let Some(top_children) = children.get(top) else {
                     return Ok(Self::empty());
                 };
                 for below_top in top_children.values() {
-                    append_replacements::<T, A>(
+                    append_replacements::<T>(
                         below_top,
                         &mut replacement,
                         &mut shifted,
@@ -7053,6 +7043,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         })
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn try_replace_top_predecessors_with_sequences(
         &self,
         max_lower_prefix: usize,
@@ -7092,7 +7083,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             prefix
         }
 
-        fn append_replacements<T, A>(
+        fn append_replacements<T>(
             top: &T,
             node: &Arc<Lower<T>>,
             max_lower_prefix: usize,
@@ -7105,7 +7096,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         ) -> Result<(), ()>
         where
             T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
         {
             let mut append = |predecessor: &T, below: &Arc<Lower<T>>| -> Result<(), ()> {
                 let lower_prefix = unique_lower_prefix(below, max_lower_prefix);
@@ -7152,7 +7142,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Lower::Segment(_) => {
                 let top = interface.inner.segment_top_value();
                 let below_top = interface.inner.segment_rest_arc();
-                append_replacements::<T, A>(
+                append_replacements::<T>(
                     top,
                     &below_top,
                     max_lower_prefix,
@@ -7163,7 +7153,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Lower::General { children, .. } => {
                 for (top, top_children) in children.iter() {
                     for below_top in top_children.values() {
-                        append_replacements::<T, A>(
+                        append_replacements::<T>(
                             top,
                             below_top,
                             max_lower_prefix,

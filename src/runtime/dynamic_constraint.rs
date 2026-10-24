@@ -885,9 +885,9 @@ impl DynamicConstraint {
             ));
         }
         Ok(DynamicConstraintPayloadV1 {
-            table: payload.table.into(),
+            table: payload.table,
             terminal_display_names: payload.terminal_display_names,
-            tokenizer: payload.tokenizer.into(),
+            tokenizer: payload.tokenizer,
             ignore_terminal: payload.ignore_terminal,
             direct_regular_automaton: None,
             token_bytes: payload.token_bytes,
@@ -988,7 +988,8 @@ impl DynamicConstraint {
                 .filter_map(|(&id, bytes)| bytes.is_empty().then_some(id))
                 .collect::<Vec<u32>>().into()
         };
-        let inner = Constraint {
+        
+        Constraint {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
@@ -1103,8 +1104,7 @@ impl DynamicConstraint {
             composition_link_metadata_materialized: true,
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
-        };
-        inner
+        }
     }
 
     pub(crate) fn from_template_runtime_parts(
@@ -1598,11 +1598,9 @@ impl DynamicConstraint {
             Vec::new()
         };
         let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
-        let residual_runtime_oracles = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
+        let residual_runtime_oracles = if crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
             .ok()
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-            .then(|| constraint.tokenizer.virtual_residual_runtime_oracles())
-            .unwrap_or_default();
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on")) { constraint.tokenizer.virtual_residual_runtime_oracles() } else { Default::default() };
         let mask_quotient = constraint
             .dynamic_mask_vocab
             .mask_tokenizer_quotient_for_transfer();
@@ -1616,10 +1614,8 @@ impl DynamicConstraint {
             .dynamic_mask_vocab
             .projected_terminal_quotients_prepared();
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
-        let recursive_constraint_artifact = constraint
-            .uses_compact_segmented_parser_runtime()
-            .then(|| constraint.save_body_external_artifact())
-            .unwrap_or_default();
+        let recursive_constraint_artifact = if constraint
+            .uses_compact_segmented_parser_runtime() { constraint.save_body_external_artifact() } else { Default::default() };
         let metadata = DynamicConstraintTransferMetadataV11 {
             terminal_display_names: constraint.terminal_display_names.clone(),
             ignore_terminal: constraint.ignore_terminal,
@@ -1722,11 +1718,9 @@ impl DynamicConstraint {
             (Vec::new(), None)
         };
         let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
-        let residual_runtime_oracles = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
+        let residual_runtime_oracles = if crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
             .ok()
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-            .then(|| constraint.tokenizer.virtual_residual_runtime_oracles())
-            .unwrap_or_default();
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on")) { constraint.tokenizer.virtual_residual_runtime_oracles() } else { Default::default() };
         let mask_quotient = constraint
             .dynamic_mask_vocab
             .mask_tokenizer_quotient_for_transfer();
@@ -1740,10 +1734,8 @@ impl DynamicConstraint {
             .dynamic_mask_vocab
             .projected_terminal_quotients_prepared();
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
-        let recursive_constraint_artifact = constraint
-            .uses_compact_segmented_parser_runtime()
-            .then(|| constraint.save_body_external_artifact())
-            .unwrap_or_default();
+        let recursive_constraint_artifact = if constraint
+            .uses_compact_segmented_parser_runtime() { constraint.save_body_external_artifact() } else { Default::default() };
         let metadata_base = DynamicConstraintTransferMetadataV11 {
             terminal_display_names: constraint.terminal_display_names.clone(),
             ignore_terminal: constraint.ignore_terminal,
@@ -2874,14 +2866,13 @@ impl DynamicConstraint {
             .map(DynamicMaskVocab::from_artifact)
             .transpose()
             .map_err(crate::GlrMaskError::Serialization)?;
-        if let (Some(vocab), Some(first)) = (&shared_dynamic_vocab, payload.alternatives.first()) {
-            if !vocab.matches_token_bytes_exact(&first.base.v2.v1.token_bytes) {
+        if let (Some(vocab), Some(first)) = (&shared_dynamic_vocab, payload.alternatives.first())
+            && !vocab.matches_token_bytes_exact(&first.base.v2.v1.token_bytes) {
                 return Err(crate::GlrMaskError::Serialization(
                     "dynamic artifact vocabulary index does not match serialized token bytes"
                         .to_owned(),
                 ));
             }
-        }
         if let (Some(vocab), Some(first)) = (&mut shared_dynamic_vocab, payload.alternatives.first()) {
             vocab.restore_root_layout_metadata_from_token_bytes(&first.base.v2.v1.token_bytes);
         }
@@ -7814,7 +7805,7 @@ nt start ::= A;
         assert!(static_state.commit_token(0));
         assert_eq!(static_state.mask(), after_third);
 
-        let loaded = crate::Constraint::load(&constraint.save(), &vocab).unwrap();
+        let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
         assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();

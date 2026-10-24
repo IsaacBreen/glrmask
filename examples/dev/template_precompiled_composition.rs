@@ -90,7 +90,7 @@ fn measure_arm(constraint: &Constraint, arm: &str, repeat: Option<usize>,
             state.fill_mask(&mut mask);
             let mask_ns = mask_started.elapsed().as_nanos();
             let tbm_ns = started.elapsed().as_nanos();
-            if let Some(result) = commit_result { if !result { return Err("commit rejected".into()); } }
+            if let Some(result) = commit_result && !result { return Err("commit rejected".into()); }
             let hash = mask_hash(&mask);
             assert_eq!((hash, state.is_accepting()), expected[index][step],
                 "isolated arm={arm} trace={index} step={step}");

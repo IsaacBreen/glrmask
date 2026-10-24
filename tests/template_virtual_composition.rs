@@ -15,7 +15,7 @@ fn isolated(name: &str) -> bool {
 
 fn verify_forms(reference: &Constraint, candidate: &Constraint, vocab: &Vocab, tokens: &[(u32, Vec<u8>)], prefixes: &[Vec<u8>]) {
     let saved = candidate.save();
-    let loaded = Constraint::load(&saved, &vocab).unwrap();
+    let loaded = Constraint::load(&saved, vocab).unwrap();
     assert_eq!(saved, loaded.save());
     let external = Constraint::load(candidate.save(), vocab).unwrap();
     for c in [candidate, &loaded, &external] { compare(reference, c, tokens, prefixes); }
@@ -47,8 +47,8 @@ fn compare(reference: &Constraint, candidate: &Constraint, tokens: &[(u32, Vec<u
         let expected = left.mask();
         assert_eq!(expected, right.mask(), "mask prefix len={}", prefix.len());
         assert_eq!(left.is_accepting(), right.is_accepting(), "completion len={}", prefix.len());
-        for (id, spelling) in tokens {
-            if !expected.get(*id as usize / 32).is_some_and(|word| word & (1 << (*id % 32)) != 0) { continue; }
+        for (id, _spelling) in tokens {
+            if expected.get(*id as usize / 32).is_none_or(|word| word & (1 << (*id % 32)) == 0) { continue; }
             let mut a = left.clone(); let mut b = right.clone();
             assert!(a.commit_token(*id));
             assert!(b.commit_token(*id));

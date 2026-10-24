@@ -1215,7 +1215,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         };
     let reference_terminal_expansion = terminal_partition
         .as_ref()
-        .is_some_and(|partition| partition_has_merges(partition));
+        .is_some_and(partition_has_merges);
     // A successful merge activates production TI. The recursive TI-off rebuild
     // and symbolic comparison are a separate, explicit validation mode.
     let strict_reference = reference_terminal_expansion
@@ -1287,8 +1287,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     if std::env::var("GLRMASK_DUMP_TI_CLASSES")
         .ok()
         .is_some_and(|requested| requested == "1" || requested == partition_label)
-    {
-        if let Some(partition) = terminal_partition.as_ref() {
+        && let Some(partition) = terminal_partition.as_ref() {
             for (&representative, members) in partition {
                 let member_exprs = members
                     .iter()
@@ -1308,7 +1307,6 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 );
             }
         }
-    }
     if std::env::var("GLRMASK_PROFILE_L2P_EXIT_AFTER_TI_DISCOVERY")
         .ok()
         .as_deref()
@@ -1410,8 +1408,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             equivalence_initial_state_map.map_or(0, |map| map.num_internal_ids()),
             scoped_ti_seed.as_ref().map_or(0, |(_, map)| map.num_internal_ids()));
     }
-    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
-        if let Some(map) = equivalence_initial_state_map {
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some()
+        && let Some(map) = equivalence_initial_state_map {
             eprintln!(
                 "SCOPED_L2P_EQ_INPUT partition={} ti_seed={} o2i={:?} classes={:?} reps={:?}",
                 partition_label,
@@ -1421,7 +1419,6 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 map.representative_original_ids,
             );
         }
-    }
     let equivalence_initial_state_map_has_stable_restricted_observation =
         shard_options.is_some_and(|options| options.initial_state_domain_is_exact)
         || ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
@@ -1643,7 +1640,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let seed_ms;
+            
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
@@ -1653,7 +1650,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 }
                 None => seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map),
             };
-            seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let validate_native_pipeline=std::env::var_os("GLRMASK_VALIDATE_NATIVE_EVENT_PIPELINE").is_some();
             let mut native_pipeline_raw=None;
@@ -2046,7 +2043,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 *slot = false;
             }
         }
-        let mut modes = binary_transport_modes_from_witnesses(
+        let modes = binary_transport_modes_from_witnesses(
             tokenizer_for_build,
             &transport_active_terminals,
             partition,
@@ -2061,7 +2058,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         let transport_coordinate_map = {
             let ordinary_state_map = &core_id_map.tokenizer_states;
             let canonicalize_started_at = ti_profile_timing.then(Instant::now);
-            canonicalize_transport_mode_states(&mut modes, ordinary_state_map);
+            canonicalize_transport_mode_states(&modes, ordinary_state_map);
             ti_canonicalize_transport_modes_ms = canonicalize_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);

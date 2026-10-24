@@ -55,7 +55,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
 
 fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn schema_source(cfa_root: &Path, file: &str) -> String {
@@ -170,7 +170,7 @@ fn matrix_link_setup(
         let (schema_path, short_name) = &files[n];
         let schema_bytes = fs::read(schema_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", schema_path.display()));
-        let schema = Constraint::load(&schema_bytes, &vocab)
+        let schema = Constraint::load(&schema_bytes, vocab)
             .unwrap_or_else(|error| panic!("load {}: {error}", schema_path.display()));
         let parent = Constraint::compile(
             Grammar::glrm(parent_source.as_ref().expect("inner source")),
@@ -285,18 +285,17 @@ fn cmd_matrix_link_with_vocab(
         std::fs::create_dir_all(out_dir).expect("create out dir");
         out_dir.join(format!("{matrix_case}-rep{repeat_index}.json"))
     } else {
-        if let Some(parent) = out_dir.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = out_dir.parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).expect("create out parent");
             }
-        }
         out_dir.to_path_buf()
     };
     // Fresh-vs-reload per backend (separately timed validation): each
     // backend's reload mask must equal ITS OWN fresh mask, not just each other.
     let r0 = Instant::now();
-    let rs = Constraint::load(&s_bytes, &vocab).expect("reload static");
-    let rd = Constraint::load(&d_bytes, &vocab).expect("reload dynamic");
+    let rs = Constraint::load(&s_bytes, vocab).expect("reload static");
+    let rd = Constraint::load(&d_bytes, vocab).expect("reload dynamic");
     let rs_mask: Vec<u32> = rs.start().mask();
     let rd_mask: Vec<u32> = rd.start().mask();
     let reload_static_equal = rs_mask == static_mask;
@@ -411,7 +410,7 @@ fn stat_line(name: &str, bytes_len: usize, c: &Constraint) {
 
 fn print_stat_row(name: &str, path: &Path, vocab: &Vocab) {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let c = Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+    let c = Constraint::load(&bytes, vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
     stat_line(name, bytes.len(), &c);
 }
 
@@ -441,8 +440,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
     for run in 0..runs {
         // Static path A: compose_compiled_subgrammars (the bench path).
         let started = Instant::now();
-        let core = Constraint::load(&core_bytes, &vocab).unwrap();
-        let dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
+        let core = Constraint::load(&core_bytes, vocab).unwrap();
+        let dispatch = Constraint::load(&dispatch_bytes, vocab).unwrap();
         let load = started.elapsed();
         let started = Instant::now();
         let composed = core
@@ -458,8 +457,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
 
         // Dynamic path: same placeholder substitution, DynamicDirect backend.
         let started = Instant::now();
-        let core = Constraint::load(&core_bytes, &vocab).unwrap();
-        let dispatch = Constraint::load(&dispatch_bytes, &vocab).unwrap();
+        let core = Constraint::load(&core_bytes, vocab).unwrap();
+        let dispatch = Constraint::load(&dispatch_bytes, vocab).unwrap();
         let _ = started.elapsed();
         let started = Instant::now();
         let dyn_result = core.compose_compiled_subgrammars_dynamic(
@@ -754,7 +753,7 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
         // Keep one continuous rng stream so a filtered run reproduces the
         // unfiltered run's draws exactly; filtered-out scenarios still walk
         // (consuming identical draws) but their timings are discarded.
-        let record = only_scenario.map_or(true, |only| only == scenario);
+        let record = only_scenario.is_none_or(|only| only == scenario);
         let mut state = constraint.start();
         if !prefix.is_empty() && !state.commit_bytes(prefix) {
             eprintln!("[tbm] which={which} prefix={:?} rejected; skipping scenario", String::from_utf8_lossy(prefix));
@@ -1113,8 +1112,8 @@ fn cmd_prefix_diff(
         static_path, dynamic_path,
         "static and dynamic artifact paths must differ",
     );
-    let static_c = Constraint::load(&static_bytes, &vocab).expect("load static artifact");
-    let dynamic_c = Constraint::load(&dynamic_bytes, &vocab).expect("load dynamic artifact");
+    let static_c = Constraint::load(&static_bytes, vocab).expect("load static artifact");
+    let dynamic_c = Constraint::load(&dynamic_bytes, vocab).expect("load dynamic artifact");
     mark("load done");
     // Pair identity via existing public metadata APIs: same terminal /
     // tokenizer-state counts, exact-vocab bind on both. NOTE (verified
@@ -1437,11 +1436,10 @@ fn cmd_trace_replay(
     // Validate the --trace selector BEFORE any compile: exactly the three
     // historical labels or 'all'. Reject unknowns and non-integer ids early.
     const LABELS: [&str; 3] = ["sequential-3", "parallel-4", "all-tools"];
-    if let Some(only) = only_trace {
-        if only != "all" && !LABELS.contains(&only) {
+    if let Some(only) = only_trace
+        && only != "all" && !LABELS.contains(&only) {
             panic!("unknown --trace {only:?} (expected one of sequential-3|parallel-4|all-tools|all)");
         }
-    }
     // Chunk scope requires a single selected trace (never 'all'/None).
     let chunked = trace_count.is_some();
     if chunked {
@@ -1452,7 +1450,7 @@ fn cmd_trace_replay(
         panic!("--prepare-out-dir and --prepared-in-dir are mutually exclusive");
     }
     let progress = |stage: &str, label: &str, index: usize, token: u32| {
-        if trace_progress || index < 16 || index % 128 == 0 {
+        if trace_progress || index < 16 || index.is_multiple_of(128) {
             eprintln!("[trace-progress] stage={stage} trace={label} index={index} token={token}");
         }
     };
@@ -1584,11 +1582,10 @@ fn cmd_trace_replay(
     let mut covered_traces = 0usize;
     for entry in list {
         let label = entry.get("label").and_then(Value::as_str).unwrap_or("?");
-        if let Some(only) = only_trace {
-            if only != "all" && only != label {
+        if let Some(only) = only_trace
+            && only != "all" && only != label {
                 continue;
             }
-        }
         covered_traces += 1;
         // token_ids borrowed (no Value-array clone): validate integers + vocab
         // range element-wise.

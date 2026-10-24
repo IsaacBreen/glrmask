@@ -22,14 +22,12 @@ fn compress(pairs:&[(u32,u32)])->Vec<Run>{
     let mut runs=Vec::new();let mut i=0;
     while i<pairs.len(){
         let (target,origin)=pairs[i];let mut end=i+1;let mut delta=(0,0);
-        if let Some(&(t,o))=pairs.get(end){
-            if let (Some(dt),Some(do_))=(t.checked_sub(target),o.checked_sub(origin)){
-                if dt<=1&&do_<=1&&(dt!=0||do_!=0){
+        if let Some(&(t,o))=pairs.get(end)
+            && let (Some(dt),Some(do_))=(t.checked_sub(target),o.checked_sub(origin))
+                && dt<=1&&do_<=1&&(dt!=0||do_!=0){
                     delta=(dt,do_);end+=1;
                     while let Some(&(t,o))=pairs.get(end){let k=(end-i)as u32;if t==target+k*dt&&o==origin+k*do_{end+=1;}else{break;}}
                 }
-            }
-        }
         runs.push(Run{target,origin,len:(end-i)as u32,target_step:delta.0 as u8,origin_step:delta.1 as u8});i=end;
     }
     runs

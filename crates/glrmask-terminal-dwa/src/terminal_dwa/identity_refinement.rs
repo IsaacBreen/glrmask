@@ -229,13 +229,12 @@ fn build_identity_common(
             // induction a second identical-policy minimization changes neither
             // weights nor groups. Ignore erasure could invalidate that proof.
             let proof=NativeMinimizationFixedPoint::from_native(&candidate.dwa,ignore_terminal);
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some(){
-                if let Some(accepted)=proof.as_ref().and_then(|p|p.accepted_weight()){
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some()
+                && let Some(accepted)=proof.as_ref().and_then(|p|p.accepted_weight()){
                     let reference=native_support_reference(&candidate.dwa);
                     assert_eq!(accepted,&reference,"native root support is not backward-pushed");
                     eprintln!("[glrmask/validate][native_root_support] exact_full_weight=true states={}",candidate.dwa.num_states());
                 }
-            }
             (candidate,proof)
         }
         None=>(ordinary()?,None),

@@ -358,7 +358,7 @@ mod candidate_tests {
         let _ = state.mask();
         assert!(linked.boundary_candidate_summary.get().is_none(),
             "current masks and commits must not request the wrapper's future outward proof");
-        check(&Constraint::load(&linked.save(), &vocab).unwrap());
+        check(&Constraint::load(linked.save(), &vocab).unwrap());
         assert!(linked.boundary_candidate_summary.get().unwrap().is_known());
     }
 

@@ -1469,7 +1469,7 @@ impl Constraint {
     pub(crate) fn can_defer_internal_tsid_inverse(&self) -> bool {
         if self.runtime_source_state_offset.is_some()
             || self.state_to_internal_tsid.len() != self.tokenizer.num_states() as usize
-            || self.state_to_internal_tsid.iter().any(|&tsid| tsid == u32::MAX)
+            || self.state_to_internal_tsid.contains(&u32::MAX)
         {
             return false;
         }
@@ -1614,11 +1614,10 @@ impl Constraint {
             return parser.embedding.as_ref().map(|embedding| embedding.nullable)
                 .ok_or_else(|| "template parser has no embedding nullability".to_owned());
         }
-        if self.uses_compact_segmented_parser_runtime() {
-            if let Some(summary) = self.composition_grammar_summary.as_ref() {
+        if self.uses_compact_segmented_parser_runtime()
+            && let Some(summary) = self.composition_grammar_summary.as_ref() {
                 return Ok(summary.root_nullable);
             }
-        }
         Ok(self.table.embedded_start_nullable())
     }
 
@@ -2106,7 +2105,7 @@ impl Constraint {
         let tokenizer = root.tokenizer.clone();
         let tokenizer_fast_transitions = root.tokenizer_fast_transitions.clone();
         let tokenizer_has_epsilon_transitions = root.tokenizer_has_epsilon_transitions;
-        self.tokenizer = tokenizer.into();
+        self.tokenizer = tokenizer;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         self.tokenizer_has_epsilon_transitions = tokenizer_has_epsilon_transitions;
         self.terminal_live_states.clear();
@@ -8472,12 +8471,11 @@ impl Constraint {
                 if missing == 0 {
                     continue;
                 }
-                if missing == valid_mask {
-                    if let Some(group_mask) = sparse_word_groups.get(wi) {
+                if missing == valid_mask
+                    && let Some(group_mask) = sparse_word_groups.get(wi) {
                         cost += group_mask.len() as u64;
                         continue;
                     }
-                }
                 cost += self.internal_bits_grouped_buf_op_cost(wi, missing, valid_mask, buf_len)
                     as u64;
             }
@@ -8494,12 +8492,11 @@ impl Constraint {
                 if valid_bits == 0 {
                     continue;
                 }
-                if valid_bits == valid_mask {
-                    if let Some(group_mask) = sparse_word_groups.get(wi) {
+                if valid_bits == valid_mask
+                    && let Some(group_mask) = sparse_word_groups.get(wi) {
                         cost += group_mask.len() as u64;
                         continue;
                     }
-                }
                 cost += self.internal_bits_grouped_buf_op_cost(wi, valid_bits, valid_mask, buf_len)
                     as u64;
             }
@@ -8533,14 +8530,13 @@ impl Constraint {
             let current = current_dense.get(wi).copied().unwrap_or(0) & valid_mask;
 
             let mut added = current & !previous;
-            if added == valid_mask {
-                if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+            if added == valid_mask
+                && let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
                     stats.added_word_group_hits += 1;
                     stats.added_word_group_entries += group_mask.len() as u64;
                     or_sparse_buf_entries(buf, group_mask);
                     continue;
                 }
-            }
             for byte_idx in 0..8 {
                 let shift = byte_idx * 8;
                 let byte_valid = (valid_mask >> shift) & 0xff;
@@ -8583,14 +8579,13 @@ impl Constraint {
                 stats.added_token_iterations += 1;
                 let bit = added.trailing_zeros() as usize;
                 let internal_token = wi * 64 + bit;
-                if internal_token < heavy.len() {
-                    if let Some(ref dense_mask) = heavy[internal_token] {
+                if internal_token < heavy.len()
+                    && let Some(ref dense_mask) = heavy[internal_token] {
                         stats.added_token_entries += dense_mask.len() as u64;
                         or_dense_buf(buf, dense_mask);
                         added &= added - 1;
                         continue;
                     }
-                }
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.added_token_entries += (end - start) as u64;
@@ -8610,14 +8605,13 @@ impl Constraint {
             let current = current_dense.get(wi).copied().unwrap_or(0) & valid_mask;
 
             let mut removed = previous & !current;
-            if removed == valid_mask {
-                if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+            if removed == valid_mask
+                && let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
                     stats.removed_word_group_hits += 1;
                     stats.removed_word_group_entries += group_mask.len() as u64;
                     andnot_sparse_buf_entries(buf, group_mask);
                     continue;
                 }
-            }
             for byte_idx in 0..8 {
                 let shift = byte_idx * 8;
                 let byte_valid = (valid_mask >> shift) & 0xff;
@@ -8660,14 +8654,13 @@ impl Constraint {
                 stats.removed_token_iterations += 1;
                 let bit = removed.trailing_zeros() as usize;
                 let internal_token = wi * 64 + bit;
-                if internal_token < heavy.len() {
-                    if let Some(ref dense_mask) = heavy[internal_token] {
+                if internal_token < heavy.len()
+                    && let Some(ref dense_mask) = heavy[internal_token] {
                         stats.removed_token_entries += dense_mask.len() as u64;
                         andnot_dense_buf(buf, dense_mask);
                         removed &= removed - 1;
                         continue;
                     }
-                }
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.removed_token_entries += (end - start) as u64;
@@ -9235,11 +9228,10 @@ impl Constraint {
                 }
                 let (_, matches) = self.tokenizer.execute_summary_from_state(bytes, start);
                 for (terminal, width) in matches {
-                    if width == bytes.len() {
-                        if let Some(row) = rows.get_mut(terminal as usize) {
+                    if width == bytes.len()
+                        && let Some(row) = rows.get_mut(terminal as usize) {
                             row.push(token_id);
                         }
-                    }
                 }
                 rows
             })
@@ -10680,12 +10672,11 @@ impl Constraint {
                 };
                 let word = (original as u32 / 32) as u16;
                 let bit = original as u32 % 32;
-                if let Some((last_word, last_mask)) = mask.last_mut() {
-                    if *last_word == word {
+                if let Some((last_word, last_mask)) = mask.last_mut()
+                    && *last_word == word {
                         *last_mask |= 1u32 << bit;
                         continue;
                     }
-                }
                 mask.push((word, 1u32 << bit));
             }
             return masks;
@@ -12106,10 +12097,10 @@ impl Constraint {
                 }
                 for (_, tokens) in weight.raw_iter() {
                     let key = Arc::as_ptr(tokens) as usize;
-                    if !mask_by_token_set.contains_key(&key) {
-                        let mask = self.indexed_dag_dense_mask_for_tokens(tokens);
-                        mask_by_token_set.insert(key, mask);
-                    }
+                    mask_by_token_set.entry(key).or_insert_with(|| {
+                        
+                        self.indexed_dag_dense_mask_for_tokens(tokens)
+                    });
                 }
             }
             if let Some(weight) = state.final_weight.as_ref()
@@ -12117,10 +12108,10 @@ impl Constraint {
             {
                 for (_, tokens) in weight.raw_iter() {
                     let key = Arc::as_ptr(tokens) as usize;
-                    if !mask_by_token_set.contains_key(&key) {
-                        let mask = self.indexed_dag_dense_mask_for_tokens(tokens);
-                        mask_by_token_set.insert(key, mask);
-                    }
+                    mask_by_token_set.entry(key).or_insert_with(|| {
+                        
+                        self.indexed_dag_dense_mask_for_tokens(tokens)
+                    });
                 }
             }
         }
@@ -13038,7 +13029,6 @@ impl Constraint {
         let sparse_terminals = sparse_terminals.map(|terminals| {
             terminals
                 .into_iter()
-                .map(|terminal| terminal as u32)
                 .collect::<SmallVec<[u32; 8]>>()
         });
         let mut stack = Vec::new();
@@ -14085,15 +14075,14 @@ impl Constraint {
         buf: &mut [u32],
         stats_entries: &mut u64,
     ) {
-        if internal_token < self.heavy_token_dense_masks.len() {
-            if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
+        if internal_token < self.heavy_token_dense_masks.len()
+            && let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
                 if PROFILE {
                     *stats_entries += dense_mask.len() as u64;
                 }
                 or_dense_buf(buf, dense_mask);
                 return;
             }
-        }
         let start = self.internal_token_buf_offsets[internal_token] as usize;
         let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
         if PROFILE {
@@ -14109,15 +14098,14 @@ impl Constraint {
         buf: &mut [u32],
         stats_entries: &mut u64,
     ) {
-        if internal_token < self.heavy_token_dense_masks.len() {
-            if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
+        if internal_token < self.heavy_token_dense_masks.len()
+            && let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
                 if PROFILE {
                     *stats_entries += dense_mask.len() as u64;
                 }
                 andnot_dense_buf(buf, dense_mask);
                 return;
             }
-        }
         let start = self.internal_token_buf_offsets[internal_token] as usize;
         let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
         if PROFILE {
@@ -14327,7 +14315,7 @@ impl Constraint {
         dense: &[u64],
         buf: &mut [u32],
         buf_zeroed: bool,
-        mut dirty_complement_scratch: Option<&mut Vec<u32>>,
+        dirty_complement_scratch: Option<&mut Vec<u32>>,
     ) -> DenseToBufProfileStats {
         if self.final_mask_mapping.internal_len() > 0 {
             if PROFILE {
@@ -14408,7 +14396,7 @@ impl Constraint {
                     buf,
                     &mut stats,
                 );
-            } else if let Some(scratch) = dirty_complement_scratch.as_deref_mut() {
+            } else if let Some(scratch) = dirty_complement_scratch {
                 scratch.resize(buf.len(), 0);
                 self.fill_internal_dense_complement_to_buf::<PROFILE>(
                     dense,
@@ -14458,8 +14446,8 @@ impl Constraint {
                     continue;
                 }
                 let missing_bits = !valid_bits & valid_mask;
-                if missing_bits != 0 {
-                    if let Some(group_mask) = sparse_word_groups.get(wi) {
+                if missing_bits != 0
+                    && let Some(group_mask) = sparse_word_groups.get(wi) {
                         let selected_cost = self.internal_bits_buf_op_cost(wi, valid_bits, buf_len);
                         let missing_cost = self
                             .word_group_buf_op_costs
@@ -14505,7 +14493,6 @@ impl Constraint {
                             continue;
                         }
                     }
-                }
 
                 self.or_internal_bits_to_buf_grouped::<PROFILE>(
                     wi,
@@ -14706,7 +14693,7 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
+        let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         assert!(loaded.direct_regular_wide_frontier_acceptance.is_empty());
         assert!(
             loaded.lazy_dynamic_mask_vocab.get().is_none(),
@@ -14741,7 +14728,7 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        let mut loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         assert!(loaded.lazy_dynamic_mask_vocab.get().is_none());
 
         let initial = loaded.initial_state_map();
@@ -15297,8 +15284,7 @@ mod boundary_token_trie_tests {
                 &vocab,
                 BuildOptions::default().optimization(MaskStrategy::ParserDwa),
             )
-            .expect("plain")
-            .into();
+            .expect("plain");
         assert_matches_reference(&mut plain, "plain");
 
         let mut ignored = Grammar::from_lark(
@@ -15311,8 +15297,7 @@ WS: /[ \t]+/
             &vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
         )
-        .expect("ignore")
-        .into();
+        .expect("ignore");
         assert_matches_reference(&mut ignored, "ignore");
 
         let mut schema = Grammar::from_json_schema(
@@ -15322,8 +15307,7 @@ WS: /[ \t]+/
             &vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
         )
-        .expect("schema")
-        .into();
+        .expect("schema");
         assert_matches_reference(&mut schema, "schema");
 
         let placeholder = Grammar::from_glrm(

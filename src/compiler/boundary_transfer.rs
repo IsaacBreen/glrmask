@@ -446,7 +446,7 @@ pub(crate) fn validate_canonical_child_start(
             link.child_component, link.return_pop,
         ));
     }
-    if child_table.control_terminals.len() != 0 {
+    if !child_table.control_terminals.is_empty() {
         return Err(format!(
             "static link unsupported: child component {} carries retained linker controls; classify them as controls before static reuse",
             link.child_component,
@@ -468,7 +468,7 @@ pub(crate) fn instantiate_finish(
     validate_canonical_child_start(child_table, link)?;
     let policy = FinishEndpointPolicy {
         return_pop: link.return_pop,
-        nullable_child_start: link.child_start_nullable.then(|| link.child_start),
+        nullable_child_start: link.child_start_nullable.then_some(link.child_start),
     };
     let FinishTransfer {
         characterization,
@@ -1575,10 +1575,10 @@ fn build_fragment_library_cached_impl(
             .lock()
             .map_err(|_| "signed link global-ignore cache poisoned".to_string())?;
         for terminal in special_terminals {
-            if !special_cache.contains_key(&terminal) {
+            if let std::collections::btree_map::Entry::Vacant(e) = special_cache.entry(terminal) {
                 let transfer =
                     scoped_transfer_for_terminal(context, terminal, &mut global_ignore)?;
-                special_cache.insert(terminal, transfer);
+                e.insert(transfer);
             }
             let transfer = special_cache
                 .get(&terminal)
@@ -1896,14 +1896,13 @@ fn project_weight_to_kept_in_place(
     weight: &mut Weight,
     memo: &mut ProjectionMemo<'_>,
 ) -> bool {
-    if memo.outer_enabled {
-        if let Some((original, result)) = memo.outer.get(&weight.ptr_key()) {
+    if memo.outer_enabled
+        && let Some((original, result)) = memo.outer.get(&weight.ptr_key()) {
             let unchanged = original.ptr_key() == result.ptr_key();
             if !unchanged { *weight = result.clone(); }
             memo.outer_hits += 1;
             return unchanged;
         }
-    }
     let original = memo.outer_enabled.then(|| weight.clone());
     // One extra scan, only over inner-set Arcs (no token enumeration): the
     // memo hit path is a pointer lookup + Arc clone, so unchanged weights
@@ -1922,11 +1921,10 @@ fn project_weight_to_kept_in_place(
         memo.remapped_weights += 1;
         *weight = project_weight_to_kept_memo(weight, memo);
     }
-    if let Some(original) = original {
-        if memo.outer.len() < memo.cap {
+    if let Some(original) = original
+        && memo.outer.len() < memo.cap {
             memo.outer.insert(original.ptr_key(), (original, weight.clone()));
         }
-    }
     !changed
 }
 
@@ -2487,9 +2485,8 @@ fn try_compile_with_weight_atoms(
     let mut encoded = arena.clone();
     let keep_identity = crate::env::var_os("GLRMASK_BOUNDARY_ATOM_KEEP_IDENTITY").is_some();
     for state in encoded.states_mut() {
-        if let Some(weight) = state.final_weight.as_mut() {
-            if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
-        }
+        if let Some(weight) = state.final_weight.as_mut()
+            && (!keep_identity || !weight.is_full()) { *weight = quotient.encode(weight)?; }
         for branches in state.transitions.values_mut() {
             for (_, weight) in branches {
                 if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
@@ -2777,11 +2774,10 @@ fn compile_signed_shard_parser_with_support(
             ready[index * depths + depth] = arena.add_state();
         }
         // Depth-0 finals only (no trailing closure for admission endpoints).
-        if let Some(weight) = state.final_weight.as_ref() {
-            if !weight.is_empty() && (!admission_tails || index==shard_dwa.start_state() as usize) {
+        if let Some(weight) = state.final_weight.as_ref()
+            && !weight.is_empty() && (!admission_tails || index==shard_dwa.start_state() as usize) {
                 arena.set_final_weight(port(&ready, index, 0), weight.clone());
             }
-        }
     }
     let start_index = shard_dwa.start_state() as usize;
     let start_port = ready.get(start_index * depths).copied().ok_or_else(|| {
@@ -2902,7 +2898,7 @@ fn compile_signed_shard_parser_with_support(
                 if let Some(final_weight)=&target_state.final_weight {
                     let ending=weight.intersection(final_weight);
                     if !ending.is_empty() {
-                        if !admission_cache.contains_key(&terminal) {
+                        admission_cache.entry(terminal).or_insert_with(|| {
                             let started=Instant::now();
                             let projected=library.templates.by_terminal.get(&terminal)
                                 .and_then(|template|admission::project(template,context.total_scoped_states))
@@ -2911,8 +2907,8 @@ fn compile_signed_shard_parser_with_support(
                                     prepared.by_terminal_nwa.remove(&terminal).expect("admission template constructed")
                                 });
                             admission_build_ms+=started.elapsed().as_secs_f64()*1000.0;
-                            admission_cache.insert(terminal,projected);
-                        }
+                            projected
+                        });
                         let projected=admission_cache.get(&terminal).and_then(Option::as_ref);
                         let last=projected.unwrap_or(fragment);
                         admission_fallbacks+=usize::from(projected.is_none());
@@ -3534,7 +3530,7 @@ mod tests {
             let mut table = build_test_table(4,17,&[&[],&[],&[],&[]],&[&[],&[],&[],&[]]);
             for state in 0..4usize {
                 for terminal in 0..17u32 {
-                    if (state+terminal as usize+case)%5 != 0 {
+                    if !(state+terminal as usize + case).is_multiple_of(5) {
                         let action = if case%3==0 {Action::Reduce(0,1)} else {
                             actions[(state*19+terminal as usize+case)%actions.len()].clone()};
                         table.action[state].insert(terminal,action);
@@ -3620,14 +3616,12 @@ mod tests {
         use crate::automata::weighted_u32::{determinize::determinize, equivalence::find_difference};
         use crate::compiler::stages::id_map_and_terminal_dwa::l2p::canonicalize_acyclic_nwa;
 
-        let weights = vec![
-            Weight::all(), Weight::empty(),
+        let weights = [Weight::all(), Weight::empty(),
             Weight::from_per_tsid_token_sets([(0, RangeSetBlaze::from_iter([0..=2]))]),
             Weight::from_per_tsid_token_sets([
                 (0, RangeSetBlaze::from_iter([1..=3])),
                 (2, RangeSetBlaze::from_iter([7..=7])),
-            ]),
-        ];
+            ])];
         let mut random = 19u64;
         let mut next = || {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);

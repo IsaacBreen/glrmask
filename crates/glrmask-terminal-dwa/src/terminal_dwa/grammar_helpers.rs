@@ -129,128 +129,6 @@ pub fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compiler::glr::table::testing::build_test_table;
-    use crate::compiler::glr::table::Action;
-
-    fn assert_row_colors_are_unique(table: &GLRTable, coloring: &TerminalColoring) {
-        for row in &table.action {
-            let mut colors = BTreeSet::new();
-            for terminal in row.keys() {
-                if terminal < table.num_terminals {
-                    let color = coloring.color_for(terminal);
-                    assert!(
-                        colors.insert(color),
-                        "terminal {terminal} reused color {color} in one action row"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn terminal_coloring_keeps_action_row_terminals_distinct() {
-        let table = build_test_table(
-            3,
-            6,
-            &[
-                &[(0, Action::Accept), (2, Action::Accept), (4, Action::Accept)],
-                &[(1, Action::Accept), (2, Action::Accept)],
-                &[(1, Action::Accept), (3, Action::Accept), (5, Action::Accept)],
-            ],
-            &[&[], &[], &[]],
-        );
-
-        let coloring = compute_terminal_coloring(&table);
-
-        assert_row_colors_are_unique(&table, &coloring);
-        assert!(coloring.num_colors <= 3);
-    }
-
-    #[test]
-    fn terminal_coloring_handles_sparse_high_terminal_count() {
-        let table = build_test_table(
-            2,
-            50_000,
-            &[
-                &[(10, Action::Accept), (20_000, Action::Accept)],
-                &[(20_000, Action::Accept), (49_999, Action::Accept)],
-            ],
-            &[&[], &[]],
-        );
-
-        let coloring = compute_terminal_coloring(&table);
-
-        assert_eq!(coloring.terminal_to_color.len(), 50_000);
-        assert_row_colors_are_unique(&table, &coloring);
-        assert!(coloring.num_colors <= 2);
-    }
-
-    #[test]
-    fn direct_regular_follow_sets_match_generic_analysis() {
-        use crate::grammar::flat::{
-            DirectRegularAutomaton, DirectRegularState, GrammarDef, Rule, Symbol, Terminal,
-        };
-
-        let mut grammar = GrammarDef {
-            rules: vec![
-                Rule {
-                    lhs: 0,
-                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1)],
-                },
-                Rule {
-                    lhs: 0,
-                    rhs: vec![Symbol::Terminal(1)],
-                },
-                Rule {
-                    lhs: 1,
-                    rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(1)],
-                },
-                Rule {
-                    lhs: 1,
-                    rhs: vec![Symbol::Terminal(3)],
-                },
-            ],
-            start: 0,
-            terminals: (0..4)
-                .map(|id| Terminal::Literal {
-                    id,
-                    bytes: vec![b'a' + id as u8],
-                })
-                .collect(),
-            direct_regular_automaton: Some(DirectRegularAutomaton {
-                states: vec![
-                    DirectRegularState {
-                        transitions: BTreeMap::from([(0, vec![1]), (1, vec![2])]),
-                        ..DirectRegularState::default()
-                    },
-                    DirectRegularState {
-                        transitions: BTreeMap::from([(2, vec![1]), (3, vec![2])]),
-                        ..DirectRegularState::default()
-                    },
-                    DirectRegularState {
-                        is_accepting: true,
-                        ..DirectRegularState::default()
-                    },
-                ],
-                start_states: vec![0],
-            }),
-            ..GrammarDef::default()
-        };
-
-        let direct = AnalyzedGrammar::from_grammar_def(&grammar);
-        let direct_ever = compute_ever_allowed_follows(&direct);
-        let direct_always = compute_always_allowed_follows(&direct);
-
-        grammar.direct_regular_automaton = None;
-        let generic = AnalyzedGrammar::from_grammar_def(&grammar);
-        assert_eq!(direct_ever, compute_ever_allowed_follows(&generic));
-        assert_eq!(direct_always, compute_always_allowed_follows(&generic));
-    }
-}
-
 fn direct_regular_follow_sets(
     grammar: &AnalyzedGrammar,
 ) -> Option<(Vec<Vec<TerminalID>>, Vec<Vec<TerminalID>>)> {
@@ -528,8 +406,8 @@ fn occurrence_follow_set(
         }
     }
 
-    if suffix_nullable {
-        if let Some(follow) = grammar.follow.get(lhs as usize) {
+    if suffix_nullable
+        && let Some(follow) = grammar.follow.get(lhs as usize) {
             follows.extend(
                 follow
                     .iter_ones()
@@ -537,7 +415,128 @@ fn occurrence_follow_set(
                     .map(|bit| bit as TerminalID),
             );
         }
-    }
 
     follows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::glr::table::testing::build_test_table;
+    use crate::compiler::glr::table::Action;
+
+    fn assert_row_colors_are_unique(table: &GLRTable, coloring: &TerminalColoring) {
+        for row in &table.action {
+            let mut colors = BTreeSet::new();
+            for terminal in row.keys() {
+                if terminal < table.num_terminals {
+                    let color = coloring.color_for(terminal);
+                    assert!(
+                        colors.insert(color),
+                        "terminal {terminal} reused color {color} in one action row"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_coloring_keeps_action_row_terminals_distinct() {
+        let table = build_test_table(
+            3,
+            6,
+            &[
+                &[(0, Action::Accept), (2, Action::Accept), (4, Action::Accept)],
+                &[(1, Action::Accept), (2, Action::Accept)],
+                &[(1, Action::Accept), (3, Action::Accept), (5, Action::Accept)],
+            ],
+            &[&[], &[], &[]],
+        );
+
+        let coloring = compute_terminal_coloring(&table);
+
+        assert_row_colors_are_unique(&table, &coloring);
+        assert!(coloring.num_colors <= 3);
+    }
+
+    #[test]
+    fn terminal_coloring_handles_sparse_high_terminal_count() {
+        let table = build_test_table(
+            2,
+            50_000,
+            &[
+                &[(10, Action::Accept), (20_000, Action::Accept)],
+                &[(20_000, Action::Accept), (49_999, Action::Accept)],
+            ],
+            &[&[], &[]],
+        );
+
+        let coloring = compute_terminal_coloring(&table);
+
+        assert_eq!(coloring.terminal_to_color.len(), 50_000);
+        assert_row_colors_are_unique(&table, &coloring);
+        assert!(coloring.num_colors <= 2);
+    }
+
+    #[test]
+    fn direct_regular_follow_sets_match_generic_analysis() {
+        use crate::grammar::flat::{
+            DirectRegularAutomaton, DirectRegularState, GrammarDef, Rule, Symbol, Terminal,
+        };
+
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(3)],
+                },
+            ],
+            start: 0,
+            terminals: (0..4)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states: vec![
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(0, vec![1]), (1, vec![2])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(2, vec![1]), (3, vec![2])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        is_accepting: true,
+                        ..DirectRegularState::default()
+                    },
+                ],
+                start_states: vec![0],
+            }),
+            ..GrammarDef::default()
+        };
+
+        let direct = AnalyzedGrammar::from_grammar_def(&grammar);
+        let direct_ever = compute_ever_allowed_follows(&direct);
+        let direct_always = compute_always_allowed_follows(&direct);
+
+        grammar.direct_regular_automaton = None;
+        let generic = AnalyzedGrammar::from_grammar_def(&grammar);
+        assert_eq!(direct_ever, compute_ever_allowed_follows(&generic));
+        assert_eq!(direct_always, compute_always_allowed_follows(&generic));
+    }
 }

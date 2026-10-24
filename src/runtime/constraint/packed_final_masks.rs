@@ -308,21 +308,6 @@ impl Constraint {
     }
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    #[test]
-    fn cache_counts_are_checked_before_decoding() {
-        assert!(bounded_count(0, 0));
-        assert!(bounded_count(MAX_SCANNED_ENTRIES, MAX_SCANNED_ENTRIES));
-        assert!(!bounded_count(MAX_SCANNED_ENTRIES + 1, usize::MAX));
-        assert!(!bounded_count(1, 0));
-        assert!(!bounded_count(u32::MAX as usize, MAX_SCANNED_ENTRIES));
-        assert!(!bounded_count(usize::MAX, usize::MAX));
-    }
-}
-
 /// Exhaustive interval-boundary checks and randomized internal-set projection
 /// checks against the wire decoder and original-token fragments, independently
 /// of the cache. Used by crate tests and isolated internal release gates only.
@@ -416,5 +401,20 @@ impl Constraint {
         assert!(pool.final_masks.scanned_ranges <= MAX_SCANNED_ENTRIES);
         assert!(pool.final_masks.prefix_entries <= MAX_WORKSPACE_BYTES / 8);
         checked
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn cache_counts_are_checked_before_decoding() {
+        assert!(bounded_count(0, 0));
+        assert!(bounded_count(MAX_SCANNED_ENTRIES, MAX_SCANNED_ENTRIES));
+        assert!(!bounded_count(MAX_SCANNED_ENTRIES + 1, usize::MAX));
+        assert!(!bounded_count(1, 0));
+        assert!(!bounded_count(u32::MAX as usize, MAX_SCANNED_ENTRIES));
+        assert!(!bounded_count(usize::MAX, usize::MAX));
     }
 }

@@ -96,7 +96,7 @@ fn usize_to_u32(value: usize, what: &str) -> u32 {
 
 #[inline]
 fn is_active_group(group_id: usize, active_groups: Option<&[bool]>) -> bool {
-    active_groups.map_or(true, |groups| {
+    active_groups.is_none_or(|groups| {
         groups.get(group_id).copied().unwrap_or(false)
     })
 }
@@ -142,7 +142,7 @@ fn build_has_any_transition_labels(dfa: &FlatDfa) -> Vec<bool> {
 
 #[inline]
 fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
-    relevant_bytes.map_or(true, |bytes| bytes[byte])
+    relevant_bytes.is_none_or(|bytes| bytes[byte])
 }
 
 fn active_byte_representatives(
@@ -199,7 +199,7 @@ fn build_initial_label_partition(
     let mut previous_state: Option<usize> = None;
 
     for state in order {
-        let starts_new_label = previous_state.map_or(true, |prev| {
+        let starts_new_label = previous_state.is_none_or(|prev| {
             finalizer_labels[state] != finalizer_labels[prev]
                 || future_labels[state] != future_labels[prev]
                 || has_any_transition[state] != has_any_transition[prev]
@@ -315,7 +315,7 @@ fn refine_once_sorted(
     let mut previous_state: Option<usize> = None;
 
     for &state in order.iter() {
-        let starts_new_block = previous_state.map_or(true, |prev| {
+        let starts_new_block = previous_state.is_none_or(|prev| {
             if row_hashes[state] != row_hashes[prev] {
                 return true;
             }
@@ -401,7 +401,7 @@ fn refine_once_sorted_monotone(
     let mut previous_state = None::<usize>;
     let mut current_block = u32::MAX;
     for &state in order.iter() {
-        let starts_new_block = previous_state.map_or(true, |previous| {
+        let starts_new_block = previous_state.is_none_or(|previous| {
             if prev_blocks[state] != prev_blocks[previous]
                 || row_hashes[state] != row_hashes[previous]
             {
@@ -884,7 +884,9 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
         }
     };
 
-    let mapping = find_state_equivalence_classes_kbounded(
+    
+
+    find_state_equivalence_classes_kbounded(
         tokenizer,
         states,
         max_len,
@@ -892,9 +894,7 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
         Some(relevant_bytes),
         byte_to_class,
         "byte_restricted",
-    );
-
-    mapping
+    )
 }
 
 #[cfg(test)]

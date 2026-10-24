@@ -44,7 +44,7 @@ pub fn certify(initial:&[u32],effects:&[Effect],alphabet:u32)->Result<Certificat
                 for &predecessor in &source.finite {pred[target].insert(predecessor);}
                 if pred[target].finite.len()>1024{pred[target].all=true;pred[target].finite.clear();stats.widened+=1;}
             }
-            if pred[target].all||before!=pred[target].finite.len(){if !queued[target]{queued[target]=true;queue.push_back(target);}}
+            if (pred[target].all||before!=pred[target].finite.len())&& !queued[target]{queued[target]=true;queue.push_back(target);}
         }
     }
     // Verify the full effect closure against the completed abstract relation.
@@ -119,7 +119,7 @@ fn ordered_set_reference(initial:&[u32],effects:&[Effect],alphabet:u32)->Result<
                 pred[target].finite.extend(source.finite.iter().copied());
                 if pred[target].finite.len()>1024{pred[target].all=true;pred[target].finite.clear();stats.widened+=1;}
             }
-            if pred[target].all||before!=pred[target].finite.len(){if !queued[target]{queued[target]=true;queue.push_back(target);}}
+            if (pred[target].all||before!=pred[target].finite.len())&& !queued[target]{queued[target]=true;queue.push_back(target);}
         }
     }
     // Verify the full effect closure against the completed abstract relation.

@@ -79,7 +79,7 @@ impl NFA {
     pub fn is_accepting(&self, state: u32) -> bool {
         self.states
             .get(state as usize)
-            .map_or(false, |s| s.is_accepting)
+            .is_some_and(|s| s.is_accepting)
     }
 
     /// Compute whether the NFA's labeled and epsilon transition graph is acyclic.

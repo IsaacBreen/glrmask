@@ -159,7 +159,7 @@ impl OutputBits {
     fn append_to(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
         for &terminal in &self.0 {
-            output.extend_from_slice(&(terminal as u32).to_le_bytes());
+            output.extend_from_slice(&terminal.to_le_bytes());
         }
     }
 }
@@ -792,7 +792,7 @@ impl RestrictedTopology {
     fn state_has_raw_source(&self, state: usize) -> bool {
         self.raw_representative_by_state
             .as_ref()
-            .map_or(true, |representatives| {
+            .is_none_or(|representatives| {
                 representatives
                     .get(state)
                     .copied()
@@ -1069,8 +1069,8 @@ impl TiTokenizerOutputData {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(4096);
-        if state_count >= parallel_output_min_states {
-            if let Some(pool) = ti_certification_pool() {
+        if state_count >= parallel_output_min_states
+            && let Some(pool) = ti_certification_pool() {
                 let chunk_count = pool.current_num_threads().min(state_count).max(1);
                 let build_chunks = || {
                     (0..chunk_count)
@@ -1173,7 +1173,6 @@ impl TiTokenizerOutputData {
                     full_output_projection: OnceLock::new(),
                 };
             }
-        }
         let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
         let mut future_finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
         let mut finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
@@ -2057,7 +2056,7 @@ fn refine_candidate_groups_by_observed_output_hypergraph(
                         colors[terminal as usize] as u64,
                     );
                     total = total.wrapping_add(component);
-                    parity ^= component.rotate_left((colors[terminal as usize] & 63) as u32);
+                    parity ^= component.rotate_left(colors[terminal as usize] & 63);
                 }
                 let mut fingerprint = mix_structural_fingerprint(
                     0xa076_1d64_78bd_642f,
@@ -2439,11 +2438,10 @@ where
         .ok()
         .map(|value| value.trim() != "0" && !value.trim().is_empty())
         .unwrap_or(false);
-    if enabled {
-        if let Some(pool) = ti_certification_pool() {
+    if enabled
+        && let Some(pool) = ti_certification_pool() {
             return pool.install(f);
         }
-    }
     f()
 }
 
@@ -3239,9 +3237,6 @@ impl InterchangeabilityDfa {
                             queued[new_class] = true;
                             queue.push_back(new_class);
                         }
-                    } else if class == dead_class {
-                        queued[new_class] = true;
-                        queue.push_back(new_class);
                     } else {
                         queued[new_class] = true;
                         queue.push_back(new_class);
@@ -3489,10 +3484,7 @@ impl InterchangeabilityDfa {
                         class_for_state[states[pos] as usize] = new_class as u32;
                     }
 
-                    if was_queued {
-                        queued[new_class] = true;
-                        queue.push_back(new_class);
-                    } else if class == dead_class {
+                    if was_queued || class == dead_class {
                         queued[new_class] = true;
                         queue.push_back(new_class);
                     } else {
@@ -3883,7 +3875,7 @@ impl InterchangeabilityDfa {
                 output,
             });
         }
-        CanonicalSignature(components.into())
+        CanonicalSignature(components)
     }
 
     fn support_mask_for_class(support: &[(u32, u8)], class: usize) -> u8 {
@@ -4526,7 +4518,7 @@ impl InterchangeabilityDfa {
                 output,
             });
         }
-        CanonicalSignature(components.into())
+        CanonicalSignature(components)
     }
 
     /// Sparse-output-cache variant for the first-round rejection filter. That
@@ -4554,7 +4546,7 @@ impl InterchangeabilityDfa {
                 output,
             });
         }
-        CanonicalSignature(components.into())
+        CanonicalSignature(components)
     }
 
     fn canonical_identity_round(&self, previous: &[u32]) -> CanonicalRound {
@@ -4667,14 +4659,11 @@ impl InterchangeabilityDfa {
         let dead = self.dead_state();
         // A full pass is required whenever there is no usable cache, or when the
         // dead-state class moved (it sets the skip threshold for every state).
-        let full = match prev_prev {
+        let full = !matches!(
+            prev_prev,
             Some(prev_prev)
-                if cached_hashes.len() == state_count && previous[dead] == prev_prev[dead] =>
-            {
-                false
-            }
-            _ => true,
-        };
+                if cached_hashes.len() == state_count && previous[dead] == prev_prev[dead]
+        );
         if cached_hashes.len() != state_count {
             cached_hashes.clear();
             cached_hashes.resize(state_count, 0);
@@ -5014,7 +5003,7 @@ impl InterchangeabilityDfa {
                 output,
             });
         }
-        CanonicalSignature(components.into())
+        CanonicalSignature(components)
     }
 
     fn quotient_identity_classes_at_round<'a>(
@@ -6531,14 +6520,13 @@ impl InterchangeabilityDfa {
             if left_internal != right_internal {
                 return false;
             }
-            if !left_internal {
-                if union_petals[left_target]
+            if !left_internal
+                && (union_petals[left_target]
                     || union_petals[right_target]
-                    || left_target != right_target
+                    || left_target != right_target)
                 {
                     return false;
                 }
-            }
             let left_output =
                 &self.output_pairs[self.output_pair_by_state[left_destination] as usize];
             let right_output =
@@ -6965,7 +6953,7 @@ impl InterchangeabilityDfa {
                 output,
             });
         }
-        CanonicalSignature(components.into())
+        CanonicalSignature(components)
     }
 
     /// Exact sparse quotient evaluation. Outside the backward cone of every
@@ -7082,11 +7070,10 @@ impl InterchangeabilityDfa {
                 found
             }
         };
-        if profile_timing {
-            if let Some(started_at) = pair_started_at {
+        if profile_timing
+            && let Some(started_at) = pair_started_at {
                 self.sparse_quotient_refinement_ns += started_at.elapsed().as_nanos() as u64;
             }
-        }
         if let Some((map, cone_size)) = result {
             self.sparse_quotient_certified += 1;
             self.sparse_quotient_cone_classes_total += cone_size;
@@ -7155,15 +7142,15 @@ impl InterchangeabilityDfa {
             }
             if !self.quotient_rooted_class_set_still_possible(
                 quotient,
-                &identity_next,
+                identity_next,
                 &swapped_next,
             ) {
                 return None;
             }
             if same_equality_partition_pair_u32(
-                &identity_previous,
+                identity_previous,
                 &swapped_previous,
-                &identity_next,
+                identity_next,
                 &swapped_next,
             ) {
                 let map = self.quotient_interchange_map_from_classes(quotient, &swapped_next)?;
@@ -8091,15 +8078,14 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> Option<InterchangeMap> {
-        if let Some(deviations) = self.support_transposition_deviations_scratch(left, right) {
-            if let Some(map) = self.support_transposition_interchange_map_from_deviations_scratch(
+        if let Some(deviations) = self.support_transposition_deviations_scratch(left, right)
+            && let Some(map) = self.support_transposition_interchange_map_from_deviations_scratch(
                 left,
                 right,
                 deviations,
             ) {
                 return Some(map);
             }
-        }
         let left_support = self.terminal_support_parallel(left);
         let right_support = self.terminal_support_parallel(right);
         let deviations = self.support_transposition_search_deviations_with_supports(
@@ -10094,11 +10080,11 @@ pub fn coalesced_disallowed_follows(
             continue;
         };
         let mut common_successors = original
-            .get(&(first_member as u32))
+            .get(&{ first_member })
             .cloned()
             .unwrap_or_else(|| empty.clone());
         for &member in members {
-            let Some(successors) = original.get(&(member as u32)) else {
+            let Some(successors) = original.get(&{ member }) else {
                 common_successors.clear_all();
                 break;
             };
@@ -10117,7 +10103,7 @@ pub fn coalesced_disallowed_follows(
                 row.set(successor_representative as usize);
             }
         }
-        coalesced.insert(representative as u32, row);
+        coalesced.insert(representative, row);
     }
 
     coalesced
@@ -12374,14 +12360,14 @@ mod tests {
                     if predecessors.iter().all(|&predecessor| {
                         successors.iter().all(|&successor| {
                             original
-                                .get(&(predecessor as u32))
+                                .get(&{ predecessor })
                                 .is_some_and(|bits| bits.contains(successor as usize))
                         })
                     }) {
                         bits.set(successor_representative as usize);
                     }
                 }
-                result.insert(predecessor_representative as u32, bits);
+                result.insert(predecessor_representative, bits);
             }
             result
         }
@@ -12444,7 +12430,7 @@ mod tests {
             4,
             vec![0, 2, 4, 6],
         );
-        let mut modes = vec![
+        let modes = vec![
             TerminalNwaTransportMode::ordinary(7),
             TerminalNwaTransportMode::member(
                 TransportScannerStateMap::Explicit(vec![1, 0, 3, 2, 5, 4, 6].into()),
@@ -12480,7 +12466,7 @@ mod tests {
             }
         }
 
-        canonicalize_transport_mode_states(&mut modes, &ordinary);
+        canonicalize_transport_mode_states(&modes, &ordinary);
         let canonical_quotient = transport_coordinate_quotient(&ordinary, &modes);
         for left in 0..expected_signatures.len() {
             for right in 0..expected_signatures.len() {

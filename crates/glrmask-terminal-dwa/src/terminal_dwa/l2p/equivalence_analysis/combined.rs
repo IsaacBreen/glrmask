@@ -1181,7 +1181,7 @@ fn try_analyze_equivalences_with_token_position_partition(
         rows
     } else {
         owned_normalized_disallowed_follows =
-            normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
+            normalize_disallowed_follows(tokenizer_group_count(tokenizer_view), effective_disallowed);
         &owned_normalized_disallowed_follows
     };
     let effective_follows_normalize_ms = effective_follows_prepare_ms
@@ -1240,10 +1240,10 @@ fn try_analyze_equivalences_with_token_position_partition(
             .collect::<Vec<_>>();
         let prefix_target_representatives = if exact_rep_confirmation_used {
             state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base_with_initial_finalizers(
-                    &tokenizer_view,
+                    tokenizer_view,
                     &suffix_tokens,
                     &prefix_targets,
-                    &normalized_disallowed_follows,
+                    normalized_disallowed_follows,
                     None,
                     None,
                     Some(true),
@@ -1251,10 +1251,10 @@ fn try_analyze_equivalences_with_token_position_partition(
                 )
         } else {
             state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers(
-                    &tokenizer_view,
+                    tokenizer_view,
                     &suffix_tokens,
                     &prefix_targets,
-                    &normalized_disallowed_follows,
+                    normalized_disallowed_follows,
                     compatible_shared_base,
                 )
         };
@@ -1289,10 +1289,10 @@ fn try_analyze_equivalences_with_token_position_partition(
             .collect()
     } else if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
-            &tokenizer_view,
+            tokenizer_view,
             &dedup.representative_token_bytes,
             &query_states,
-            &normalized_disallowed_follows,
+            normalized_disallowed_follows,
             None,
             None,
             Some(true),
@@ -1300,10 +1300,10 @@ fn try_analyze_equivalences_with_token_position_partition(
         )
     } else {
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
-            &tokenizer_view,
+            tokenizer_view,
             &dedup.representative_token_bytes,
             &query_states,
-            &normalized_disallowed_follows,
+            normalized_disallowed_follows,
             compatible_shared_base,
         )
     };
@@ -1372,7 +1372,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     let vocab_equiv_started_at = Instant::now();
     let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
         vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
-            &tokenizer_view,
+            tokenizer_view,
             &dedup.representative_token_bytes,
             &final_state_representatives,
             effective_disallowed,
@@ -2374,8 +2374,8 @@ fn analyze_equivalences_impl(
         // only whole-token analysis, so it is sound to use before the absolute
         // restricted-observation pipeline. Epsilon lexers use a bounded
         // configuration view inside that route and project back to raw TSIDs.
-        if let Some(token_position_partition) = token_position_partition {
-            if let Some(result) = try_analyze_equivalences_with_token_position_partition(
+        if let Some(token_position_partition) = token_position_partition
+            && let Some(result) = try_analyze_equivalences_with_token_position_partition(
                 partition_label,
                 tokenizer,
                 vocab,
@@ -2390,7 +2390,6 @@ fn analyze_equivalences_impl(
             ) {
                 return result;
             }
-        }
 
         let prepare_started_at = Instant::now();
         let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
@@ -2533,9 +2532,7 @@ fn analyze_equivalences_impl(
             (initial_state_map_has_stable_restricted_observation && continuation_state_map.is_none())
                 .then(|| {
                     initial_state_map.and_then(|map| {
-                        map.original_to_internal
-                            .iter()
-                            .any(|&class| class == u32::MAX)
+                        map.original_to_internal.contains(&u32::MAX)
                             .then(|| {
                                 let mut completed = map.clone();
                                 super::super::super::scope::complete_with_continuation_singletons(
@@ -3440,8 +3437,8 @@ fn analyze_equivalences_impl(
     let effective_disallowed = token_path_disallowed_follows
         .as_ref()
         .unwrap_or(disallowed_follows);
-    if let Some(token_position_partition) = token_position_partition {
-        if let Some(result) = try_analyze_equivalences_with_token_position_partition(
+    if let Some(token_position_partition) = token_position_partition
+        && let Some(result) = try_analyze_equivalences_with_token_position_partition(
             partition_label,
             tokenizer,
             vocab,
@@ -3456,7 +3453,6 @@ fn analyze_equivalences_impl(
         ) {
             return result;
         }
-    }
     if let Some(result) = try_analyze_equivalences_with_raw_quotient(
         partition_label,
         tokenizer,

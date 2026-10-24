@@ -83,7 +83,8 @@ fn packed_results_preserve_derived_rows_counters_and_numeric_weights() {
             let(expected,expected_stats)=compute_on_graph_policy(source.as_slice(),&mut original,
                 &topo,filter,ResultPolicy::Vector).unwrap();
             queries+=expected_stats.queries;
-            for policy in [ResultPolicy::Packed] {
+            {
+                let policy = ResultPolicy::Packed;
                 let mut candidate=pool(words);
                 let(actual,stats)=compute_on_graph_policy(source.as_slice(),&mut candidate,
                     &topo,filter,policy).unwrap();
@@ -98,7 +99,8 @@ fn packed_results_preserve_derived_rows_counters_and_numeric_weights() {
                     let mut reference=pool(words);
                     reference.limits.as_mut().unwrap().work=work;
                     let a=compute_on_graph_policy(source.as_slice(),&mut reference,&topo,filter,ResultPolicy::Vector);
-                    for policy in [ResultPolicy::Packed] {
+                    {
+                        let policy = ResultPolicy::Packed;
                         let mut candidate=pool(words);candidate.limits.as_mut().unwrap().work=work;
                         let b=compute_on_graph_policy(source.as_slice(),&mut candidate,&topo,filter,policy);
                         assert_eq!(a.is_some(),b.is_some());

@@ -561,7 +561,7 @@ fn determinize_general_nfa(nfa: &NFA) -> DFA {
             dense_targets.finish_subset();
         } else {
             for (label, raw_targets) in gather_label_targets(nfa, &subset_key) {
-                let next_key = epsilon_closures.union(raw_targets.into_iter());
+                let next_key = epsilon_closures.union(raw_targets);
                 if next_key.is_empty() {
                     continue;
                 }

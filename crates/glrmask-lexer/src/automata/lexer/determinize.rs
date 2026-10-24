@@ -10,12 +10,12 @@ use crate::ds::compressed_state_set::{CompressedStateSet, SparseStateSet};
 use crate::ds::u8set::U8Set;
 
 use super::dfa::DFA;
-use super::nfa::{CompactNFA, NFA};
+use super::nfa::{CompactNFA, Nfa};
 
 const EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD: u32 = 1;
 
 fn compute_subset_metadata(
-    nfa: &NFA,
+    nfa: &Nfa,
     subset: &CompressedStateSet,
     group_count: usize,
     reachable_groups: &[BitSet],
@@ -60,7 +60,7 @@ fn compute_subset_metadata(
     (finalizers, future)
 }
 
-fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
+fn compute_reachable_groups(nfa: &Nfa, group_count: usize) -> Vec<BitSet> {
     let num_states = nfa.states.len();
     if num_states == 0 {
         return Vec::new();
@@ -236,7 +236,7 @@ fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
         .collect()
 }
 
-fn is_epsilon_free_deterministic(nfa: &NFA) -> bool {
+fn is_epsilon_free_deterministic(nfa: &Nfa) -> bool {
     nfa.states.iter().all(|state| {
         if !state.epsilon_transitions.is_empty() {
             return false;
@@ -253,7 +253,7 @@ fn is_epsilon_free_deterministic(nfa: &NFA) -> bool {
     })
 }
 
-fn determinize_epsilon_free_deterministic(nfa: &NFA, group_count: usize, reachable_groups: &[BitSet]) -> DFA {
+fn determinize_epsilon_free_deterministic(nfa: &Nfa, group_count: usize, reachable_groups: &[BitSet]) -> DFA {
     let num_states = nfa.states.len().max(1);
     let mut order = Vec::with_capacity(num_states);
     order.push(nfa.start_state as usize);
@@ -303,7 +303,7 @@ struct RemappedTransitions {
     source_word_masks: Vec<u64>,
 }
 
-fn build_remapped_transitions(nfa: &NFA, class_map: &[u8]) -> RemappedTransitions {
+fn build_remapped_transitions(nfa: &Nfa, class_map: &[u8]) -> RemappedTransitions {
     let mut remapped_set_cache: FxHashMap<U8Set, U8Set> = FxHashMap::default();
     let mut offsets = Vec::with_capacity(nfa.states.len() + 1);
     let transition_count = nfa
@@ -562,7 +562,7 @@ fn expand_byte_class_transitions(dfa: &mut DFA, class_members: &[Vec<u8>]) {
     }
 }
 
-impl NFA {
+impl Nfa {
     pub(super) fn to_dfa(&self) -> DFA {
         self.determinize_impl(true).0
     }
@@ -931,7 +931,7 @@ mod class_minimization_tests {
 
     #[test]
     fn class_alphabet_minimization_matches_byte_expansion() {
-        let mut nfa = NFA::new(8);
+        let mut nfa = Nfa::new(8);
         let mut ab = U8Set::empty();
         ab.insert(b'a');
         ab.insert(b'b');

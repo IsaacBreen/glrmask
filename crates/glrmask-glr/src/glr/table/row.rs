@@ -645,7 +645,7 @@ impl ActionRow {
         // is provably impossible to compress. Reject it before allocating and
         // hashing an action-frequency map.
         let present_count = row.len();
-        if present_count <= (num_terminals as usize + 1) / 2 {
+        if present_count <= (num_terminals as usize).div_ceil(2) {
             return;
         }
 
@@ -733,7 +733,7 @@ impl ActionRow {
         let Self::Indexed { .. } = self else {
             return;
         };
-        let old = std::mem::replace(self, Self::default());
+        let old = std::mem::take(self);
         let Self::Indexed { entries, .. } = old else {
             unreachable!();
         };

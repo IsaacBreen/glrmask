@@ -197,13 +197,12 @@ impl NWA {
         let left_body = self.append_with_body(left);
 
         for state_id in offset as usize..(offset as usize + left.states.len()) {
-            if let Some(final_weight) = self.states[state_id].final_weight.take() {
-                if !final_weight.is_empty() {
+            if let Some(final_weight) = self.states[state_id].final_weight.take()
+                && !final_weight.is_empty() {
                     for &right_start in &right_body.start_states {
                         self.add_epsilon(state_id as u32, right_start, final_weight.clone());
                     }
                 }
-            }
         }
 
         left_body
@@ -234,11 +233,10 @@ impl NWA {
             for (dst, weight) in &state.epsilons {
                 rev.add_epsilon(*dst, src as u32, weight.clone());
             }
-            if let Some(final_weight) = &state.final_weight {
-                if !final_weight.is_empty() {
+            if let Some(final_weight) = &state.final_weight
+                && !final_weight.is_empty() {
                     rev.add_epsilon(super_start, src as u32, final_weight.clone());
                 }
-            }
         }
 
         for &start in &self.start_states {

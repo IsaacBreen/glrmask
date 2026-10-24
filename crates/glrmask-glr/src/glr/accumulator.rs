@@ -347,11 +347,10 @@ impl Default for TerminalsDisallowed {
 
 impl PartialEq for TerminalsDisallowed {
     fn eq(&self, other: &Self) -> bool {
-        if let (Repr::Many(left), Repr::Many(right)) = (&self.0, &other.0) {
-            if Arc::ptr_eq(left, right) {
+        if let (Repr::Many(left), Repr::Many(right)) = (&self.0, &other.0)
+            && Arc::ptr_eq(left, right) {
                 return true;
             }
-        }
         self.is_subset_of(other) && other.is_subset_of(self)
     }
 }

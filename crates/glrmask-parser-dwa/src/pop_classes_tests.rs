@@ -136,13 +136,13 @@ fn classed_cancellation_matches_literal_weighted_acyclic_programs() {
     for case in 0..256 {
         let count = 3 + random() % 7;
         let mut states = vec![NWAState::default(); count];
-        for from in 0..count {
-            if random() % 3 == 0 { states[from].final_weight = Some(weight((random() % 3 + 1) as u8)); }
+        for (from, state) in states.iter_mut().enumerate() {
+            if random() % 3 == 0 { state.final_weight = Some(weight((random() % 3 + 1) as u8)); }
             for to in from+1..count {
                 if random() % 3 != 0 { continue; }
                 let coefficient = weight((random() % 3 + 1) as u8);
-                if random() % 5 == 0 { states[from].epsilons.push((to as u32, coefficient)); }
-                else { states[from].transitions.entry(labels[random() % labels.len()]).or_default().push((to as u32, coefficient)); }
+                if random() % 5 == 0 { state.epsilons.push((to as u32, coefficient)); }
+                else { state.transitions.entry(labels[random() % labels.len()]).or_default().push((to as u32, coefficient)); }
             }
         }
         let graph = NWA::from_parts(states, vec![0]);

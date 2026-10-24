@@ -21,19 +21,17 @@ fn outputs(program: &CommitTemplateDfas, input: &[u32]) -> BTreeSet<Vec<u32>> {
                 if let Some(target) = program.pop_to_push.get(state as usize).copied().flatten() {
                     todo.push((2, target, stack.clone()));
                 }
-                if let Some(&top) = stack.last() {
-                    if let Some(&target) = row.transitions.get(&(top as i32)).or_else(|| row.transitions.get(&DEFAULT_LABEL)) {
+                if let Some(&top) = stack.last()
+                    && let Some(&target) = row.transitions.get(&(top as i32)).or_else(|| row.transitions.get(&DEFAULT_LABEL)) {
                         let mut rest = stack; rest.pop(); todo.push((0, target, rest));
                     }
-                }
             }
             1 => {
                 if let Some(target) = program.read_to_push.get(state as usize).copied().flatten() {
                     todo.push((2, target, stack.clone()));
                 }
-                if let Some(&top) = stack.last() {
-                    if let Some(&target) = row.transitions.get(&(top as i32)) { todo.push((1, target, stack)); }
-                }
+                if let Some(&top) = stack.last()
+                    && let Some(&target) = row.transitions.get(&(top as i32)) { todo.push((1, target, stack)); }
             }
             _ => for (&label, &target) in &row.transitions {
                 let mut next = stack.clone(); next.push(negative_to_positive_label(label) as u32);
@@ -89,15 +87,15 @@ fn random_program(seed: &mut u64) -> CommitTemplateDfas {
         let n = 1 + next(seed) % 5; let mut graph = DFA::new();
         while graph.states.len() < n as usize { graph.add_state(); }
         for state in 0..n {
-            graph.set_accepting(state, next(seed) % 4 == 0);
+            graph.set_accepting(state, next(seed).is_multiple_of(4));
             if state + 1 == n { continue; }
             for symbol in 0..3 {
-                if next(seed) % 3 != 0 { continue; }
+                if !next(seed).is_multiple_of(3) { continue; }
                 let target = state + 1 + next(seed) % (n - state - 1);
                 let label = if phase == 2 { encode_negative_label(symbol) } else { symbol as i32 };
                 graph.add_transition(state, label, target);
             }
-            if phase == 0 && next(seed) % 3 == 0 {
+            if phase == 0 && next(seed).is_multiple_of(3) {
                 let target = state + 1 + next(seed) % (n - state - 1);
                 graph.add_transition(state, DEFAULT_LABEL, target);
             }
@@ -106,7 +104,7 @@ fn random_program(seed: &mut u64) -> CommitTemplateDfas {
     }
     let push = graphs.pop().unwrap(); let read = graphs.pop().unwrap(); let pop = graphs.pop().unwrap();
     let mut links = |count: usize, target_count: usize| (0..count).map(|_| {
-        let value = next(seed); (value % 3 == 0).then_some((value / 3) % target_count as u32)
+        let value = next(seed); value.is_multiple_of(3).then_some((value / 3) % target_count as u32)
     }).collect();
     CommitTemplateDfas { pop_to_read: links(pop.states.len(), read.states.len()),
         pop_to_push: links(pop.states.len(), push.states.len()), read_to_push: links(read.states.len(), push.states.len()),

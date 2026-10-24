@@ -56,7 +56,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
         let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
         host.bind("E", expr).unwrap();
-        let loaded = Module::load(&host.save()).unwrap();
+        let loaded = Module::load(host.save()).unwrap();
         let root = loaded
             .compile_with(&v, mode.compile_options())
             .unwrap();

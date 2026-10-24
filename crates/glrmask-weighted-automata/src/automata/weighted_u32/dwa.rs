@@ -1099,7 +1099,7 @@ impl BackedPackedRuntimeDwa {
         let token_body_end = pos;
 
         let (compact_overflow_values_start, compact_overflow_count) = if compact_token_ranges {
-            if token_body_len % 2 != 0 {
+            if !token_body_len.is_multiple_of(2) {
                 return Err("DWF8 compact token body is not u16-aligned".to_owned());
             }
             let overflow_count = read_u32(input, pos)? as usize;
@@ -1124,7 +1124,7 @@ impl BackedPackedRuntimeDwa {
                     read_u24(input, compact_overflow_locations_start + index * 3)? as usize;
                 if range_start < previous_range
                     || range_start > token_body_len
-                    || range_start % 2 != 0
+                    || !range_start.is_multiple_of(2)
                     || overflow_start < previous_overflow
                     || overflow_start > overflow_count
                 {
@@ -2669,15 +2669,15 @@ impl PackedRuntimeDwa {
         Some(out)
     }
 
-    fn try_append_narrow_backed_fast_wire_bytes(&self, mut out: &mut Vec<u8>) -> Option<usize> {
+    fn try_append_narrow_backed_fast_wire_bytes(&self, out: &mut Vec<u8>) -> Option<usize> {
         let split_target_weight = self.states.len() > (1usize << 17)
             || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
             || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15));
         let raw_u16_ranges = split_target_weight
-            .then(|| self.flat_token_ranges_u16.as_deref())
+            .then_some(self.flat_token_ranges_u16.as_deref())
             .flatten();
         let raw_u16_spans = split_target_weight
-            .then(|| self.flat_token_spans.as_deref())
+            .then_some(self.flat_token_spans.as_deref())
             .flatten();
         // DWF6's token body is the fixed-width u16 runtime slab. A large DWA
         // that does not use that runtime representation must fall back to
@@ -2882,9 +2882,7 @@ impl PackedRuntimeDwa {
             let mut row_label_ids = Vec::<u16>::with_capacity(self.label_pool.spans.len());
             for &[start, len] in self.label_pool.spans.iter() {
                 let start_usize = start as usize;
-                let Some(end) = start_usize.checked_add(len as usize) else {
-                    return None;
-                };
+                let end = start_usize.checked_add(len as usize)?;
                 let labels = self.label_pool.values.get(start_usize..end)?;
                 let id = if let Some(&id) = label_ids.get(labels) {
                     id
@@ -2952,14 +2950,14 @@ impl PackedRuntimeDwa {
         let output_start = out.len();
         out.reserve(expected_len);
         out.extend_from_slice(if split_target_weight { b"DWF6" } else { b"DWF5" });
-        put_u32(&mut out, self.start_state);
-        put_u32(&mut out, token_set_count as u32);
-        put_u32(&mut out, token_bytes as u32);
+        put_u32(out, self.start_state);
+        put_u32(out, token_set_count as u32);
+        put_u32(out, token_bytes as u32);
         for location in locations {
-            put_u24(&mut out, location);
+            put_u24(out, location);
         }
         for &word_span in word_spans {
-            put_u16(&mut out, word_span as u16);
+            put_u16(out, word_span as u16);
         }
         if let Some(ranges) = raw_u16_ranges {
             if cfg!(target_endian = "little") {
@@ -2972,8 +2970,8 @@ impl PackedRuntimeDwa {
                 out.extend_from_slice(bytes);
             } else {
                 for &[start, end] in ranges {
-                    put_u16(&mut out, start);
-                    put_u16(&mut out, end);
+                    put_u16(out, start);
+                    put_u16(out, end);
                 }
             }
         } else {
@@ -2982,21 +2980,21 @@ impl PackedRuntimeDwa {
             }
         }
 
-        put_u32(&mut out, self.geometries.len() as u32);
+        put_u32(out, self.geometries.len() as u32);
         for geometry in self.geometries.iter() {
-            put_u16(&mut out, geometry.len() as u16);
+            put_u16(out, geometry.len() as u16);
             for &(start, end) in geometry {
-                put_u16(&mut out, start as u16);
-                put_u16(&mut out, end as u16);
+                put_u16(out, start as u16);
+                put_u16(out, end as u16);
             }
         }
-        put_u32(&mut out, self.weights.len() as u32);
+        put_u32(out, self.weights.len() as u32);
         for weight in self.weights.iter() {
-            put_u16(&mut out, weight.geometry as u16);
-            put_u24(&mut out, weight.token_ids_start);
+            put_u16(out, weight.geometry as u16);
+            put_u24(out, weight.token_ids_start);
             out.push(weight.full as u8);
         }
-        put_u32(&mut out, self.weight_token_ids.len() as u32);
+        put_u32(out, self.weight_token_ids.len() as u32);
         let weight_token_ids_start = out.len();
         out.resize(
             weight_token_ids_start + self.weight_token_ids.len().saturating_mul(2),
@@ -3016,7 +3014,7 @@ impl PackedRuntimeDwa {
             }
         }
         if split_target_weight {
-            put_u32(&mut out, self.label_pool.values.len() as u32);
+            put_u32(out, self.label_pool.values.len() as u32);
             let transitions_start = out.len();
             out.resize(
                 transitions_start + self.label_pool.values.len().saturating_mul(7),
@@ -3060,15 +3058,15 @@ impl PackedRuntimeDwa {
                     write_transition(dst, entry);
                 }
             }
-            put_u32(&mut out, self.label_pool.spans.len() as u32);
+            put_u32(out, self.label_pool.spans.len() as u32);
             for &span in self.label_pool.spans.iter() {
-                put_span(&mut out, span);
+                put_span(out, span);
             }
         } else {
-            put_u32(&mut out, unique_label_values.len() as u32);
+            put_u32(out, unique_label_values.len() as u32);
             for &label in &unique_label_values {
                 put_u16(
-                    &mut out,
+                    out,
                     if label == DEFAULT_LABEL_WIRE {
                         u16::MAX
                     } else {
@@ -3076,15 +3074,15 @@ impl PackedRuntimeDwa {
                     },
                 );
             }
-            put_u32(&mut out, unique_label_spans.len() as u32);
+            put_u32(out, unique_label_spans.len() as u32);
             for &span in &unique_label_spans {
-                put_span(&mut out, span);
+                put_span(out, span);
             }
-            put_u32(&mut out, row_label_ids.len() as u32);
+            put_u32(out, row_label_ids.len() as u32);
             for &label_id in &row_label_ids {
-                put_u16(&mut out, label_id);
+                put_u16(out, label_id);
             }
-            put_u32(&mut out, self.target_pool.values.len() as u32);
+            put_u32(out, self.target_pool.values.len() as u32);
             let transitions_start = out.len();
             out.resize(
                 transitions_start + self.target_pool.values.len().saturating_mul(4),
@@ -3116,12 +3114,12 @@ impl PackedRuntimeDwa {
                     write_transition(dst, pair);
                 }
             }
-            put_u32(&mut out, self.target_pool.spans.len() as u32);
+            put_u32(out, self.target_pool.spans.len() as u32);
             for &span in self.target_pool.spans.iter() {
-                put_span(&mut out, span);
+                put_span(out, span);
             }
         }
-        put_u32(&mut out, self.states.len() as u32);
+        put_u32(out, self.states.len() as u32);
         let states_start = out.len();
         out.resize(states_start + self.states.len().saturating_mul(4), 0);
         let write_state = |dst: &mut [u8], state: &PackedRuntimeState| {
@@ -3868,9 +3866,8 @@ impl PackedRuntimeDwa {
                 .ok_or_else(|| "truncated fast DWA u32 vector".to_owned())?;
             *pos = end;
             if cfg!(target_endian = "little") {
-                let mut out = Vec::<u32>::with_capacity(len);
+                let mut out = vec![0u32; len];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -3897,9 +3894,8 @@ impl PackedRuntimeDwa {
                 .ok_or_else(|| "truncated fast DWA i32 vector".to_owned())?;
             *pos = end;
             if cfg!(target_endian = "little") {
-                let mut out = Vec::<i32>::with_capacity(len);
+                let mut out = vec![0i32; len];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -3931,9 +3927,15 @@ impl PackedRuntimeDwa {
             *pos = end;
             if cfg!(target_endian = "little") {
                 debug_assert_eq!(std::mem::size_of::<PackedRuntimeRow>(), 12);
-                let mut out = Vec::<PackedRuntimeRow>::with_capacity(len);
+                let mut out = vec![
+                    PackedRuntimeRow {
+                        labels: 0,
+                        targets: 0,
+                        weights: 0,
+                    };
+                    len
+                ];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -3985,9 +3987,15 @@ impl PackedRuntimeDwa {
             *pos = end;
             if cfg!(target_endian = "little") {
                 debug_assert_eq!(std::mem::size_of::<PackedRuntimeWeight>(), 12);
-                let mut out = Vec::<PackedRuntimeWeight>::with_capacity(len);
+                let mut out = vec![
+                    PackedRuntimeWeight {
+                        geometry: 0,
+                        token_ids_start: 0,
+                        full: 0,
+                    };
+                    len
+                ];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -4024,9 +4032,8 @@ impl PackedRuntimeDwa {
                 .ok_or_else(|| "truncated fast DWA pair vector".to_owned())?;
             *pos = end;
             if cfg!(target_endian = "little") {
-                let mut out = Vec::<[u32; 2]>::with_capacity(len);
+                let mut out = vec![[0u32; 2]; len];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -4063,9 +4070,14 @@ impl PackedRuntimeDwa {
             *pos = end;
             if cfg!(target_endian = "little") {
                 debug_assert_eq!(std::mem::size_of::<PackedRuntimeState>(), 8);
-                let mut out = Vec::<PackedRuntimeState>::with_capacity(len);
+                let mut out = vec![
+                    PackedRuntimeState {
+                        row: 0,
+                        final_weight: 0,
+                    };
+                    len
+                ];
                 unsafe {
-                    out.set_len(len);
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         out.as_mut_ptr().cast::<u8>(),
@@ -4905,13 +4917,15 @@ impl PackedRuntimeDwa {
                     && (state.final_weight == u32::MAX || state.final_weight < u16::MAX as u32)
             })
         {
-            let (
+            let Some((
                 compact_token_ranges,
                 compact_token_spans,
                 compact_token_overflow_starts,
                 compact_token_overflows,
-            ) =
-                compact_tokens.expect("checked compact token runtime");
+            )) = compact_tokens
+            else {
+                panic!("checked compact token runtime");
+            };
             let mut transitions = Vec::<u8>::with_capacity(label_values.len() * 7);
             for ((&label, &target), &weight_id) in label_values
                 .iter()
@@ -5883,7 +5897,7 @@ impl PackedRuntimeDwa {
             };
             if start_bytes > end_bytes
                 || end_bytes > narrow.token_ranges.len().checked_mul(2)?
-                || start_bytes % 2 != 0
+                || !start_bytes.is_multiple_of(2)
                 || end_bytes % 2 != 0
             {
                 return None;
@@ -5891,7 +5905,7 @@ impl PackedRuntimeDwa {
             let start = start_bytes / 2;
             let end = end_bytes / 2;
             if wide {
-                if (end - start) % 2 != 0 || (end - start) / 2 != span.len as usize {
+                if !(end - start).is_multiple_of(2) || (end - start) / 2 != span.len as usize {
                     return None;
                 }
                 let words = narrow.token_ranges.get(start..end)?;
@@ -8744,8 +8758,10 @@ impl DWA {
             vec![self.start_state],
         );
         for state in &self.states {
-            let mut nwa_state = NWAState::default();
-            nwa_state.final_weight = state.final_weight.clone();
+            let mut nwa_state = NWAState {
+                final_weight: state.final_weight.clone(),
+                ..Default::default()
+            };
             for (&label, (target, weight)) in &state.transitions {
                 nwa_state
                     .transitions

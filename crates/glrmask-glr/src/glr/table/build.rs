@@ -2294,15 +2294,14 @@ fn compute_lalr_item_lookaheads(
                     continue;
                 };
                 let target_node = lalr_global_node_id(&offsets, state_id, target_item_index);
-                if !spontaneous.is_empty() {
-                    if lookaheads[target_node].union_with_changed(spontaneous) {
+                if !spontaneous.is_empty()
+                    && lookaheads[target_node].union_with_changed(spontaneous) {
                         spontaneous_updates += 1;
                         if !queued[target_node] {
                             queued[target_node] = true;
                             worklist.push_back(target_node);
                         }
                     }
-                }
                 if propagates {
                     edges[source_node].push(target_node);
                 }
@@ -2317,9 +2316,11 @@ fn compute_lalr_item_lookaheads(
         targets.dedup();
     }
     let dedup_ms = dedup_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
-    let edge_count = profile
-        .then(|| edges.iter().map(Vec::len).sum::<usize>())
-        .unwrap_or(0);
+    let edge_count = if profile {
+        edges.iter().map(Vec::len).sum::<usize>()
+    } else {
+        0
+    };
 
     let propagation_started = profile.then(std::time::Instant::now);
     let mut propagation_pops = 0usize;
@@ -2850,7 +2851,6 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
 /// foo items in the source.
 ///
 /// Returns `Some(transferred)` with the set of transferred items otherwise.
-
 /// Eagerly advance transferred items past completed nonterminals in the
 fn compute_transfer_items(
     kernel: &BTreeSet<LR1Item>,
@@ -2888,8 +2888,8 @@ fn compute_transfer_items(
             if item.transferred {
                 continue;
             }
-            if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-                if all_needed.contains(nt) && !found_nts.contains(nt) {
+            if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules)
+                && all_needed.contains(nt) && !found_nts.contains(nt) {
                     transferred.push(LR1Item {
                         transferred: true,
                         ..*item
@@ -2905,7 +2905,6 @@ fn compute_transfer_items(
                         }
                     }
                 }
-            }
         }
         if new_needed.is_empty() {
             break;
@@ -3284,14 +3283,9 @@ fn grammar_has_recursion(rules: &[Rule]) -> bool {
     fn dfs(node: usize, adj: &[Vec<usize>], color: &mut [u8]) -> bool {
         color[node] = 1;
         for &next in &adj[node] {
-            match color[next] {
-                1 => return true,
-                0 => {
-                    if dfs(next, adj, color) {
-                        return true;
-                    }
-                }
-                _ => {}
+            if color[next] == 1 { return true }
+            if dfs(next, adj, color) {
+                return true;
             }
         }
         color[node] = 2;
@@ -3307,8 +3301,8 @@ fn grammar_has_recursion(rules: &[Rule]) -> bool {
 }
 
 fn apply_local_forward_replace(
-    pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
-    goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    pending: &mut [BTreeMap<TerminalID, PendingAction>],
+    goto: &mut [FxHashMap<NonterminalID, (u32, bool)>],
     item_sets: &[BTreeSet<LR1Item>],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
     rules: &[Rule],
@@ -3414,12 +3408,10 @@ fn apply_local_forward_replace(
                         None => {
                             if let Some(&(existing_target, existing_replace)) =
                                 goto[reduce_state as usize].get(&reduce_nt)
-                            {
-                                if existing_target != forward_target || !existing_replace {
+                                && (existing_target != forward_target || !existing_replace) {
                                     valid = false;
                                     break;
                                 }
-                            }
                             forwarded.insert((reduce_state, reduce_nt), forward_target);
                         }
                     }
@@ -3435,11 +3427,10 @@ fn apply_local_forward_replace(
 
                 match symbol {
                     Symbol::Terminal(terminal) => {
-                        if let Some(pending_action) = pending[source].get_mut(terminal) {
-                            if let Some((_, is_replace)) = pending_action.shift.as_mut() {
+                        if let Some(pending_action) = pending[source].get_mut(terminal)
+                            && let Some((_, is_replace)) = pending_action.shift.as_mut() {
                                 *is_replace = true;
                             }
-                        }
                     }
                     Symbol::Nonterminal(nonterminal) => {
                         if let Some((_, is_replace)) = goto[source].get_mut(nonterminal) {
@@ -3478,8 +3469,8 @@ fn apply_local_forward_replace(
 /// Iterates until no more inlining is possible (handles chains of zero-pop
 /// reduces).
 fn inline_zero_pop_reduces(
-    pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
-    goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    pending: &mut [BTreeMap<TerminalID, PendingAction>],
+    goto: &mut [FxHashMap<NonterminalID, (u32, bool)>],
 ) {
     loop {
         let mut changed = false;
@@ -3490,11 +3481,10 @@ fn inline_zero_pop_reduces(
             if let Some(by_terminal) = pending.get(state) {
                 for (&terminal, pa) in by_terminal {
                     for &(reduce_nt, reduce_len) in &pa.reduces {
-                        if reduce_len == 0 {
-                            if let Some(&(target, _)) = goto[state].get(&reduce_nt) {
+                        if reduce_len == 0
+                            && let Some(&(target, _)) = goto[state].get(&reduce_nt) {
                                 to_inline.push((terminal, reduce_nt, target));
                             }
-                        }
                     }
                 }
             }
@@ -3526,11 +3516,10 @@ fn inline_zero_pop_reduces(
                         // Propagate gotos needed for any zero-pop reduces
                         // we just inlined from the target state.
                         for &(nt, len) in &tpa.reduces {
-                            if len == 0 {
-                                if let Some(&goto_entry) = goto[target as usize].get(&nt) {
+                            if len == 0
+                                && let Some(&goto_entry) = goto[target as usize].get(&nt) {
                                     goto[state].entry(nt).or_insert(goto_entry);
                                 }
-                            }
                         }
                     }
 
@@ -3553,7 +3542,7 @@ fn build_lr1_table(
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let init_started_at = profile_enabled.then(std::time::Instant::now);
-    let (pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
+    let (mut pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
     let init_ms = init_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -3561,8 +3550,6 @@ fn build_lr1_table(
     // Replace flags are now carried in the transitions map from
     // build_lr1_item_sets, so we don't need to recompute them here.
 
-    let mut pending = pending;
-    let goto = goto;
     let reductions_started_at = profile_enabled.then(std::time::Instant::now);
     // Each state's pending reduce/accept actions depend only on that state's
     // items, so populate the rows in parallel. Shifts were already filled in by
@@ -3921,7 +3908,7 @@ fn union_experimental_core_rows(table: GLRTable, partition: &[u32]) -> Option<GL
         for (terminal, action) in &table.action[state] {
             add_remapped_action_to_pending(
                 action,
-                &mut pending[group].entry(terminal).or_default(),
+                pending[group].entry(terminal).or_default(),
                 partition,
             )?;
             if action_shift(action).is_some()

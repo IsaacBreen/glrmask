@@ -1324,7 +1324,8 @@ fn build_char_type_sub_vocabs(
     };
 
     let partition_index = |bytes: &[u8]| {
-        let idx = if custom_partition {
+        
+        if custom_partition {
             classify::classify_vocab_char_type(bytes) as usize
         } else {
             let base_partition = classify::fast_eval_char_type_regular_partition(bytes) as usize;
@@ -1333,8 +1334,7 @@ fn build_char_type_sub_vocabs(
                 bytes.len(),
                 regular_key.expect("default partition key"),
             )
-        };
-        idx
+        }
     };
     let new_partition_accumulator = || {
         (
@@ -2304,7 +2304,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let shared_ti_output_cache = shared_classify_cache
         .get()
         .and_then(l2p::SharedTiTokenizerOutputCache::new_with_classify_bytesets)
-        .unwrap_or_else(l2p::SharedTiTokenizerOutputCache::new);
+        .unwrap_or_default();
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_shared_setup_end] ms={:.3}", shared_cache_setup_ms); }
@@ -2508,7 +2508,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 use_terminal_coloring,
                 ignore_terminal,
                 grammar,
-                &always_allowed_follows,
+                always_allowed_follows,
                 disallowed_follows,
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
@@ -2567,7 +2567,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 use_terminal_coloring,
                 ignore_terminal,
                 grammar,
-                &always_allowed_follows,
+                always_allowed_follows,
                 disallowed_follows,
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
@@ -2580,7 +2580,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_original_vocab_analysis_dfa_cache),
                 Some(shared_transition_cache),
                 Some(&shared_ti_output_cache),
-                Some(&shared_classify_cache),
+                Some(shared_classify_cache),
                 terminal_filter,
                 boundary_scope,
             )
@@ -2593,7 +2593,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 use_terminal_coloring,
                 ignore_terminal,
                 grammar,
-                &always_allowed_follows,
+                always_allowed_follows,
                 disallowed_follows,
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
@@ -2606,7 +2606,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_original_vocab_analysis_dfa_cache),
                 Some(shared_transition_cache),
                 Some(&shared_ti_output_cache),
-                Some(&shared_classify_cache),
+                Some(shared_classify_cache),
                 terminal_filter,
                 boundary_scope,
             )

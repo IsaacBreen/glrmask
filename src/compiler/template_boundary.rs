@@ -208,18 +208,16 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         || layout.total_tokenizer_states.checked_add(1) != Some(merged.num_states())) {
         return Err(fail("static lexical observation changed the recursive state coordinate"));
     }
-    if let Some(observation) = &observation {
-        if observation.leaf_offsets[..leaves.len()] != tokenizer_offsets
-            || observation.leaf_offsets.last() != Some(&merged.num_states()) {
+    if let Some(observation) = &observation
+        && (observation.leaf_offsets[..leaves.len()] != tokenizer_offsets
+            || observation.leaf_offsets.last() != Some(&merged.num_states())) {
             return Err(fail("finite boundary observation does not match the lexical union"));
         }
-    }
-    if merged.terminal_exprs().is_none() {
-        if let Some(exprs) = merged_retained_terminal_exprs(&leaves, &layout.leaf_terminal_offsets,
+    if merged.terminal_exprs().is_none()
+        && let Some(exprs) = merged_retained_terminal_exprs(&leaves, &layout.leaf_terminal_offsets,
             layout.total_leaf_terminals) {
             merged.restore_terminal_exprs(Some(exprs)).map_err(fail)?;
         }
-    }
     if profile {for (index,leaf) in leaves.iter().enumerate() {
         eprintln!("[glrmask/profile][compiler_effect_metadata] leaf={index} summary={}",leaf.parser_backend_report()["compiler_effect_metadata"]);
     }}
@@ -509,7 +507,7 @@ mod tests {
             let reference=Grammar::from_ebnf(if nullable {r#"start ::= "x" ("a" | "") "y""#}
                 else {r#"start ::= "x" "a" "y""#}).unwrap()
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-            let loaded=Constraint::load(&candidate.save(), &vocab).unwrap();
+            let loaded=Constraint::load(candidate.save(), &vocab).unwrap();
             let mut words=vec![Vec::new()];
             for depth in 0..=4 {
                 let mut next=Vec::new();
@@ -541,7 +539,7 @@ mod tests {
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT = /a[ab]*/; nt root = TEXT "?";"#).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-        let loaded_left=Constraint::load(&left.save(), &vocab).unwrap();let loaded_right=Constraint::load(&right.save(), &vocab).unwrap();
+        let loaded_left=Constraint::load(left.save(), &vocab).unwrap();let loaded_right=Constraint::load(right.save(), &vocab).unwrap();
         for leaves in [vec![&left,&right],vec![&loaded_left,&loaded_right],vec![&left,&loaded_right]] {
             let terminals=vec![0,leaves[0].tokenizer.num_terminals()];
             let inputs=leaves.iter().zip(&terminals).map(|(&leaf,&offset)|(leaf.tokenizer.as_ref(),offset)).collect::<Vec<_>>();

@@ -70,6 +70,20 @@ jobs:
       - name: Test with internal API
         run: cargo test --locked --profile fasttest -p glrmask -p glrmask-grammar --features internal-api
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --profile fasttest --exclude _glrmask --exclude glrmask-c --exclude glrmask-node --exclude glrmask-binding-core -- -D warnings
+
   examples:
     name: Examples
     runs-on: ubuntu-24.04

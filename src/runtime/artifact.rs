@@ -8599,8 +8599,8 @@ impl DynamicMaskVocab {
         while !frames.is_empty() {
             let frame_index = frames.len() - 1;
             let node_id = frames[frame_index].node;
-            if frames[frame_index].next_child == 0 {
-                if let Some(canonical) = self.trie.node(node_id).token_id {
+            if frames[frame_index].next_child == 0
+                && let Some(canonical) = self.trie.node(node_id).token_id {
                     let canonical = canonical as usize;
                     if canonical >= canonical_seen.len()
                         || canonical_seen[canonical]
@@ -8610,7 +8610,6 @@ impl DynamicMaskVocab {
                     }
                     canonical_seen[canonical] = true;
                 }
-            }
 
             let children = self.trie.children(node_id);
             if frames[frame_index].next_child < children.len() {
@@ -8665,8 +8664,8 @@ impl DynamicMaskVocab {
         while !frames.is_empty() {
             let frame_index = frames.len() - 1;
             let node_id = frames[frame_index].node;
-            if frames[frame_index].next_child == 0 {
-                if let Some(canonical) = self.trie.node(node_id).token_id {
+            if frames[frame_index].next_child == 0
+                && let Some(canonical) = self.trie.node(node_id).token_id {
                     let canonical = canonical as usize;
                     if canonical >= canonical_seen.len() || canonical_seen[canonical] {
                         return false;
@@ -8685,7 +8684,6 @@ impl DynamicMaskVocab {
                     }
                     canonical_seen[canonical] = true;
                 }
-            }
             let children = self.trie.children(node_id);
             if frames[frame_index].next_child < children.len() {
                 let edge = children[frames[frame_index].next_child].clone();

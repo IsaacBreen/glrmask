@@ -473,7 +473,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             // cell_raw(), which could materialize new union derivatives.
             return Some(full_walk_identity_byte_classes(state, |byte| {
                 let cell = self.uncached_base_cell(state, byte);
-                (cell != u32::MAX).then(|| (cell & 0x7fff_ffff, cell & 0x8000_0000 != 0))
+                (cell != u32::MAX).then_some((cell & 0x7fff_ffff, cell & 0x8000_0000 != 0))
             }));
         }
         // This query declines virtual/compressed coordinates. Plain physical
@@ -1110,7 +1110,7 @@ impl<'a> FullWalkSubset16<'a> {
                 };
                 row[byte as usize] = target | if has_finalizer { 0x8000_0000 } else { 0 };
             }
-            table.rows[build_index] = Box::new(row);
+            *table.rows[build_index] = row;
             build_index += 1;
         }
         Some((table, root, subsets))
@@ -1547,8 +1547,8 @@ fn precollapse_master_decision(
             } else {
                 None
             };
-            if let Some(slice_slot) = prepared_slice_slot {
-                if let Some(&terminal) = vocab
+            if let Some(slice_slot) = prepared_slice_slot
+                && let Some(&terminal) = vocab
                     .prepared_master_provers(source, slice_slot)
                     .iter()
                     .find(|&&terminal| admitted.contains(terminal as usize))
@@ -1562,7 +1562,6 @@ fn precollapse_master_decision(
                     outcomes[slice_index] = true;
                     break 'sources;
                 }
-            }
 
             // Support and physical-residual coverage are immutable lexer facts
             // for this `(source, terminal, slice)`. Derive the candidate list
@@ -6436,11 +6435,10 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             if upper >= vocab.llg_master_max_safe_chars() {
                 return None;
             }
-            if let Some(lower) = llg_master_decision {
-                if lower.whitespace || lower.safe_radius > upper {
+            if let Some(lower) = llg_master_decision
+                && (lower.whitespace || lower.safe_radius > upper) {
                     return None;
                 }
-            }
             Some(upper)
         })()
     } else {
@@ -6666,7 +6664,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // Legacy scheduling (0) and every non-scheduled root keep the hot lane; only
     // a proved narrow root range hands the walk to the generic scheduler.
     let dense_hot_root_profitable = sparse_root_range_span
-        .map_or(true, |span| dense_hot_min_root_ops == 0 || span >= dense_hot_min_root_ops);
+        .is_none_or(|span| dense_hot_min_root_ops == 0 || span >= dense_hot_min_root_ops);
 
     let dense_hot_negative_proof =
         crate::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_NEGATIVE").is_some()

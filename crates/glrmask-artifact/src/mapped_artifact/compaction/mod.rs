@@ -779,7 +779,7 @@ fn build_exact_token_merge_permutation_multiword_dense(
     let mut profile_hash_to_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
     let mut perm = vec![0u32; num_tokens];
     let mut next_group = 0u32;
-    for token in 0..num_tokens {
+    for (token, perm_slot) in perm.iter_mut().enumerate() {
         let profile_start = token * profile_words;
         let profile = &profiles[profile_start..profile_start + profile_words];
         let profile_hash = hash_profile_words(profile);
@@ -788,13 +788,13 @@ fn build_exact_token_merge_permutation_multiword_dense(
             .iter()
             .find(|(existing_profile, _)| existing_profile.as_slice() == profile)
         {
-            perm[token] = *group;
+            *perm_slot = *group;
             continue;
         }
 
         let group = next_group;
         groups.push((profile.to_vec(), group));
-        perm[token] = group;
+        *perm_slot = group;
         next_group += 1;
     }
 
@@ -2196,7 +2196,7 @@ mod tests {
             (2, RangeSetBlaze::from_iter([2..=2])),
         ]);
         let context = PermutationContext::new(&[0, 1, 2], &[2, 0, 1]);
-        let cache = build_global_permuted_token_cache(&[weight.clone()], &context);
+        let cache = build_global_permuted_token_cache(std::slice::from_ref(&weight), &context);
         let cached = permute_weight_with_caches(
             &weight,
             &context,
@@ -2263,8 +2263,8 @@ mod tests {
         const NUM_TOKENS: usize = 257;
         let token_sets: Vec<Arc<RangeSetBlaze<u32>>> = (0..137u32)
             .map(|context| {
-                let first = (context.wrapping_mul(29) % NUM_TOKENS as u32) as u32;
-                let second = (context.wrapping_mul(47).wrapping_add(11) % NUM_TOKENS as u32) as u32;
+                let first = context.wrapping_mul(29) % NUM_TOKENS as u32;
+                let second = context.wrapping_mul(47).wrapping_add(11) % NUM_TOKENS as u32;
                 token_set(&[
                     (first, (first + context % 19).min(NUM_TOKENS as u32 - 1)),
                     (second, (second + context % 7).min(NUM_TOKENS as u32 - 1)),

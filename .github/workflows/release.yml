@@ -30,7 +30,7 @@ on:
       - 'scripts/check-release-version.py'
       - 'scripts/publish-crates.py'
       - 'scripts/check-cpp-release-archives.py'
-      - 'docs/releasing.md'
+      - 'docs/design/releasing.md'
   release:
     types: [published]
 

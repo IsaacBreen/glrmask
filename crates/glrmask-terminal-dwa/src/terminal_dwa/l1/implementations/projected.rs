@@ -632,13 +632,12 @@ fn build_direct_terminal_residual_machine_with_coordinates<'a>(
     };
     if profile {
         eprintln!(
-            "[glrmask/profile][l1_direct_construct] partition={} terminals={} states={} edges={} root_memberships={} local_minimize={} local_total_work_ms={:.3} local_max_ms={:.3} index_ms={:.3} edges_ms={:.3} roots_ms={:.3} finish_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_direct_construct] partition={} terminals={} states={} edges={} root_memberships={} local_minimize=true local_total_work_ms={:.3} local_max_ms={:.3} index_ms={:.3} edges_ms={:.3} roots_ms={:.3} finish_ms={:.3} total_ms={:.3}",
             input.partition_label,
             projected.terminals.len(),
             projected.configs.len(),
             projected.transitions.iter().map(Vec::len).sum::<usize>(),
             projected.root_memberships,
-            true,
             local_total_work_ms,
             local_max_ms,
             index_ms,
@@ -1316,7 +1315,6 @@ struct GroupedMinimizeStats {
 /// components cannot remove any cross-group equivalence; a second minimization
 /// of their much smaller disjoint union performs exactly those remaining
 /// cross-group merges.
-
 /// Exact congruence for a deterministic component whose only cycles are
 /// literal self-loops.  Removing self-loops yields a DAG, so child behavior is
 /// already known in reverse topological order.  Equal structural signatures
@@ -2261,7 +2259,7 @@ impl<'a> ReverseSubsets<'a> {
                 *last = (1u64 << remainder) - 1;
             }
         }
-        let build_column = |column: &Box<[u32]>| {
+        let build_column = |column: &[u32]| {
                 let mut counts = vec![0u32; state_count];
                 let mut live_sources = vec![0u64; words];
                 let mut live_targets = vec![0u64; words];
@@ -2297,7 +2295,10 @@ impl<'a> ReverseSubsets<'a> {
                     live_target_count,
                 }
             };
-        let reverse_columns: Vec<ReverseColumn> = columns.iter().map(build_column).collect();
+        let reverse_columns: Vec<ReverseColumn> = columns
+            .iter()
+            .map(|column| build_column(column))
+            .collect();
         let symbol_count = reverse_columns.len();
         let mut result = Self {
             columns: reverse_columns,
@@ -2346,10 +2347,10 @@ impl<'a> ReverseSubsets<'a> {
         }
         let id = self.sets.len() as u32;
         let set: Arc<[u64]> = Arc::from(set.into_boxed_slice());
-        if self.ids.contains_key(&hash) {
-            self.id_collisions.entry(hash).or_default().push(id);
+        if let std::collections::hash_map::Entry::Vacant(e) = self.ids.entry(hash) {
+            e.insert(id);
         } else {
-            self.ids.insert(hash, id);
+            self.id_collisions.entry(hash).or_default().push(id);
         }
         self.sets.push(set);
         self.cache
@@ -3349,14 +3350,13 @@ fn collect_finite_profile(
     }
     for &child in &current.children {
         let target = scanner.step_bytes(config, trie.edge(child, tokens));
-        if target != DEAD {
-            if !collect_finite_profile(
+        if target != DEAD
+            && !collect_finite_profile(
                 scanner, trie, tokens, self_loops, child, target, out, pair_visits,
                 uniform_subtrees, uniform_tokens, max_profile_runs, max_pair_visits,
             ) {
                 return false;
             }
-        }
     }
     true
 }
@@ -4716,10 +4716,13 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
-    let reverse_trie = use_reverse_trie
-        .then_some(())
-        .and_then(|()| prepared_vocab.as_ref())
-        .and_then(|prepared| prepared.reverse_trie.as_ref());
+    let reverse_trie = if use_reverse_trie {
+        prepared_vocab
+            .as_ref()
+            .and_then(|prepared| prepared.reverse_trie.as_ref())
+    } else {
+        None
+    };
     let dense_reverse_max_states = std::env::var("GLRMASK_L1_RESIDUAL_DENSE_REVERSE_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -5451,7 +5454,7 @@ fn build_binary_vocab_only_with_switch(
         vocab_bytes_storage = collect_vocab_bytes(tokens);
         vocab_bytes_storage.as_ref()
     };
-    let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
+    let (bytes, input_byte_representative) = quotient_input_bytes(input, vocab_bytes);
     let prep_wall_ms = setup_timer.elapsed().as_secs_f64() * 1000.0;
     let prep_cpu_ms = 0.0;
 
@@ -5594,10 +5597,13 @@ fn build_binary_vocab_only_with_switch(
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
-    let reverse_trie = use_reverse_trie
-        .then_some(())
-        .and_then(|()| prepared_vocab.as_ref())
-        .and_then(|prepared| prepared.reverse_trie.as_ref());
+    let reverse_trie = if use_reverse_trie {
+        prepared_vocab
+            .as_ref()
+            .and_then(|prepared| prepared.reverse_trie.as_ref())
+    } else {
+        None
+    };
     let dense_reverse_max_states = std::env::var("GLRMASK_L1_RESIDUAL_DENSE_REVERSE_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())

@@ -398,15 +398,14 @@ impl RelevantConfigInterner {
 
     fn intern(&mut self, states: Vec<u32>, configs: &mut Vec<Box<[u32]>>) -> u32 {
         let hash = Self::hash(&states);
-        if let Some(candidates) = self.ids_by_hash.get(&hash) {
-            if let Some(id) = candidates
+        if let Some(candidates) = self.ids_by_hash.get(&hash)
+            && let Some(id) = candidates
                 .iter()
                 .copied()
                 .find(|&id| configs[id as usize].as_ref() == states.as_slice())
             {
                 return id;
             }
-        }
         let id = configs.len() as u32;
         configs.push(states.into_boxed_slice());
         self.ids_by_hash.entry(hash).or_default().push(id);
@@ -1725,7 +1724,10 @@ fn expand_trie_frontiers(
             && preseeded_raw_closures.is_some()
             && trie[node_index].children.len() > 1
         {
-            let raw_start_to_view = preseeded_raw_closures.expect("checked above");
+            let raw_start_to_view = match preseeded_raw_closures {
+                Some(closures) => closures,
+                None => unreachable!("preseeded raw closures checked above"),
+            };
             let root_children = &trie[node_index].children;
             let mut child_slot_by_byte = [u16::MAX; 256];
             for (slot, &(byte, _)) in root_children.iter().enumerate() {
@@ -2015,9 +2017,7 @@ impl TokenBoundedAnalysisTopology {
             .raw_start_to_view
             .iter()
             .map(|&state| {
-                (state != u32::MAX)
-                    .then(|| projected_state_by_topology_state[state as usize])
-                    .unwrap_or(u32::MAX)
+                if state != u32::MAX { projected_state_by_topology_state[state as usize] } else { u32::MAX }
             })
             .collect::<Vec<_>>();
         let start_state = projected_state_by_topology_state[self.start_state] as usize;

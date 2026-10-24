@@ -1109,7 +1109,7 @@ impl<'a> Lowerer<'a> {
         // If the referenced named rule is already nonnullable, reuse its
         // ordinary lowered symbol instead of synthesizing a second alias.
         if !self.rule_nullable.get(name).copied().unwrap_or(false)
-            && !(is_terminal && self.internal_terminal_names.contains(name))
+            && (!is_terminal || !self.internal_terminal_names.contains(name))
         {
             return Ok(Symbol::Nonterminal(self.nonterminal_id(name)));
         }
@@ -1118,7 +1118,7 @@ impl<'a> Lowerer<'a> {
         self.nonnullable_named_rule_cache.insert(name.to_string(), nt);
 
         if is_terminal {
-            let terminal_expr = self.resolve_terminal_expr(Some(name), &expr)?;
+            let terminal_expr = self.resolve_terminal_expr(Some(name), expr)?;
             let terminal_expr = if terminal_expr.is_nullable() {
                 Expr::Exclude {
                     expr: Box::new(terminal_expr),
@@ -1138,7 +1138,7 @@ impl<'a> Lowerer<'a> {
                 });
             }
         } else {
-            self.emit_nonnullable_expr(nt, &expr)?;
+            self.emit_nonnullable_expr(nt, expr)?;
         }
 
         Ok(Symbol::Nonterminal(nt))

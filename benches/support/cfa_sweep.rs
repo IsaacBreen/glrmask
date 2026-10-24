@@ -70,7 +70,7 @@ pub fn load_llama3_vocab() -> Vocab {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(format!("odd hex length {}", hex.len()));
     }
     (0..hex.len())

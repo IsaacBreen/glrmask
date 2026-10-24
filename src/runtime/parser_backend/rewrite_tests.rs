@@ -260,7 +260,7 @@ fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tabl
         let summary = parser.link_grammar.as_ref().unwrap().stack_effects().unwrap();
         assert_eq!(summary.states, parser.state_count);
         assert!(!summary.effects.is_empty());
-        let loaded = Constraint::load(&component.save(), &vocab).unwrap();
+        let loaded = Constraint::load(component.save(), &vocab).unwrap();
         assert!(!loaded.table.is_present());
         assert_eq!(
             loaded.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
@@ -463,7 +463,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
                 assert_eq!(state.mask().get(2).is_some_and(|word| word & 1 != 0), depth == 0);
                 let mut mask = vec![0; constraint.mask_len()];
                 state.fill_mask(&mut mask);
-                assert_eq!(mask[0] & 1 != 0, true);
+                assert!(mask[0] & 1 != 0);
                 assert_eq!(mask[0] & 2 != 0, depth != 0);
                 assert_eq!(mask[2] & 1 != 0, depth == 0);
                 assert!(state.commit_bytes(&vec![b'b'; depth]));

@@ -1530,7 +1530,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
             .any(|child| table_has_guarded_stack_shifts(child.table));
     let can_affine_guarded_index = source_has_guarded_stack_shifts
         && parent.guarded_shift_index.len() == parent.num_states as usize
-        && parent_scoped_ignore_terminal.map_or(true, |ignore| {
+        && parent_scoped_ignore_terminal.is_none_or(|ignore| {
             parent.action.iter().all(|row| row.get(&ignore).is_none())
         })
         && children.iter().all(|child_input| {
@@ -1538,7 +1538,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
             child.guarded_shift_index.len() == child.num_states as usize
                 && !(child_input.start_nullable
                     && child.action.first().is_some_and(|row| row.get(&EOF).is_some()))
-                && child_input.ignore_terminal.map_or(true, |ignore| {
+                && child_input.ignore_terminal.is_none_or(|ignore| {
                     child.action.iter().all(|row| row.get(&ignore).is_none())
                 })
         });

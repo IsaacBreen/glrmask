@@ -713,7 +713,7 @@ fn json_schema_open_object_required_fixed_property_remains_mandatory_with_ap_tai
 fn json_schema_rejects_invalid_utf8_in_string() {
     let constraint = byte_schema(r#"{"type":"string"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(&[b'"']));
+    assert!(state.commit_bytes(b"\""));
     assert!(!state.commit_bytes(&[0xff]));
 }
 
@@ -1568,7 +1568,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
     assert!(dynamic_state.commit_token(7));
     assert_eq!(static_state.mask(), dynamic_state.mask());
 
-    let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
+    let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
     assert_special_token_sequence(&loaded);
     let dynamic_loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
     let mut dynamic_loaded_state = dynamic_loaded.start();
@@ -1769,7 +1769,7 @@ fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
         frontier = next;
     }
 
-    let loaded = Constraint::load(&isolated.save(), &vocab).unwrap();
+    let loaded = Constraint::load(isolated.save(), &vocab).unwrap();
     assert_eq!(loaded.start().mask(), isolated.start().mask());
 }
 
@@ -1930,7 +1930,7 @@ fn residual_terminal_continuation_survives_across_vocab_tokens() {
 
     let mask = state.mask();
     assert!(
-        mask[3 / 32] & (1u32 << (3 % 32)) != 0,
+        mask[3 / 32] & (1u32 << 3) != 0,
         "next token ab must be admitted: babab = B(ba) B(ba) B(b)"
     );
 }

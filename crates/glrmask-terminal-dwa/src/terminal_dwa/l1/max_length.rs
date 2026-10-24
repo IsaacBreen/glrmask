@@ -22,11 +22,11 @@ fn mix_u64(mut x: u64) -> u64 {
 fn hash_filtered_sorted_set(values: &[usize], active_groups: Option<&[bool]>, tag: u64) -> u64 {
     let active_len = values
         .iter()
-        .filter(|&&value| active_groups.map_or(true, |groups| groups.get(value).copied().unwrap_or(false)))
+        .filter(|&&value| active_groups.is_none_or(|groups| groups.get(value).copied().unwrap_or(false)))
         .count();
     let mut hash = mix_u64((active_len as u64) ^ tag);
     for &value in values {
-        if !active_groups.map_or(true, |groups| groups.get(value).copied().unwrap_or(false)) {
+        if !active_groups.is_none_or(|groups| groups.get(value).copied().unwrap_or(false)) {
             continue;
         }
         hash = hash.wrapping_add(mix_u64((value as u64) ^ tag.rotate_left(17)));
@@ -204,15 +204,15 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
-    let mapping = find_state_equivalence_classes_kstep(
+    
+
+    find_state_equivalence_classes_kstep(
         tokenizer,
         states,
         max_len,
         active_groups,
         relevant_bytes,
-    );
-
-    mapping
+    )
 }
 
 /// Build a state shape considering only a restricted set of bytes.
@@ -387,8 +387,8 @@ fn find_state_equivalence_classes_kstep_restricted(
         full_hashes[orig_state] = prev_dense_hashes[dense_id];
     }
 
-    let result = build_subset_mapping(states, &full_hashes);
-    result
+    
+    build_subset_mapping(states, &full_hashes)
 }
 
 /// Byte-restricted state equivalence: merge states that behave identically

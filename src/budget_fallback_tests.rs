@@ -499,7 +499,7 @@ fn auto_decline_with_a_retained_child_keeps_that_child() {
         rules: &[(0, &[-1]), (0, &[-2, -3])],
     };
     let vocab = fuzz_vocab();
-    let mut child = Module::new(&Grammar::from_lark(&lark(CHILD)).unwrap());
+    let mut child = Module::new(&Grammar::from_lark(lark(CHILD)).unwrap());
     child
         .precompile_with(&vocab, MaskMode::ParserDwa.compile_options())
         .expect("precompile the retained child");
@@ -554,7 +554,7 @@ fn auto_decline_fallback_honours_parser_backend() {
     // switches would, so with `TemplateDfa` it is table-free.
     let auto = {
         let _limit = TestBudgetLimit::set(1);
-        Grammar::from_lark(&lark(SMALL))
+        Grammar::from_lark(lark(SMALL))
             .unwrap()
             .compile_with_build_options(
                 &fuzz_vocab(),

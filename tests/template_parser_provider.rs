@@ -190,7 +190,7 @@ fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
 
 fn native_representations(compiled:&Constraint,vocab:&Vocab)->[Constraint;3] {
     let bytes=compiled.save();
-    let loaded=Constraint::load(bytes.clone(), &vocab).unwrap();
+    let loaded=Constraint::load(bytes.clone(), vocab).unwrap();
     assert_eq!(loaded.save(),bytes);
     let external=compiled.save();
     let external=Constraint::load(external,vocab).unwrap();

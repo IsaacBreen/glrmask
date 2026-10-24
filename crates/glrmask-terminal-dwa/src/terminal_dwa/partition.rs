@@ -779,13 +779,13 @@ fn build_partition_id_map_and_terminal_dwa_impl(
 
     let total_started_at = Instant::now();
     let pre_classify_setup_started_at = Instant::now();
-    let num_terminals = grammar.num_terminals as u32;
+    let num_terminals = grammar.num_terminals;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
     // Scoped boundary analysis needs the complete terminal-word observation:
     // after the first lexical commit it may reset into the whole current link,
     // so the ordinary L1 shortcut is not a proved replacement for L2P here.
     let force_all_l2p = boundary_scope.is_some()
-        || std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+        || std::env::var("GLRMASK_FORCE_ALL_L2P").is_ok_and(|v| v == "1");
 
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1025,8 +1025,8 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         .flatten();
 
     let effective_l2p_initial_state_map = initial_state_map;
-    if boundary_scope.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
-        if let Some(map) = initial_state_map {
+    if boundary_scope.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some()
+        && let Some(map) = initial_state_map {
             eprintln!(
                 "SCOPED_PART_INPUT partition={} o2i={:?} classes={:?} reps={:?}",
                 partition_label,
@@ -1035,7 +1035,6 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                 map.representative_original_ids,
             );
         }
-    }
     let scoped_crossing_filter = boundary_scope.and_then(|scope| {
         scope.require_crossing().then_some(super::l2p::L2pCrossingFilter {
             ownership: scope.ownership(),
@@ -1060,9 +1059,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         skip_ti_discovery: scoped_ti_candidate_groups
             .as_ref()
             .is_none_or(|groups| groups.is_empty()),
-        ti_candidate_groups: scoped_ti_candidate_groups
-            .as_ref()
-            .map(Vec::as_slice),
+        ti_candidate_groups: scoped_ti_candidate_groups.as_deref(),
         crossing_filter: scoped_crossing_filter,
         // The parser consumer indexes the scoped Step-1 TSID coordinate.
         skip_core_compact: true,
@@ -1514,16 +1511,14 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     if let Some(l1) = l1_pair.as_ref() {
         dominant_branch = Some((l1_ms, l1.profile));
     }
-    if let Some(l2p) = l2p_pair.as_ref() {
-        if dominant_branch.map_or(true, |(current_ms, _)| l2p_boundary_ms > current_ms) {
+    if let Some(l2p) = l2p_pair.as_ref()
+        && dominant_branch.is_none_or(|(current_ms, _)| l2p_boundary_ms > current_ms) {
             dominant_branch = Some((l2p_boundary_ms, l2p.profile));
         }
-    }
-    if let Some(split_l1) = l2p_single_l1_pair.as_ref() {
-        if dominant_branch.map_or(true, |(current_ms, _)| l2p_single_ms > current_ms) {
+    if let Some(split_l1) = l2p_single_l1_pair.as_ref()
+        && dominant_branch.is_none_or(|(current_ms, _)| l2p_single_ms > current_ms) {
             dominant_branch = Some((l2p_single_ms, split_l1.profile));
         }
-    }
     let dominant_branch_profile = if let Some((_, profile)) = dominant_branch {
         profile
     } else if speculative_hit {
@@ -1637,7 +1632,7 @@ pub(super) fn build_partition_vocab_equivalence(
     if vocab.is_empty() {
         return None;
     }
-    let num_terminals = grammar.num_terminals as u32;
+    let num_terminals = grammar.num_terminals;
 
     let terminal_path_lengths = classify_terminal_path_lengths(
         partition_label,
@@ -2124,7 +2119,7 @@ mod tests {
         let result = super::complete_partition_vocab_maps(&vocab, &[partial]).unwrap();
         assert_eq!(result.internal_to_originals, [vec![0],vec![1],vec![2,3]]);
         assert_eq!(result.representative_original_ids, [0,1,2]);
-        let complete = super::complete_partition_vocab_maps(&vocab, &[result.clone()]).unwrap();
+        let complete = super::complete_partition_vocab_maps(&vocab, std::slice::from_ref(&result)).unwrap();
         assert_eq!(complete.internal_to_originals,result.internal_to_originals);
     }
 

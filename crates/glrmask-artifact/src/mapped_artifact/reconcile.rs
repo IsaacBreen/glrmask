@@ -389,7 +389,7 @@ fn build_common_many_to_one_id_map(
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut representatives: Vec<u32> = Vec::new();
 
-    for original in 0..num_originals {
+    for (original, internal_slot) in original_to_internal.iter_mut().enumerate() {
         let composite: Vec<u32> = inputs
             .iter()
             .map(|input| {
@@ -410,7 +410,7 @@ fn build_common_many_to_one_id_map(
             representatives.push(original as u32);
             next_id
         });
-        original_to_internal[original] = class_id;
+        *internal_slot = class_id;
         internal_to_originals[class_id as usize].push(original as u32);
     }
 
@@ -1118,13 +1118,13 @@ fn remap_token_set_with_disjoint_runs_uncached(
         // consume that ordered stream directly instead of paying one balanced
         // tree insertion per source range (millions of ranges in large parser
         // artifacts).
-        return Arc::new(RangeSetBlaze::from_iter(tokens.ranges().filter_map(
+        Arc::new(RangeSetBlaze::from_iter(tokens.ranges().filter_map(
             |local_range| {
                 lookup
                     .remap(*local_range.start(), *local_range.end())
                     .map(|(start, end)| start..=end)
             },
-        )));
+        )))
     } else {
         let mut mapped = RangeSetBlaze::new();
         for local_token in tokens.iter() {

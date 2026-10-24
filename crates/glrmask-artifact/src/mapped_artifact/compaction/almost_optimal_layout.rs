@@ -381,13 +381,12 @@ pub(super) fn bounded_greedy_adjacency_layout(
             if used[candidate] {
                 continue;
             }
-            if let Some(window) = random_window {
-                if candidate_len < window.min(candidates.len()) {
+            if let Some(window) = random_window
+                && candidate_len < window.min(candidates.len()) {
                     candidates[candidate_len] = candidate;
                     candidate_len += 1;
                     continue;
                 }
-            }
             best = Some(candidate);
             break;
         }

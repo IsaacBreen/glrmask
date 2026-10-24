@@ -270,7 +270,7 @@ mod tests {
         }
         nfa.start_states = vec![0];
         for source in 0..count {
-            if (source as u32 + seed) % 5 == 0 {
+            if (source as u32 + seed).is_multiple_of(5) {
                 nfa.set_accepting(source as u32);
             }
             let remaining = count.saturating_sub(source + 1);
@@ -278,16 +278,16 @@ mod tests {
                 continue;
             }
             for lane in 0..3u32 {
-                if (source as u32 + seed + lane) % 2 == 0 {
+                if (source as u32 + seed + lane).is_multiple_of(2) {
                     let target = source + 1 + ((source as u32 * 7 + seed + lane * 3) as usize % remaining);
                     let label = ((source as i32 * 11 + lane as i32 * 5 + seed as i32) % 13) - 6;
                     nfa.add_transition(source as u32, label, target as u32);
-                    if (source as u32 + seed + lane) % 4 == 0 {
+                    if (source as u32 + seed + lane).is_multiple_of(4) {
                         nfa.add_transition(source as u32, label, target as u32);
                     }
                 }
             }
-            if (source as u32 * 3 + seed) % 4 != 0 {
+            if !(source as u32 * 3 + seed).is_multiple_of(4) {
                 let target = source + 1 + ((source as u32 * 5 + seed) as usize % remaining);
                 nfa.add_epsilon(source as u32, target as u32);
             }
