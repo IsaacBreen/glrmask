@@ -8,15 +8,15 @@ export declare const MaskStrategy: Readonly<{
   Auto: 'auto';
   /** Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. */
   ParserDwa: 'parser-dwa';
-  /** Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. */
+  /** Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` object instead to change its settings. */
   TokenTrie: 'token-trie';
   /** Same as `TokenTrie`. */
   FastCompile: 'token-trie';
   /** Same as `ParserDwa`. */
   FastMasks: 'parser-dwa';
 }>;
-/** A `MaskStrategy` value. */
-export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
+/** A `MaskStrategy` value, or `TokenTrie` settings. */
+export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy] | TokenTrie;
 
 /** How masks are computed at grammar boundaries. */
 export declare const BoundaryMaskStrategy: Readonly<{
@@ -43,6 +43,16 @@ export declare const ParserBackend: Readonly<{
 }>;
 /** A `ParserBackend` value. */
 export type ParserBackend = typeof ParserBackend[keyof typeof ParserBackend];
+
+/** Settings for `MaskStrategy.TokenTrie`. Pass one as `maskStrategy`. */
+export interface TokenTrie {
+  /** Always `'token-trie'`. */
+  readonly kind: 'token-trie';
+  /** How the parser is represented. Defaults to `ParserBackend.LrTable`. */
+  readonly parserBackend?: ParserBackend;
+  /** Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `false`. Tokens are not merged in a composition that includes precompiled parts. */
+  readonly mergeEquivalentTokens?: boolean;
+}
 
 /** The kinds of `GlrMaskError`. */
 export type ErrorCode = 'GLRMASK_INVALID_ARGUMENT' | 'GLRMASK_ENGINE_ERROR' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
@@ -132,10 +142,6 @@ export interface CompileOptions {
   maskStrategy?: MaskStrategy;
   /** How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
   boundaryMaskStrategy?: BoundaryMaskStrategy;
-  /** How the parser is represented for parts compiled with `MaskStrategy.TokenTrie`. Defaults to `ParserBackend.LrTable`. */
-  parserBackend?: ParserBackend;
-  /** Whether `MaskStrategy.TokenTrie` merges tokens that the grammar treats the same, so masks walk fewer tokens. Requires `ParserBackend.TemplateDfa`. Defaults to `false`. */
-  mergeEquivalentTokens?: boolean;
 }
 
 /** A grammar, written as source text or built from an `Expr`. */

@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let jobs: usize = args.next().unwrap_or_else(|| "64".into()).parse()?;
     assert!(largest > 0 && jobs > 0);
     let v = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,Vec::new())]);
-    let options = BuildOptions::default().optimization(MaskStrategy::TokenTrie);
+    let options = BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE);
     let workers = [1,2,4,8,16,32,64,128].into_iter().filter(|n| *n<=largest).collect::<Vec<_>>();
     let mut rows = Vec::new();
     for slots in [1,32,128,512] {

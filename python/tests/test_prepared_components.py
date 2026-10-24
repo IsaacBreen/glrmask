@@ -172,12 +172,12 @@ def test_grammar_compile_sugar():
     g = glrmask.Grammar.from_ebnf('start ::= "a"')
     sugar_constraint = g.compile(
         v,
-        mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE, parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True,
+        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     module_constraint = glrmask.Module(g).compile(
         v,
-        mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE, parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True,
+        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())

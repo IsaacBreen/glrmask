@@ -34,7 +34,10 @@ def compile_grammar(grammar, vocab, **options):
     if "optimization" in options:
         options["mask_strategy"] = options.pop("optimization")
     if "parser_backend" in options:
-        options["template_dfas"] = options["parser_backend"] == glrmask.ParserBackend.TEMPLATE_DFA
+        backend = options.pop("parser_backend")
+        merge = options.pop("merge_equivalent_tokens", False)
+        options["mask_strategy"] = glrmask.TokenTrie(
+            parser_backend=backend, merge_equivalent_tokens=merge)
         return glrmask._internal.compile_with_backend(grammar, vocab, **options)
     return grammar.compile(vocab, **options)
 
@@ -117,8 +120,8 @@ def depth_after(word, depth=0, ignore_whitespace=True):
 
 MODES = [
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE,
-     "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.TokenTrie(
+        parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
 ]
 
 
@@ -228,13 +231,22 @@ def test_python_prepared_composition_uses_native_defaults(mode):
     body = grammar_from_ebnf('start ::= "a"')
     # Standalone representations and composed representations are both native;
     # executable roots are not implicitly converted into reusable components.
-    for root in [body.compile(vocab, **mode),
-                 body.compile(
-                     vocab,
-                     **{**mode, "parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA},
-                 )]:
+    strategy = mode.get("mask_strategy")
+    standalone_backend = (
+        glrmask._internal.ParserBackend.LR_TABLE
+        if isinstance(strategy, glrmask.TokenTrie)
+        and strategy.merge_equivalent_tokens
+        and strategy.parser_backend is glrmask.ParserBackend.LR_TABLE
+        else glrmask._internal.ParserBackend.TEMPLATE_DFA
+    )
+    for root, expected in [
+        (body.compile(vocab, **mode), standalone_backend),
+        (body.compile(vocab, mask_strategy=glrmask.TokenTrie(
+            parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)),
+         glrmask._internal.ParserBackend.TEMPLATE_DFA),
+    ]:
         for restored in representations(root, vocab):
-            assert glrmask._internal.parser_backend(restored) == glrmask._internal.ParserBackend.TEMPLATE_DFA
+            assert glrmask._internal.parser_backend(restored) == expected
             assert restored.start().mask().tolist() == [True, False, False]
     prepared = body.prepare(vocab)
     parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
@@ -290,12 +302,15 @@ def test_python_backend_selection_does_not_accept_untyped_flags():
             compile_grammar(grammar, vocab, parser_backend=value)
 
 
-def test_python_explicit_lr_compile_and_link_requests_panic_loudly():
+def test_python_explicit_lr_merged_request_is_supported():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
     grammar = grammar_from_ebnf('start ::= "a"')
-    with pytest.raises(BaseException, match="LR-BACKED CONSTRAINT REQUEST IS FORBIDDEN") as rejected:
-        compile_grammar(grammar, vocab, parser_backend=glrmask._internal.ParserBackend.LR_TABLE)
-    assert type(rejected.value).__name__ == "PanicException"
+    compiled = compile_grammar(
+        grammar, vocab,
+        parser_backend=glrmask._internal.ParserBackend.LR_TABLE,
+        merge_equivalent_tokens=True,
+    )
+    assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.LR_TABLE
 
 
 @pytest.mark.parametrize("mode", MODES)

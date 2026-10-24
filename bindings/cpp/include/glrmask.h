@@ -56,7 +56,7 @@ enum {
 enum {
     GLRMASK_MASK_STRATEGY_AUTO=0,        ///< Reuses any precompiled work; otherwise GLRMASK_MASK_STRATEGY_PARSER_DWA, or GLRMASK_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
     GLRMASK_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
-    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2   ///< Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2   ///< Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Its settings are in `glrmask_compile_options.token_trie`.
 };
 /// Same as GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
 #define GLRMASK_MASK_STRATEGY_FAST_COMPILE GLRMASK_MASK_STRATEGY_TOKEN_TRIE
@@ -107,14 +107,18 @@ typedef struct glrmask_events glrmask_events;
 typedef struct { uint32_t id; const uint8_t *bytes; size_t bytes_len; } glrmask_vocab_entry;
 /// Token IDs from `first` to `last`, inclusive.
 typedef struct { uint32_t first; uint32_t last; } glrmask_token_range;
+/// Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
+typedef struct {
+    uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value; 0 is an LR table.
+    uint32_t merge_equivalent_tokens; ///< Nonzero to merge tokens that the grammar treats the same, so masks walk fewer tokens. Tokens are not merged in a composition that includes precompiled parts.
+} glrmask_token_trie_settings;
 /// Options for compiling a grammar or module. Set `struct_size` to
 /// `sizeof(glrmask_compile_options)`; fields past `struct_size` count as zero.
 typedef struct {
     size_t struct_size;               ///< Size of this struct in bytes.
     uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
     uint32_t boundary_mask_strategy;  ///< A `GLRMASK_BOUNDARY_MASK_STRATEGY_*` value; 0 is Auto.
-    uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value for parts compiled with GLRMASK_MASK_STRATEGY_TOKEN_TRIE; 0 is an LR table.
-    uint32_t merge_equivalent_tokens; ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE merge tokens that the grammar treats the same, so masks walk fewer tokens. Requires GLRMASK_PARSER_BACKEND_TEMPLATE_DFA.
+    glrmask_token_trie_settings token_trie; ///< Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE; must be zero for any other strategy.
 } glrmask_compile_options;
 /// An extern declared by a grammar. Its `name` stays valid until the externs view
 /// is freed.

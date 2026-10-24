@@ -1,4 +1,4 @@
-import {Vocab, Grammar, Module, Expr, MaskStrategy, Constraint, type CompileOptions} from '@glrmask/node';
+import {Vocab, Grammar, Module, Expr, MaskStrategy, ParserBackend, Constraint, type CompileOptions, type TokenTrie} from '@glrmask/node';
 import api = require('@glrmask/node');
 const v = new Vocab([[0, new TextEncoder().encode('a')]]);
 const sameVocab: api.Vocab = v;
@@ -10,7 +10,8 @@ const words: Uint32Array = loaded.start().mask();
 const module = new Module(Grammar.fromEbnf('start ::= "a"'));
 const precompiled: Module = await Grammar.fromEbnf('start ::= "a"').precompile(v, options);
 void precompiled;
-await module.precompile(v, {maskStrategy: MaskStrategy.TokenTrie});
+const tokenTrie: TokenTrie = {kind: 'token-trie', parserBackend: ParserBackend.TemplateDfa, mergeEquivalentTokens: true};
+await module.precompile(v, {maskStrategy: tokenTrie});
 const expr = Expr.choice(module, Grammar.fromEbnf('start ::= "a"'));
 const restored = await Module.load(await module.save());
 const canonical: api.Constraint = await restored.compile(v, {maskStrategy: MaskStrategy.TokenTrie});

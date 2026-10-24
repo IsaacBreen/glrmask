@@ -114,11 +114,13 @@ impl NativeModule {
     }
 
     fn options(mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> core::Result<g::CompileOptions> {
+        let token_trie = g::TokenTrie::new()
+            .parser_backend(core::parser_backend(parser_backend as u32)?)
+            .merge_equivalent_tokens(merge_equivalent_tokens);
         Ok(core::compile_options(
             core::mask_strategy(id(mode)?)?,
             core::boundary_mask_strategy(id(boundary)?)?,
-            core::parser_backend(parser_backend as u32)?,
-            merge_equivalent_tokens,
+            token_trie,
         ))
     }
 

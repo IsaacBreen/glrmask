@@ -177,7 +177,7 @@ attached. Modules keep bindings and retained work; strategy values are supplied
 to the compile call, and `Grammar` stores no settings:
 
 ```rust
-use glrmask::{Grammar, Module, Result, Vocab, ParserBackend};
+use glrmask::{Grammar, Module, Result, Vocab};
 
 # fn demo(vocab: &Vocab, marker: u32) -> Result<()> {
 let child_grammar = Grammar::from_glrm(
@@ -236,23 +236,25 @@ Expressions can be bound directly to module externs.
 
 `FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
 
-Two compile options tune `TokenTrie`:
+`TokenTrie` has two settings:
 
 - `parser_backend` chooses how the parser is represented: `LrTable`, the default, or `TemplateDfa`, which is slower to compile, with faster masks.
-- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default and requires `TemplateDfa`.
+- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default. Tokens are not merged in a composition that includes precompiled parts.
 
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern. `ParserDwa` is slower to compile, with faster masks, and fails with `ErrorKind::ResourceLimit` if it would be too large. `TokenTrie` is faster to compile, with slower masks. `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
 Options are passed to each `compile` and `precompile` call (in Python, as keyword arguments) and apply to the whole compile, including bound grammars. Precompiled work is never thrown away. Each precompiled part keeps its masks unless you request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with precompiled parts use `TemplateDfa`.
 
 ```rust
-# use glrmask::{CompileOptions, Grammar, MaskStrategy, ParserBackend, Result, Vocab};
+# use glrmask::{CompileOptions, Grammar, ParserBackend, Result, TokenTrie, Vocab};
 # fn demo(grammar: &Grammar, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
-    CompileOptions::default()
-        .mask_strategy(MaskStrategy::TokenTrie)
-        .parser_backend(ParserBackend::TemplateDfa),
+    CompileOptions::default().mask_strategy(
+        TokenTrie::new()
+            .parser_backend(ParserBackend::TemplateDfa)
+            .merge_equivalent_tokens(true),
+    ),
 )?;
 # let _ = constraint;
 # Ok(())

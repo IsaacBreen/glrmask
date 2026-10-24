@@ -354,10 +354,10 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 `FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
 
-Two compile options tune `TokenTrie`:
+`TokenTrie` has two settings:
 
 - `parser_backend` chooses how the parser is represented: `LrTable`, the default, or `TemplateDfa`, which is slower to compile, with faster masks.
-- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default and requires `TemplateDfa`.
+- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default. Tokens are not merged in a composition that includes precompiled parts.
 
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
 

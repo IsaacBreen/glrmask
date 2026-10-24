@@ -21,7 +21,7 @@ fn vocab() -> Vocab {
 fn token_trie() -> crate::runtime::Constraint {
     let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
-        .compile_with(&vocab(), CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+        .compile_with(&vocab(), CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap()
 }
 

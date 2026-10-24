@@ -535,7 +535,7 @@ mod tests {
     use super::*;
     use crate::{BuildOptions,Grammar,MaskStrategy,TokenSet,Vocab};
 
-    const MODES:[MaskMode;5]=MaskMode::ALL;
+    const MODES:[MaskMode;6]=MaskMode::ALL;
     fn ids(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(wi,&word)| (0..32).filter_map(move |bit|
             (word&(1<<bit)!=0).then_some((wi*32+bit) as u32))).collect()
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn ambiguous_query_stops_after_two_final_witnesses_without_filling_cache() {
         let v=Vocab::new((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
-        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
+        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
         let s=c.start();let before=s.mask_cache.lock().unwrap().is_some();
         BYTE_PROOFS.with(|n|n.set(0));assert_eq!(s.probe_one_token().unwrap(),AtMostOne::MoreThanOne);
         let examined=BYTE_PROOFS.with(|n|n.get());assert!(examined<40,"performed {examined} byte proofs for a two-witness query");
@@ -691,7 +691,7 @@ mod tests {
 mod differential_tests {
     use super::*;
     use crate::{Grammar, TokenSet, Vocab};
-    const MODES:[MaskMode;5]=MaskMode::ALL;
+    const MODES:[MaskMode;6]=MaskMode::ALL;
     fn allowed(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(word,&bits)| (0..32).filter_map(move |bit|
             (bits&(1u32<<bit)!=0).then_some((word*32+bit) as u32))).collect()

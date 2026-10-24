@@ -51,6 +51,7 @@ from ._glrmask import (
     Grammar,
     MaskStrategy,
     Module,
+    TokenTrie,
     Vocab,
     _internal,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "Grammar",
     "MaskStrategy",
     "Module",
+    "TokenTrie",
     "Vocab",
     "_internal",
 ]

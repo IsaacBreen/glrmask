@@ -350,7 +350,7 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
         let none = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert_ne!(plain.save(), none.save());
         for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
-            if mode == MaskMode::A && detail == BoundaryTriggerDetail::Exact {
+            if (mode == MaskMode::A || mode == MaskMode::D) && detail == BoundaryTriggerDetail::Exact {
                 assert!(grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
                 continue;
             }

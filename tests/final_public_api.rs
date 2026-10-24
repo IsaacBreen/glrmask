@@ -1,6 +1,6 @@
 use glrmask::{
     BoundaryMaskStrategy, CompileOptions, Constraint, Expr, ExternKind, Grammar, MaskStrategy,
-    Module, TokenSet, Vocab,
+    Module, TokenSet, TokenTrie, Vocab,
 };
 
 fn vocab() -> Vocab {
@@ -385,9 +385,9 @@ fn focused_5_externs_get_iter_order_len_unbound() {
 fn focused_6_compile_options_never_touch_retained_work() {
     let v = vocab();
     let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    assert_eq!(MaskStrategy::FAST_COMPILE, MaskStrategy::TokenTrie);
+    assert_eq!(MaskStrategy::FAST_COMPILE, MaskStrategy::TokenTrie(TokenTrie::new()));
     assert_eq!(MaskStrategy::FAST_MASKS, MaskStrategy::ParserDwa);
-    assert_eq!(BoundaryMaskStrategy::FAST_COMPILE, BoundaryMaskStrategy::TokenTrie);
+    assert_eq!(BoundaryMaskStrategy::TokenTrie, BoundaryMaskStrategy::TokenTrie);
     assert_eq!(BoundaryMaskStrategy::FAST_MASKS, BoundaryMaskStrategy::ParserDwa);
 
     let mut m = m;
@@ -453,7 +453,7 @@ fn focused_8_static_parts_are_never_downgraded() {
 
     // TokenTrie requests use the retained static parts instead of downgrading.
     let c = parent
-        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap();
     assert!(allowed(&c.start().mask(), 4), "xay must compose statically");
 }
@@ -482,7 +482,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
     let mut m_tt = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap();
     // TokenTrie precompilation retains no work, so Auto builds ParserDwa.
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());

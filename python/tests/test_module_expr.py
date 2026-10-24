@@ -38,12 +38,12 @@ def test_compile_options_and_helpers():
 
     assert module.precompile(
         v,
-        mask_strategy=g.MaskStrategy.TOKEN_TRIE, parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True,
+        mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
         boundary_mask_strategy=g.BoundaryMaskStrategy.PARSER_DWA,
     ) is None
     state = module.compile(
         v,
-        mask_strategy=g.MaskStrategy.TOKEN_TRIE, parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True,
+        mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
         boundary_mask_strategy=g.BoundaryMaskStrategy.TOKEN_TRIE,
     ).start()
     assert state.mask()[1]
@@ -55,10 +55,10 @@ def test_compile_options_and_helpers():
 def test_local_precompilation_and_root_only_compile():
     v = vocab()
     child = g.Module(source())
-    assert child.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE, parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True) is None
+    assert child.precompile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)) is None
     parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
-    state = g.Grammar.from_expr(g.Expr.sequence(parent, g.TokenSet([63]))).compile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE, parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True).start()
+    state = g.Grammar.from_expr(g.Expr.sequence(parent, g.TokenSet([63]))).compile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)).start()
     assert not state.mask()[63]
     assert state.commit_token(4)
     assert not state.is_accepting() and state.mask()[63]
@@ -85,7 +85,7 @@ def test_independent_mutable_copies(copy_fn):
 def test_precompilation_persists_across_save_and_retained_work_preserved():
     v = vocab()
     module = g.Module(source())
-    module.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE, parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)
+    module.precompile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
     saved = module.save()
     loaded = g.Module.load(saved)
     accepts(loaded, v, [1])

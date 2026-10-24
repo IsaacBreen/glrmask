@@ -2,7 +2,7 @@
 //! backend-agreement tests: comparing two identical bugs is not an oracle.
 use glrmask::test_modes::MaskMode;
 use glrmask::{Constraint, Grammar, TokenSet, Vocab};
-const MODES: [MaskMode; 5] = MaskMode::ALL;
+const MODES: [MaskMode; 6] = MaskMode::ALL;
 
 fn allows(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)

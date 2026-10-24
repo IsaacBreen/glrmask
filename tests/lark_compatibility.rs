@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{Constraint,Grammar,Module,PreparedGrammar,TokenSet,Vocab};
-const MODES: [MaskMode; 5] = MaskMode::ALL;
+const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || !s.commit_token(id){return false;}}s.is_accepting()}
 fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect())}

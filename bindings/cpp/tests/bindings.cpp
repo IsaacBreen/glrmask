@@ -299,8 +299,8 @@ void canonical_modules() {
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
     CompileOptions child_options = strategy_options(
         static_cast<unsigned>(MaskStrategy::TokenTrie), BoundaryMaskStrategy::TokenTrie);
-    child_options.parser_backend = ParserBackend::TemplateDfa;
-    child_options.merge_equivalent_tokens = true;
+    child_options.token_trie.parser_backend = ParserBackend::TemplateDfa;
+    child_options.token_trie.merge_equivalent_tokens = true;
     child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save());
@@ -370,6 +370,32 @@ void canonical_modules() {
         v, strategy_options(static_cast<unsigned>(MaskStrategy::TokenTrie))).start();
     CHECK(allowed(precompiled_state.mask(), 3));
     CHECK(precompiled_state.commit_token(3)); CHECK(precompiled_state.is_accepting());
+
+    // Designated initializers fill the nested TokenTrie settings.
+    CompileOptions designated{
+        .mask_strategy = MaskStrategy::TokenTrie,
+        .token_trie = {.parser_backend = ParserBackend::LrTable,
+                       .merge_equivalent_tokens = true}};
+    auto merged_lr = Grammar::from_ebnf("start ::= \"a\"").compile(v, designated);
+    CHECK(allowed(merged_lr.start().mask(), 1));
+    auto designated_native = Grammar::from_ebnf("start ::= \"a\"").compile(
+        v, CompileOptions{.mask_strategy = MaskStrategy::TokenTrie,
+                          .token_trie = {.parser_backend = ParserBackend::TemplateDfa,
+                                         .merge_equivalent_tokens = true}});
+    CHECK(allowed(designated_native.start().mask(), 1));
+
+    // token_trie with another strategy is an invalid argument.
+    CompileOptions wrong;
+    wrong.mask_strategy = MaskStrategy::Auto;
+    wrong.token_trie.merge_equivalent_tokens = true;
+    bool rejected = false;
+    try { Grammar::from_ebnf("start ::= \"a\"").compile(v, wrong); }
+    catch (const Error& error) {
+        rejected = true;
+        CHECK(error.status() == GLRMASK_INVALID_ARGUMENT);
+        CHECK(std::string(error.what()) == "token_trie settings apply only to the TokenTrie mask strategy");
+    }
+    CHECK(rejected);
 }
 
 int main(int argc, char** argv) {

@@ -18,7 +18,7 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     compiled = DynamicConstraint.from_ebnf(SOURCE, vocab, vocab_partition=partition)
     raw = bytes(compiled.save())
-    expected = 16 if partition else 17
+    expected = 17
     assert version(raw) == expected
     loaded = DynamicConstraint.load(raw, vocab)
     assert bytes(loaded.save()) == raw
@@ -54,8 +54,8 @@ MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
     {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)},
+    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
 ]
 
 

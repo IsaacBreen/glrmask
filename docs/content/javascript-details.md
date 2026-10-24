@@ -55,7 +55,7 @@ const constraint = await parent.compile(moduleVocab);
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. `precompile` and `compile` take an options object, `{maskStrategy, boundaryMaskStrategy, parserBackend, mergeEquivalentTokens}`, which applies to the whole compile, including bound grammars:
+`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. `precompile` and `compile` take an options object, `{maskStrategy, boundaryMaskStrategy}`, which applies to the whole compile, including bound grammars:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));
@@ -68,7 +68,7 @@ const sequence = Expr.sequence(Expr.literal('x'), expression, Expr.literal('y'))
 | `ParserDwa` | `parser-dwa` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
 | `TokenTrie` | `token-trie` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
 
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. With `TokenTrie`, `parserBackend` chooses how the parser is represented: `ParserBackend.LrTable` (`lr-table`), the default, or `ParserBackend.TemplateDfa` (`template-dfa`), which is slower to compile, with faster masks. `mergeEquivalentTokens: true` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `ParserBackend.TemplateDfa`. Precompiled work is never thrown away: each precompiled part keeps its masks unless you request a faster strategy for it, and parts compiled now that link with precompiled parts use `TemplateDfa`.
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. To change `TokenTrie`'s settings, pass `{kind: 'token-trie', parserBackend, mergeEquivalentTokens}` as `maskStrategy`. `parserBackend` chooses how the parser is represented: `ParserBackend.LrTable` (`lr-table`), the default, or `ParserBackend.TemplateDfa` (`template-dfa`), which is slower to compile, with faster masks. `mergeEquivalentTokens: true` merges tokens that the grammar treats the same, so masks walk fewer tokens; tokens are not merged in a composition that includes precompiled parts. Precompiled work is never thrown away: each precompiled part keeps its masks unless you request a faster strategy for it, and parts compiled now that link with precompiled parts use `TemplateDfa`.
 
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` (`parser-dwa`) is slower to compile, with faster masks, and throws `GlrMaskError` if it would be too large; `TokenTrie` (`token-trie`) is faster to compile, with slower masks; `Auto` (`auto`), the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 

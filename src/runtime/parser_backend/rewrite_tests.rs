@@ -161,11 +161,11 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
         ["a", "b", "(", ")", "ab", "aa", " "].into_iter().enumerate()
             .map(|(id, value)| (id as u32, value.as_bytes().to_vec())).collect()
     );
-    let grammar = crate::Grammar::glrm(
-        r#"start root; nt root ::= "a" | "(" root ")";"#
-    );
-    let dynamic =
-        crate::DynamicConstraint::compile_with_vocab_partition(grammar, &vocab).unwrap();
+    let dynamic = crate::__private::compile_bounded_template_o2_glrm(
+        r#"start root; nt root ::= "a" | "(" root ")";"#,
+        &vocab,
+    )
+    .unwrap();
     let mut candidate = dynamic.into_constraints().pop().unwrap();
     assert!(candidate.has_template_parser() && !candidate.table.is_present());
     assert!(candidate.prepare_template_parser().unwrap().is_none());

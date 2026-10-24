@@ -31,6 +31,7 @@ enum class MaskStrategy : std::uint32_t {
     /// Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
     ParserDwa = 1,
     /// Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+    /// Its settings are in `CompileOptions::token_trie`.
     TokenTrie = 2,
     /// Same as `TokenTrie`.
     FastCompile = TokenTrie,
@@ -140,24 +141,31 @@ public:
     }
 };
 
+/// Settings for `MaskStrategy::TokenTrie`.
+struct TokenTrie {
+    /// How the parser is represented. Defaults to `ParserBackend::LrTable`.
+    ParserBackend parser_backend = ParserBackend::LrTable;
+    /// Whether tokens that the grammar treats the same are merged, so masks walk fewer
+    /// tokens. Off by default. Tokens are not merged in a composition that includes
+    /// precompiled parts.
+    bool merge_equivalent_tokens = false;
+};
+
 /// Options for compiling a grammar or module.
 struct CompileOptions {
     /// How masks are computed. Defaults to `MaskStrategy::Auto`.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
     /// How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy::Auto`.
     BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
-    /// How the parser is represented for parts compiled with `MaskStrategy::TokenTrie`. Defaults to `ParserBackend::LrTable`.
-    ParserBackend parser_backend = ParserBackend::LrTable;
-    /// Whether `MaskStrategy::TokenTrie` merges tokens that the grammar treats the same, so
-    /// masks walk fewer tokens. Requires `ParserBackend::TemplateDfa`. Off by default.
-    bool merge_equivalent_tokens = false;
+    /// Settings for `MaskStrategy::TokenTrie`. Leave at the defaults for any other strategy.
+    TokenTrie token_trie{};
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         return {sizeof(glrmask_compile_options),
                 static_cast<std::uint32_t>(mask_strategy),
                 static_cast<std::uint32_t>(boundary_mask_strategy),
-                static_cast<std::uint32_t>(parser_backend),
-                static_cast<std::uint32_t>(merge_equivalent_tokens)};
+                {static_cast<std::uint32_t>(token_trie.parser_backend),
+                 static_cast<std::uint32_t>(token_trie.merge_equivalent_tokens)}};
     }
 };
 

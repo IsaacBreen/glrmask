@@ -394,6 +394,10 @@ name = "public_optimization_modes"
 path = "tests/public_optimization_modes.rs"
 
 [[test]]
+name = "mask_strategy_modes"
+path = "tests/mask_strategy_modes.rs"
+
+[[test]]
 name = "core_batch"
 path = "tests/core_batch.rs"
 

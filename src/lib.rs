@@ -75,7 +75,7 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab};
 pub use error::{Error, ErrorKind, Result};
-pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, ParserBackend, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, ParserBackend, TokenTrie, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{
@@ -215,7 +215,7 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub mod test_modes {
-    use crate::{BuildOptions, CompileOptions, MaskStrategy, ParserBackend};
+    use crate::{BuildOptions, CompileOptions, MaskStrategy, ParserBackend, TokenTrie};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum MaskMode {
@@ -224,16 +224,21 @@ pub mod test_modes {
         A,
         B,
         C,
+        D,
     }
 
     impl MaskMode {
-        pub const ALL: [Self; 5] = [Self::Auto, Self::ParserDwa, Self::A, Self::B, Self::C];
+        pub const ALL: [Self; 6] = [Self::Auto, Self::ParserDwa, Self::A, Self::B, Self::C, Self::D];
 
         pub fn strategy(self) -> MaskStrategy {
             match self {
                 Self::Auto => MaskStrategy::Auto,
                 Self::ParserDwa => MaskStrategy::ParserDwa,
-                Self::A | Self::B | Self::C => MaskStrategy::TokenTrie,
+                Self::A | Self::B | Self::C | Self::D => MaskStrategy::TokenTrie(
+                    TokenTrie::new()
+                        .parser_backend(self.parser_backend())
+                        .merge_equivalent_tokens(self.merge_equivalent_tokens()),
+                ),
             }
         }
 
@@ -246,7 +251,7 @@ pub mod test_modes {
         }
 
         pub fn merge_equivalent_tokens(self) -> bool {
-            matches!(self, Self::C)
+            matches!(self, Self::C | Self::D)
         }
 
         pub fn build_options(self) -> BuildOptions {
@@ -257,10 +262,7 @@ pub mod test_modes {
         }
 
         pub fn compile_options(self) -> CompileOptions {
-            CompileOptions::default()
-                .mask_strategy(self.strategy())
-                .parser_backend(self.parser_backend())
-                .merge_equivalent_tokens(self.merge_equivalent_tokens())
+            CompileOptions::default().mask_strategy(self.strategy())
         }
     }
 }

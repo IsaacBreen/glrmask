@@ -6457,12 +6457,28 @@ pub(crate) fn compile_dynamic_owned_with_vocab_partition_with_table_construction
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> crate::Result<DynamicConstraint> {
+    compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
+        grammar,
+        vocab,
+        default_table_construction,
+        None,
+    )
+}
+
+/// The LR finalization keeps source nullability when the caller knows it
+/// before normalization, exactly as the template frontend does.
+pub(crate) fn compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    source_start_nullable: Option<bool>,
+) -> crate::Result<DynamicConstraint> {
     compile_dynamic_owned_with_vocab_partition_impl(
         grammar,
         vocab,
         default_table_construction,
         DynamicPartitionFinalization::Lr,
-        None,
+        source_start_nullable,
     )
 }
 
@@ -6550,9 +6566,16 @@ fn compile_dynamic_owned_with_vocab_partition_impl(
                         vocab,
                         default_table_construction,
                         false,
-                        false,
+                        finalization == DynamicPartitionFinalization::Lr,
                     ).and_then(|mut constraint| {
                         let mut prepared_parsers = Vec::new();
+                        if finalization == DynamicPartitionFinalization::Lr
+                            && let Some(nullable) = source_start_nullable
+                        {
+                            for alternative in constraint.constraints_mut() {
+                                alternative.set_composition_start_nullable(nullable);
+                            }
+                        }
                         if finalization == DynamicPartitionFinalization::Template {
                             // Parser relations depend on the complete core
                             // table, not on the model-token quotient. Derive
@@ -7628,7 +7651,7 @@ mod caller_execution_tests {
     fn caller_parallel_compilation_preserves_masks_and_snapshot_isolation() {
         let v=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let g=crate::Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
-        let opts=crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenTrie);
+        let opts=crate::BuildOptions::default().optimization(crate::MaskStrategy::FAST_COMPILE);
         let reference=g.compile_with_build_options(&v,opts.clone()).unwrap();let expected=reference.start().mask();
         let pool=rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
         pool.install(|| (0..12).into_par_iter().for_each(|_| {

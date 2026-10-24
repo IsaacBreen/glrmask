@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
-fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::TokenTrie)}
+fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).with_special_tokens([17,29])}
 
 #[test]

@@ -290,9 +290,9 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
         .unwrap();
 
         for constraint in [&direct, &loaded, &external] {
-            // A is ordinary Dynamic TokenTrie and keeps its LR table; every
-            // other configuration is table-free.
-            if optimization != MaskMode::A {
+            // A and D are ordinary Dynamic TokenTrie and keep their LR table;
+            // every other configuration is table-free.
+            if optimization != MaskMode::A && optimization != MaskMode::D {
                 assert_eq!(
                     constraint.parser_backend(),
                     crate::ParserBackend::TemplateDfa,

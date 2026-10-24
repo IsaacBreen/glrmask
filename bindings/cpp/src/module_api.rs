@@ -4,12 +4,15 @@ use std::ffi::c_void;
 
 pub struct glrmask_module(pub(super) g::Module);
 pub struct glrmask_expr(pub(super) g::Expr);
+#[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_trie_settings {
+    pub parser_backend: u32,
+    pub merge_equivalent_tokens: u32,
+}
 #[repr(C)] pub struct glrmask_compile_options {
     pub struct_size: usize,
     pub mask_strategy: u32,
     pub boundary_mask_strategy: u32,
-    pub parser_backend: u32,
-    pub merge_equivalent_tokens: u32,
+    pub token_trie: glrmask_token_trie_settings,
 }
 /// kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 TokenSet. Inputs are borrowed for this call only.
 #[repr(C)] pub struct glrmask_expr_operand { pub kind: u32, pub handle: *const c_void }
@@ -26,11 +29,20 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     let mut o: glrmask_compile_options = unsafe { std::mem::zeroed() };
     unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), struct_size) };
     o.struct_size = struct_size;
-    Ok(core::compile_options(
-        core::mask_strategy(o.mask_strategy)?,
+    let strategy = core::mask_strategy(o.mask_strategy)?;
+    let settings_are_present = o.token_trie.parser_backend != 0
+        || o.token_trie.merge_equivalent_tokens != 0;
+    if settings_are_present && !matches!(strategy, g::MaskStrategy::TokenTrie(_)) {
+        return Err(Error::invalid(
+            "token_trie settings apply only to the TokenTrie mask strategy",
+        ));
+    }
+    let token_trie = g::TokenTrie::new()
+        .parser_backend(core::parser_backend(o.token_trie.parser_backend)?)
+        .merge_equivalent_tokens(o.token_trie.merge_equivalent_tokens != 0);    Ok(core::compile_options(
+        strategy,
         core::boundary_mask_strategy(o.boundary_mask_strategy)?,
-        core::parser_backend(o.parser_backend)?,
-        o.merge_equivalent_tokens != 0,
+        token_trie,
     ))
 }
 
@@ -39,8 +51,10 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
         struct_size: size_of::<glrmask_compile_options>(),
         mask_strategy: 0,
         boundary_mask_strategy: 0,
-        parser_backend: 0,
-        merge_equivalent_tokens: 0,
+        token_trie: glrmask_token_trie_settings {
+            parser_backend: 0,
+            merge_equivalent_tokens: 0,
+        },
     }
 }
 

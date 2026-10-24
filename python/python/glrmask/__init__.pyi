@@ -55,9 +55,7 @@ class MaskStrategy:
     PARSER_DWA: ClassVar[MaskStrategy]
     """Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks."""
     TOKEN_TRIE: ClassVar[MaskStrategy]
-    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
-
-Two arguments of `compile` and `precompile` tune it. `parser_backend` chooses how the parser is represented; see `ParserBackend`. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `parser_backend=ParserBackend.TEMPLATE_DFA`."""
+    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` instead to change its settings."""
     FAST_COMPILE: ClassVar[MaskStrategy]
     """Same as `TOKEN_TRIE`."""
     FAST_MASKS: ClassVar[MaskStrategy]
@@ -84,6 +82,23 @@ class ParserBackend:
     """An LR table. Faster to compile, with slower masks. The default."""
     TEMPLATE_DFA: ClassVar[ParserBackend]
     """Template DFAs. Slower to compile, with faster masks."""
+
+@final
+class TokenTrie:
+    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
+
+    `TokenTrie()` is the same as `MaskStrategy.TOKEN_TRIE`."""
+    def __init__(self, *, parser_backend: ParserBackend = ParserBackend.LR_TABLE, merge_equivalent_tokens: bool = False) -> None: ...
+    @property
+    def parser_backend(self) -> ParserBackend:
+        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
+        ...
+    @property
+    def merge_equivalent_tokens(self) -> bool:
+        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
+
+        Tokens are not merged in a composition that includes precompiled parts."""
+        ...
 
 @final
 class TokenSet:
@@ -245,28 +260,24 @@ class Module:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
-        merge_equivalent_tokens: bool = False,
     ) -> None:
         """Compiles as much as possible for `vocab` now, so later compiles are fast.
 
-        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
-        merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the module for `vocab`, reusing any precompiled work.
 
-        Every extern must be bound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        Every extern must be bound. The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
     @property
@@ -329,28 +340,24 @@ class Grammar:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
-        merge_equivalent_tokens: bool = False,
     ) -> Module:
         """Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.
 
-        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
-        merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the grammar for `vocab`.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
     @staticmethod

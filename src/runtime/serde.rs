@@ -6643,14 +6643,12 @@ impl Constraint {
                                 dynamic_mask_vocab: self.uses_dynamic_runtime().then(|| {
                                     // The template-only artifact also preserves its proven
                                     // mask quotient. Table-backed and table-free DWA bodies
-                                    // omit the vocabulary artifact and rebuild the exact
-                                    // full-vocabulary mask coordinate from the supplied
-                                    // Vocab on load.
-                                    if self.has_template_parser() {
-                                        self.dynamic_mask_vocab.to_template_external_vocab_artifact()
-                                    } else {
-                                        None
-                                    }
+                                    // with a grammar quotient serialize it too, so a merged
+                                    // LR body keeps its partition across save/load. A
+                                    // non-quotiented body omits the artifact and rebuilds
+                                    // the exact full-vocabulary mask coordinate from the
+                                    // supplied Vocab on load.
+                                    self.dynamic_mask_vocab.to_template_external_vocab_artifact()
                                 }).flatten(),
                                 virtual_runtimes: self
                                     .tokenizer

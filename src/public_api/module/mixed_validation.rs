@@ -194,18 +194,38 @@ enum Precompile {
     None,
     ParserDwa,
     Merged,
+    MergedLr,
+    A,
     B,
 }
 
 impl Precompile {
-    const ALL: [Self; 4] = [Self::None, Self::ParserDwa, Self::Merged, Self::B];
+    const ALL: [Self; 6] = [
+        Self::None,
+        Self::ParserDwa,
+        Self::Merged,
+        Self::MergedLr,
+        Self::A,
+        Self::B,
+    ];
 
     fn options(self) -> Option<crate::CompileOptions> {
         match self {
             Self::None => None,
             Self::ParserDwa => Some(PARSER_DWA.compile_options()),
             Self::Merged => Some(MaskMode::C.compile_options()),
+            Self::MergedLr => Some(MaskMode::D.compile_options()),
+            Self::A => Some(MaskMode::A.compile_options()),
             Self::B => Some(MaskMode::B.compile_options()),
+        }
+    }
+
+    fn retains_key(self) -> Option<u8> {
+        match self {
+            Self::None | Self::MergedLr | Self::A => None,
+            Self::ParserDwa => Some(Engine::ParserDwa.key()),
+            Self::Merged => Some(Engine::MergedTokenTrie.key()),
+            Self::B => Some(Engine::TokenTrie.key()),
         }
     }
 }
@@ -432,6 +452,7 @@ fn precompiled_work_is_reused_across_every_engine_request() {
         MaskMode::A,
         MaskMode::B,
         MaskMode::C,
+        MaskMode::D,
     ];
     let mut compiles = 0usize;
     let mut retained_parts = 0usize;
@@ -441,19 +462,24 @@ fn precompiled_work_is_reused_across_every_engine_request() {
         for assignment in precompile_assignments(spec.nodes.len()) {
             let (module, parts) = build_assembly(&spec, &assignment, &vocab);
             for (index, mode) in assignment.iter().enumerate() {
-                let expected = match mode {
-                    Precompile::None => continue,
-                    Precompile::ParserDwa => Engine::ParserDwa.key(),
-                    Precompile::Merged => Engine::MergedTokenTrie.key(),
-                    Precompile::B => Engine::TokenTrie.key(),
-                };
-                assert!(
-                    parts[index].node.prepared.contains_key(&expected),
-                    "{} node {index}: {:?} did not retain key {expected}",
-                    spec.name,
-                    mode,
-                );
-                retained_parts += 1;
+                match mode.retains_key() {
+                    Some(expected) => {
+                        assert!(
+                            parts[index].node.prepared.contains_key(&expected),
+                            "{} node {index}: {:?} did not retain key {expected}",
+                            spec.name,
+                            mode,
+                        );
+                        retained_parts += 1;
+                    }
+                    None => assert!(
+                        parts[index].node.prepared.is_empty(),
+                        "{} node {index}: {:?} must retain nothing, kept {:?}",
+                        spec.name,
+                        mode,
+                        parts[index].node.prepared.keys().collect::<Vec<_>>(),
+                    ),
+                }
             }
             let mut retained = Vec::new();
             for part in &parts {

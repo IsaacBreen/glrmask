@@ -2,7 +2,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, TokenSet, Vocab};
 
-const MODES: [MaskMode; 5] = MaskMode::ALL;
+const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
 }
@@ -113,7 +113,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
     for child in children {
         let description=parent.clone().bind_snapshot("child",child).unwrap();
         let reference=description.compile(&v).unwrap();
-        let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
+        let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
         for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
             Constraint::load(actual.save(),&v).unwrap()] {
             compare_prefixes(&c,&reference,&[0,1,2,3,4,5,6,7,8,9,10,11,33,99],5);
@@ -125,7 +125,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         .bind_snapshot("leaf",exact).unwrap();
     let description=parent.bind_snapshot("child",middle).unwrap();
     let reference=description.compile(&v).unwrap();
-    let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
+    let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
     compare_prefixes(&actual,&reference,&[0,1,3,4,8,33,99],4);
     assert!(!allowed(&actual.start().mask(),4));
 }
@@ -139,7 +139,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     source.push_str("r30: \"b\"\n");
     let g=Grammar::from_lark(&source).unwrap();
     let oracle=g.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options().end_tokens([100])).unwrap();
-    let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
+    let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
     for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
         Constraint::load(actual.save(),&v).unwrap()] {
@@ -174,7 +174,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
             (3,word(n)),(7,word(n)),(8,word(n-1)),(9,word(n+1)),(11,b"x".to_vec())]);
         let g=Grammar::from_lark(&source).unwrap();
-        let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
+        let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE).end_tokens([100])).unwrap();
         for mode in MODES {
             let compiled=g.compile_with_build_options(&v,mode.build_options().end_tokens([100])).unwrap();
             for c in [compiled.clone(),

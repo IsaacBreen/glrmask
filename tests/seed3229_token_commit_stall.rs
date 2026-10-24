@@ -27,7 +27,7 @@ b: n a | "y"
 n: "z" |
 "#;
 
-const MODES: [MaskMode; 5] = MaskMode::ALL;
+const MODES: [MaskMode; 6] = MaskMode::ALL;
 
 fn vocab() -> Vocab {
     Vocab::new(vec![

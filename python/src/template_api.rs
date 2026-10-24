@@ -1,7 +1,7 @@
 //! Data-only parser programs. Python objects are converted to owned Rust data
 //! before validation/compilation; no Python callback is retained at runtime.
 use super::{PyConstraint, PyVocab};
-use super::final_api::{api_error, constraint, PyMaskStrategy};
+use super::final_api::{api_error, constraint, resolve_mask_strategy};
 use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, TemplateBuildOptions, TerminalPattern,
 };
@@ -63,8 +63,8 @@ impl PyParserProgram {
         terminal_patterns: &Bound<'_, PyAny>,
         ignore_terminal: Option<u32>,
         end_tokens: Option<Vec<u32>>,
-        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
-        optimization: Option<PyRef<'_, PyMaskStrategy>>,
+        mask_strategy: Option<&Bound<'_, PyAny>>,
+        optimization: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyConstraint> {
         let mut terminals = Vec::with_capacity(self.terminal_count);
         for value in terminal_patterns.try_iter()? {
@@ -83,9 +83,9 @@ impl PyParserProgram {
         let mut lexer = LexerDefinition::new(terminals);
         if let Some(terminal) = ignore_terminal { lexer = lexer.ignoring(terminal); }
         let mut options = TemplateBuildOptions::default().end_tokens(end_tokens.unwrap_or_default());
-        let strategy = mask_strategy.or(optimization);
-        if let Some(value) = strategy {
-            options = options.optimization((*value).into());
+        let strategy = resolve_mask_strategy(mask_strategy.or(optimization))?;
+        if mask_strategy.is_some() || optimization.is_some() {
+            options = options.optimization(strategy);
         }
         let vocab = vocab.inner.clone();
         py.detach(|| self.inner.compile_with(&lexer, &vocab, options))

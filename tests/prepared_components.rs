@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab};
-const MODES: [MaskMode; 5] = MaskMode::ALL;
+const MODES: [MaskMode; 6] = MaskMode::ALL;
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]).with_special_tokens([4,5])}

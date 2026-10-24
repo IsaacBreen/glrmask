@@ -17,8 +17,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             let rust_options = core::compile_options(
                 core::mask_strategy(strategy).unwrap(),
                 g::BoundaryMaskStrategy::Auto,
-                g::ParserBackend::LrTable,
-                false,
+                g::TokenTrie::new(),
             );
             let rust = rust_m.compile_with(&rust_vocab, rust_options).unwrap();
             let mut reference = rust.start();
@@ -28,8 +27,10 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 struct_size: size_of::<glrmask_compile_options>(),
                 mask_strategy: strategy,
                 boundary_mask_strategy: 0,
-                parser_backend: 0,
-                merge_equivalent_tokens: 0,
+                token_trie: glrmask_token_trie_settings {
+                    parser_backend: 0,
+                    merge_equivalent_tokens: 0,
+                },
             };
             let (mut constraint, mut state) = (ptr::null_mut(), ptr::null_mut());
             assert_eq!(glrmask_module_compile(module, vocab, &options, &mut constraint), 0);
@@ -95,8 +96,10 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
             struct_size: size_of::<glrmask_compile_options>(),
             mask_strategy: 1,
             boundary_mask_strategy: 0,
-            parser_backend: 0,
-            merge_equivalent_tokens: 0,
+            token_trie: glrmask_token_trie_settings {
+                parser_backend: 0,
+                merge_equivalent_tokens: 0,
+            },
         };
         assert_eq!(glrmask_module_precompile(prepared, vocab, &parse_options), 0);
 
@@ -157,10 +160,9 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
     };
     let options = unsafe { root_options((&old as *const OldOptions).cast()) }.unwrap();
     let reference = core::compile_options(
-        g::MaskStrategy::TokenTrie,
+        g::MaskStrategy::TokenTrie(g::TokenTrie::new()),
         g::BoundaryMaskStrategy::ParserDwa,
-        g::ParserBackend::LrTable,
-        false,
+        g::TokenTrie::new(),
     );
     assert_eq!(options, reference);
 

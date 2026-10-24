@@ -126,11 +126,13 @@ impl NativeTokenSet {
 }
 
 fn grammar_compile_options(mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> core::Result<g::CompileOptions> {
+    let token_trie = g::TokenTrie::new()
+        .parser_backend(core::parser_backend(parser_backend.unwrap_or(0.0) as u32)?)
+        .merge_equivalent_tokens(merge_equivalent_tokens.unwrap_or(false));
     Ok(core::compile_options(
         core::mask_strategy(id(mode)?)?,
         core::boundary_mask_strategy(id(boundary)?)?,
-        core::parser_backend(parser_backend.unwrap_or(0.0) as u32)?,
-        merge_equivalent_tokens.unwrap_or(false),
+        token_trie,
     ))
 }
 

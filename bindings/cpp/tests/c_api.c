@@ -13,6 +13,22 @@ int main(void) {
     CHECK(glrmask_grammar_from_source(GLRMASK_EBNF,source,strlen(source),&grammar)==GLRMASK_OK);
     glrmask_compile_options options=glrmask_default_compile_options();
     CHECK(options.mask_strategy==GLRMASK_MASK_STRATEGY_AUTO);CHECK(options.boundary_mask_strategy==GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO);
+    CHECK(options.token_trie.parser_backend==GLRMASK_PARSER_BACKEND_LR_TABLE);
+    CHECK(options.token_trie.merge_equivalent_tokens==0);
+    {
+        glrmask_compile_options wrong=glrmask_default_compile_options();
+        wrong.token_trie.merge_equivalent_tokens=1;
+        CHECK(glrmask_grammar_compile(grammar,vocab,&wrong,&constraint)==GLRMASK_INVALID_ARGUMENT);
+        CHECK(strcmp(glrmask_error_message(),"token_trie settings apply only to the TokenTrie mask strategy")==0);
+    }
+    {
+        glrmask_compile_options merged_lr=glrmask_default_compile_options();
+        merged_lr.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_TRIE;
+        merged_lr.token_trie.merge_equivalent_tokens=1;
+        glrmask_constraint* merged_lr_constraint=NULL;
+        CHECK(glrmask_grammar_compile(grammar,vocab,&merged_lr,&merged_lr_constraint)==GLRMASK_OK);
+        glrmask_constraint_free(merged_lr_constraint);
+    }
     options.struct_size=0;
     CHECK(glrmask_grammar_compile(grammar,vocab,&options,&constraint)==GLRMASK_INVALID_ARGUMENT);CHECK(constraint==NULL);
     CHECK(glrmask_grammar_compile(grammar,vocab,NULL,&constraint)==GLRMASK_OK);
@@ -21,8 +37,8 @@ int main(void) {
     CHECK(glrmask_module_new(grammar,&module)==GLRMASK_OK);
     glrmask_compile_options module_options=glrmask_default_compile_options();
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_TRIE;
-    module_options.parser_backend=GLRMASK_PARSER_BACKEND_TEMPLATE_DFA;
-    module_options.merge_equivalent_tokens=1;
+    module_options.token_trie.parser_backend=GLRMASK_PARSER_BACKEND_TEMPLATE_DFA;
+    module_options.token_trie.merge_equivalent_tokens=1;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
     /* Grammar::precompile is the module-returning mirror of Grammar::compile. */
     glrmask_module *from_grammar=NULL;glrmask_constraint *precompiled_constraint=NULL;

@@ -68,11 +68,31 @@ const ParserBackend = Object.freeze({
 });
 
 function parseMaskStrategy(value) {
-  if (value === undefined) return 0;
-  if (value === 'auto') return 0;
-  if (value === 'parser-dwa') return 1;
-  if (value === 'token-trie') return 2;
-  throw new TypeError("maskStrategy must be 'auto', 'parser-dwa' or 'token-trie'");
+  if (value === undefined) return {strategy: 0, parserBackend: 0, mergeEquivalentTokens: false};
+  if (typeof value === 'string') {
+    if (value === 'auto') return {strategy: 0, parserBackend: 0, mergeEquivalentTokens: false};
+    if (value === 'parser-dwa') return {strategy: 1, parserBackend: 0, mergeEquivalentTokens: false};
+    if (value === 'token-trie') return {strategy: 2, parserBackend: 0, mergeEquivalentTokens: false};
+    throw new TypeError("maskStrategy must be 'auto', 'parser-dwa' or 'token-trie'");
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('maskStrategy must be a string or a TokenTrie object');
+  }
+  const o = checkedOptions(value, ['kind', 'parserBackend', 'mergeEquivalentTokens']);
+  if (o.kind !== 'token-trie') {
+    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', "maskStrategy.kind must be 'token-trie'");
+  }
+  if (o.parserBackend !== undefined && o.parserBackend !== 'lr-table' && o.parserBackend !== 'template-dfa') {
+    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', "maskStrategy.parserBackend must be 'lr-table' or 'template-dfa'");
+  }
+  if (o.mergeEquivalentTokens !== undefined && typeof o.mergeEquivalentTokens !== 'boolean') {
+    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', 'maskStrategy.mergeEquivalentTokens must be a boolean');
+  }
+  return {
+    strategy: 2,
+    parserBackend: o.parserBackend === 'template-dfa' ? 1 : 0,
+    mergeEquivalentTokens: o.mergeEquivalentTokens ?? false,
+  };
 }
 function formatMaskStrategy(num) {
   switch (num) {
@@ -97,13 +117,6 @@ function formatBoundaryMaskStrategy(num) {
     case 2: return 'token-trie';
     default: return 'auto';
   }
-}
-
-function parseParserBackend(value) {
-  if (value === undefined) return 0;
-  if (value === 'lr-table') return 0;
-  if (value === 'template-dfa') return 1;
-  throw new TypeError("parserBackend must be 'lr-table' or 'template-dfa'");
 }
 
 class ExternsMap {
@@ -235,13 +248,13 @@ class Grammar extends Owned {
 }
 
 function compileSettings(options) {
-  const o = checkedOptions(options, ['maskStrategy', 'boundaryMaskStrategy', 'parserBackend', 'mergeEquivalentTokens']);
-  if (o.mergeEquivalentTokens !== undefined && typeof o.mergeEquivalentTokens !== 'boolean') throw new TypeError('mergeEquivalentTokens must be a boolean');
+  const o = checkedOptions(options, ['maskStrategy', 'boundaryMaskStrategy']);
+  const strategy = parseMaskStrategy(o.maskStrategy);
   return {
-    mode: parseMaskStrategy(o.maskStrategy),
+    mode: strategy.strategy,
     boundary: parseBoundaryMaskStrategy(o.boundaryMaskStrategy),
-    parserBackend: parseParserBackend(o.parserBackend),
-    mergeEquivalentTokens: o.mergeEquivalentTokens ?? false,
+    parserBackend: strategy.parserBackend,
+    mergeEquivalentTokens: strategy.mergeEquivalentTokens,
   };
 }
 

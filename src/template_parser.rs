@@ -201,7 +201,7 @@ pub struct TemplateBuildOptions {
 
 impl Default for TemplateBuildOptions {
     fn default() -> Self {
-        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::TokenTrie }
+        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::FAST_COMPILE }
     }
 }
 
@@ -337,7 +337,7 @@ impl ParserProgram {
         names: Vec<String>, ignore: Option<u32>, specials: Vec<crate::runtime::SpecialTokenTerminal>,
         vocab: &Vocab, options: TemplateBuildOptions) -> Result<Constraint> {
         let mut constraint = match options.optimization {
-            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenTrie => {
+            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenTrie(_) => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
                     tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,

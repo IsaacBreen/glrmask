@@ -56,7 +56,7 @@ pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
     match val {
         0 => Ok(glrmask::MaskStrategy::Auto),
         1 => Ok(glrmask::MaskStrategy::ParserDwa),
-        2 => Ok(glrmask::MaskStrategy::TokenTrie),
+        2 => Ok(glrmask::MaskStrategy::TokenTrie(glrmask::TokenTrie::new())),
         _ => Err(Error::invalid("unknown mask strategy; expected 0, 1 or 2")),
     }
 }
@@ -65,7 +65,7 @@ pub fn mask_strategy_value(strategy: glrmask::MaskStrategy) -> u32 {
     match strategy {
         glrmask::MaskStrategy::Auto => 0,
         glrmask::MaskStrategy::ParserDwa => 1,
-        glrmask::MaskStrategy::TokenTrie => 2,
+        glrmask::MaskStrategy::TokenTrie(_) => 2,
         _ => 0,
     }
 }
@@ -99,14 +99,15 @@ pub fn parser_backend(value: u32) -> Result<glrmask::ParserBackend> {
 pub fn compile_options(
     mask_strategy: glrmask::MaskStrategy,
     boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
-    parser_backend: glrmask::ParserBackend,
-    merge_equivalent_tokens: bool,
+    token_trie: glrmask::TokenTrie,
 ) -> glrmask::CompileOptions {
+    let mask_strategy = match mask_strategy {
+        glrmask::MaskStrategy::TokenTrie(_) => glrmask::MaskStrategy::TokenTrie(token_trie),
+        other => other,
+    };
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy)
         .boundary_mask_strategy(boundary_mask_strategy)
-        .parser_backend(parser_backend)
-        .merge_equivalent_tokens(merge_equivalent_tokens)
 }
 
 type BorrowedState<'a> = glrmask::ConstraintState<'a>;
@@ -183,8 +184,7 @@ mod tests {
             let options = compile_options(
                 mask_strategy(mode).unwrap(),
                 glrmask::BoundaryMaskStrategy::Auto,
-                glrmask::ParserBackend::LrTable,
-                false,
+                glrmask::TokenTrie::new(),
             );
             let c = Arc::new(module.compile_with(&vocab, options).unwrap());
             let expected = c.start().mask();

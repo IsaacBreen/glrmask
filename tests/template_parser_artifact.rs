@@ -75,7 +75,7 @@ fn static_template_artifacts_roundtrip_without_lr_storage() {
 fn o2_template_artifacts_roundtrip_without_lr_storage() {
     let v=vocab();
     for source in GRAMMARS {
-        let reference=DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(source),&v).unwrap();
+        let reference=glrmask::__private::compile_bounded_template_o2_glrm(source,&v).unwrap();
         let template=reference.clone();
         let bytes=template.save();
         assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 16);
@@ -175,7 +175,7 @@ fn cyclic_or_out_of_domain_completion_program_is_rejected() {
 #[test]
 fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() {
     let v = vocab();
-    let reference = DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(GRAMMARS[1]), &v).unwrap();
+    let reference = glrmask::__private::compile_bounded_template_o2_glrm(GRAMMARS[1], &v).unwrap();
     let template = reference.clone();
     let external = template.save();
     assert_eq!(&external[..8], b"GLRDXF\0\0");
@@ -211,7 +211,7 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
 #[test]
 fn malformed_external_template_binding_is_rejected() {
     let v=vocab();
-    let template=DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(GRAMMARS[0]),&v).unwrap();
+    let template=glrmask::__private::compile_bounded_template_o2_glrm(GRAMMARS[0],&v).unwrap();
     let external=template.save();
     let baseline=<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external,&v)
         .expect("malformed binding cases must start from a valid current external artifact");
@@ -259,8 +259,8 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
     external[40+8..40+10].copy_from_slice(&36u16.to_le_bytes());
     assert!(Constraint::load(&external, &v).is_err());
 
-    let dynamic = DynamicConstraint::compile_with_vocab_partition(
-        Grammar::glrm(GRAMMARS[0]), &v,
+    let dynamic = glrmask::__private::compile_bounded_template_o2_glrm(
+        GRAMMARS[0], &v,
     ).unwrap();
     let mut old_dynamic = dynamic.save();
     old_dynamic[38..40].copy_from_slice(&35u16.to_le_bytes());

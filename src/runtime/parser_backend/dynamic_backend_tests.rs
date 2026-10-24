@@ -342,8 +342,8 @@ fn ordinary_lr_and_o2_static_are_isolated_across_reload() {
         assert_eq!(dynamic.clone().into_constraint().parser_backend(), ParserBackend::LrTable);
         let o2 = crate::DynamicConstraint::from_ebnf_with_vocab_partition(source, &vocab)
             .unwrap().into_constraint();
-        assert_eq!(o2.parser_backend(), ParserBackend::TemplateDfa);
-        assert!(!o2.table.is_present());
+        assert_eq!(o2.parser_backend(), ParserBackend::LrTable);
+        assert!(o2.table.is_present());
         let native = compile(&vocab, source, ParserBackend::TemplateDfa);
         assert_eq!(native.parser_backend(), ParserBackend::TemplateDfa);
         std::fs::write(directory.join("native.constraint"), native.save()).unwrap();

@@ -17,14 +17,12 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 pub struct CompileOptions {
     pub(crate) mask_strategy: MaskStrategy,
     pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
-    pub(crate) parser_backend: ParserBackend,
-    pub(crate) merge_equivalent_tokens: bool,
 }
 
 impl CompileOptions {
     /// Sets how masks are computed. Defaults to [`MaskStrategy::Auto`].
-    pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
-        self.mask_strategy = strategy;
+    pub fn mask_strategy(mut self, strategy: impl Into<MaskStrategy>) -> Self {
+        self.mask_strategy = strategy.into();
         self
     }
 
@@ -35,33 +33,38 @@ impl CompileOptions {
         self
     }
 
-    /// Sets how the parser is represented for parts compiled with
-    /// [`TokenTrie`](MaskStrategy::TokenTrie). Defaults to [`ParserBackend::LrTable`].
-    pub fn parser_backend(mut self, backend: ParserBackend) -> Self {
-        self.parser_backend = backend;
-        self
-    }
-
-    /// Sets whether [`TokenTrie`](MaskStrategy::TokenTrie) merges tokens that the
-    /// grammar treats the same, so masks walk fewer tokens. Requires
-    /// [`ParserBackend::TemplateDfa`]. Off by default.
-    pub fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
-        self.merge_equivalent_tokens = enable;
-        self
-    }
-
-    /// The internal engine for these options, rejecting combination D.
+    /// The internal engine for these options.
     pub(crate) fn engine(&self) -> Result<Engine> {
-        engine_for(
-            self.mask_strategy,
-            self.parser_backend,
-            self.merge_equivalent_tokens,
-        )
+        Ok(engine_for(self.mask_strategy))
+    }
+
+    pub(crate) fn parser_backend(&self) -> ParserBackend {
+        self.mask_strategy.token_trie_backend()
+    }
+
+    pub(crate) fn merge_equivalent_tokens(&self) -> bool {
+        self.mask_strategy.merges_tokens()
     }
 
     /// The TokenTrie parser backend for these options.
     fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
-        token_trie_backend(self.parser_backend)
+        token_trie_backend(self.mask_strategy.token_trie_backend())
+    }
+}
+
+impl MaskStrategy {
+    pub(crate) fn token_trie_backend(self) -> ParserBackend {
+        match self {
+            Self::TokenTrie(settings) => settings.backend(),
+            _ => ParserBackend::LrTable,
+        }
+    }
+
+    pub(crate) fn merges_tokens(self) -> bool {
+        match self {
+            Self::TokenTrie(settings) => settings.merges(),
+            _ => false,
+        }
     }
 }
 
@@ -249,7 +252,11 @@ fn plan_node(
                 Some(Engine::ParserDwa) | Some(Engine::MergedTokenTrie) => retained.unwrap(),
                 _ => Engine::MergedTokenTrie,
             },
-            backend: ParserBackend::TemplateDfa,
+            backend: if any_retained {
+                ParserBackend::TemplateDfa
+            } else {
+                requested_backend
+            },
         },
         Engine::TokenTrie => match retained {
             Some(engine) => NodePlan {
@@ -266,6 +273,13 @@ fn plan_node(
             },
         },
     }
+}
+
+/// A node plan with an LR-table TokenTrie body retains nothing: an LR merged
+/// body is not kept either, exactly like an unmerged LR TokenTrie build.
+fn retains_nothing(plan: NodePlan) -> bool {
+    plan.backend == ParserBackend::LrTable
+        && matches!(plan.engine, Engine::TokenTrie | Engine::MergedTokenTrie)
 }
 
 pub(crate) fn target_boundary() -> BoundaryTriggerDetail {
@@ -589,7 +603,7 @@ impl Module {
         let requested = options.engine()?;
         let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
         let target_b = target_boundary();
-        let plan_of = |m: &Module| plan_node(requested, &m.node.prepared, any_retained, options.parser_backend);
+        let plan_of = |m: &Module| plan_node(requested, &m.node.prepared, any_retained, options.parser_backend());
         let backend_of = |plan: NodePlan| token_trie_backend(plan.backend);
 
         // Keyed by source identity: every node has exactly one plan.
@@ -597,8 +611,8 @@ impl Module {
 
         for m in &modules {
             let plan = plan_of(m);
-            // A pure LR TokenTrie precompile retains nothing.
-            if plan.engine == Engine::TokenTrie && plan.backend == ParserBackend::LrTable {
+            // A pure LR TokenTrie precompile retains nothing, merged or not.
+            if retains_nothing(plan) {
                 continue;
             }
             let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
@@ -614,7 +628,7 @@ impl Module {
         let mut seen = std::collections::HashSet::new();
         let jobs: Vec<&Module> = modules.iter().filter(|m| {
             let plan = plan_of(m);
-            if plan.engine == Engine::TokenTrie && plan.backend == ParserBackend::LrTable {
+            if retains_nothing(plan) {
                 return false;
             }
             let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
@@ -752,14 +766,27 @@ impl Module {
             )?,
             Engine::MergedTokenTrie => match source.source {
                 GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
-                    crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
-                        .map_err(token_class_error)?
+                    if backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
+                        crate::import::compile_component_shell_balanced_lr(source.component()?, vocab, &[])
+                            .map_err(token_class_error)?
+                    } else {
+                        crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
+                            .map_err(token_class_error)?
+                    }
                 }
                 _ => {
-                    let dynamic = match &source.source {
-                        GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_bounded_template_parser(s, vocab),
-                        GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_bounded_template_parser(s, vocab),
-                        _ => unreachable!(),
+                    let dynamic = if backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
+                        match &source.source {
+                            GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_vocab_partition(s, vocab),
+                            GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_vocab_partition(s, vocab),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        match &source.source {
+                            GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_bounded_template_parser(s, vocab),
+                            GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_bounded_template_parser(s, vocab),
+                            _ => unreachable!(),
+                        }
                     }.map_err(token_class_error)?;
                     let mut components = dynamic.into_constraints();
                     if components.len() != 1 {
@@ -795,7 +822,9 @@ impl Module {
         };
 
         let _ = inner.late_bind_vocab.set(vocab.clone());
-        if engine == Engine::MergedTokenTrie {
+        if engine == Engine::MergedTokenTrie
+            && backend != crate::runtime::parser_backend::DynamicParserBackend::LrTable
+        {
             inner.install_template_parser_from_compile()?;
         }
         if build_boundary {
@@ -904,20 +933,27 @@ impl Module {
         }
         // TOKEN_TRIE without retained static work compiles the whole
         // composition as one ordinary Dynamic grammar, inlined at source level.
+        // Merged requests take the same path so that a merged composition from
+        // scratch computes one partition over the flattened grammar.
         // Over retained static work it is mixed: retained parts stay static and
         // every other module is compiled as its own dynamic component.
         let requested = options.engine()?;
         let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
         // The whole-composition flatten path is only valid when the request is
-        // TokenTrie and no part owns precompiled machinery.
-        let whole = requested == Engine::TokenTrie && !any_retained;
+        // a TokenTrie request and no part owns precompiled machinery.
+        let whole = requested.is_token_trie() && !any_retained;
         // EXPERIMENT: one route report per top-level Module compile.
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         if whole {
             let result = self
                 .flatten_source()?
-                .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet, options.token_trie_backend())?;
-            let result = result.with_end_tokens(end_tokens)?;
+                .compile_requested_token_trie(
+                    vocab,
+                    BoundaryTriggerDetail::TokenSet,
+                    options.parser_backend(),
+                    options.merge_equivalent_tokens(),
+                )?
+                .with_end_tokens(end_tokens)?;
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
                 crate::compiler::terminal_ended_rescue::Route::Normal,
@@ -1034,8 +1070,8 @@ impl Module {
                                 .compile_requested_token_trie(
                                     vocab,
                                     BoundaryTriggerDetail::TokenSet,
-                                    options.parser_backend,
-                                    options.merge_equivalent_tokens,
+                                    options.parser_backend(),
+                                    options.merge_equivalent_tokens(),
                                 )?
                                 .with_end_tokens(end_tokens)?;
                             route =
@@ -1411,7 +1447,7 @@ mod precompile_boundary_tests {
         let compiled = module
             .compile_with(
                 &vocab,
-                CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie),
+                CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE),
             )
             .expect("TokenTrie compile after ParserDwa precompile");
         assert!(
@@ -1496,7 +1532,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1511,7 +1547,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1598,7 +1634,7 @@ mod grammar_precompile_tests {
         assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
 
         let compiled = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
             .expect("TokenTrie compile after a ParserDwa grammar precompile");
         assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
         assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");

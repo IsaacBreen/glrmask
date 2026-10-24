@@ -2,7 +2,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, Vocab};
 
-fn modes() -> [MaskMode; 5] {
+fn modes() -> [MaskMode; 6] {
     MaskMode::ALL
 }
 fn options(mode: MaskMode) -> BuildOptions { mode.build_options() }

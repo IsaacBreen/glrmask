@@ -44,18 +44,71 @@ pub enum MaskStrategy {
     /// masks.
     ParserDwa,
     /// Computes each mask by walking the vocabulary. Fastest to compile, with
-    /// slower masks.
-    ///
-    /// See [`CompileOptions::parser_backend`] and
-    /// [`CompileOptions::merge_equivalent_tokens`].
-    TokenTrie,
+    /// slower masks. See [`TokenTrie`](crate::TokenTrie) for its settings.
+    TokenTrie(TokenTrie),
 }
 
 impl MaskStrategy {
-    /// Same as [`TokenTrie`](Self::TokenTrie).
-    pub const FAST_COMPILE: Self = Self::TokenTrie;
+    /// Same as [`TokenTrie`](Self::TokenTrie) with the default settings.
+    pub const FAST_COMPILE: Self = Self::TokenTrie(TokenTrie::new());
     /// Same as [`ParserDwa`](Self::ParserDwa).
     pub const FAST_MASKS: Self = Self::ParserDwa;
+}
+
+impl From<TokenTrie> for MaskStrategy {
+    fn from(settings: TokenTrie) -> Self {
+        Self::TokenTrie(settings)
+    }
+}
+
+/// Settings for [`MaskStrategy::TokenTrie`].
+///
+/// ```
+/// # use glrmask::{CompileOptions, ParserBackend, TokenTrie};
+/// let options = CompileOptions::default().mask_strategy(
+///     TokenTrie::new()
+///         .parser_backend(ParserBackend::TemplateDfa)
+///         .merge_equivalent_tokens(true),
+/// );
+/// # let _ = options;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TokenTrie {
+    parser_backend: ParserBackend,
+    merge_equivalent_tokens: bool,
+}
+
+impl TokenTrie {
+    /// The default settings: an LR table, with tokens not merged.
+    pub const fn new() -> Self {
+        Self {
+            parser_backend: ParserBackend::LrTable,
+            merge_equivalent_tokens: false,
+        }
+    }
+
+    /// Sets how the parser is represented. Defaults to [`ParserBackend::LrTable`].
+    pub const fn parser_backend(mut self, backend: ParserBackend) -> Self {
+        self.parser_backend = backend;
+        self
+    }
+
+    /// Sets whether tokens that the grammar treats the same are merged, so masks
+    /// walk fewer tokens. Off by default.
+    ///
+    /// Tokens are not merged in a composition that includes precompiled parts.
+    pub const fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
+        self.merge_equivalent_tokens = enable;
+        self
+    }
+
+    pub(crate) const fn backend(&self) -> ParserBackend {
+        self.parser_backend
+    }
+
+    pub(crate) const fn merges(&self) -> bool {
+        self.merge_equivalent_tokens
+    }
 }
 
 /// How masks are computed at grammar boundaries.
@@ -93,7 +146,10 @@ pub(crate) enum Engine {
     /// A retained [`TokenTrie`](Self::TokenTrie) template-DFA shell ("B shell").
     /// An LR-table TokenTrie build retains nothing, so it has no key.
     TokenTrie,
-    /// [`TokenTrie`](Self::TokenTrie) over the merged vocabulary (combination C).
+    /// [`TokenTrie`](Self::TokenTrie) over the merged vocabulary. Key 3 is
+    /// retained only for a template-DFA body (combination C); an LR-table
+    /// merged body (combination D) retains nothing, exactly like an unmerged
+    /// LR TokenTrie build.
     MergedTokenTrie,
 }
 
@@ -289,7 +345,8 @@ impl BuildOptions {
         self
     }
 
-    /// Merges tokens that the grammar treats the same. Requires template DFAs.
+    /// Merges tokens that the grammar treats the same, so masks walk fewer
+    /// tokens. Off by default.
     pub fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
         self.merge_equivalent_tokens = enable;
         self
@@ -313,9 +370,9 @@ impl BuildOptions {
         &self.end_tokens
     }
 
-    /// The internal engine for these options, rejecting combination D.
+    /// The internal engine for these options.
     pub(crate) fn engine(&self) -> Result<Engine> {
-        engine_for(self.optimization, self.engine_backend, self.merge_equivalent_tokens)
+        Ok(engine_for(self.optimization))
     }
 
     /// The TokenTrie parser backend for these options.
@@ -324,27 +381,14 @@ impl BuildOptions {
     }
 }
 
-/// Derive the internal engine from the public switches.
-///
-/// Merging equivalent tokens needs the template parser: without it the merged
-/// vocabulary would have to be paired with a retained LR table, which no
-/// backend produces.
-pub(crate) fn engine_for(
-    strategy: MaskStrategy,
-    parser_backend: ParserBackend,
-    merge_equivalent_tokens: bool,
-) -> Result<Engine> {
-    if merge_equivalent_tokens && parser_backend != ParserBackend::TemplateDfa {
-        return Err(Error::StrategyUnsupported(
-            "merging equivalent tokens requires the TemplateDfa parser backend".into(),
-        ));
-    }
-    Ok(match strategy {
+/// Derive the internal engine from the public strategy.
+pub(crate) fn engine_for(strategy: MaskStrategy) -> Engine {
+    match strategy {
         MaskStrategy::Auto => Engine::Auto,
         MaskStrategy::ParserDwa => Engine::ParserDwa,
-        MaskStrategy::TokenTrie if merge_equivalent_tokens => Engine::MergedTokenTrie,
-        MaskStrategy::TokenTrie => Engine::TokenTrie,
-    })
+        MaskStrategy::TokenTrie(settings) if settings.merges() => Engine::MergedTokenTrie,
+        MaskStrategy::TokenTrie(_) => Engine::TokenTrie,
+    }
 }
 
 pub(crate) fn token_trie_backend(
@@ -364,8 +408,16 @@ impl Engine {
         let (optimization, engine_backend, merge_equivalent_tokens) = match self {
             Self::Auto => (MaskStrategy::Auto, ParserBackend::LrTable, false),
             Self::ParserDwa => (MaskStrategy::ParserDwa, ParserBackend::LrTable, false),
-            Self::TokenTrie => (MaskStrategy::TokenTrie, ParserBackend::LrTable, false),
-            Self::MergedTokenTrie => (MaskStrategy::TokenTrie, ParserBackend::TemplateDfa, true),
+            Self::TokenTrie => (MaskStrategy::FAST_COMPILE, ParserBackend::LrTable, false),
+            Self::MergedTokenTrie => (
+                MaskStrategy::TokenTrie(
+                    TokenTrie::new()
+                        .parser_backend(ParserBackend::TemplateDfa)
+                        .merge_equivalent_tokens(true),
+                ),
+                ParserBackend::TemplateDfa,
+                true,
+            ),
         };
         BuildOptions {
             optimization,
@@ -853,6 +905,14 @@ impl Grammar {
             )?;
             return constraint.with_end_tokens(options.end_token_ids());
         }
+        if engine == Engine::MergedTokenTrie && options.engine_backend == ParserBackend::LrTable {
+            let constraint = self.compile_merged_token_trie(
+                vocab,
+                options.boundary_trigger.unwrap_or_default(),
+                ParserBackend::LrTable,
+            )?;
+            return constraint.with_end_tokens(options.end_token_ids());
+        }
         if options.parser_backend == ParserBackend::TemplateDfa {
             if engine == Engine::MergedTokenTrie && self.bindings.is_empty() {
                 return self.finish_template_attempt(vocab, &options, || {
@@ -1293,16 +1353,19 @@ impl Grammar {
     }
 
     /// Compile the whole grammar as TokenTrie over the merged vocabulary
-    /// (combination C). The merged vocabulary needs the template parser, so no
-    /// parser backend argument is accepted.
+    /// (combinations C and D). `TemplateDfa` installs a template parser; `LrTable`
+    /// keeps an LR table and never installs one.
     pub(crate) fn compile_merged_token_trie(
         &self,
         vocab: &Vocab,
         boundary: BoundaryTriggerDetail,
+        backend: ParserBackend,
     ) -> Result<RuntimeConstraint> {
         graph::source_preflight(self)?;
         if matches!(self.source, GrammarSource::Lark(_)) {
-            return self.resolve_lark(vocab)?.compile_merged_token_trie(vocab, boundary);
+            return self
+                .resolve_lark(vocab)?
+                .compile_merged_token_trie(vocab, boundary, backend);
         }
         self.validate_exact_target(vocab)?;
         let merge_error = |e: Error| {
@@ -1314,36 +1377,92 @@ impl Grammar {
                 ))
             }
         };
+        let backend = token_trie_backend(backend);
+        let has_bindings = !self.bindings.is_empty();
         let mut inner = match self.source {
             GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
-                crate::import::compile_component_shell_balanced(self.component()?, vocab, &[])
+                if has_bindings {
+                    self.compile_merged_from_resolved_source(vocab, backend)?
+                } else if backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
+                    crate::import::compile_component_shell_balanced_lr(
+                        self.component()?,
+                        vocab,
+                        &[],
+                    )
                     .map_err(merge_error)?
+                } else {
+                    crate::import::compile_component_shell_balanced(
+                        self.component()?,
+                        vocab,
+                        &[],
+                    )
+                    .map_err(merge_error)?
+                }
             }
             _ => {
-                let dynamic = match &self.source {
-                    GrammarSource::Lark(source) => {
-                        DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab)
+                if has_bindings || backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
+                    self.compile_merged_from_resolved_source(vocab, backend)?
+                } else {
+                    let dynamic = match &self.source {
+                        GrammarSource::Lark(source) => {
+                            DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab)
+                        }
+                        GrammarSource::JsonSchema(source) => {
+                            DynamicConstraint::from_json_schema_with_bounded_template_parser(
+                                source, vocab,
+                            )
+                        }
+                        _ => unreachable!(),
                     }
-                    GrammarSource::JsonSchema(source) => {
-                        DynamicConstraint::from_json_schema_with_bounded_template_parser(source, vocab)
+                    .map_err(merge_error)?;
+                    let mut components = dynamic.into_constraints();
+                    if components.len() != 1 {
+                        return Err(Error::Compilation(
+                            "cannot merge equivalent tokens for this grammar: requires one compiled component".into(),
+                        ));
                     }
-                    _ => unreachable!(),
+                    components.pop().unwrap()
                 }
-                .map_err(merge_error)?;
-                let mut components = dynamic.into_constraints();
-                if components.len() != 1 {
-                    return Err(Error::Compilation(
-                        "cannot merge equivalent tokens for this grammar: requires one compiled component".into(),
-                    ));
-                }
-                components.pop().unwrap()
             }
         };
         let _ = inner.late_bind_vocab.set(vocab.clone());
-        inner.install_template_parser_from_compile()?;
+        if backend != crate::runtime::parser_backend::DynamicParserBackend::LrTable {
+            inner.install_template_parser_from_compile()?;
+        }
         ensure_runnable_constraint(&inner)?;
         apply_final_boundary_trigger(&mut inner, boundary)?;
         Ok(inner)
+    }
+
+    /// Resolve bindings exactly as the unmerged flatten path does, then compile
+    /// the whole resolved grammar through the merged-vocabulary lane.
+    fn compile_merged_from_resolved_source(
+        &self,
+        vocab: &Vocab,
+        backend: crate::runtime::parser_backend::DynamicParserBackend,
+    ) -> Result<RuntimeConstraint> {
+        let named = self.resolve_dynamic_source(vocab, false)?;
+        let construction = match &self.source {
+            GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
+            _ => crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        };
+        let merge_error = |e: Error| {
+            if e.is_strategy_decline() {
+                e
+            } else {
+                Error::Compilation(format!(
+                    "cannot merge equivalent tokens for this grammar: {e}"
+                ))
+            }
+        };
+        crate::import::compile_dynamic_named_single_merged(
+            named,
+            vocab,
+            construction,
+            matches!(self.source, GrammarSource::JsonSchema(_)),
+            backend,
+        )
+        .map_err(merge_error)
     }
 
     /// Compile a TokenTrie request with the supplied switches, whether they
@@ -1356,7 +1475,7 @@ impl Grammar {
         merge_equivalent_tokens: bool,
     ) -> Result<RuntimeConstraint> {
         if merge_equivalent_tokens {
-            self.compile_merged_token_trie(vocab, boundary)
+            self.compile_merged_token_trie(vocab, boundary, parser_backend)
         } else {
             self.compile_token_trie(vocab, boundary, token_trie_backend(parser_backend))
         }
@@ -4055,7 +4174,9 @@ mod tests {
 
         let ordinary_child = native_dynamic_fixture(child_grammar.clone(), &vocab).unwrap();
         let optimized_child =
-            DynamicConstraint::compile_with_vocab_partition(child_grammar, &vocab).unwrap();
+            DynamicConstraint::from_ebnf_with_bounded_template_parser(
+                r#"start ::= [ab]"#, &vocab,
+            ).unwrap();
         assert_eq!(optimized_child.inner.token_bytes_count(), vocab.len());
 
         let parent = Grammar::glrm(
@@ -6719,6 +6840,27 @@ impl RuntimeConstraint {
             ParserBackend::TemplateDfa
         } else { ParserBackend::LrTable }
     }
+
+    /// Diagnostic: whether this body retains an LR table.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn runtime_has_lr_table(&self) -> bool {
+        self.table.is_present()
+    }
+
+    /// Diagnostic: whether this body retains a template parser.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn runtime_has_template_parser(&self) -> bool {
+        self.has_template_parser()
+    }
+
+    /// Diagnostic: whether the mask vocabulary is grammar-quotiented.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn runtime_is_grammar_quotiented(&self) -> bool {
+        self.dynamic_mask_vocab.is_grammar_quotiented()
+    }
 }
 
 
@@ -6738,7 +6880,7 @@ mod final_boundary_option_tests {
             for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
                 let result = grammar.compile_with_build_options(&v,
                     mode.build_options().boundary_trigger(detail));
-                if mode == MaskMode::A && detail == BoundaryTriggerDetail::Exact {
+                if (mode == MaskMode::A || mode == MaskMode::D) && detail == BoundaryTriggerDetail::Exact {
                     assert!(result.unwrap_err().to_string().contains("retained-LR Dynamic"));
                     continue;
                 }
@@ -6796,7 +6938,7 @@ mod final_ordinary_dynamic_selection_tests {
     fn fast_build_uses_the_actual_dynamic_compiler_and_preserves_loaded_representation() {
         let v=Vocab::new(vec![(0,b"(".to_vec()),(1,b")".to_vec()),(2,b"()".to_vec()),(3,b"x".to_vec())]);
         let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#).unwrap();
-        let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
+        let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
         let oracle=DynamicConstraint::compile(g.clone(),&v).unwrap().into_constraint();
         assert!(actual.uses_dynamic_runtime());
         assert!(!actual.has_template_parser()); assert!(actual.table.is_present());
@@ -7404,8 +7546,31 @@ mod mask_strategy_configuration_tests {
         let merged = parent
             .compile_with(&vocab, MaskMode::C.compile_options())
             .expect("merged compile");
+        let merged_lr = parent
+            .compile_with(&vocab, MaskMode::D.compile_options())
+            .expect("merged LR compile");
+        assert!(merged.runtime_is_grammar_quotiented(), "C flattened composition must be quotiented");
+        assert!(merged_lr.runtime_is_grammar_quotiented(), "D flattened composition must be quotiented");
+        assert_eq!(merged_lr.parser_backend(), ParserBackend::LrTable);
+        assert!(merged_lr.runtime_has_lr_table());
+        assert!(!merged_lr.runtime_has_template_parser());
         assert_inputs_match(
             &merged,
+            &unmerged,
+            &[
+                &[],
+                &[3],
+                &[4],
+                &[5],
+                &[0],
+                &[0, 1],
+                &[0, 1, 2],
+                &[3, 3],
+                &[4, 3],
+            ],
+        );
+        assert_inputs_match(
+            &merged_lr,
             &unmerged,
             &[
                 &[],
@@ -7430,7 +7595,43 @@ mod mask_strategy_configuration_tests {
         let merged = parent
             .compile_with(&vocab, MaskMode::C.compile_options())
             .expect("merged compile");
+        let merged_lr = parent
+            .compile_with(&vocab, MaskMode::D.compile_options())
+            .expect("merged LR compile");
+        assert!(merged.runtime_is_grammar_quotiented());
+        assert!(merged_lr.runtime_is_grammar_quotiented());
         assert_inputs_match(&merged, &unmerged, &[&[], &[0], &[0, 1], &[0, 3], &[3, 0], &[4, 0]]);
+        assert_inputs_match(&merged_lr, &unmerged, &[&[], &[0], &[0, 1], &[0, 3], &[3, 0], &[4, 0]]);
+
+        // Two levels of composition flatten into one partition.
+        let nested_vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"y".to_vec()),
+            (5, b"(".to_vec()),
+            (6, b")".to_vec()),
+            (7, b"(a)".to_vec()),
+            (8, Vec::new()),
+        ]);
+        let leaf = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap();
+        let mut middle = Module::new(
+            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "(" leaf ")";"#)
+                .unwrap(),
+        );
+        middle.bind("leaf", leaf).unwrap();
+        let mut top = Module::new(
+            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle "y";"#)
+                .unwrap(),
+        );
+        top.bind("middle", middle).unwrap();
+        let unmerged = top
+            .compile_with(&nested_vocab, MaskMode::A.compile_options())
+            .unwrap();
+        let merged_lr = top
+            .compile_with(&nested_vocab, MaskMode::D.compile_options())
+            .unwrap();
+        assert!(merged_lr.runtime_is_grammar_quotiented());
+        assert_inputs_match(&merged_lr, &unmerged, &[&[], &[0], &[0, 5], &[4, 0], &[0, 7, 3]]);
 
         // A local C compile still uses its own quotient.
         let local = Grammar::from_ebnf(r#"start ::= "a" "b" | "ab""#)
@@ -7438,5 +7639,61 @@ mod mask_strategy_configuration_tests {
             .compile_with(&merged_vocab(), MaskMode::C.compile_options())
             .unwrap();
         assert!(local.dynamic_mask_vocab.is_grammar_quotiented());
+    }
+
+    #[test]
+    fn merged_request_over_retained_parts_keeps_them_and_matches_unmerged() {
+        let vocab = merged_vocab();
+        let child = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap();
+        let mut parent = composed_module(&child);
+        parent
+            .precompile_with(&vocab, MaskMode::ParserDwa.compile_options())
+            .unwrap();
+        let unmerged = parent
+            .compile_with(&vocab, MaskMode::A.compile_options())
+            .unwrap();
+        for mode in [MaskMode::C, MaskMode::D] {
+            let merged = parent
+                .compile_with(&vocab, mode.compile_options())
+                .unwrap();
+            assert_inputs_match(&merged, &unmerged, &[&[], &[0], &[0, 1], &[0, 3], &[3, 0], &[4, 0]]);
+        }
+    }
+
+    #[test]
+    fn merged_flatten_resolves_lark_and_json_schema_children() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"\"a\"".to_vec()),
+            (4, Vec::new()),
+        ]);
+        let lark = Grammar::from_lark(r#"start: "a""#).unwrap();
+        let json = Grammar::from_json_schema(r#"{"type":"string","maxLength":1}"#).unwrap();
+        let build = || {
+            let mut parent = Module::new(
+                &Grammar::from_glrm(
+                    r#"glrm 1; start root; extern grammar L; extern grammar J; nt root = "x" L "y" | J;"#,
+                )
+                .unwrap(),
+            );
+            parent.bind("L", lark.clone()).unwrap();
+            parent.bind("J", json.clone()).unwrap();
+            parent
+        };
+        let unmerged = build()
+            .compile_with(&vocab, MaskMode::A.compile_options())
+            .unwrap();
+        for mode in [MaskMode::C, MaskMode::D] {
+            let merged = build()
+                .compile_with(&vocab, mode.compile_options())
+                .unwrap();
+            assert!(
+                merged.runtime_is_grammar_quotiented(),
+                "{mode:?}: flattened composition must be quotiented",
+            );
+            assert_inputs_match(&merged, &unmerged, &[&[], &[0], &[0, 2], &[0, 2, 1], &[3], &[0, 3]]);
+        }
     }
 }

@@ -3703,7 +3703,8 @@ mod parser_replacement_compile_tests {
         assert!(ordinary.external_vocab_artifact_cache.is_some(),
             "the reference fixture must actually build a non-tiny transfer snapshot");
         assert!(replacement.external_vocab_artifact_cache.is_none());
-        assert!(ordinary.inner.table.as_lr().is_none(), "ordinary compilation must also return a native constraint");
+        assert!(ordinary.inner.table.as_lr().is_some(),
+            "the LR finalization must retain its table");
         assert!(replacement.inner.table.as_lr().is_none(),
             "the template core must be installed before quotient finalization returns");
         assert_eq!(ordinary.inner.dynamic_mask_vocab.canonical_token_count(),

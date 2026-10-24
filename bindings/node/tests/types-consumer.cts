@@ -3,7 +3,8 @@ const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {specialTok
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromEbnf('start ::= "a"');
-const c = api.Grammar.fromExpr(api.Expr.sequence(g, new api.TokenSet([99]))).compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie});
+const trie: api.TokenTrie = {kind: 'token-trie', parserBackend: api.ParserBackend.LrTable, mergeEquivalentTokens: true};
+const c = api.Grammar.fromExpr(api.Expr.sequence(g, new api.TokenSet([99]))).compileSync(v, {maskStrategy: trie});
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);
 const accepted: boolean = s.isAccepting(); const markers: api.MarkerEvent[] = s.markerEvents();
 const offset: bigint|undefined = markers[0]?.byteOffset;

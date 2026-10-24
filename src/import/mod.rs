@@ -18,7 +18,7 @@ use crate::compiler::pipeline::{
     compile_dynamic_owned_unfinalized_with_backend,
     compile_dynamic_owned_with_backend,
     compile_dynamic_owned_with_vocab_partition_unfinalized_with_table_construction,
-    compile_dynamic_owned_with_vocab_partition_with_table_construction,
+    compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable,
     compile_dynamic_owned_with_vocab_partition_for_parser_replacement_with_source_nullable,
 };
 use crate::grammar::factoring::factor_named_grammar;
@@ -638,6 +638,64 @@ pub(crate) fn compile_component_shell_balanced(
     })
 }
 
+/// The LR-table sibling of [`compile_component_shell_balanced`]: one merged
+/// vocabulary quotient over an LR parser body, with no template install.
+pub(crate) fn compile_component_shell_balanced_lr(
+    component:&crate::grammar::glrm::ParsedComponent,
+    vocab:&crate::Vocab, token_bindings:&[(&str,&[(u32,u32)])],
+)->crate::Result<Constraint> {
+    compile_component_shell_using(component,vocab,token_bindings,|named| {
+        let mut bodies=compile_bounded_lr_from_named(named,vocab,GlrTableConstruction::ExperimentalCoreMerged,None)?.into_constraints();
+        if bodies.len()!=1 {return Err(crate::Error::Compilation("Balanced component requires one parser body".into()));}
+        Ok(bodies.pop().unwrap())
+    })
+}
+
+/// Compile a bounded named grammar through the LR merged-vocabulary lane.
+pub(crate) fn compile_bounded_lr_from_named(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    transform:Option<NamedGrammarTransform>,
+)->crate::Result<DynamicConstraint> {
+    let alternatives=dynamic_named_alternatives_from_named(named,transform,&[])?;
+    let mut compiled=Vec::with_capacity(alternatives.len());
+    for alternative in alternatives {
+        let grammar=ast::lower(&alternative)?;
+        let source_start_nullable=grammar.start_is_nullable();
+        let prepared=crate::compiler::grammar::transforms::prepare_grammar_transforms_only(grammar);
+        let component=compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
+            prepared,vocab,table_construction,Some(source_start_nullable))?;
+        compiled.push(component);
+    }
+    Ok(DynamicConstraint::from_alternatives(compiled))
+}
+
+/// Compile a resolved named grammar as one merged-vocabulary runtime on the
+/// requested parser backend. Used by the whole-composition flatten path, where
+/// bound children and token sets have already been inlined.
+pub(crate) fn compile_dynamic_named_single_merged(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    prepare_json_schema:bool,backend:crate::runtime::parser_backend::DynamicParserBackend,
+)->crate::Result<Constraint> {
+    let mut named=factor_named_grammar(named);
+    if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
+    let grammar=ast::lower(&named)?;
+    let source_start_nullable=grammar.start_is_nullable();
+    let dynamic=match backend {
+        crate::runtime::parser_backend::DynamicParserBackend::LrTable =>
+            compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
+                grammar,vocab,table_construction,Some(source_start_nullable))?,
+        crate::runtime::parser_backend::DynamicParserBackend::Native => {
+            let mut dynamic=compile_dynamic_owned_with_vocab_partition_for_parser_replacement_with_source_nullable(
+                grammar,vocab,table_construction,source_start_nullable)?;
+            for component in dynamic.constraints_mut() {
+                component.install_template_parser()?;
+            }
+            dynamic
+        }
+    };
+    Ok(dynamic.into_constraint())
+}
+
 fn component_shell_named(
     component:&crate::grammar::glrm::ParsedComponent,
     vocab:&crate::Vocab, token_bindings:&[(&str,&[(u32,u32)])],
@@ -804,11 +862,14 @@ fn compile_dynamic_from_source_with_vocab_partition(
     let mut compiled = Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
         let grammar = ast::lower(&alternative)?;
+        let source_start_nullable = grammar.start_is_nullable();
+        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(grammar);
         compiled.push(
-            compile_dynamic_owned_with_vocab_partition_with_table_construction(
-                grammar,
+            compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
+                prepared,
                 vocab,
                 default_table_construction,
+                Some(source_start_nullable),
             )?,
         );
     }

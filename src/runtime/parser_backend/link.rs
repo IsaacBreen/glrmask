@@ -334,7 +334,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(MaskStrategy::TokenTrie).engine_backend(ParserBackend::TemplateDfa).merge_equivalent_tokens(true)
+                    .optimization(MaskStrategy::FAST_COMPILE).engine_backend(ParserBackend::TemplateDfa).merge_equivalent_tokens(true)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();

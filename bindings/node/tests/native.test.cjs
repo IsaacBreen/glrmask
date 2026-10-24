@@ -8,8 +8,9 @@ const strategies=[
   {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
   {label:'parser-dwa',options:{maskStrategy:MaskStrategy.ParserDwa}},
   {label:'token-trie',options:{maskStrategy:MaskStrategy.TokenTrie}},
-  {label:'token-trie+template-dfas',options:{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa}},
-  {label:'token-trie+template-dfas+merge',options:{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}},
+  {label:'token-trie+template-dfas',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa}}},
+  {label:'token-trie+template-dfas+merge',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}}},
+  {label:'token-trie+lr+merge',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.LrTable,mergeEquivalentTokens:true}}},
 ];
 const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
@@ -129,9 +130,16 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'token_class_trie'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'TokenTrie'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{parserBackend:'nope'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:'yes'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:MaskStrategy.TokenTrie,mergeEquivalentTokens:true}),GlrMaskError);
+  // The TokenTrie object form validates its own keys and values.
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',parserBackend:'nope'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'lr-table'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',bogus:true}}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{parserBackend:ParserBackend.LrTable}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:true}),TypeError);
+  // An LR merged request is accepted.
+  const merged=simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:true}});
+  assert.ok(allowed(merged.start().mask(),0));
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);

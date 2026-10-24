@@ -119,6 +119,9 @@ if(GLRMASK_BUILD_TESTS)
   # older glibc (libpthread was separate before glibc 2.34).
   find_package(Threads REQUIRED)
   add_executable(glrmask_cpp_tests tests/bindings.cpp)
+  # The test source exercises designated aggregate initializers for
+  # CompileOptions::token_trie. The library itself remains C++17.
+  target_compile_features(glrmask_cpp_tests PRIVATE cxx_std_20)
   target_link_libraries(glrmask_cpp_tests PRIVATE glrmask::glrmask Threads::Threads)
   glrmask_runtime_for(glrmask_cpp_tests)
   add_test(NAME glrmask_cpp COMMAND glrmask_cpp_tests)

@@ -381,8 +381,9 @@ mod tests {
             .precompile_with(
                 &v,
                 CompileOptions::default()
-                    .mask_strategy(MaskStrategy::TokenTrie)
-                    .parser_backend(ParserBackend::TemplateDfa),
+                    .mask_strategy(MaskStrategy::TokenTrie(
+                        TokenTrie::new().parser_backend(ParserBackend::TemplateDfa),
+                    )),
             )
             .unwrap();
         let mut static_part = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
