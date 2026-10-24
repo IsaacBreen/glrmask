@@ -345,7 +345,7 @@ struct ComponentStateSignature {
 }
 
 pub(super) fn structural_sharing_enabled() -> bool {
-    std::env::var_os("GLRMASK_COMPOSE_DISABLE_STRUCTURAL_SHARING").is_none()
+    crate::env::var_os("GLRMASK_COMPOSE_DISABLE_STRUCTURAL_SHARING").is_none()
 }
 
 pub(super) fn composition_terminal_classes(
@@ -371,7 +371,7 @@ pub(super) fn composition_terminal_classes(
     let components = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .collect::<Vec<_>>();
-    let automata_fallback_enabled = std::env::var("GLRMASK_COMPOSE_TERMINAL_AUTOMATA_EQUIV")
+    let automata_fallback_enabled = crate::env::var("GLRMASK_COMPOSE_TERMINAL_AUTOMATA_EQUIV")
         .ok()
         .is_some_and(|value| {
             !matches!(
@@ -415,34 +415,34 @@ pub(super) fn composition_terminal_classes(
     let mut representative_by_artifact_terminal = FxHashMap::<(usize, u32), u32>::default();
     let mut representatives_by_prefilter =
         FxHashMap::<TerminalEquivalencePrefilter, Vec<TerminalRepresentative>>::default();
-    let pair_limit = std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PAIR_LIMIT")
+    let pair_limit = crate::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PAIR_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(1_024);
     let transition_work_limit =
-        std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_TRANSITION_WORK_LIMIT")
+        crate::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_TRANSITION_WORK_LIMIT")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(200_000);
-    let prefix_depth = std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PREFIX_DEPTH")
+    let prefix_depth = crate::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PREFIX_DEPTH")
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
         .unwrap_or(10);
     let certificate_state_limit =
-        std::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_STATE_LIMIT")
+        crate::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_STATE_LIMIT")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(20_000);
     let certificate_transition_limit =
-        std::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_TRANSITION_LIMIT")
+        crate::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_TRANSITION_LIMIT")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(1_000_000);
-    let semantic_fallback = std::env::var("GLRMASK_COMPOSE_TERMINAL_SEMANTIC_EQUIV")
+    let semantic_fallback = crate::env::var("GLRMASK_COMPOSE_TERMINAL_SEMANTIC_EQUIV")
         .ok()
         .is_some_and(|value| {
             !matches!(
@@ -1300,7 +1300,7 @@ pub(super) fn quotient_composed_table_structurally(
     // states it removes. Skipping it is semantics-preserving: it merely leaves
     // some exact states unmerged. Keep it for smaller tables where it is cheap,
     // with an environment override for measurement.
-    let ordinary_max_states = std::env::var("GLRMASK_COMPOSE_ORDINARY_STRUCTURAL_MAX_STATES")
+    let ordinary_max_states = crate::env::var("GLRMASK_COMPOSE_ORDINARY_STRUCTURAL_MAX_STATES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4_096);

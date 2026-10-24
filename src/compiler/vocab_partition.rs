@@ -250,7 +250,7 @@ pub(crate) fn compile_vocab_partition_owned(
     // problem than the generic tokenizer/L1/L2P pipeline. Classify whole model
     // tokens directly by their transitions over positions in that one byte
     // string. Keep a same-binary kill switch for validation.
-    if std::env::var_os("GLRMASK_DISABLE_SINGLETON_LITERAL_VOCAB_PARTITION").is_none()
+    if crate::env::var_os("GLRMASK_DISABLE_SINGLETON_LITERAL_VOCAB_PARTITION").is_none()
         && let Some(language) = singleton_literal_language_bytes(&prepared_grammar)
     {
         let started = std::time::Instant::now();
@@ -301,7 +301,7 @@ pub(crate) fn compile_vocab_partition_owned(
                     direct_mask_tokenizer,
                 ) =
                     build_vocab_partition_compile_context(&prepared_grammar, vocab);
-                if std::env::var_os("GLRMASK_PROFILE_VOCAB_PROJECTED_QUOTIENTS").is_some() {
+                if crate::env::var_os("GLRMASK_PROFILE_VOCAB_PROJECTED_QUOTIENTS").is_some() {
                     let projected_started = std::time::Instant::now();
                     let quotients = tokenizer
                         .build_shared_component_terminal_projected_quotients(256);
@@ -347,7 +347,7 @@ pub(crate) fn compile_vocab_partition_owned(
             },
         );
 
-        if std::env::var_os("GLRMASK_PROFILE_TERMINAL_OBSERVATION_PARTITIONS").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_TERMINAL_OBSERVATION_PARTITIONS").is_some() {
             let started = std::time::Instant::now();
             let mut total_configs = 0usize;
             let mut total_classes = 0usize;
@@ -399,7 +399,7 @@ pub(crate) fn compile_vocab_partition_owned(
         let topology = (tokenizer.num_states() as usize)
             .saturating_mul(analyzed_grammar.num_terminals as usize);
         let use_dedicated = match strategy {
-            VocabPartitionStrategy::Automatic => std::env::var("GLRMASK_VOCAB_PARTITION_DEDICATED")
+            VocabPartitionStrategy::Automatic => crate::env::var("GLRMASK_VOCAB_PARTITION_DEDICATED")
                 .ok()
                 .map(|value| {
                     let value = value.trim();

@@ -58,11 +58,11 @@ pub(super) fn accepted_weight(dwa: &DWA) -> Option<Weight> {
 }
 
 pub(super) fn accepted_tokens(dwa: &DWA, id_map: &InternalIdMap) -> Option<BTreeSet<u32>> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let started = profile.then(Instant::now);
     let accepted = accepted_weight(dwa)?;
     let support_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
-    if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BATCHED_TOKEN_SUPPORT").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BATCHED_TOKEN_SUPPORT").is_some() {
         let reference = super::constraint_compose::accepted_weight_support(dwa);
         assert_eq!(accepted, reference, "batched terminal summary changed correlated TSID/token support");
         eprintln!("[glrmask/validate][boundary_batched_token_support] exact_full_weight=true states={}", dwa.num_states());

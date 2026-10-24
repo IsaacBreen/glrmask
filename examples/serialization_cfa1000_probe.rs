@@ -41,13 +41,13 @@ fn main() {
             .ok()
             .is_some_and(|needle| row.id.contains(&needle));
         if profile_this_save {
-            unsafe { std::env::set_var("GLRMASK_PROFILE_SERIALIZATION", "1") };
+            unsafe { glrmask::__private::set_env_var("GLRMASK_PROFILE_SERIALIZATION", Some("1")) };
         }
         let started = Instant::now();
         let artifact = constraint.save();
         let save_ms = started.elapsed().as_secs_f64() * 1000.0;
         if profile_this_save {
-            unsafe { std::env::remove_var("GLRMASK_PROFILE_SERIALIZATION") };
+            unsafe { glrmask::__private::set_env_var("GLRMASK_PROFILE_SERIALIZATION", None) };
         }
         let mut loads = Vec::with_capacity(load_iters);
         for _ in 0..load_iters {

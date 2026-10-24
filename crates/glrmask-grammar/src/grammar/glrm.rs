@@ -403,7 +403,7 @@ fn dump_parsed_scope_v1(
     for subgrammar in &scope.subgrammars {
         match &subgrammar.body {
             ParsedSubgrammarBody::External(kind) => {
-                let tag=match kind {ExternKind::Token=>"token ",ExternKind::Grammar=>"grammar ",ExternKind::LegacyGeneric=>""};
+                let tag=match kind {ExternKind::Token=>"token ",ExternKind::Grammar=>"grammar "};
                 push_indented_line(out, indent, &format!("extern {tag}{}",source_identifier(&subgrammar.name)));
             }
             ParsedSubgrammarBody::Inline(child) => {
@@ -908,15 +908,13 @@ pub struct GlrmWithExternalSubgrammars {
 }
 
 /// What an extern can be bound to.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternKind {
     /// A token set or token ID.
     Token,
     /// A grammar, module, expression, token set or token ID.
     Grammar,
-    /// Historical source-only union port. New source should declare a kind.
-    #[doc(hidden)]
-    LegacyGeneric,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1144,7 +1142,7 @@ where F: Fn(&str) -> Result<ParsedGlrmScope, GlrMaskError> {
         };
         if matches!(subgrammar.body, ParsedSubgrammarBody::External(_)) {
             if matches!(subgrammar.body,ParsedSubgrammarBody::External(ExternKind::Token)) {
-                return Err(err(&format!("external token {path:?} requires an exact-token binding, not a child grammar")));
+                return Err(err(&format!("extern {path:?} is a token extern; bind it to a token ID or token set")));
             }
             let mut child_scope = resolve(&path)?;
             consumed.insert(path.clone());
@@ -1690,7 +1688,7 @@ fn bind_external_terminals(
             match &mut declaration.body {
                 ParsedSubgrammarBody::External(kind) if names.contains(path.as_str()) => {
                     if *kind==ExternKind::Grammar {
-                        return Err(err(&format!("external grammar {path:?} requires a grammar; use Grammar::exact for intentional exact-event adaptation")));
+                        return Err(err(&format!("extern {path:?} is a grammar extern; bind it to a grammar")));
                     }
                     scope.external_terminals.push(ParsedExternalTerminal {
                         name: declaration.name, token_ranges: Vec::new(), source_span:declaration.source_span,
@@ -2154,8 +2152,7 @@ impl GlrmParser {
                                 let (name, is_escaped) = self.expect_ident_token()?;
                                 (ExternKind::Grammar, name, is_escaped)
                             }
-                            _ if self.strict_native => return Err(err("external declarations require 'extern token NAME' or 'extern grammar NAME'")),
-                            _ => (ExternKind::LegacyGeneric, first, first_escaped),
+                            _ => return Err(err("external declarations require 'extern token NAME' or 'extern grammar NAME'")),
                         };
                         self.check_declared_name(&name, is_escaped)?;
                         if matches!(self.peek(), Tok::Colon) || name.contains("::") {
@@ -2758,7 +2755,7 @@ impl GlrmParser {
             self.consume(&Tok::RParen)?;
             if matches!(self.peek(), Tok::Quest | Tok::Star | Tok::Plus | Tok::LBrace) {
                 return Err(err(
-                    "quantifiers cannot be applied directly to SeparatedSequence; wrap it in a named rule instead",
+                    "a quantifier can't apply directly to a separated sequence; wrap it in a named rule",
                 ));
             }
             return Ok(GrammarExpr::SeparatedSequence {
@@ -2902,7 +2899,7 @@ impl GlrmParser {
                     return Ok(GrammarExpr::marker(id));
                 }
                 if self.version == GlrmVersion::V1 {
-                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern NAME;' and bind it by name"));
+                    return Err(err("GLRM has no @token(id) syntax; declare 'extern token NAME;' and bind it"));
                 }
                 self.advance();
                 let is_range = match self.advance().clone() {
@@ -2913,11 +2910,11 @@ impl GlrmParser {
                 };
                 self.consume(&Tok::LParen)?;
                 let start = u32::try_from(self.expect_int()?)
-                    .map_err(|_| err("special LLM token id does not fit in u32"))?;
+                    .map_err(|_| err("token ID doesn't fit in 32 bits"))?;
                 let atom = if is_range {
                     self.consume(&Tok::Comma)?;
                     let end = u32::try_from(self.expect_int()?)
-                        .map_err(|_| err("special LLM token id does not fit in u32"))?;
+                        .map_err(|_| err("token ID doesn't fit in 32 bits"))?;
                     if start > end { return Err(err("exact-token range must not be reversed")); }
                     GrammarExpr::SpecialTokenRange(start, end)
                 } else { GrammarExpr::SpecialToken(start) };
@@ -3079,7 +3076,7 @@ fn validate_ignore_terminal(grammar: &NamedGrammar, scope_label: &str) -> Result
     }
     if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)) {
         return Err(err(
-            "a special LLM token terminal cannot be the ignore terminal",
+            "the ignore terminal can't match a token ID",
         ));
     }
     let resolved = resolved_named_terminal_exprs(grammar)?;

@@ -1,7 +1,7 @@
 mod ti_mre_tests {
-    use std::{env, ffi::OsString};
+    use std::ffi::OsString;
 
-    use crate::{Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
+    use crate::{env, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -12,7 +12,7 @@ mod ti_mre_tests {
         fn set(key: &'static str, value: &str) -> Self {
             let original = env::var_os(key);
             unsafe {
-                env::set_var(key, value);
+                crate::__private::set_env_var(key, Some(value));
             }
             Self { key, original }
         }
@@ -22,10 +22,10 @@ mod ti_mre_tests {
         fn drop(&mut self) {
             match &self.original {
                 Some(value) => unsafe {
-                    env::set_var(self.key, value);
+                    crate::__private::set_env_var(self.key, Some(value.to_str().expect("environment override is valid UTF-8")));
                 },
                 None => unsafe {
-                    env::remove_var(self.key);
+                    crate::__private::set_env_var(self.key, None);
                 },
             }
         }
@@ -54,7 +54,7 @@ mod ti_mre_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let original = env::var_os("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
         unsafe {
-            env::remove_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
+            crate::__private::set_env_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", None);
         }
         let _restore = EnvVarGuard {
             key: "GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY",

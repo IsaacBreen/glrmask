@@ -12,7 +12,7 @@ fn value_enabled(value: &str) -> bool {
 }
 
 pub(crate) fn enabled(name: &str) -> bool {
-    std::env::var_os(name)
+    crate::env::var_os(name)
         .map(|value| value_enabled(&value.to_string_lossy()))
         .unwrap_or(true)
 }
@@ -41,7 +41,7 @@ pub(crate) fn bounded_usize(
     min: usize,
     max: usize,
 ) -> Option<usize> {
-    let value = std::env::var_os(name);
+    let value = crate::env::var_os(name);
     bounded_usize_value(value.as_deref().and_then(std::ffi::OsStr::to_str), default, min, max)
 }
 

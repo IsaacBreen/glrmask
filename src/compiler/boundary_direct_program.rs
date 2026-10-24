@@ -61,7 +61,7 @@ pub(super) fn compile(
     // Mirror the established finite compiler's policy instead of spending
     // codec work on a tiny shard that will deliberately use its exact fallback.
     if !(4096..=200_000).contains(&estimated_states) || coefficients.len() > 2048 { return None; }
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         // Count physical template insertion, not only the compact lexical
         // graph. Keep this diagnostic outside unprofiled performance samples.
         let mut counts = vec![0usize; templates.len()];
@@ -89,7 +89,7 @@ pub(super) fn compile(
         largest.truncate(12);
         eprintln!("[glrmask/profile][boundary_template_census] component={start_component} lexical_states={} lexical_edges={} ports={ports} groups_templates_copies_states_edges={groups:?} largest_totalstates_key_kind_copies_states_edges={largest:?}",
             lexical.num_states(), lexical.num_transitions());
-        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some() {
             let profile_started=Instant::now();
             let mut counts=BTreeMap::<u32,usize>::new();
             for row in lexical.states() {
@@ -131,10 +131,10 @@ pub(super) fn compile(
     let program = FiniteTemplateProgram { templates: &templates, coefficients: &encoded,
         port_finals: &finals, starts: &starts, instances: &instances };
     let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let trim = std::env::var_os("GLRMASK_DISABLE_BOUNDARY_DIRECT_PROGRAM_TRIM").is_none();
+    let trim = crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_DIRECT_PROGRAM_TRIM").is_none();
     let (native, profile) = normalize_finite_template_program(
         &program, context.total_scoped_states, quotient.rows(), Some(&native_context), trim)?;
-    if let Some(directory)=std::env::var_os("GLRMASK_DUMP_BOUNDARY_NATIVE_PREMIN") {
+    if let Some(directory)=crate::env::var_os("GLRMASK_DUMP_BOUNDARY_NATIVE_PREMIN") {
         let directory=std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create native diagnostic directory");
         // Diagnostic only; serialize the unchanged finite normalized graph
@@ -150,7 +150,7 @@ pub(super) fn compile(
     let (parser_dwa, min_profile) = minimize_native_decoded(
         &native, &decoder, crate::compiler::glr::labels::DEFAULT_LABEL)?;
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_direct_program] component={start_component} templates={} instances={} coefficients={} points={} atoms={} prepare_ms={prepare_ms:.3} minimize_ms={minimize_ms:.3} total_ms={:.3} native={profile:?} minimize={min_profile:?}",
             templates.len(), instances.len(), coefficients.len(), quotient.point_count(), quotient.atom_count(),
             started.elapsed().as_secs_f64()*1000.0);

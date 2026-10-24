@@ -35,7 +35,7 @@ fn resolved_limit() -> u64 {
     PENDING_TEST_LIMIT
         .with(Cell::get)
         .or_else(|| {
-            std::env::var("GLRMASK_TEMPLATE_BUILD_BUDGET")
+            crate::env::var("GLRMASK_TEMPLATE_BUILD_BUDGET")
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .filter(|&value| value > 0)
@@ -98,7 +98,7 @@ impl BuildBudgetScope {
         // template work normally runs, but an inline fallback or a nested
         // scope must still see the handle.
         set_template_build_budget_handle(Arc::clone(&handle));
-        if std::env::var_os("GLRMASK_PROFILE_TEMPLATE_BUILD_BUDGET").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BUILD_BUDGET").is_some() {
             eprintln!(
                 "[glrmask/profile][template_build_budget] limit={} units=0",
                 handle.limit()
@@ -160,7 +160,7 @@ impl BuildBudgetScope {
 impl Drop for BuildBudgetScope {
     fn drop(&mut self) {
         if self.owns_caller_handle {
-            if std::env::var_os("GLRMASK_PROFILE_TEMPLATE_BUILD_BUDGET").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BUILD_BUDGET").is_some() {
                 eprintln!(
                     "[glrmask/profile][template_build_budget] complete units={}",
                     template_build_budget_units()

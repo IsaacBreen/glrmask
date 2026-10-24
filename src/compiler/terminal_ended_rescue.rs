@@ -96,15 +96,15 @@ pub(crate) struct RescueExperiment {
 impl RescueExperiment {
     pub(crate) fn read() -> Self {
         let terminal_ended_rescue = terminal_ended_rescue_override().unwrap_or_else(|| {
-            std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE")
+            crate::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE")
                 .is_some_and(|value| value.to_str() == Some("1"))
         });
         let terminal_ended_first = terminal_ended_rescue
             && terminal_ended_first_override().unwrap_or_else(|| {
-                std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST")
+                crate::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST")
                     .is_some_and(|value| value.to_str() == Some("1"))
             });
-        let report_route = std::env::var_os("GLRMASK_REPORT_ROUTE").is_some();
+        let report_route = crate::env::var_os("GLRMASK_REPORT_ROUTE").is_some();
         Self {
             terminal_ended_rescue,
             terminal_ended_first,

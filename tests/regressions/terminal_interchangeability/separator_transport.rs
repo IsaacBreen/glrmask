@@ -3,9 +3,9 @@ use glrmask::{Constraint as Constraint, Vocab};
 #[test]
 fn ti_separator_transport_matches_ti_off_reference() {
     unsafe {
-        std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE", "1");
-        std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
-        std::env::set_var("GLRMASK_SPLIT_L2P_VOCAB", "0");
+        glrmask::__private::set_env_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE", Some("1"));
+        glrmask::__private::set_env_var("GLRMASK_FORCE_ALL_L2P", Some("1"));
+        glrmask::__private::set_env_var("GLRMASK_SPLIT_L2P_VOCAB", Some("0"));
     }
 
     let grammar = r#"

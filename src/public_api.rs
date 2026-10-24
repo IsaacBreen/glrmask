@@ -516,7 +516,7 @@ fn attached_path<'n,T:Clone>(name:&'n str, bindings:&OrdMap<String,T>) -> Option
 }
 fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     if matches!((kind,grammar),(ExternKind::Token,true)) {
-        return Err(Error::Compilation(format!("external {name:?} expects {kind:?}; a general grammar cannot fill an atomic token port")));
+        return Err(Error::Compilation(format!("extern {name:?} is a token extern; bind it to a token ID or token set")));
     }
     Ok(())
 }
@@ -684,7 +684,7 @@ impl Grammar {
                 LarkTokenSet::Any=>domain.clone(),
                 LarkTokenSet::Ranges{ranges,negate}=>{
                     for &(start,end) in ranges {
-                        if !vocab.contains_token_range(start,end){return Err(Error::Compilation(format!("token range {start}..={end} contains an ID outside the vocabulary event domain")));}
+                        if !vocab.contains_token_range(start,end){return Err(Error::Compilation(format!("token range {start}..={end} includes IDs that are not in the vocabulary")));}
                     }
                     let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
                     if *negate {&domain-&selected}else{selected}
@@ -734,7 +734,7 @@ impl Grammar {
             && let Some(id) = vocab.first_unknown_token_id(set)
         {
             return Err(Error::Compilation(format!(
-                "token-set grammar contains token ID {id}, which is not present in the target vocabulary",
+                "token ID {id} is not in the vocabulary",
             )));
         }
         Ok(())
@@ -811,10 +811,10 @@ impl Grammar {
                 graph::check_source_limits(&next)?;
                 return Ok(next);
             }
-            return Err(Error::Compilation(format!("no external named {name:?} is declared; attach its parent before binding descendants")));
+            return Err(Error::Compilation(format!("there is no extern named {name:?}")));
         }
         if self.bindings.contains_key(name) {
-            return Err(Error::Compilation(format!("external {name:?} was bound more than once")));
+            return Err(Error::Compilation(format!("extern {name:?} is already bound")));
         }
         check_binding_kind(name,declared.kinds[name],matches!(value,GrammarValue::Source(_)))
             .map_err(|e|e.with_source_span(declared.spans.get(name).copied()))?;
@@ -934,7 +934,7 @@ impl Grammar {
                             }?;
                             let mut components = dynamic.into_constraints();
                             if components.len() != 1 {
-                                return Err(Error::Compilation("a template-parser Constraint currently requires one compiled component; union composition is not implemented".into()));
+                                return Err(Error::Compilation("the TemplateDfa parser backend doesn't support a choice of several grammars yet; use the LrTable backend".into()));
                             }
                             let mut constraint = components.pop().unwrap();
                             ensure_runnable_constraint(&constraint)?;
@@ -1136,11 +1136,11 @@ impl Grammar {
 
     fn prepare_cached(&self,vocab:&Vocab,options:BuildOptions,cache:&mut SourcePreparation,depth:usize)
         -> Result<Arc<PreparedGrammar>> {
-        if depth>graph::MAX_DEPTH {return Err(Error::Compilation("component preparation depth exceeds 64".into()));}
+        if depth>graph::MAX_DEPTH {return Err(Error::Compilation("grammars are nested more than 64 levels deep".into()));}
         let identity=graph::source_identity(self);
         if let Some(module)=cache.prepared.get(&identity){return Ok(module.clone());}
         cache.visited+=1;
-        if cache.visited>graph::MAX_NODES {return Err(Error::Compilation("too many distinct source component instances".into()));}
+        if cache.visited>graph::MAX_NODES {return Err(Error::Compilation("the composition has too many parts".into()));}
 
         if matches!(self.source,GrammarSource::Lark(_)) {
             let resolved=Arc::new(self.resolve_lark(vocab)?);
@@ -1165,7 +1165,7 @@ impl Grammar {
                 GrammarValue::TokenSet(tokens) => {
                     if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
+                            "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
                         )));
                     }
                     bindings.insert(name.clone(),ModuleBinding::TokenSet(event_adapters.leaf(tokens.range_pairs())?));
@@ -1241,7 +1241,7 @@ impl Grammar {
                         GrammarValue::Source(child)=>children.push((name.as_str(),ParsedComponent::from_named(child.resolve_dynamic_source(vocab,true)?,&[])?)),
                         GrammarValue::TokenSet(ids)=>{
                             if let Some(id) = vocab.first_unknown_token_id(ids) {
-                                return Err(Error::Compilation(format!("token ID {id} is not present in the target vocabulary")));
+                                return Err(Error::Compilation(format!("token ID {id} is not in the vocabulary")));
                             }
                             tokens.push((name.as_str(),ids.range_pairs().to_vec()));
                         },
@@ -1418,7 +1418,7 @@ impl Grammar {
                     let mut components = dynamic.into_constraints();
                     if components.len() != 1 {
                         return Err(Error::Compilation(
-                            "cannot merge equivalent tokens for this grammar: requires one compiled component".into(),
+                            "cannot merge equivalent tokens in a grammar made of several parts".into(),
                         ));
                     }
                     components.pop().unwrap()
@@ -2157,12 +2157,12 @@ impl<'a> ConstraintSpecBuilder<'a> {
                 GrammarValue::TokenSet(tokens) => {
                     if !declared_externals.contains(&name) {
                         return Err(Error::Compilation(format!(
-                            "token-set binding was supplied for unknown external token {name:?}",
+                            "there is no token extern named {name:?}",
                         )));
                     }
                     if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
+                            "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
                         )));
                     }
                     token_bindings.insert(name, tokens.range_pairs().to_vec());
@@ -2170,7 +2170,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
                 GrammarValue::Source(child) => {
                     if !declared_externals.contains(&name) {
                         return Err(Error::Compilation(format!(
-                            "source binding was supplied for unknown external grammar {name:?}",
+                            "there is no grammar extern named {name:?}",
                         )));
                     }
                     grammar_bindings.insert(name, GrammarBinding::Source(child.as_ref().clone()));
@@ -2220,14 +2220,14 @@ impl<'a> ConstraintSpecBuilder<'a> {
         check_binding_kind(name,self.grammar.declarations()?.kinds[name],false)?;
         if self.token_bindings.contains_key(name) || self.grammar_bindings.contains_key(name) {
             return Err(Error::Compilation(format!(
-                "external token {name:?} was bound more than once",
+                "extern {name:?} is already bound",
             )));
         }
         let token_ids = token_ids.into_iter().collect::<Vec<_>>();
         let unique = token_ids.iter().copied().collect::<BTreeSet<_>>();
         if unique.len() != token_ids.len() {
             return Err(Error::Compilation(format!(
-                "external token {name:?} contains a duplicate token ID",
+                "the token IDs bound to extern {name:?} contain a duplicate",
             )));
         }
         self.token_bindings
@@ -2247,7 +2247,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         check_binding_kind(name,self.grammar.declarations()?.kinds[name],true)?;
         if self.grammar_bindings.contains_key(name) || self.token_bindings.contains_key(name) {
             return Err(Error::Compilation(format!(
-                "external grammar {name:?} was bound more than once",
+                "extern {name:?} is already bound",
             )));
         }
         let mut realization = realization.into_grammar_binding();
@@ -2286,7 +2286,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         if self.declared_externals.contains(name) {
             return Ok(());
         }
-        Err(Error::Compilation(format!("no external named {name:?} is declared")))
+        Err(Error::Compilation(format!("there is no extern named {name:?}")))
     }
 }
 
@@ -2338,7 +2338,7 @@ impl GrammarBinding<'_> {
             Ok(())
         } else {
             Err(Error::Compilation(format!(
-                "external grammar {name:?} was built for an incompatible vocabulary",
+                "the module bound to extern {name:?} was precompiled for a different vocabulary",
             )))
         }
     }
@@ -2355,7 +2355,7 @@ impl GrammarBinding<'_> {
                     if !allow_open_source_tokens {
                         if let Some(name) = grammar.unresolved_external_names()?.first() {
                             return Err(Error::Compilation(format!(
-                                "external {name:?} is unbound in source child; use prepare() to retain open external slots",
+                                "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                             )));
                         }
                     }
@@ -2398,7 +2398,7 @@ impl GrammarBinding<'_> {
                 ChildCompileMode::Static => {
                     if let Some(name) = grammar.unresolved_external_names()?.first() {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} is unbound in source child; use prepare() to retain open external slots",
+                            "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                         )));
                     }
                     let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
@@ -2434,7 +2434,7 @@ impl GrammarBinding<'_> {
 fn require_composable_parser(constraint: &RuntimeConstraint) -> Result<()> {
     if !constraint.has_template_parser() || constraint.table.is_present() {
         return Err(Error::Compilation(
-            "compiled grammar composition requires native template components; LR-backed components are unsupported".into(),
+            "a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends".into(),
         ));
     }
     Ok(())
@@ -2563,7 +2563,7 @@ fn compose_named_children(
                 // segmented dynamic boundary that `compose` already installed
                 // is the exact fallback; it supports the same nested shape.
                 Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
-                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
                         eprintln!("[glrmask/profile][static_template_boundary] fallback=dynamic reason=budget_decline");
                     }
                 }
@@ -2597,7 +2597,7 @@ fn compose_named_children(
     // Native components were dispatched above and may never enter LR machinery.
     if !parent.table.is_present() || present.iter().any(|&i|
         children[i].1.has_template_parser() || !children[i].1.table.is_present()) {
-        return Err(Error::Compilation("FastBuild/LR composition requires homogeneous retained-LR components".into()));
+        return Err(Error::Compilation("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends".into()));
     }
 
     let remaining_parent_slots = parent
@@ -2735,7 +2735,7 @@ impl RuntimeConstraint {
         self.materialize_composition_metadata_for_compilation()
             .map_err(Error::Compilation)?;
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(self, vocab);
-        if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_COMPLETION").is_some() {
+        if crate::env::var_os("GLRMASK_PREPARE_BOUNDARY_COMPLETION").is_some() {
             crate::compiler::boundary_precomputed_completion::prepare_component(self, vocab)
                 .map_err(crate::GlrMaskError::Compilation)?;
         }
@@ -2860,7 +2860,7 @@ fn apply_final_boundary_trigger(constraint: &mut RuntimeConstraint, detail: Boun
 fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
     if let Some(slot) = constraint.late_grammar_slots.first() {
         return Err(Error::Compilation(format!(
-            "external grammar {:?} is still unbound",
+            "extern {:?} is unbound; bind it before compiling, or precompile to leave it open; bind it before compiling, or precompile to leave it open",
             slot.name,
         )));
     }
@@ -3021,8 +3021,8 @@ impl PreparedGrammar {
     }
 
     fn require_direct_slot(&self,name:&str)->Result<()> {
-        if !self.slot_kinds.contains_key(name){return Err(Error::Compilation(format!("no unresolved external named {name:?}")));}
-        if self.bindings.contains_key(name){return Err(Error::Compilation(format!("external {name:?} was bound more than once")));}
+        if !self.slot_kinds.contains_key(name){return Err(Error::Compilation(format!("there is no unbound extern named {name:?}")));}
+        if self.bindings.contains_key(name){return Err(Error::Compilation(format!("extern {name:?} is already bound")));}
         Ok(())
     }
 
@@ -3040,11 +3040,11 @@ impl PreparedGrammar {
         self.validate_slot_manifest()?;
         let mut pending=vec![(self,Vec::<String>::new())];let mut out=Vec::new();let mut visits=0;
         while let Some((module,prefix))=pending.pop() {
-            visits+=1;if visits>131_072 {return Err(Error::Compilation("expanded extern traversal exceeds its limit".into()));}
+            visits+=1;if visits>131_072 {return Err(Error::Compilation("the composition expands to too many parts".into()));}
             for (name,&kind) in module.slot_kinds.iter() {
                 let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));
                 out.push(Requirement {path,kind,source_span:module.slot_spans.get(name).copied()});
-                if out.len()>65_536 {return Err(Error::Compilation("too many expanded extern paths".into()));}
+                if out.len()>65_536 {return Err(Error::Compilation("the composition expands to too many parts".into()));}
             }
             for (name,binding) in &module.bindings {if let ModuleBinding::Module(child)=binding {
                 let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));pending.push((child,path));
@@ -3074,7 +3074,7 @@ impl PreparedGrammar {
         let vocab = constraint_vocab(self.inner.as_ref());
         let binding = match value {
             UnlinkedValue::Prepared(child) => {
-                if !child.targets_vocab(&vocab){return Err(Error::Compilation("prepared child targets an incompatible vocabulary".into()));}
+                if !child.targets_vocab(&vocab){return Err(Error::Compilation("the bound modules were precompiled for different vocabularies".into()));}
                 let _=graph::prepared_first(&child)?;
                 ModuleBinding::Module(child)
             }
@@ -3082,7 +3082,7 @@ impl PreparedGrammar {
                 self.require_direct_slot(name)?;
                 if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                     return Err(Error::Compilation(format!(
-                        "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
+                        "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
                     )));
                 }
                 ModuleBinding::TokenSet(self.event_adapters.leaf(tokens.range_pairs())?)
@@ -3091,7 +3091,7 @@ impl PreparedGrammar {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child, &vocab) {
                     return Err(Error::Compilation(format!(
-                        "external grammar {name:?} was built for an incompatible vocabulary",
+                        "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }
                 ModuleBinding::Constraint(Arc::new(child.clone()))
@@ -3100,7 +3100,7 @@ impl PreparedGrammar {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child.as_ref(), &vocab) {
                     return Err(Error::Compilation(format!(
-                        "external grammar {name:?} was built for an incompatible vocabulary",
+                        "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }
                 ModuleBinding::Constraint(child)
@@ -3250,7 +3250,7 @@ impl PreparedGrammar {
         graph::prepared_preflight(self)?;
         if let Some(name) = self.first_open_slot()? {
             return Err(Error::Compilation(format!(
-                "external {name:?} is still unbound",
+                "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
             )));
         }
         let engine = options.engine()?;
@@ -3331,7 +3331,7 @@ fn require_late_grammar_slot(
         return Ok(());
     }
     Err(Error::Compilation(format!(
-        "compiled constraint has no unresolved external grammar named {name:?}",
+        "there is no unbound grammar extern named {name:?}",
     )))
 }
 
@@ -3367,7 +3367,7 @@ fn bind_static_parent_grammar<'a, T>(
 where
     T: IntoGrammarBinding<'a>,
 {
-    let profile = std::env::var_os("GLRMASK_PROFILE_PUBLIC_BIND").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_PUBLIC_BIND").is_some();
     let total_started = Instant::now();
     let phase = Instant::now();
     require_late_grammar_slot(std::slice::from_ref(parent), name)?;
@@ -3503,7 +3503,7 @@ mod tests {
             (3, b"<a>".to_vec()), (4, b"a>".to_vec()), (5, b"<a".to_vec()),
             (6, b"b".to_vec()), (7, b"ab".to_vec()), (8, b"<ab>".to_vec()),
         ]).with_special_tokens([99]);
-        let parent = Grammar::glrm("glrm 1; start root; extern child; nt root = \"<\" child \">\";")
+        let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root = \"<\" child \">\";")
             .prepare(&vocab).unwrap();
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
             .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
@@ -3785,7 +3785,7 @@ mod tests {
     fn vocab_partition_rejects_bound_subgrammar_instead_of_ignoring_it() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let grammar = Grammar::glrm(
-            "glrm 1; extern child; start root; nt root = child;",
+            "glrm 1; extern grammar child; start root; nt root = child;",
         )
         .bind_grammar("child", Grammar::ebnf(r#"start ::= "a""#))
         .unwrap();
@@ -4180,7 +4180,7 @@ mod tests {
         assert_eq!(optimized_child.inner.token_bytes_count(), vocab.len());
 
         let parent = Grammar::glrm(
-            "glrm 1; start start; extern child; nt start = child \"x\";",
+            "glrm 1; start start; extern grammar child; nt start = child \"x\";",
         );
         let ordinary = ConstraintSpec::builder(parent.clone(), &vocab)
             .unwrap()
@@ -4307,7 +4307,7 @@ mod tests {
         let lr = |source: &str| crate::import::compile_dynamic_glrm_fixture(
             source, &vocab, crate::runtime::parser_backend::DynamicParserBackend::LrTable,
         ).unwrap();
-        let source = "start start; extern child; nt start ::= 'x' child;";
+        let source = "start start; extern grammar child; nt start ::= 'x' child;";
         let parent = RuntimeConstraint::compile(Grammar::glrm(source), &vocab).unwrap();
         let child = lr("start start; nt start ::= 'y';");
         assert!(child.inner.table.is_present());
@@ -4319,9 +4319,7 @@ mod tests {
             parent.bind_grammar_dynamic_boundary("child", &child).unwrap_err()] {
             assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
             let message=error.to_string();
-            assert!(message.contains("LR-backed components are unsupported") ||
-                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
-                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
+            assert!(message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }
         let lr_parent = lr(source);
         let native_child = RuntimeConstraint::compile(Grammar::ebnf("start ::= 'y'"), &vocab).unwrap();
@@ -4329,9 +4327,7 @@ mod tests {
             lr_parent.bind_grammar_dynamic_boundary("child", &native_child).unwrap_err()] {
             assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
             let message=error.to_string();
-            assert!(message.contains("LR-backed components are unsupported") ||
-                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
-                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
+            assert!(message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }
         // Failed linking must leave the retained LR object usable.
         assert_eq!(child.start().mask()[0] & 2, 2);
@@ -4347,7 +4343,7 @@ mod tests {
             (2, b"xy".to_vec()),
         ]);
         let parent = Grammar::glrm(
-            "glrm 1; start start; extern child; nt start = \"x\" child;",
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
         );
         let static_child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
             .unwrap();
@@ -4412,7 +4408,7 @@ mod tests {
             (5, b"xyz".to_vec()),
         ]);
         let one_slot = Grammar::glrm(
-            "glrm 1; start start; extern child; nt start = \"x\" child;",
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
         );
         let static_parent = RuntimeConstraint::compile(one_slot.clone(), &vocab).unwrap();
         let dynamic_parent = native_dynamic_fixture(one_slot, &vocab).unwrap();
@@ -4478,7 +4474,7 @@ mod tests {
         }
 
         let two_slots = Grammar::glrm(
-            "glrm 1; start start; extern left; extern right; \
+            "glrm 1; start start; extern grammar left; extern grammar right; \
              nt start = \"x\" left right;",
         );
         let open = RuntimeConstraint::compile(two_slots, &vocab).unwrap();
@@ -4513,7 +4509,7 @@ mod tests {
 
         let open = native_dynamic_fixture(
             Grammar::glrm(
-                "glrm 1; start start; extern left; extern right; \
+                "glrm 1; start start; extern grammar left; extern grammar right; \
                  nt start = \"x\" left right;",
             ),
             &vocab,
@@ -4545,7 +4541,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             ),
             &vocab,
         )
@@ -4626,7 +4622,7 @@ mod tests {
         .unwrap();
         let parent = native_dynamic_fixture(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             ),
             &vocab,
         )
@@ -4672,7 +4668,7 @@ mod tests {
         .unwrap();
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             ),
             &vocab,
         )
@@ -4733,7 +4729,7 @@ mod tests {
         .unwrap();
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child \"z\";",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child \"z\";",
             ),
             &vocab,
         )
@@ -4802,7 +4798,7 @@ mod tests {
 
         let inner_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start inner; extern leaf; nt inner = "<" leaf ">";"#,
+                r#"glrm 1; start inner; extern grammar leaf; nt inner = "<" leaf ">";"#,
             ),
             &vocab,
         )
@@ -4826,7 +4822,7 @@ mod tests {
 
         let outer = RuntimeConstraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start document; extern inner; nt document = inner "!";"#,
+                r#"glrm 1; start document; extern grammar inner; nt document = inner "!";"#,
             ),
             &vocab,
         )
@@ -4874,7 +4870,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             ),
             &vocab,
         )
@@ -4933,7 +4929,7 @@ mod tests {
         // lane. The outer lexer product can then coalesce parent + child lanes
         // after `a`/`b` without relying on duplicate child call sites.
         let parent = Grammar::glrm(
-            "glrm 1; start document; extern child; \
+            "glrm 1; start document; extern grammar child; \
              nt document = child \"!\" | \"a\" \"b\" \"c\" \"?\";",
         );
         let composed = ConstraintSpec::builder(parent, &vocab)
@@ -4953,7 +4949,7 @@ mod tests {
         )
         .unwrap();
 
-        let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
+        let explicitly_disabled = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
             .ok()
             .is_some_and(|value| {
                 matches!(
@@ -5038,7 +5034,7 @@ mod tests {
         ]);
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" \"q\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" \"q\" child;",
             ),
             &vocab,
         )
@@ -5080,7 +5076,7 @@ mod tests {
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5090,7 +5086,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5219,7 +5215,7 @@ mod tests {
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5230,7 +5226,7 @@ mod tests {
         assert!(middle.uses_compact_segmented_parser_runtime());
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5276,7 +5272,7 @@ mod tests {
         .unwrap();
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -5329,7 +5325,7 @@ mod tests {
 
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern payload; nt document = \"X\" payload \"!\";",
+                "glrm 1; start document; extern grammar payload; nt document = \"X\" payload \"!\";",
             ),
             &vocab,
         )
@@ -5407,7 +5403,7 @@ mod tests {
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5417,7 +5413,7 @@ mod tests {
 
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5570,7 +5566,7 @@ mod tests {
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start middle; extern leaf; nt middle = leaf?;"),
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf?;"),
             &vocab,
         )
         .unwrap();
@@ -5581,7 +5577,7 @@ mod tests {
 
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5634,7 +5630,7 @@ mod tests {
         let leaf_tokenizer_reset = leaf.runtime_commit_initial_state();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5647,7 +5643,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5827,7 +5823,7 @@ mod tests {
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern leaf; t L = \"[\"; t R = \"]\"; nt middle = L leaf R;",
+                "glrm 1; start middle; extern grammar leaf; t L = \"[\"; t R = \"]\"; nt middle = L leaf R;",
             ),
             &vocab,
         )
@@ -5837,7 +5833,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
             ),
             &vocab,
         )
@@ -5918,7 +5914,7 @@ mod tests {
         };
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern left; extern right; t LT = \"<\"; t GT = \">\"; nt document = LT left right GT;",
+                "glrm 1; start document; extern grammar left; extern grammar right; t LT = \"<\"; t GT = \">\"; nt document = LT left right GT;",
             ),
             &vocab,
         )
@@ -6008,7 +6004,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern left; extern right; nt document = \"<\" left right \">\";",
+                "glrm 1; start document; extern grammar left; extern grammar right; nt document = \"<\" left right \">\";",
             ),
             &vocab,
         )
@@ -6140,7 +6136,7 @@ mod tests {
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start middle; extern leaf; nt middle = leaf;"),
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf;"),
             &vocab,
         )
         .unwrap();
@@ -6151,7 +6147,7 @@ mod tests {
         assert!(middle.composition_start_nullable().unwrap());
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
             ),
             &vocab,
         )
@@ -6218,7 +6214,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern left; extern right; \
+                "glrm 1; start start; extern grammar left; extern grammar right; \
                  nt start = \"x\" left right;",
             ),
             &vocab,
@@ -6304,7 +6300,7 @@ mod tests {
                     start document;
                     ignore PARENT_WS;
                     t PARENT_WS = " "+;
-                    extern child;
+                    extern grammar child;
                     nt document = "X" child "!";
                 "#,
             ),
@@ -6435,7 +6431,7 @@ mod tests {
                 r#"
                     glrm 1;
                     start document;
-                    extern child;
+                    extern grammar child;
                     nt document = "X" child "!" "?";
                 "#,
             ),
@@ -6488,7 +6484,7 @@ mod tests {
             (0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec()),
         ]);
         let parent = native_dynamic_fixture(
-            Grammar::glrm("glrm 1; start start; extern child; nt start = \"x\" child;"),
+            Grammar::glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child;"),
             &vocab,
         ).unwrap();
         let child = native_dynamic_fixture(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
@@ -6524,7 +6520,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             ),
             &vocab,
         )
@@ -6594,7 +6590,7 @@ mod final_unlinked_optimization_tests {
             (2, b"xy".to_vec()),
         ]);
         let host = Grammar::glrm(
-            r#"glrm 1; start start; extern child; nt start = "x" child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
         )
         .prepare(&vocab)
         .unwrap();
@@ -6658,7 +6654,7 @@ mod cached_parent_main_tests {
             Grammar::glrm(
                 r#"
                     glrm 1;
-                    extern payload;
+                    extern grammar payload;
                     start document;
                     nt document = "x" | "<" payload ">";
                 "#,
@@ -6714,8 +6710,8 @@ mod cached_parent_main_tests {
             Grammar::glrm(
                 r#"
                     glrm 1;
-                    extern left;
-                    extern right;
+                    extern grammar left;
+                    extern grammar right;
                     start document;
                     nt document = "<" left right ">";
                 "#,
@@ -6744,7 +6740,7 @@ mod cached_parent_main_tests {
 
         let unresolved_child = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; extern leaf; start value; nt value = leaf;",
+                "glrm 1; extern grammar leaf; start value; nt value = leaf;",
             ),
             &vocab,
         )
@@ -6771,7 +6767,7 @@ mod cached_parent_main_tests {
         let vocab = vocab();
         let open = native_dynamic_fixture(
             Grammar::glrm(
-                "glrm 1; extern payload; start document; nt document = payload;",
+                "glrm 1; extern grammar payload; start document; nt document = payload;",
             ),
             &vocab,
         )

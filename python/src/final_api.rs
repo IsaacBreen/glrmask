@@ -261,9 +261,25 @@ impl PyTokenSet {
         Ok(Self { inner: glrmask::TokenSet::from_ranges(ranges.into_iter().flatten()) })
     }
 
-    /// The normalized ranges, for example `TokenSet[0..=9, 20..=29]`.
+    /// An expression that rebuilds the set, or a summary for large sets.
     fn __repr__(&self) -> String {
-        format!("{:?}", self.inner)
+        let ranges = self.inner.range_pairs();
+        if ranges.len() > 8 {
+            let tokens: u64 = ranges
+                .iter()
+                .map(|&(start, end)| u64::from(end - start) + 1)
+                .sum();
+            format!(
+                "<glrmask.TokenSet: {tokens} tokens in {} ranges>",
+                ranges.len()
+            )
+        } else {
+            let listed: Vec<String> = ranges
+                .iter()
+                .map(|&(start, end)| format!("range({start}, {})", u64::from(end) + 1))
+                .collect();
+            format!("TokenSet.from_ranges([{}])", listed.join(", "))
+        }
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -345,8 +361,9 @@ impl PyGrammar {
 
     /// Builds a source grammar from an `Expr`, `Grammar`, or `TokenSet`.
     #[staticmethod]
-    fn from_expr(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let expr = canonical::extract_expr_part(value)?;
+    #[pyo3(signature = (expr, /))]
+    fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let expr = canonical::extract_expr_part(expr)?;
         Ok(Self {
             inner: glrmask::Grammar::from_expr(expr).map_err(api_error)?,
         })

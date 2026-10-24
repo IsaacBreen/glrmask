@@ -32,7 +32,7 @@ def accepted_ids(state):
 def test_range_inputs_are_normalized_to_one_set():
     tokens = glrmask.TokenSet.from_ranges([range(20, 40), range(10, 25), range(40, 50), range(90, 95)])
     assert tokens == glrmask.TokenSet.from_ranges([range(10, 50), range(90, 95)])
-    assert repr(tokens) == "TokenSet[10..=49, 90..=94]"
+    assert repr(tokens) == "TokenSet.from_ranges([range(10, 50), range(90, 95)])"
     assert glrmask.TokenSet.from_ranges(r for r in [range(3, 5), range(5, 9)]) == glrmask.TokenSet.from_ranges([range(3, 9)])
     assert glrmask.TokenSet(iter([8, 3, 4, 5])) == glrmask.TokenSet.from_ranges([range(3, 6), range(8, 9)])
     assert glrmask.TokenSet(range(4)) != glrmask.TokenSet(range(5))

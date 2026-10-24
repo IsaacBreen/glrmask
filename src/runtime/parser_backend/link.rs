@@ -185,7 +185,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     if let Some(grammar) = parser.link_grammar.as_mut() {
         Arc::make_mut(grammar).root_nullable = nullable;
     }
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][native_link_metadata] phase=descriptor elapsed_ms={:.3} materialized={}",
             metadata_started.elapsed().as_secs_f64()*1000.0,
             parser.link_grammar.as_ref().is_some_and(|grammar| grammar.is_materialized()));
@@ -218,7 +218,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             if let Ok(refined) = crate::compiler::boundary_tail::build_root_call_candidates_with_queries(
                 leaves[0], &children, &calls, vocab, component_queries[0], &component_queries[1..]) {
                 let ids = existing.iter().copied().filter(|id| refined.candidate_ids.binary_search(id).is_ok()).collect::<Vec<_>>();
-                if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
                     eprintln!("[glrmask/profile][native_link_root_call_proof] reusable={} filtered={} summary_ms={:.3} map_ms={:.3}",
                         existing.len(),ids.len(),refined.summary_ms,refined.map_ms);
                 }
@@ -285,7 +285,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             ).map_err(fail)?;
         }
     }
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][native_link_metadata] phase=complete materialized={}",
             constraint.template_parser.as_ref().and_then(|parser| parser.link_grammar.as_ref())
                 .is_some_and(|grammar| grammar.is_materialized()));

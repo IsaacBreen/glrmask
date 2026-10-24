@@ -24,9 +24,9 @@
     "ParserBackend.LR_TABLE": "An LR table. Faster to compile, with slower masks. The default.",
     "ParserBackend.TEMPLATE_DFA": "Template DFAs. Slower to compile, with faster masks.",
     "TokenSet": "A set of token IDs.\n\nIn a grammar, it matches any one of its tokens. Every ID must be in the vocabulary.",
-    "TokenSet.__init__": "Creates a set from `ids`.",
+    "TokenSet.__new__": "Creates a set from `ids`.",
     "TokenSet.from_ranges": "Creates a set from `range` objects, which must have step 1.",
-    "TokenSet.__repr__": "The set as ranges, for example `TokenSet[0..=9, 20..=29]`.",
+    "TokenSet.__repr__": "An expression that rebuilds the set, or a summary for large sets.",
     "TokenSet.__eq__": "Whether both sets contain the same IDs.",
     "Vocab": "A model's vocabulary: each token ID and its bytes.\n\nUse each token's exact bytes, not its display form: `b\" hello\"`, not `\"Ġhello\"`. IDs need not be contiguous.",
     "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_tokens` adds tokens that have no bytes.",
@@ -55,7 +55,7 @@
     "Expr.sequence": "Matches `parts` one after another.\n\nOne token may span several parts. Raises `ValueError` if a part has unbound externs.",
     "Expr.literal": "Matches exactly `value`, with no whitespace skipped. A `str` is UTF-8 encoded.",
     "Module": "A grammar you can compose with others and partly compile before its externs are bound.",
-    "Module.__init__": "Creates a module from a grammar.",
+    "Module.__new__": "Creates a module from a grammar.",
     "Module.bind": "Binds the extern `name` to `value`: a grammar, module, expression or token set.\n\n`bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set.",
     "Module.precompile": "Compiles as much as possible for `vocab` now, so later compiles are fast.\n\nExterns may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.",
     "Module.compile": "Compiles the module for `vocab`, reusing any precompiled work.\n\nEvery extern must be bound. The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.",
@@ -64,7 +64,7 @@
     "Module.__copy__": "Same as `copy()`.",
     "Module.__deepcopy__": "Same as `copy()`.",
     "Module.save": "Saves the module, including precompiled work, as bytes.\n\nThe vocabulary is not included. Bytes saved by one GLRMask version may not load in another.",
-    "Module.load": "Loads a module saved with `save`.\n\nPrecompiled work applies only to the vocabulary it was built for; compiling with a different one is an error.",
+    "Module.load": "Loads a module saved with `save()`.",
     "Grammar": "A grammar, written as source text or built from an `Expr`.",
     "Grammar.from_ebnf": "Creates a grammar from EBNF source.",
     "Grammar.from_glrm": "Creates a grammar from GLRM, GLRMask's native format.",
@@ -203,8 +203,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "f641f38279d4374494795f62d0769300a61a5c73a2e3cb18abd96557f6affe67",
-    "bindings/node/README.md": "317179444d73e4ae9109a46fd63e64ca8b176b4bc177d5708244dc7827675a3b",
+    "bindings/cpp/README.md": "1ca71a834a9a510a5212d8cc8cfef67773fff01d9496f73582f6bad6a5e8a732",
+    "bindings/node/README.md": "8f558a430242220207856b2211667c8f39e9eda46c1d93da1183331cc2954971",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -212,5 +212,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "92f03001ad8b00e105991b1fd8f995086003d300530973387f219eea65623fcd"
+  "content_sha256": "9a0d50e40b5839e3447211b0b50f11c053668d6b249604089e8ce10c5ba0350a"
 }

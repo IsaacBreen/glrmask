@@ -242,7 +242,7 @@ impl Constraint {
         cache.scanned_ranges = ranges_seen;
         cache.prefix_entries = prefix.len();
         debug_assert!(cache.bytes <= MAX_CACHE_BYTES);
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
             eprintln!(
                 "[glrmask/profile][packed_final_masks] sets={} indexed_weights={} accounted_bytes={} ranges={}",
                 cache.sets.len(),

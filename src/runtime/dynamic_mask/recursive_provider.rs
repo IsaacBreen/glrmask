@@ -304,7 +304,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
             self.tables[leaf].parser_initial_state(local, &admitted)
         };
         static PROFILE: OnceLock<bool> = OnceLock::new();
-        if *PROFILE.get_or_init(||std::env::var_os("GLRMASK_PROFILE_INITIAL_ROOT_PROJECTION").is_some()) {
+        if *PROFILE.get_or_init(||crate::env::var_os("GLRMASK_PROFILE_INITIAL_ROOT_PROJECTION").is_some()) {
             eprintln!("[glrmask/profile][initial_root_projection] raw={} leaf={} admitted={} direct={} reset={} configs={}",
                 scoped_raw, leaf, count, direct, is_reset, self.tables[leaf].cache.configs.len());
         }
@@ -536,7 +536,7 @@ fn with_provider_and_baseline(
     state: &ConstraintState<'_>, max_token_len: usize, already: Option<&[u32]>,
     evaluate: impl FnOnce(&mut RecursiveConfigTransitions<'_, '_>) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_RECURSIVE_PHASES").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_RECURSIVE_PHASES").is_some();
     let setup_start = profile.then(std::time::Instant::now);
     let routing = RecursiveFullWalkTransitions::new_for_parser_routing(state.constraint)
         .ok_or_else(|| "recursive composition has no valid scoped lexer/parser layout".to_owned())?;
@@ -558,12 +558,12 @@ fn with_provider_and_baseline(
         support_cache: FxHashMap::default(),
         support_profile: {
             static GENERATIONS: OnceLock<Vec<u64>> = OnceLock::new();
-            let generations = GENERATIONS.get_or_init(|| std::env::var("GLRMASK_PROFILE_CLOSED_SUPPORT")
+            let generations = GENERATIONS.get_or_init(|| crate::env::var("GLRMASK_PROFILE_CLOSED_SUPPORT")
                 .unwrap_or_default().split(',').filter_map(|n|n.parse().ok()).collect());
             generations.contains(&(state.generation as u64)).then(ScopedSupportProfile::default)
         },
         projected_resets: FxHashMap::default(),
-        project_resets: std::env::var_os("GLRMASK_PROFILE_SCOPED_RESET_PROJECTION").is_some(),
+        project_resets: crate::env::var_os("GLRMASK_PROFILE_SCOPED_RESET_PROJECTION").is_some(),
         epsilon_proofs_remaining: {
             static ENABLED: OnceLock<bool> = OnceLock::new();
             if *ENABLED.get_or_init(|| env_flag("GLRMASK_EPSILON_ONLY_RESETS", true)) { 4 } else { 0 }
@@ -649,7 +649,7 @@ mod epsilon_reset_boundary_tests {
                 r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W;"#
             };
             let outer = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern leaf; nt root = "P[" leaf "]" leaf "!";"#,
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P[" leaf "]" leaf "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();
@@ -733,7 +733,7 @@ mod closed_admission_support_tests {
                 r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W;"#
             };
             let outer = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern leaf; nt root = "P[" leaf "]" leaf "!";"#,
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P[" leaf "]" leaf "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();

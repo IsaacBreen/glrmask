@@ -141,7 +141,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     constraint.materialize_non_dwa_weights_for_compilation().map_err(fail)?;
     let layout = constraint.recursive_parser_layout().map_err(fail)?
         .ok_or_else(|| fail("static template boundary has no scoped layout"))?;
-    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let started = std::time::Instant::now();
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=begin leaves={} links={} stack_symbols={}",
         layout.leaves.len(), layout.links.len(), layout.total_states); }
@@ -368,7 +368,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     let predecessor=metadata.and_then(|metadata|metadata.stack_effects()).filter(|summary|summary.states==parser.state_count)
         .and_then(|summary|super::boundary_stack_support::from_compiler_effects(summary).ok());
     let read_context=predecessor.as_ref().and_then(|certificate|certificate.native_context())
-        .filter(|_|std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NO_READ_SUPPORT").is_none());
+        .filter(|_|crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_NO_READ_SUPPORT").is_none());
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=programs_ready templates={} admissions={} pop_classes={} predecessor={} elapsed_ms={:.3}",
         templates.len(),admissions.len(), classes.len(),read_context.is_some(), started.elapsed().as_secs_f64() * 1000.0); }
     let prepared=if walks.is_empty() {None} else {

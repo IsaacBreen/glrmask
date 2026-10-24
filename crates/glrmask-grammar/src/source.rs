@@ -13,7 +13,7 @@ pub struct SourceSpan {
 }
 impl std::fmt::Display for SourceSpan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "line {}, column {} (bytes {}..{})", self.line, self.column, self.start, self.end)
+        write!(f, "line {}, column {}", self.line, self.column)
     }
 }
 impl SourceSpan {

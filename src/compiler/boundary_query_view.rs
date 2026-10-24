@@ -121,7 +121,7 @@ pub(super) fn prepare_with_policy(
 )->Option<QueryView>{
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW") {
         if let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
                 let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
                 assert_eq!(candidate.view.original_to_view,reference.view.original_to_view);
                 assert_eq!(candidate.scope.initial_states().keep_raw(),reference.scope.initial_states().keep_raw());

@@ -51,7 +51,7 @@ use crate::Vocab;
 /// is non-empty. Enabled by `GLRMASK_DEBUG_BOUNDARY_WORDS`.
 #[cfg(test)]
 fn trace_boundary_terminal_dwa_words(label: &str, dwa: &DWA, num_terminals: usize) {
-    if std::env::var_os("GLRMASK_DEBUG_BOUNDARY_WORDS").is_none() {
+    if crate::env::var_os("GLRMASK_DEBUG_BOUNDARY_WORDS").is_none() {
         return;
     }
     const MAX_LEN: usize = 8;
@@ -247,11 +247,11 @@ fn build_boundary_terminal_dwa_with_prepared(
         flat_trans:inputs.flat_trans,retain_non_crossing_paths:inputs.retain_non_crossing_paths,
     };
     let first_ms=first_started.elapsed().as_secs_f64()*1000.0;
-    let allow_identity_tiles = std::env::var_os("GLRMASK_BOUNDARY_IDENTITY_TILES").is_some();
+    let allow_identity_tiles = crate::env::var_os("GLRMASK_BOUNDARY_IDENTITY_TILES").is_some();
     let synthesized = (identity && scoped.scope.require_crossing()
-        && std::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_LEXER").is_some())
+        && crate::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_LEXER").is_some())
         .then(|| build_boundary_terminal_dwa_synthesized(&scoped,
-            std::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_FULL").is_none()))
+            crate::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_FULL").is_none()))
         .flatten();
     let mut output=synthesized.or_else(|| build_boundary_terminal_dwa_query(&scoped,shared,
         if identity && !allow_identity_tiles { None } else { tile_size },
@@ -268,7 +268,7 @@ fn build_boundary_terminal_dwa_with_prepared(
         if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_first_completion] component={} before={} after={} prefixes={} steps={} cells={} ms={first_ms:.3}",inputs.scope.start_component().0,plan.before,plan.after,plan.prefixes,plan.steps,plan.signature_cells);}
     }
     if (first.is_some() || identity || tile_size.is_some() || terminal_support)
-        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_QUERY_TILES").is_some()
+        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_QUERY_TILES").is_some()
     {
         // This reference bypasses tiling, terminal support and compact views.
         let reference=build_boundary_terminal_dwa_on_view(inputs,shared)?;
@@ -412,7 +412,7 @@ fn build_boundary_terminal_dwa_query(
 ) -> Option<BoundaryWalkOutput> {
     if identity && query_view && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_BORROWED_QUERY"){
         if let Some(candidate)=build_boundary_terminal_dwa_borrowed_query(inputs){
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BORROWED_QUERY").is_some(){
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BORROWED_QUERY").is_some(){
                 let reference=build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)?;
                 assert_eq!(candidate.dwa.start_state(),reference.dwa.start_state());assert_eq!(candidate.dwa.states(),reference.dwa.states());
                 for (a,b)in [(&candidate.id_map.tokenizer_states,&reference.id_map.tokenizer_states),(&candidate.id_map.vocab_tokens,&reference.id_map.vocab_tokens)]{
@@ -470,7 +470,7 @@ fn build_boundary_terminal_dwa_query_reference(
             inputs.scope.start_component().0,inputs.merged_tokenizer.num_states(),view.tokenizer.num_states(),
             prepared.first_states,prepared.reset_states,prepared.state_steps,prepared.footprint_ms,
             prepared.materialize_ms,output.profile.walk_ms);}
-        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_QUERY_VIEW").is_some(){
+        if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_QUERY_VIEW").is_some(){
             let reference=build_boundary_terminal_dwa_on_view(inputs,shared)?;
             tdwa::l2p::compare_terminal_dwa_artifacts(
                 &tdwa::types::LocalIdMapTerminalDwa{dwa:reference.dwa,id_map:reference.id_map,profile:Default::default()},
@@ -634,11 +634,11 @@ fn finalize_scoped_terminal_output(
     let certified = native_fixed_point.is_some()
         && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_NATIVE_MINIMUM");
     let summarize_after=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SUMMARIZE_AFTER_MIN");
-    let reference=(certified && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_MINIMUM").is_some())
+    let reference=(certified && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_MINIMUM").is_some())
         .then(||finalize_boundary_terminal_dwa(dwa.clone(),&id_map,summarize_after));
     let (finalized, accepted_tokens, final_minimize_ms) = if certified {
         let accepted=if let Some(support)=native_fixed_point.as_ref().and_then(|proof|proof.accepted_weight()){
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some(){
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some(){
                 assert_eq!(support,&super::constraint_compose::accepted_weight_support(&dwa),
                     "certified root support changed correlated output weights");
             }
@@ -1010,7 +1010,7 @@ pub(crate) struct WalkStaticLinkShardBreakdown {
 }
 
 fn boundary_analysis_json_enabled() -> bool {
-    std::env::var_os("GLRMASK_BOUNDARY_ANALYSIS_JSON").is_some()
+    crate::env::var_os("GLRMASK_BOUNDARY_ANALYSIS_JSON").is_some()
 }
 
 fn emit_boundary_analysis_json(breakdown: &WalkStaticLinkBreakdown) {
@@ -1111,7 +1111,7 @@ where
     let prepared_flat=use_direct_flat.then(|| super::boundary_flat_transitions::build(inputs.merged_tokenizer,true)).flatten();
     let direct_flat_selected=prepared_flat.is_some();
     let flat: Arc<[u32]> = prepared_flat.unwrap_or_else(make_original_flat);
-    if direct_flat_selected && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_FLAT_ARC").is_some() {
+    if direct_flat_selected && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_FLAT_ARC").is_some() {
         let reference:Arc<[u32]>=make_original_flat();
         assert_eq!(&*flat,&*reference,"direct Arc transition table differs from ordinary scalar rows");
         eprintln!("[glrmask/validate][boundary_direct_flat_arc] exact=true cells={}",flat.len());
@@ -1136,7 +1136,7 @@ where
         .then(|| tdwa::ScopedBoundarySharedContext::new(inputs.merged_tokenizer, inputs.grammar));
     let num_terms = inputs.grammar.num_terminals as usize;
     #[cfg(test)]
-    if std::env::var_os("GLRMASK_DEBUG_L2P_TOKEN_CLASSES").is_some() {
+    if crate::env::var_os("GLRMASK_DEBUG_L2P_TOKEN_CLASSES").is_some() {
         let always_allowed = tdwa::grammar_helpers::compute_always_allowed_follows(inputs.grammar);
         eprintln!(
             "[boundary-walk-setup] num_terms={} ignore_terminal={:?} follow_transparent_ignores={:?} always_allowed={:?} disallowed={:?}",
@@ -1241,7 +1241,7 @@ where
         };
         let mut seed_mask = plan.commit_states.clone();
         if !plan.retain_non_crossing_paths
-            && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
+            && crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
         {
             let started = Instant::now();
             let prepared_support = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS")
@@ -1253,7 +1253,7 @@ where
                 ));
             let precomputed = prepared_support.is_some();
             if let Some(support) = &prepared_support
-                && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS").is_some()
+                && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS").is_some()
             {
                 let (reference, _) = tdwa::scope::crossing_prefix_seed_support(
                     inputs.merged_tokenizer,candidate_vocab,&flat,&ownership,plan.crossing_owner,
@@ -1318,7 +1318,7 @@ where
                         inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,support_transitions.as_ref(),
                     );
                     if let Some(candidate)=prepared.as_ref(){
-                        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
+                        if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
                             let reference=ordinary().expect("ordinary necessary-cut reference must finish");
                             assert_eq!(candidate.tokens,reference.tokens,"prepared cut changed original token IDs");
                             eprintln!("[glrmask/validate][boundary_prepared_cut] component={} exact_ids=true",plan.start_component);
@@ -1328,7 +1328,7 @@ where
                 }).flatten();
             let used_cut = cut.is_some();
             let support = if let Some(cut) = cut {
-                if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CUT_SUPPORT").is_some() {
+                if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CUT_SUPPORT").is_some() {
                     let reference = super::boundary_token_support::crossing_token_support_with_prepared_transitions(
                         inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
                         &ownership, plan.crossing_owner, inputs.disallowed_follows,
@@ -1377,7 +1377,7 @@ where
             }
         }
         let candidate_vocab = live_vocab.as_ref().unwrap_or(candidate_vocab);
-        if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_INPUTS") {
+        if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_INPUTS") {
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).expect("create boundary input diagnostics");
             let payload = serde_json::json!({
@@ -1421,7 +1421,7 @@ where
         }, shared.as_ref(), prepared_first.and_then(|spans| spans.get(plan.start_component)).and_then(Option::as_ref))
         .expect("nonempty candidate-vocab shard walks must produce a DWA");
         if live_vocab.is_some()
-            && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_LIVENESS").is_some()
+            && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_LIVENESS").is_some()
         {
             let mut reference = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: inputs.merged_tokenizer, vocab: original_candidate_vocab,
@@ -1450,7 +1450,7 @@ where
             ).expect("boundary token support changed completed terminal weighted language");
             eprintln!("[glrmask/validate][boundary_token_liveness] component={} exact=true",plan.start_component);
         }
-        if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_INPUTS") {
+        if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_INPUTS") {
             let directory = std::path::PathBuf::from(directory);
             let mut id_map = output.id_map.clone();
             id_map.materialize_deferred_vocab_singletons();
@@ -1479,7 +1479,7 @@ where
         let candidate_tokens = if reuse_inventory {
             candidate_vocab.entries_map().keys().copied().collect()
         } else { boundary_accepted_tokens(&output.dwa, &output.id_map) };
-        if reuse_inventory && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_INVENTORY").is_some() {
+        if reuse_inventory && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_INVENTORY").is_some() {
             assert_eq!(candidate_tokens, boundary_accepted_tokens(&output.dwa, &output.id_map),
                 "cached all-input coverage must reproduce the untouched exact enumeration");
         }
@@ -1489,7 +1489,7 @@ where
         }
         output.profile.lexical_accepted_tokens = candidate_tokens.len();
         #[cfg(test)]
-        if std::env::var_os("GLRMASK_DEBUG_A_WITNESS").is_some() {
+        if crate::env::var_os("GLRMASK_DEBUG_A_WITNESS").is_some() {
             let emitted = boundary_emitted_terminals(
                 &output.dwa,
                 inputs.grammar.num_terminals as usize,
@@ -2586,7 +2586,7 @@ pub(crate) fn build_walk_static_boundary_link(
     let process_shard = |mut shard: BuiltBoundaryShardWalk| -> Result<ProcessedShard, String> {
         let start_component = shard.start_component;
         let adjacency_reference = (scoped_adjacent.is_some()
-            && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_SCOPED_ADJACENCY").is_some()).then(|| shard.output.dwa.clone());
+            && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_SCOPED_ADJACENCY").is_some()).then(|| shard.output.dwa.clone());
         if let Some(relation) = &scoped_adjacent {
             apply_scoped_adjacency(&mut shard, relation, grammar.num_terminals);
         }
@@ -3790,17 +3790,17 @@ mod tests {
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
+            let original = crate::env::var_os(key);
             unsafe {
-                std::env::set_var(key, value);
+                crate::__private::set_env_var(key, Some(value));
             }
             Self { key, original }
         }
 
         fn unset(key: &'static str) -> Self {
-            let original = std::env::var_os(key);
+            let original = crate::env::var_os(key);
             unsafe {
-                std::env::remove_var(key);
+                crate::__private::set_env_var(key, None);
             }
             Self { key, original }
         }
@@ -3810,10 +3810,10 @@ mod tests {
         fn drop(&mut self) {
             match &self.original {
                 Some(value) => unsafe {
-                    std::env::set_var(self.key, value);
+                    crate::__private::set_env_var(self.key, Some(value.to_str().expect("environment override is valid UTF-8")));
                 },
                 None => unsafe {
-                    std::env::remove_var(self.key);
+                    crate::__private::set_env_var(self.key, None);
                 },
             }
         }
@@ -4171,7 +4171,7 @@ mod tests {
             )
             .expect("toy terminal ownership"),
         );
-        if std::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
+        if crate::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
             for raw in composed.tokenizer_offsets[0]
                 ..composed.tokenizer_offsets[0] + parent.tokenizer.num_states()
             {
@@ -4241,7 +4241,7 @@ mod tests {
                 retain_non_crossing_paths: false,
             })
             .expect("toy shard walk must produce a DWA");
-            if std::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
+            if crate::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
                 eprintln!(
                     "TOY_SCOPE shard={} idmap_o2i={:?} idmap_classes={:?} reps={:?}",
                     index,
@@ -4295,7 +4295,7 @@ mod tests {
         let mut core =
             Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
                 .expect("load core");
-        let dispatch_name = std::env::var("PHASE1_DISPATCH")
+        let dispatch_name = crate::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
             Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
@@ -4355,7 +4355,7 @@ mod tests {
     /// `SELECTED10_CFA_ROOT` overrides the documented sibling checkout next to
     /// the workspace (`../../constraint-framework-analysis`).
     fn selected10_cfa_root() -> std::path::PathBuf {
-        std::env::var_os("SELECTED10_CFA_ROOT")
+        crate::env::var_os("SELECTED10_CFA_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4595,7 +4595,7 @@ mod tests {
     fn phase1_root() -> std::path::PathBuf {
         use std::path::Path;
 
-        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
+        let root = crate::env::var("PHASE1_DIR").unwrap_or_else(|_| {
             "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
         });
         Path::new(&root).to_path_buf()
@@ -4607,10 +4607,10 @@ mod tests {
     /// `../../glrmask-ptc-selected10-cache-20260827-pc/vocab_dump.bin`.
     /// These gates read no other file from `PHASE1_DIR`.
     fn phase1_vocab_path() -> String {
-        if let Ok(path) = std::env::var("PHASE1_VOCAB") {
+        if let Ok(path) = crate::env::var("PHASE1_VOCAB") {
             return path;
         }
-        if let Ok(dir) = std::env::var("PHASE1_DIR") {
+        if let Ok(dir) = crate::env::var("PHASE1_DIR") {
             return std::path::Path::new(&dir)
                 .join("vocab_dump.bin")
                 .to_string_lossy()
@@ -4734,7 +4734,7 @@ mod tests {
     /// var is set, its value is the output directory (created fresh; refuses
     /// non-empty dirs so stale bins can never pass).
     fn install_prepare_dir(env_key: &str) -> Option<std::path::PathBuf> {
-        std::env::var_os(env_key).map(|dir| {
+        crate::env::var_os(env_key).map(|dir| {
             let dir = std::path::PathBuf::from(dir);
             if dir.exists() {
                 let count = std::fs::read_dir(&dir).expect("read prepare dir").count();
@@ -4845,18 +4845,18 @@ mod tests {
     #[ignore]
     fn prepared_install_pair_windowed_differential() {
         let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        let dir = std::env::var("GLRMASK_INSTALL_DIFF_PREPARE_DIR")
+        let dir = crate::env::var("GLRMASK_INSTALL_DIFF_PREPARE_DIR")
             .expect("GLRMASK_INSTALL_DIFF_PREPARE_DIR must name a prepared pair dir");
         let dir = std::path::PathBuf::from(dir);
-        let scenario: usize = std::env::var("GLRMASK_INSTALL_DIFF_SCENARIO")
+        let scenario: usize = crate::env::var("GLRMASK_INSTALL_DIFF_SCENARIO")
             .expect("GLRMASK_INSTALL_DIFF_SCENARIO required")
             .parse()
             .expect("scenario integer");
-        let start: usize = std::env::var("GLRMASK_INSTALL_DIFF_START")
+        let start: usize = crate::env::var("GLRMASK_INSTALL_DIFF_START")
             .expect("GLRMASK_INSTALL_DIFF_START required")
             .parse()
             .expect("start integer");
-        let count: usize = std::env::var("GLRMASK_INSTALL_DIFF_COUNT")
+        let count: usize = crate::env::var("GLRMASK_INSTALL_DIFF_COUNT")
             .expect("GLRMASK_INSTALL_DIFF_COUNT required")
             .parse()
             .expect("count integer");
@@ -5485,7 +5485,7 @@ mod tests {
         let mut core =
             Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
                 .expect("load core");
-        let dispatch_name = std::env::var("PHASE1_DISPATCH")
+        let dispatch_name = crate::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
             Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
@@ -6186,7 +6186,7 @@ mod tests {
         impl TrapGuard {
             fn set() -> Self {
                 unsafe {
-                    std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                    crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1"));
                 }
                 Self
             }
@@ -6194,7 +6194,7 @@ mod tests {
         impl Drop for TrapGuard {
             fn drop(&mut self) {
                 unsafe {
-                    std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                    crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None);
                 }
             }
         }
@@ -6460,14 +6460,14 @@ mod tests {
         impl TrapGuard {
             fn set() -> Self {
                 unsafe {
-                    std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                    crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1"));
                 }
                 Self(true)
             }
             fn clear(&mut self) {
                 if self.0 {
                     unsafe {
-                        std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                        crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None);
                     }
                     self.0 = false;
                 }
@@ -7368,7 +7368,7 @@ mod tests {
             (internals, originals)
         }
 
-        let path = std::env::var("PARSER_ALIVE_BIN")
+        let path = crate::env::var("PARSER_ALIVE_BIN")
             .expect("PARSER_ALIVE_BIN must name an existing composed .static.bin artifact");
         let bytes = std::fs::read(&path).expect("read artifact bytes");
         let digest = blake3::hash(&bytes);

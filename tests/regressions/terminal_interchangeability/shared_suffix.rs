@@ -13,10 +13,10 @@ use glrmask::{Constraint as Constraint, Vocab};
 #[test]
 fn shared_suffix_terminals_are_not_interchangeable_under_prefix_byte_partition() {
     unsafe {
-        std::env::remove_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
-        std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE", "1");
-        std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
-        std::env::set_var("GLRMASK_SPLIT_L2P_VOCAB", "0");
+        glrmask::__private::set_env_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", None);
+        glrmask::__private::set_env_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE", Some("1"));
+        glrmask::__private::set_env_var("GLRMASK_FORCE_ALL_L2P", Some("1"));
+        glrmask::__private::set_env_var("GLRMASK_SPLIT_L2P_VOCAB", Some("0"));
     }
     let grammar = "start: A | B\nA: \"at\"\nB: \"bt\"";
     let v = Vocab::new(vec![(0u32, b"a".to_vec())]);

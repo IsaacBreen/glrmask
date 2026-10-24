@@ -65,7 +65,7 @@ fn product_has_parser_relevant_multi_lane_overlap(
                 }
             }
             if live_lanes.len() >= 2 {
-                if std::env::var_os("GLRMASK_DEBUG_COMPOSE_RUNTIME_LEXER_PRODUCT").is_some() {
+                if crate::env::var_os("GLRMASK_DEBUG_COMPOSE_RUNTIME_LEXER_PRODUCT").is_some() {
                     eprintln!(
                         "[glrmask/debug][compose_runtime_lexer_overlap] product_state={} parser_state={} subset={:?} live_lanes={:?}",
                         product_state,
@@ -82,7 +82,7 @@ fn product_has_parser_relevant_multi_lane_overlap(
 }
 
 fn env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|value| {
+    crate::env::var(name).ok().map(|value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "no" | "off"
@@ -124,7 +124,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
     if force == Some(false) {
         return report;
     }
-    let max_source_states = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_MAX_SOURCE_STATES")
+    let max_source_states = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_MAX_SOURCE_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
@@ -134,14 +134,14 @@ pub(super) fn maybe_install_runtime_lexer_product(
     }
 
     report.attempted = true;
-    let state_limit = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_MAX_PRODUCT_STATES")
+    let state_limit = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_MAX_PRODUCT_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
         // A product that is already larger than the source cannot reduce the
         // visible frontier, so abort the subset construction at that point.
         .unwrap_or(source_states.max(1));
-    let transition_growth_percent = std::env::var(
+    let transition_growth_percent = crate::env::var(
         "GLRMASK_COMPOSE_RUNTIME_LEXER_MAX_TRANSITION_GROWTH_PERCENT",
     )
     .ok()
@@ -161,7 +161,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
     report.product_states = candidate.source_subsets.len();
     report.product_transitions = candidate.tokenizer.transition_count();
     report.parser_overlap = product_has_parser_relevant_multi_lane_overlap(constraint, &candidate);
-    let minimum_reduction_percent = std::env::var(
+    let minimum_reduction_percent = crate::env::var(
         "GLRMASK_COMPOSE_RUNTIME_LEXER_MIN_STATE_REDUCTION_PERCENT",
     )
     .ok()

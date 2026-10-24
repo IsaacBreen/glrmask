@@ -400,7 +400,7 @@ fn next_nonzero_generation(generation: &mut u32, stamps: &mut [u32]) -> u32 {
 }
 
 fn dense_segment_cache_min_entries() -> usize {
-    std::env::var("GLRMASK_PM_DENSE_SEGMENT_CACHE_MIN_ENTRIES")
+    crate::env::var("GLRMASK_PM_DENSE_SEGMENT_CACHE_MIN_ENTRIES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
@@ -1301,11 +1301,11 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
             .map(|terminals| terminal_sets.intern_slice(terminals))
             .collect()
     };
-    let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
+    let parallel_depth = crate::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(2);
-    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
+    let parallel_min_active = crate::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(512);
@@ -1329,7 +1329,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
     let mut active_seen_stamps = vec![0u32; num_states];
     let mut active_seen_positions = vec![0u32; num_states];
     let serial_segment_cache_enabled = (rayon::current_num_threads() == 1 || parallel_depth == 0)
-        && std::env::var_os("GLRMASK_DISABLE_PM_SEGMENT_VECTOR_CACHE").is_none();
+        && crate::env::var_os("GLRMASK_DISABLE_PM_SEGMENT_VECTOR_CACHE").is_none();
     let mut serial_segment_cache =
         serial_segment_cache_enabled.then(SerialSegmentVectorCache::default);
     let root_active_set_id = serial_segment_cache

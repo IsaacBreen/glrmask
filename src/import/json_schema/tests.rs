@@ -1,5 +1,7 @@
 use serde_json::json;
-use std::{env, ffi::OsString, process::Command};
+use std::{ffi::OsString, process::Command};
+
+use crate::env;
 
 use super::ast::StringSchema;
 use super::config::{JsonSchemaConfig, QuoteMerge};
@@ -166,7 +168,7 @@ impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let original = env::var_os(key);
         unsafe {
-            env::set_var(key, value);
+            crate::__private::set_env_var(key, Some(value));
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" || key == GLRMASK_LLGUIDANCE_COMPAT_ENV {
             let mode = if value != "0" && !value.is_empty() {
@@ -182,7 +184,7 @@ impl EnvVarGuard {
     fn unset(key: &'static str) -> Self {
         let original = env::var_os(key);
         unsafe {
-            env::remove_var(key);
+            crate::__private::set_env_var(key, None);
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" || key == GLRMASK_LLGUIDANCE_COMPAT_ENV {
             super::string::TEST_COMPAT_MODE.with(|cell| cell.set(super::string::JsonStringCompatMode::JsonSchema));
@@ -195,7 +197,7 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         let original_mode = match &self.original {
             Some(value) => unsafe {
-                env::set_var(self.key, value);
+                crate::__private::set_env_var(self.key, Some(value.to_str().expect("environment override is valid UTF-8")));
                 let val = value.to_string_lossy();
                 if val != "0" && !val.is_empty() {
                     super::string::JsonStringCompatMode::LlGuidanceNative
@@ -204,7 +206,7 @@ impl Drop for EnvVarGuard {
                 }
             },
             None => unsafe {
-                env::remove_var(self.key);
+                crate::__private::set_env_var(self.key, None);
                 super::string::JsonStringCompatMode::JsonSchema
             },
         };
@@ -324,7 +326,7 @@ fn literal_terminal_splitting_env_toggle() {
             (Some("off"), false),
             (Some("1"), true),
         ] {
-            let mut command = Command::new(env::current_exe().unwrap());
+            let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .arg("--exact")
                 .arg("import::json_schema::tests::literal_terminal_splitting_env_toggle")
@@ -2879,7 +2881,7 @@ fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disab
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _compat = CompatModeGuard::json_schema();
     if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
-        let status = Command::new(env::current_exe().unwrap())
+        let status = Command::new(std::env::current_exe().unwrap())
             .arg("--nocapture")
             .arg("huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disabled")
             .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD", "1")
@@ -2918,7 +2920,7 @@ fn huge_shared_additional_exclusion_set_uses_shared_addback_by_default() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _compat = CompatModeGuard::json_schema();
     if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
-        let status = Command::new(env::current_exe().unwrap())
+        let status = Command::new(std::env::current_exe().unwrap())
             .arg("--nocapture")
             .arg("huge_shared_additional_exclusion_set_uses_shared_addback_by_default")
             .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD", "1")
@@ -6278,7 +6280,7 @@ fn dependent_schemas_still_errors() {
     });
 
     let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("Unimplemented keys"), "{error}");
+    assert!(error.contains("unsupported keywords"), "{error}");
     assert!(error.contains("dependentSchemas"), "{error}");
 }
 
@@ -6538,7 +6540,7 @@ fn dump_pathological_nested_repeat_prepared_terminal() {
         {
             let factored = crate::automata::lexer::compile::factor_regex_expr((**left).clone());
             eprintln!("PATHOLOGICAL_FACTORED_LEFT={factored:#?}");
-            if std::env::var_os("GLRMASK_DUMP_COMPILE").is_some() {
+            if crate::env::var_os("GLRMASK_DUMP_COMPILE").is_some() {
                 let started = std::time::Instant::now();
                 let regex = crate::automata::lexer::compile::build_regex(std::slice::from_ref(&factored));
                 eprintln!(

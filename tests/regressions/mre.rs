@@ -14,7 +14,7 @@ impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let original = env::var_os(key);
         unsafe {
-            env::set_var(key, value);
+            glrmask::__private::set_env_var(key, Some(value));
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
@@ -28,12 +28,12 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         let original_enabled = match &self.original {
             Some(value) => unsafe {
-                env::set_var(self.key, value);
+                glrmask::__private::set_env_var(self.key, Some(value.to_str().expect("environment override is valid UTF-8")));
                 let val = value.to_string_lossy();
                 val != "0" && !val.is_empty()
             },
             None => unsafe {
-                env::remove_var(self.key);
+                glrmask::__private::set_env_var(self.key, None);
                 false
             },
         };

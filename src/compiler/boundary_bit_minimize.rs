@@ -139,7 +139,7 @@ impl Masks {
     fn new(rows: usize) -> Self {
         Self::with_storage(rows,
             crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_MASK_INDEX"),
-            std::env::var_os("GLRMASK_BOUNDARY_MIN_SPARSE_OVERLAP").is_some())
+            crate::env::var_os("GLRMASK_BOUNDARY_MIN_SPARSE_OVERLAP").is_some())
     }
 
     fn with_storage(rows: usize, use_index: bool, use_sparse_overlap: bool) -> Self {
@@ -689,7 +689,7 @@ fn minimize_core(input:&DWA,mut masks:Masks,default_label:i32,compress:bool)->Op
 /// Use the smaller exact observation algebra by default. Explicit zero keeps
 /// the historical all-interned-weights implementation for diagnostic A/B runs.
 fn referenced_observations_enabled() -> bool {
-    std::env::var("GLRMASK_BOUNDARY_MIN_REFERENCED_OBSERVATIONS")
+    crate::env::var("GLRMASK_BOUNDARY_MIN_REFERENCED_OBSERVATIONS")
         .map_or(true, |value| !matches!(value.trim(), "0" | "false" | "off"))
 }
 
@@ -772,7 +772,7 @@ fn minimize_prepared_with_observations(
         if !states[s].guarded {states[s].edges.retain(|e|e.mask!=0);}
     }
     profile.push_ms=started.elapsed().as_secs_f64()*1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][min_support_dedup] enabled={dedup_support} duplicates={duplicate_contributions} indexed_masks={} push_ms={:.3}",
             seen_contribution.len(),profile.push_ms);
     }
@@ -829,7 +829,7 @@ fn minimize_prepared_with_observations(
     let mut groups=vec![Group{domain:0,signature:Signature{final_mask:0,edges:Vec::new()},guarded:false}];
     let skip_redundant_merges=crate::compiler::boundary_env::enabled(
         "GLRMASK_BOUNDARY_MIN_CONTAINED_MERGES");
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][min_contained_merges] enabled={skip_redundant_merges}");
     }
     for mut bucket in buckets {
@@ -891,7 +891,7 @@ fn minimize_prepared_with_observations(
     let started=Instant::now();
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_POINT_DECODE") {
         let selected=masks.prepare_point_decoder().is_some();
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
             eprintln!("[glrmask/profile][min_point_decoder] selected={selected} rows={} points={} prepare_ms={:.3}",
                 masks.decoded_point_rows.as_ref().map_or(0,Vec::len),
                 masks.decoded_point_rows.as_ref().map_or(0,|rows|rows.iter().map(|(_,p)|p.len()).sum::<usize>()),
@@ -979,7 +979,7 @@ fn minimize_native_impl(
     let selected = referenced_observations_enabled();
     let candidate = minimize_native_with_observations(input, default_label, decoder, selected)?;
     #[cfg(feature = "internal-api")]
-    if selected && std::env::var_os("GLRMASK_VALIDATE_MIN_REFERENCED_OBSERVATIONS").is_some() {
+    if selected && crate::env::var_os("GLRMASK_VALIDATE_MIN_REFERENCED_OBSERVATIONS").is_some() {
         let reference = minimize_native_with_observations(input, default_label, decoder, false)
             .expect("reference observation minimizer declined");
         // All explicit labels plus a representative unnamed label cover the

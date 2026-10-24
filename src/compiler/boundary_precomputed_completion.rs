@@ -74,7 +74,7 @@ pub(crate) fn saved_wire(constraint:&Constraint)->Option<&[u8]>{
 pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result<bool,String>{
     let started=Instant::now();
     if saved_wire(constraint).is_some(){
-        if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
+        if crate::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
         return Ok(true);
     }
     if !std::ptr::eq(constraint.composition_tokenizer(),constraint.tokenizer.as_ref())
@@ -90,9 +90,9 @@ pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result
     let wire:Arc<[u8]>=match index.to_bytes(){Ok(b)=>Arc::from(b),Err(completion_index::Error::ResourceLimit)=>return Ok(false),Err(e)=>return Err(format!("completion index serialization: {e:?}"))};
     let prepared=PreparedCompletion::load(Arc::clone(&source),wire)?;
     let elapsed=started.elapsed().as_secs_f64()*1000.;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_completion_prepare] states={} classes={} vocab={} bytes={} total_ms={elapsed:.3} profile={profile:?}",source.num_states(),prepared.context.class_count(),words.len(),prepared.wire.len());}
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_completion_prepare] states={} classes={} vocab={} bytes={} total_ms={elapsed:.3} profile={profile:?}",source.num_states(),prepared.context.class_count(),words.len(),prepared.wire.len());}
     constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;
-    if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
+    if crate::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
     Ok(true)
 }
 
@@ -122,7 +122,7 @@ impl PreparedSourceSpan {
     pub(crate) fn refine(&self,merged:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<FirstRefinement>{
         let fast=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_UNIFORM_FIRST_PROOF");
         let result=self.refine_impl(merged,vocab,scope,fast);
-        if fast && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_UNIFORM_FIRST_PROOF").is_some(){
+        if fast && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_UNIFORM_FIRST_PROOF").is_some(){
             let reference=self.refine_impl(merged,vocab,scope,false);
             assert_eq!(result.is_some(),reference.is_some());
             if let (Some(a),Some(b))=(&result,&reference){
@@ -262,7 +262,7 @@ fn prepare_cut_component(constraint:&mut Constraint,vocab:&Vocab)->Result<bool,S
     };
     let(prefix,_)=split_cut_wire(&old.wire)?;let wire=join_cut_wire(prefix,&bytes)?;
     let prepared=PreparedCompletion{context:Arc::clone(&old.context),wire,cut:Some(PreparedCut{reset,first})};
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_cut_prepare] states={} model_words={} reset_bytes={} total_ms={:.3}",source.num_states(),model.len(),bytes.len(),began.elapsed().as_secs_f64()*1000.0);}
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_cut_prepare] states={} model_words={} reset_bytes={} total_ms={:.3}",source.num_states(),model.len(),bytes.len(),began.elapsed().as_secs_f64()*1000.0);}
     constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;Ok(true)
 }
 
@@ -285,7 +285,7 @@ pub(crate) fn cut_support(
     let mut local=vec![false;n];for(q,&keep)in initial.iter().enumerate(){if keep{let i=q.checked_sub(offset)?;*local.get_mut(i)?=true;}}
     let parts=all.iter().map(|span|{let cut=span.prepared.cut.as_ref()?;Some(cut_query::Part{prefix:span.prepared.context.as_ref(),unions:&cut.first,reset:&cut.reset,terminal_offset:span.terminal_offset})}).collect::<Option<Vec<_>>>()?;
     let result=cut_query::query(nt as usize,&parts,owner,&local,vocab,ownership,disallowed,ignore,transparent,adjacency)?;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_prepared_cut] component={} tokens={} profile={:?}",owner.0,result.tokens.len(),result.profile);}
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_prepared_cut] component={} tokens={} profile={:?}",owner.0,result.tokens.len(),result.profile);}
     Some(super::boundary_cut_support::Result{tokens:result.tokens,profile:super::boundary_cut_support::Profile{states:result.profile.products,edges:result.profile.product_edges,raw_step_work:0,cut_pairs:result.profile.cut_pairs,match_events:result.profile.events,transfer_cache_entries:result.profile.transfers,mask_classes:result.profile.observations,setup_ms:result.profile.setup_ms,solve_ms:result.profile.solve_ms}})
 }
 

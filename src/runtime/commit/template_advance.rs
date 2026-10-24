@@ -97,7 +97,7 @@ pub(super) fn advance_stacks_template_dfa_owned(
 // It never references an LR table and is excluded from timed runs.
 fn debug_template_literal_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("GLRMASK_DIAG_TEMPLATE_LITERAL").is_some())
+    *ENABLED.get_or_init(|| crate::env::var_os("GLRMASK_DIAG_TEMPLATE_LITERAL").is_some())
 }
 
 fn debug_validate_template_output(
@@ -156,9 +156,9 @@ fn debug_validate_template_output(
             }
         }
     }
-    if terminal == 1 && std::env::var_os("GLRMASK_DIAG_TEMPLATE_TRACE").is_some() {
+    if terminal == 1 && crate::env::var_os("GLRMASK_DIAG_TEMPLATE_TRACE").is_some() {
         use std::io::Write;
-        let path = std::env::var("GLRMASK_DIAG_TEMPLATE_TRACE").unwrap();
+        let path = crate::env::var("GLRMASK_DIAG_TEMPLATE_TRACE").unwrap();
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
         let record = serde_json::json!({
             "terminal":terminal,
@@ -177,7 +177,7 @@ fn debug_validate_template_output(
             "actual_stacks":output.to_stacks(4096).map(|stacks|stacks.into_iter().map(|(stack,_)|stack).collect::<Vec<_>>()),
             "input_debug":format!("{input:?}"),
         });
-        let path = std::env::var("GLRMASK_DIAG_TEMPLATE_LITERAL_PATH")
+        let path = crate::env::var("GLRMASK_DIAG_TEMPLATE_LITERAL_PATH")
             .unwrap_or_else(|_| "template-literal-difference.json".into());
         std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
         panic!("template GSS output differs from independent literal interpretation for terminal {terminal}");

@@ -107,15 +107,15 @@ use structural_sharing::{
 
 #[inline]
 pub(crate) fn compose_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+    crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
 }
 
 /// The generic parser-DWA builder currently skips weighted minimization unless
 /// explicitly overridden. Boundary overlays are different: leaving their large
 /// intermediate DWA unminimized makes the subsequent component union explode.
 fn parser_builder_skips_internal_minimization() -> bool {
-    std::env::var("GLRMASK_SKIP_PARSER_DWA_MINIMIZE")
+    crate::env::var("GLRMASK_SKIP_PARSER_DWA_MINIMIZE")
         .ok()
         .map(|value| {
             let trimmed = value.trim();
@@ -127,7 +127,7 @@ fn parser_builder_skips_internal_minimization() -> bool {
 }
 
 fn boundary_parser_minimize_min_states() -> u32 {
-    std::env::var("GLRMASK_BOUNDARY_PARSER_MINIMIZE_MIN_STATES")
+    crate::env::var("GLRMASK_BOUNDARY_PARSER_MINIMIZE_MIN_STATES")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(64)
@@ -204,7 +204,7 @@ struct ParserDefaultDomainPlan {
 }
 
 fn symbolic_child_defaults_env_override() -> Option<bool> {
-    std::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULTS")
+    crate::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULTS")
         .ok()
         .map(|value| {
             !matches!(
@@ -215,7 +215,7 @@ fn symbolic_child_defaults_env_override() -> Option<bool> {
 }
 
 fn symbolic_child_default_min_saved_edges() -> usize {
-    std::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULT_MIN_SAVED_EDGES")
+    crate::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULT_MIN_SAVED_EDGES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4_096)
@@ -242,7 +242,7 @@ fn build_parser_default_domain_plan(
         components,
         num_parser_states,
         symbolic_child_defaults_env_override(),
-        std::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some(),
+        crate::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some(),
     )
 }
 
@@ -847,7 +847,7 @@ fn build_segmented_runtime_metadata(
             let direct = deterministic_component_union_root_dispatch_direct(
                 &segmented_components, automata_maps, global_state_count,
             ).ok_or_else(|| "two-DWA runtime requires a deterministic root-only component parser union".to_string())?;
-            if std::env::var_os("GLRMASK_VALIDATE_DIRECT_COMPONENT_ROOT_DISPATCH").is_some() {
+            if crate::env::var_os("GLRMASK_VALIDATE_DIRECT_COMPONENT_ROOT_DISPATCH").is_some() {
                 let reference = deterministic_component_union_root_dispatch(
                     &segmented_components, parser_state_relations,
                     &parser_default_domains.component_domains,
@@ -1573,9 +1573,9 @@ fn build_direct_component_token_coordinates(
             };
 
         let singleton_fast =
-            std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
+            crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
         let dense_child_buckets =
-            std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
+            crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
         if dense_child_buckets {
             let child_class_count = child.internal_token_count();
             let mut buckets = (0..child_class_count)
@@ -2155,7 +2155,7 @@ fn component_parser_nwa(
     }
 
     let prepared_source;
-    let source = if std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_HASHCONS_PREP").is_some()
+    let source = if crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_HASHCONS_PREP").is_some()
         && constraint.parser_dwa.num_states() >= 10_000
     {
         let started_at = Instant::now();
@@ -2198,7 +2198,7 @@ fn component_parser_nwa(
     }
 
     let top_accept = materialized_top_acceptance(constraint);
-    if std::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
+    if crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
         && !top_accept.is_empty()
     {
         let start = nwa.add_state();
@@ -2217,8 +2217,8 @@ fn component_parser_nwa(
         }
         nwa.start_states_mut().push(start);
     }
-    if std::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
-        && std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
+    if crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
+        && crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
         && let (Some(table), Some(local_ignore)) =
             (component.composed_table, constraint.ignore_terminal)
         && let Some(ignore_possible) = constraint.possible_matches.get(&local_ignore)
@@ -2382,7 +2382,7 @@ fn build_commit_templates_from_raw_templates(
 }
 
 fn defer_boundary_commit_templates() -> bool {
-    std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_COMMIT_TEMPLATES").is_none()
+    crate::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_COMMIT_TEMPLATES").is_none()
 }
 
 enum BoundaryParserWork {
@@ -2747,7 +2747,7 @@ fn publish_real_boundary_parser_work(
     let positive_build_ms = positive_started_at.elapsed().as_secs_f64() * 1000.0;
     let tsid_quotient = positive.quotient_boundary_tsids(&mut boundary_id_map);
     let normalize_started_at = Instant::now();
-    let parser_dwa = if std::env::var_os(
+    let parser_dwa = if crate::env::var_os(
         "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
     )
     .is_some()
@@ -2792,7 +2792,7 @@ fn publish_boundary_parser_candidate_for_state_count(
     positive.ensure_positive()?;
     let tsid_quotient = positive.quotient_boundary_tsids(&mut boundary_id_map);
     let normalize_started_at = Instant::now();
-    let small_coordinate = std::env::var_os(
+    let small_coordinate = crate::env::var_os(
         "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
     )
     .is_some()
@@ -2805,7 +2805,7 @@ fn publish_boundary_parser_candidate_for_state_count(
         return Err("state-count-only boundary publication requires small-boundary determinizer".into());
     }
 
-    if std::env::var_os("GLRMASK_EXPERIMENT_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
         let parser_dwa = positive
             .compact_runtime_dwa_for_parser_state_count(
                 num_parser_states,
@@ -2814,7 +2814,7 @@ fn publish_boundary_parser_candidate_for_state_count(
                 tsid_quotient.as_deref(),
             )
             .ok_or_else(|| "compact boundary runtime DWA rejected small coordinate".to_string())?;
-        if std::env::var_os("GLRMASK_VALIDATE_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
+        if crate::env::var_os("GLRMASK_VALIDATE_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
             let materialized = parser_dwa.to_generic_dwa();
             ensure_positive_runtime_parser_dwa(&materialized)?;
             let reference = match &positive {
@@ -3132,7 +3132,7 @@ impl PositiveBoundaryParser {
         &mut self,
         id_map: &mut InternalIdMap,
     ) -> Option<Vec<u32>> {
-        if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TSID_QUOTIENT").is_none() {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TSID_QUOTIENT").is_none() {
             return None;
         }
         let Self::Nwa(nwa) = self else {
@@ -3156,7 +3156,7 @@ impl PositiveBoundaryParser {
         }
 
         let remap_started_at = Instant::now();
-        let defer_weight_remap = std::env::var_os(
+        let defer_weight_remap = crate::env::var_os(
             "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
         )
         .is_some();
@@ -3590,7 +3590,7 @@ impl BoundaryParserWork {
                 parser_table_override,
             } => {
                 let table = parser_table_override.as_deref().unwrap_or(table);
-                if std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
+                if crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
                     && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
                 {
                     let old_tsids = id_map.num_tsids() as usize;
@@ -3613,7 +3613,7 @@ impl BoundaryParserWork {
                     }
                 }
                 let build_started_at = Instant::now();
-                let nondeterministic_bundles_requested = std::env::var_os(
+                let nondeterministic_bundles_requested = crate::env::var_os(
                     "GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES",
                 )
                 .is_some();
@@ -3623,7 +3623,7 @@ impl BoundaryParserWork {
                 // publication pass than it saves during bundle construction.
                 // Key this on the boundary token coordinate itself: it is a
                 // representation-size policy, not a grammar/layout heuristic.
-                let nondeterministic_bundle_min_tokens = std::env::var(
+                let nondeterministic_bundle_min_tokens = crate::env::var(
                     "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS",
                 )
                 .ok()
@@ -3663,7 +3663,7 @@ impl BoundaryParserWork {
                     ));
                 };
                 let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
-                if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some()
+                if crate::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some()
                     && id_map.num_tsids() as usize <= 16
                     && id_map.num_internal_tokens() as usize <= 64
                 {
@@ -3696,7 +3696,7 @@ impl BoundaryParserWork {
                 let resolve_started_at = Instant::now();
                 let allow_grouped_cancellation = table.construction
                     == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged;
-                let resolved_reverse_topo = if std::env::var_os(
+                let resolved_reverse_topo = if crate::env::var_os(
                     "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_RESOLUTION",
                 )
                 .is_some()
@@ -3720,14 +3720,14 @@ impl BoundaryParserWork {
                 let hashcons_started_at = Instant::now();
                 let before_hashcons_states = parser_nwa.num_states();
                 let before_hashcons_transitions = parser_nwa.num_transitions();
-                if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                if crate::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA")
                     .is_some()
                 {
                     parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
                         parser_nwa,
                         resolved_reverse_topo,
                     );
-                } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                } else if crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
                     .is_some()
                 {
                     parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
@@ -3795,9 +3795,9 @@ impl BoundaryParserWork {
             });
         }
         let fused_signed_requested =
-            std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some();
+            crate::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some();
         if fused_signed_requested
-            && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
             && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
         {
             let old_tsids = id_map.num_tsids() as usize;
@@ -3826,11 +3826,11 @@ impl BoundaryParserWork {
                 }
             }
         }
-        let nondeterministic_bundles_requested = std::env::var_os(
+        let nondeterministic_bundles_requested = crate::env::var_os(
             "GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES",
         )
         .is_some();
-        let nondeterministic_bundle_min_tokens = std::env::var(
+        let nondeterministic_bundle_min_tokens = crate::env::var(
             "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS",
         )
         .ok()
@@ -3911,17 +3911,17 @@ impl BoundaryParserWork {
                 build_ms,
             });
         }
-        if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_SIGNED_BOUNDARY_NWA").is_some() {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_SIGNED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_signed_acyclic_nwa_fast(parser_nwa);
         }
         let resolved_reverse_topo =
             resolve_negative_codes_in_nwa(&mut parser_nwa, allow_grouped_cancellation);
-        if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
                 parser_nwa,
                 resolved_reverse_topo,
             );
-        } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
+        } else if crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
         }
         let mut template_cache = vec![None; num_terminals as usize];
@@ -3996,7 +3996,7 @@ impl BoundaryParserWork {
                 );
                 let parser_dwa = if parser_dwa.num_states() >= boundary_parser_minimize_min_states()
                     && parser_builder_skips_internal_minimization()
-                    && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
+                    && crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
                 {
                     minimize_owned(reverse_hashcons_owned(parser_dwa))
                 } else {
@@ -4647,7 +4647,7 @@ fn scan_component_residual_start_groups(
     candidate_groups: &[(u32, Vec<u32>)],
 ) -> FxHashMap<ResidualScanResult, Vec<u32>> {
     let validate =
-        std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TSID_REPRESENTATIVE_SCAN").is_some();
+        crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_TSID_REPRESENTATIVE_SCAN").is_some();
     let mut starts_by_scan = FxHashMap::<ResidualScanResult, Vec<u32>>::default();
     let mut by_component = vec![Vec::<(u32, &[u32])>::new(); components.len()];
 
@@ -5259,7 +5259,7 @@ fn boundary_token_graph_has_accepting_path(
     follow_transparent_terminals: &BitSet,
 ) -> bool {
     let accept_complete_cross_candidates =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_COMPLETE_PATH_DISCOVERY").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_COMPLETE_PATH_DISCOVERY").is_some();
     let start = BoundaryTokenNodeKey {
         offset: 0,
         last_terminal: u32::MAX,
@@ -5350,7 +5350,7 @@ fn build_boundary_token_graph(
     follow_transparent_terminals: &BitSet,
 ) -> Option<(Vec<BoundaryTokenNode>, Vec<bool>, Vec<bool>)> {
     let accept_complete_cross_candidates =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_COMPLETE_PATH_DISCOVERY").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_COMPLETE_PATH_DISCOVERY").is_some();
     let mut nodes = Vec::<BoundaryTokenNode>::new();
     let mut node_ids = FxHashMap::<BoundaryTokenNodeKey, usize>::default();
     let mut queue = std::collections::VecDeque::<usize>::new();
@@ -5594,7 +5594,7 @@ fn boundary_candidate_state_ranges_by_token(
                 });
             });
         };
-        if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some() {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some() {
             let mut materialized = (*constraint).clone();
             if materialized.materialize_non_dwa_weights_for_compilation().is_ok() {
                 let union = Weight::union_all(materialized.possible_matches.values());
@@ -5623,7 +5623,7 @@ fn boundary_candidate_state_ranges_by_token_reference(
 ) -> BTreeMap<u32, Vec<(usize, u32, u32)>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
     let union_possible_matches =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some();
     let mut by_token = BTreeMap::<u32, Vec<(usize, u32, u32)>>::new();
     for (component_index, constraint) in components.iter().enumerate() {
         if !constraint.possible_matches_complete {
@@ -6175,7 +6175,7 @@ fn boundary_interface_adjacent_pair_candidates(
         .max()
         .unwrap_or(0) as usize;
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
-    let sparse_summaries = std::env::var_os(
+    let sparse_summaries = crate::env::var_os(
         "GLRMASK_DISABLE_SPARSE_INTERFACE_BYTE_SUMMARIES",
     )
     .is_none();
@@ -6437,7 +6437,7 @@ fn discover_boundary_token_paths(
     // table: those are component-local paths, not boundary crossings.  Keep the
     // experiment flag as an opt-in for older/non-authoritative callers.
     let use_component_scoped_identity = prefer_cross_interface_only
-        || std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some();
+        || crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some();
     let boundary_context_states = if use_component_scoped_identity {
         FxHashSet::default()
     } else {
@@ -6448,7 +6448,7 @@ fn discover_boundary_token_paths(
             context_terminals,
         )
     };
-    let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
+    let use_prefilter = crate::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let all_multi_byte_entries = vocab
         .entries_map()
         .iter()
@@ -6471,7 +6471,7 @@ fn discover_boundary_token_paths(
     let cross_interface_only = use_prefilter
         && ignore_terminals.is_empty()
         && (prefer_cross_interface_only
-            || std::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some());
+            || crate::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some());
     // In the exact cross-interface factor, seed-only tokens are component-local
     // language and are deliberately excluded from boundary repair. Avoid the
     // full-vocabulary seed-DFA scan whose result would be discarded below.
@@ -6532,7 +6532,7 @@ fn discover_boundary_token_paths(
     if let Some(limit) = candidate_limit {
         prefilter.retain(|token| limit.contains(token));
     }
-    if let Some(path) = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_ALLOWLIST") {
+    if let Some(path) = crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_ALLOWLIST") {
         let allowed = std::fs::read_to_string(path)
             .expect("read experimental boundary token allowlist")
             .lines()
@@ -6560,7 +6560,7 @@ fn discover_boundary_token_paths(
     // ~271k unique Llama-3 suffixes even when only a few thousand tokens could
     // witness a boundary.
     let suffix_cache_started_at = Instant::now();
-    let reset_suffix_cache = if std::env::var_os("GLRMASK_COMPOSE_DISABLE_SUFFIX_CACHE")
+    let reset_suffix_cache = if crate::env::var_os("GLRMASK_COMPOSE_DISABLE_SUFFIX_CACHE")
         .is_some()
     {
         None
@@ -6596,7 +6596,7 @@ fn discover_boundary_token_paths(
         vocab,
         &prefilter,
     );
-    if std::env::var_os("GLRMASK_VALIDATE_FAST_BOUNDARY_CANDIDATE_RANGES").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_FAST_BOUNDARY_CANDIDATE_RANGES").is_some() {
         let reference = boundary_candidate_state_ranges_by_token_reference(
             components,
             tokenizer_state_offsets,
@@ -6657,9 +6657,9 @@ fn discover_boundary_token_paths(
     let token_union_survivors = AtomicUsize::new(0);
     let profile_discovery_detail = compose_profile_enabled();
     let boolean_graph_prefilter =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_BOOLEAN_PREFILTER").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_BOOLEAN_PREFILTER").is_some();
     let token_union_prefilter =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_UNION_PREFILTER").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_UNION_PREFILTER").is_some();
     let exact_scan_started_at = Instant::now();
     let results = multi_byte_entries
         .par_iter()
@@ -6919,7 +6919,7 @@ fn discover_boundary_token_paths(
             discovery_total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    if std::env::var_os("GLRMASK_DUMP_COMPOSE_BOUNDARY_TOKENS").is_some() {
+    if crate::env::var_os("GLRMASK_DUMP_COMPOSE_BOUNDARY_TOKENS").is_some() {
         eprintln!(
             "[glrmask/dump][constraint_boundary_tokens] prefilter={:?} exact={:?}",
             prefilter,
@@ -7129,7 +7129,7 @@ fn collect_one_byte_seed_relations(
     relations: &mut BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
 ) {
     let candidate = if rayon::current_num_threads() == 1
-        || std::env::var_os("GLRMASK_COMPOSE_SERIAL_ONE_BYTE_REFERENCE").is_some()
+        || crate::env::var_os("GLRMASK_COMPOSE_SERIAL_ONE_BYTE_REFERENCE").is_some()
     {
         collect_one_byte_seed_relations_serial(
             tokenizer,
@@ -7145,7 +7145,7 @@ fn collect_one_byte_seed_relations(
             candidate_states,
         )
     };
-    if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_ONE_BYTE_PARALLEL").is_some()
+    if crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_ONE_BYTE_PARALLEL").is_some()
         && rayon::current_num_threads() > 1
     {
         let reference = collect_one_byte_seed_relations_serial(
@@ -7215,7 +7215,7 @@ fn collect_one_byte_seed_relations_components(
             &candidate_states,
             &mut local_relations,
         );
-        if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_ONE_BYTE_STATE_INDEX").is_some() {
+        if crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_ONE_BYTE_STATE_INDEX").is_some() {
             let all_states = (0..component.tokenizer.num_states()).collect::<Vec<_>>();
             let reference = collect_one_byte_seed_relations_serial(
                 &component.tokenizer,
@@ -7772,7 +7772,7 @@ fn direct_boundary_terminal_automaton(
     let mut delta_single_lane_starts = 0usize;
     let mut delta_start_groups = 0usize;
     let cross_lane_only =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_CROSS_LANE_ONLY").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_CROSS_LANE_ONLY").is_some();
 
     for witness in &discovery.witnesses {
         let Some(internal_token) = id_map.internal_token_for_original(witness.token_id) else {
@@ -8067,7 +8067,7 @@ fn direct_boundary_terminal_automaton(
                     }
                     match lane {
                         DeltaLane::CrossedFull => {
-                            if std::env::var_os("GLRMASK_EXPERIMENT_STRICT_INTERFACE_CROSS_LANE").is_some() {
+                            if crate::env::var_os("GLRMASK_EXPERIMENT_STRICT_INTERFACE_CROSS_LANE").is_some() {
                                 key.crossed && witness.nodes[key.local].key.interface_witnessed
                             } else {
                                 key.crossed
@@ -8284,7 +8284,7 @@ fn direct_boundary_terminal_automaton(
             )
         } else {
             let started = Instant::now();
-            let prefix_dwa_requested = std::env::var_os(
+            let prefix_dwa_requested = crate::env::var_os(
                 "GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PREFIX_DWA",
             )
             .is_some();
@@ -8299,7 +8299,7 @@ fn direct_boundary_terminal_automaton(
                     "small boundary terminal prefix-DWA construction exceeded exact caps".to_string()
                 })?;
                 prefix_dwa_states = candidate.num_states();
-                if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TERMINAL_PREFIX_DWA").is_some() {
+                if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TERMINAL_PREFIX_DWA").is_some() {
                     let reference = determinize(&nwa).map_err(|error| error.to_string())?;
                     let difference = find_difference(&candidate, &reference)
                         .map_err(|error| error.to_string())?;
@@ -8321,7 +8321,7 @@ fn direct_boundary_terminal_automaton(
             };
             let determinize_ms = started.elapsed().as_secs_f64() * 1000.0;
             let started = Instant::now();
-            let mut dwa = if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_HASHCONS_ONLY")
+            let mut dwa = if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_HASHCONS_ONLY")
                 .is_some()
             {
                 reverse_hashcons_owned(dwa)
@@ -9110,7 +9110,7 @@ fn determinize_epsilon_free_component_union(
     }
 
     let preallocate_raw_singletons =
-        std::env::var_os("GLRMASK_EXPERIMENT_PREALLOCATE_RAW_SINGLETONS").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_PREALLOCATE_RAW_SINGLETONS").is_some();
     let mut preallocated_nondeterministic = Vec::<u32>::new();
     let (mut states, mut singleton_states, mut singleton_count) = if preallocate_raw_singletons {
         let states = raw_states
@@ -9225,11 +9225,11 @@ fn determinize_epsilon_free_component_union(
     let mut cached_residual_rows =
         FxHashMap::<(u32, usize), Arc<ResidualEdgeIntersections>>::default();
     let use_residual_row_cache =
-        std::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_RESIDUAL_ROW_CACHE").is_none();
+        crate::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_RESIDUAL_ROW_CACHE").is_none();
     let use_interval_pair_runs =
-        std::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_INTERVAL_RUNS").is_none();
+        crate::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_INTERVAL_RUNS").is_none();
     let defer_support_unions =
-        std::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_DEFER_SUPPORT_UNIONS").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_DIRECT_UNION_DEFER_SUPPORT_UNIONS").is_none()
             && rayon::current_num_threads() > 1;
     let mut deferred_union_ids = FxHashMap::<(usize, usize), usize>::default();
     let mut deferred_union_jobs = Vec::<(Weight, Weight)>::new();
@@ -9240,7 +9240,7 @@ fn determinize_epsilon_free_component_union(
     let profiled_local_intersection_lookups = std::cell::Cell::new(0usize);
     let profiled_global_intersection_lookups = std::cell::Cell::new(0usize);
     let profiled_row_cache_build_intersections = std::cell::Cell::new(0usize);
-    let residual_prefetch_min_raw_states = std::env::var(
+    let residual_prefetch_min_raw_states = crate::env::var(
         "GLRMASK_DIRECT_UNION_RESIDUAL_PREFETCH_MIN_RAW_STATES",
     )
     .ok()
@@ -9248,9 +9248,9 @@ fn determinize_epsilon_free_component_union(
     .unwrap_or(65_536);
     let use_parallel_residual_row_prefetch = use_residual_row_cache
         && raw_states.len() >= residual_prefetch_min_raw_states
-        && std::env::var_os("GLRMASK_DISABLE_PARALLEL_RESIDUAL_ROW_PREFETCH").is_none()
+        && crate::env::var_os("GLRMASK_DISABLE_PARALLEL_RESIDUAL_ROW_PREFETCH").is_none()
         && rayon::current_num_threads() > 1;
-    let residual_row_prefetch_batch = std::env::var("GLRMASK_RESIDUAL_ROW_PREFETCH_BATCH")
+    let residual_row_prefetch_batch = crate::env::var("GLRMASK_RESIDUAL_ROW_PREFETCH_BATCH")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(8192)
@@ -9283,7 +9283,7 @@ fn determinize_epsilon_free_component_union(
             }
             let jobs = missing.into_iter().collect::<Vec<_>>();
             let dedup_intersection_jobs =
-                std::env::var_os("GLRMASK_DISABLE_DEDUP_RESIDUAL_PREFETCH_JOBS").is_none();
+                crate::env::var_os("GLRMASK_DISABLE_DEDUP_RESIDUAL_PREFETCH_JOBS").is_none();
             let prepared = if dedup_intersection_jobs {
                 // Read source rows in parallel, then intern exact
                 // (residual-prefix, source-edge-weight) algebra jobs across the
@@ -10328,8 +10328,8 @@ impl<'a> DeferredComponentParserUnionView<'a> {
             || constraints.len() != tokenizer_state_offsets.len()
             || constraints.len() != terminal_offsets.len()
             || constraints.len() != default_domains.len()
-            || (std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
-                && std::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none())
+            || (crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
+                && crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none())
         {
             return None;
         }
@@ -10474,7 +10474,7 @@ struct PreparedOwnedComponentArtifacts {
 fn prebuild_segmented_token_mask_caches(
     id_map: &InternalIdMap,
 ) -> (Option<crate::runtime::InternalTokenMaskPrebuild>, f64) {
-    if std::env::var_os("GLRMASK_EXPERIMENT_PREBUILD_SEGMENTED_TOKEN_MASK_CACHES").is_none() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_PREBUILD_SEGMENTED_TOKEN_MASK_CACHES").is_none() {
         return (None, 0.0);
     }
     let started_at = Instant::now();
@@ -10938,7 +10938,7 @@ fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
     }
     let classify_ms = classify_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
 
-    let renumber_by_old_id = std::env::var_os(
+    let renumber_by_old_id = crate::env::var_os(
         "GLRMASK_EXPERIMENT_HASHCONS_RENUMBER_SKIP_SORT",
     )
     .is_some();
@@ -11492,7 +11492,7 @@ fn compose_component_parser_dwas_and_possible_matches(
     };
 
     let direct_started_at = Instant::now();
-    let direct = if std::env::var_os("GLRMASK_COMPOSE_GENERIC_COMPONENT_UNION").is_some() {
+    let direct = if crate::env::var_os("GLRMASK_COMPOSE_GENERIC_COMPONENT_UNION").is_some() {
         None
     } else {
         determinize_epsilon_free_component_union(
@@ -11503,7 +11503,7 @@ fn compose_component_parser_dwas_and_possible_matches(
     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
     let (dwa, union_path, synthetic_states, append_ms, determinize_ms) =
         if let Some((direct_dwa, synthetic_states)) = direct {
-            if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_DIRECT_UNION").is_some() {
+            if crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_DIRECT_UNION").is_some() {
                 let (reference, _, _) = build_generic()?;
                 let difference = find_difference(&direct_dwa, &reference)
                     .map_err(|error| error.to_string())?;
@@ -11902,7 +11902,7 @@ fn profile_exact_boundary_parser_delta(
     boundary_dwa: &DWA,
     num_parser_states: u32,
 ) {
-    if std::env::var_os("GLRMASK_PROFILE_EXACT_BOUNDARY_PARSER_DELTA").is_none() {
+    if crate::env::var_os("GLRMASK_PROFILE_EXACT_BOUNDARY_PARSER_DELTA").is_none() {
         return;
     }
     let total_started = Instant::now();
@@ -12077,7 +12077,7 @@ fn union_boundary_parser_dwa(
 ) -> Result<MappedArtifact<(DWA, PossibleMatches)>, String> {
     let total_started_at = Instant::now();
     let pair_started_at = Instant::now();
-    let paired = if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_RECONCILE").is_some() {
+    let paired = if crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_RECONCILE").is_some() {
         component_artifacts.pair_forced_common(boundary)
     } else {
         pair_boundary_into_component_refinement(component_artifacts, boundary)
@@ -12146,7 +12146,7 @@ fn union_boundary_parser_dwa(
     };
 
     let direct_started_at = Instant::now();
-    let direct = if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_UNION").is_some() {
+    let direct = if crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_UNION").is_some() {
         None
     } else {
         determinize_epsilon_free_component_union(
@@ -12157,7 +12157,7 @@ fn union_boundary_parser_dwa(
     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
     let (parser_dwa, union_path, synthetic_states, append_ms, determinize_ms) =
         if let Some((direct_dwa, synthetic_states)) = direct {
-            if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_BOUNDARY_DIRECT_UNION").is_some() {
+            if crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_BOUNDARY_DIRECT_UNION").is_some() {
                 let (reference, _, _) = build_generic()?;
                 let extra_positive_labels = component_dwa
                     .states()
@@ -12502,7 +12502,7 @@ fn rebuild_transported_component_templates(
     active_terminals: &[bool],
 ) -> BTreeMap<u32, UnweightedDfa> {
     let profile_transport =
-        std::env::var_os("GLRMASK_PROFILE_TEMPLATE_TRANSPORT").is_some();
+        crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_TRANSPORT").is_some();
     let mut result = BTreeMap::new();
     for (component_index, component) in components.iter().copied().enumerate() {
         let component_started = Instant::now();
@@ -13063,8 +13063,8 @@ fn factor_one_terminal_seed_relations(
     };
 
     let scoped_ignore_shadow_is_separately_supplied = |terminal: u32| -> bool {
-        if std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_SHADOW_REUSE").is_none()
-            || std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_none()
+        if crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_SHADOW_REUSE").is_none()
+            || crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_none()
         {
             return false;
         }
@@ -13248,7 +13248,7 @@ fn profile_current_boundary_template_delta(
     boundary_paths: &BoundaryTokenDiscovery,
     tokenizer_state_offsets: &[u32],
 ) {
-    if std::env::var_os("GLRMASK_PROFILE_CURRENT_BOUNDARY_TEMPLATE_DELTA").is_none() {
+    if crate::env::var_os("GLRMASK_PROFILE_CURRENT_BOUNDARY_TEMPLATE_DELTA").is_none() {
         return;
     }
     let started = Instant::now();
@@ -13589,7 +13589,7 @@ fn changed_parent_template_candidate_terminals(
         .unwrap_or(num_terminals)
         .min(num_terminals) as usize;
     let mut candidates = BitSet::new(num_terminals as usize);
-    if std::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some() {
         for &terminal in &composed_table.appended_parent_action_terminals {
             if (terminal as usize) < parent_terminal_end {
                 candidates.set(terminal as usize);
@@ -13650,8 +13650,8 @@ fn try_build_changed_parent_templates_for_terminal_count(
         parent,
         num_terminals,
     );
-    if std::env::var_os("GLRMASK_VALIDATE_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
-        && std::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
+    if crate::env::var_os("GLRMASK_VALIDATE_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
+        && crate::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
     {
         let mut reference = BTreeSet::new();
         for row in composed_table
@@ -13880,7 +13880,7 @@ fn finish_eager_changed_parent_templates(
     if transported.by_terminal.len() != expected_transport {
         return None;
     }
-    if std::env::var_os("GLRMASK_VALIDATE_PAIRED_TEMPLATE_TRANSPORT").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_PAIRED_TEMPLATE_TRANSPORT").is_some() {
         let reference = Templates::from_terminal_dfas(transported.by_terminal.clone());
         assert_eq!(
             transported.by_terminal_nwa.len(),
@@ -13976,7 +13976,7 @@ fn try_prepare_cached_composition_template_plan_for_terminal_count(
     scoped_ignore_terminals: &BitSet,
 ) -> Option<CachedCompositionTemplatePlan> {
     let total_started_at = Instant::now();
-    if std::env::var_os("GLRMASK_DISABLE_CACHED_BOUNDARY_TEMPLATES").is_some() {
+    if crate::env::var_os("GLRMASK_DISABLE_CACHED_BOUNDARY_TEMPLATES").is_some() {
         return None;
     }
     let parent = *components.first()?;
@@ -14286,7 +14286,7 @@ fn try_build_cached_composition_templates(
         build_commit_templates_from_raw_templates(&raw_templates)
     };
 
-    if std::env::var_os("GLRMASK_VALIDATE_CACHED_BOUNDARY_TEMPLATES").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_CACHED_BOUNDARY_TEMPLATES").is_some() {
         let (reference, _, _) =
             build_composition_templates(&composed_table.table, analyzed, selected);
         for (terminal, &active) in selected.iter().enumerate() {
@@ -14748,7 +14748,7 @@ fn combine_weighted_shared_parser_roots(
 
     let mut weight_ops = ScopedWeightOpCache::default();
     let keep_final_lanes =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_KEEP_FINAL_LANES").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_KEEP_FINAL_LANES").is_some();
     let initial = canonicalize_lanes(roots.iter().filter_map(|(root, weight)| {
         (!weight.is_empty() && !arena.is_empty_root(*root)).then(|| Lane {
             root: *root,
@@ -14888,7 +14888,7 @@ fn profile_direct_boundary_terminal_dwa_domain_dp(
     templates: &Templates,
     terminal_dwa: &DWA,
 ) {
-    if std::env::var_os("GLRMASK_PROFILE_DIRECT_BOUNDARY_DOMAIN_DP").is_none()
+    if crate::env::var_os("GLRMASK_PROFILE_DIRECT_BOUNDARY_DOMAIN_DP").is_none()
         || !terminal_dwa.is_acyclic()
     {
         return;
@@ -15114,7 +15114,7 @@ fn profile_direct_boundary_terminal_dwa_domain_dp(
         .map(|lane| lane.domain.num_transitions())
         .sum::<usize>();
 
-    if std::env::var_os("GLRMASK_PROFILE_DIRECT_BOUNDARY_DOMAIN_FLATTEN").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_DIRECT_BOUNDARY_DOMAIN_FLATTEN").is_some() {
         let flatten_started_at = Instant::now();
         let mut arena = NWA::new(0, 0);
         let global_start = arena.add_state();
@@ -15171,7 +15171,7 @@ fn validate_lazy_boundary_terminal_dwa_preimages(
     templates: &Templates,
     terminal_dwa: &DWA,
 ) {
-    if std::env::var_os("GLRMASK_VALIDATE_LAZY_BOUNDARY_PREIMAGE_DP").is_none()
+    if crate::env::var_os("GLRMASK_VALIDATE_LAZY_BOUNDARY_PREIMAGE_DP").is_none()
         || !terminal_dwa.is_acyclic()
     {
         return;
@@ -15342,7 +15342,7 @@ fn build_boundary_parser_from_weighted_terminal_paths(
     templates: &Templates,
     terminal_dwa: &DWA,
 ) -> Option<DWA> {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_none()
+    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_none()
         || !terminal_dwa.is_acyclic()
     {
         return None;
@@ -15416,7 +15416,7 @@ fn build_boundary_parser_from_weighted_terminal_paths(
     }
     let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PARALLEL_LOCAL").is_some() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PARALLEL_LOCAL").is_some() {
         let local_started_at = Instant::now();
         let local_domains = sequences
             .par_iter()
@@ -15508,7 +15508,7 @@ fn build_boundary_parser_from_weighted_terminal_paths(
 
     let combine_started_at = Instant::now();
     let mut roots = weighted_roots.into_iter().collect::<Vec<_>>();
-    let use_atoms = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_ATOMS").is_some();
+    let use_atoms = crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_ATOMS").is_some();
     let atomize_started_at = Instant::now();
     if use_atoms {
         roots = atomize_weighted_parser_roots(&mut arena, &roots);
@@ -15546,7 +15546,7 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
     templates: &Templates,
     terminal_dwa: &DWA,
 ) -> Option<DWA> {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_DWA_DOMAIN_DP").is_none() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_DWA_DOMAIN_DP").is_none() {
         return None;
     }
     if !terminal_dwa.is_acyclic() {
@@ -15593,7 +15593,7 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
         skip_allowed_states: Option<Arc<Vec<u32>>>,
     }
     let use_direct_skip =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DIRECT_SKIP_PREIMAGE").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DIRECT_SKIP_PREIMAGE").is_some();
     let mut seen_terminal = vec![false; table.num_terminals as usize];
     let mut non_skip_terminal = vec![false; table.num_terminals as usize];
     let mut skip_states_by_terminal = vec![Vec::<u32>::new(); table.num_terminals as usize];
@@ -15765,7 +15765,7 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
                     } else {
                         arena.preimage_bundle(bundle.expect("non-skip bundle must exist"), target_root)?
                     };
-                    if std::env::var_os("GLRMASK_VALIDATE_SHARED_BOUNDARY_PREIMAGE").is_some()
+                    if crate::env::var_os("GLRMASK_VALIDATE_SHARED_BOUNDARY_PREIMAGE").is_some()
                         && group.skip_allowed_states.is_none()
                     {
                         let target_nwa = arena.to_nwa(target_root);
@@ -15890,7 +15890,7 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
             preimage_cache.len(),
         );
     }
-    if let Ok(spec) = std::env::var("GLRMASK_DEBUG_BOUNDARY_DOMAIN_LANE") {
+    if let Ok(spec) = crate::env::var("GLRMASK_DEBUG_BOUNDARY_DOMAIN_LANE") {
         let parts = spec
             .split(':')
             .filter_map(|part| part.parse::<u32>().ok())
@@ -15927,10 +15927,10 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
         .iter()
         .map(|(&root, weight)| (root, weight.clone()))
         .collect::<Vec<_>>();
-    let use_atoms = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_DISJOINT_ATOMS")
+    let use_atoms = crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_DISJOINT_ATOMS")
         .is_some();
     let root_weights = if use_atoms
-        || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_ATOMIZE").is_some()
+        || crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_ATOMIZE").is_some()
     {
         atomize_weighted_parser_roots(&mut arena, &root_weights)
     } else {
@@ -15971,7 +15971,7 @@ fn build_full_boundary_lazy_direct_parser(
     id_map: &InternalIdMap,
     seed_relations: &BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
 ) -> Option<DWA> {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER").is_none() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER").is_none() {
         return None;
     }
 
@@ -16243,15 +16243,15 @@ fn try_prepare_pre_table_boundary_base_discovery(
     // shortens the critical path. Older experimental composition modes retain
     // their explicit opt-in gate.
     let pretable_requested = authoritative_dynamic_boundary
-        || std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_BASE_DISCOVERY").is_some();
+        || crate::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_BASE_DISCOVERY").is_some();
     let experimental_enabled = pretable_requested
         && (authoritative_dynamic_boundary
-            || (std::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some()
-                && std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
-                && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()));
+            || (crate::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some()
+                && crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
+                && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()));
     if !experimental_enabled
-        || std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some()
-        || std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
+        || crate::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some()
+        || crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
         || children
             .iter()
             .any(|child| child.constraint.table.embedded_start_nullable())
@@ -16317,7 +16317,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
             discovery_interface_pairs.insert((neutral, right));
         }
     }
-    if std::env::var_os(
+    if crate::env::var_os(
         "GLRMASK_EXPERIMENT_PRETABLE_CONSERVATIVE_NEUTRAL_INTERFACES",
     )
     .is_some()
@@ -16377,13 +16377,13 @@ fn try_prepare_pre_table_boundary_base_discovery(
             {
                 context_terminals.set(terminal as usize);
             }
-            if std::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
+            if crate::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
                 follow_transparent_terminals.set(terminal as usize);
             }
         }
     }
     let disallowed_follows = (authoritative_dynamic_boundary
-        || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_GRAMMAR_FOLLOWS").is_some())
+        || crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_GRAMMAR_FOLLOWS").is_some())
         .then(|| {
             disallowed_follows_from_allowed_rows(
                 &summary.allowed_follows,
@@ -16391,7 +16391,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
             )
         });
     let prebuild_terminal = authoritative_dynamic_boundary
-        || std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_TERMINAL_DWA").is_some();
+        || crate::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_TERMINAL_DWA").is_some();
     let (discovery, discovery_ms, state_map_ms, component_state_map, terminal_artifact, terminal_ms) = if prebuild_terminal {
         let ((discovery, discovery_ms), (component_state_map, state_map_ms)) = macro_join(
             "compose_pretable_discovery_and_state_map",
@@ -16525,7 +16525,7 @@ fn build_boundary_repair(
     static_boundary_components: Option<&BitSet>,
 ) -> Result<Option<BoundaryRepair>, String> {
     let total_started_at = Instant::now();
-    if std::env::var_os("GLRMASK_PROFILE_COMPONENT_GRAMMAR_ANALYSIS").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPONENT_GRAMMAR_ANALYSIS").is_some() {
         for (component_index, component) in components.iter().enumerate() {
             let started_at = Instant::now();
             let augmented_start = component
@@ -16553,8 +16553,8 @@ fn build_boundary_repair(
             );
         }
     }
-    if let Ok(capture_path) = std::env::var("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_CAPTURE") {
-        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_none() {
+    if let Ok(capture_path) = crate::env::var("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_CAPTURE") {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_none() {
             return Err(
                 "count-only exact boundary capture requires the segmented parser runtime"
                     .to_string(),
@@ -16631,7 +16631,7 @@ fn build_boundary_repair(
     }
 
     let cross_only_boundary = authoritative_segmented_boundary
-        || std::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some();
+        || crate::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some();
     // When dynamic A+B retains the explicit linker controls in the composed
     // LR table, those controls are parser-internal epsilon transitions.  They
     // must never become labels in the lexical B automaton; exact B parser
@@ -16671,10 +16671,10 @@ fn build_boundary_repair(
         .unwrap_or(&composed_table.table);
     let fast_component_grammar_splice = cross_only_boundary
         && (authoritative_segmented_boundary
-            || (std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
-                && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()))
-        && std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
-        && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+            || (crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
+                && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()))
+        && crate::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
+        && crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
     // In the cross-only factor every accepted repair word has a parser-visible
     // component ownership switch.  The transported component union A contains
     // only component-local words, so no per-terminal `New \ Old` factor is
@@ -16786,7 +16786,7 @@ fn build_boundary_repair(
             &composed_table.control_terminals,
         )
     });
-    let interface_pairs = if std::env::var_os("GLRMASK_EXPERIMENT_BASE_BOUNDARY_INTERFACES_ONLY")
+    let interface_pairs = if crate::env::var_os("GLRMASK_EXPERIMENT_BASE_BOUNDARY_INTERFACES_ONLY")
         .is_some()
     {
         base_interface_pairs.clone()
@@ -16798,7 +16798,7 @@ fn build_boundary_repair(
     };
     let interface_ms = interface_started_at.elapsed().as_secs_f64() * 1000.0;
     let mut follow_transparent_terminals = BitSet::new(seed_terminals.len());
-    if std::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
         for &terminal in &composed_table.table.skip_terminals {
             follow_transparent_terminals.set(terminal as usize);
         }
@@ -16840,7 +16840,7 @@ fn build_boundary_repair(
             *extended_owner_counts.entry((owner(left), owner(right))).or_default() += 1;
         }
         eprintln!("[glrmask/profile][constraint_boundary_interface_owners] base={base_owner_counts:?} extended={extended_owner_counts:?}");
-        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_INTERFACE_PAIRS").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_INTERFACE_PAIRS").is_some() {
             let rows = base_interface_pairs
                 .iter()
                 .map(|&(left, right)| {
@@ -16937,7 +16937,7 @@ fn build_boundary_repair(
     // repair pay two full million-state/vocabulary scans back-to-back.
     let follow_started_at = Instant::now();
     let boundary_disallowed_follows = if authoritative_segmented_boundary
-        || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_GRAMMAR_FOLLOWS").is_some()
+        || crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_GRAMMAR_FOLLOWS").is_some()
     {
         if let Some(allowed) = spliced_allowed_follows.as_ref() {
             Some(disallowed_follows_from_allowed_rows(
@@ -16953,7 +16953,7 @@ fn build_boundary_repair(
         None
     };
     let follow_ms = follow_started_at.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_VALIDATE_COMPONENT_GRAMMAR_SPLICE").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_COMPONENT_GRAMMAR_SPLICE").is_some() {
         let started_at = Instant::now();
         let (spliced_summary, spliced_pairs) = compose_nonnullable_grammar_adjacency_summaries(
             components,
@@ -17011,11 +17011,11 @@ fn build_boundary_repair(
         );
     }
     let eager_all_templates = !fast_component_grammar_splice
-        && std::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
+        && crate::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
     let all_terminals = vec![true; analyzed.num_terminals as usize];
     let eager_changed_parent_enabled = fast_component_grammar_splice
-        && std::env::var_os("GLRMASK_EXPERIMENT_EAGER_CHANGED_PARENT_TEMPLATES").is_some();
-    let pretransport_active = if std::env::var_os(
+        && crate::env::var_os("GLRMASK_EXPERIMENT_EAGER_CHANGED_PARENT_TEMPLATES").is_some();
+    let pretransport_active = if crate::env::var_os(
         "GLRMASK_EXPERIMENT_EAGER_PRETRANSPORT_TEMPLATES",
     )
     .is_some()
@@ -17061,7 +17061,7 @@ fn build_boundary_repair(
                     active,
                 )
             });
-            let prebuilt_bundle_cache = if std::env::var_os(
+            let prebuilt_bundle_cache = if crate::env::var_os(
                 "GLRMASK_EXPERIMENT_EAGER_PREBUILD_UNCHANGED_BUNDLES",
             )
             .is_some()
@@ -17211,7 +17211,7 @@ fn build_boundary_repair(
                                 );
                             }
 
-                            if std::env::var_os(
+                            if crate::env::var_os(
                                 "GLRMASK_VALIDATE_PRETABLE_BOUNDARY_DISCOVERY",
                             )
                             .is_some()
@@ -17302,7 +17302,7 @@ fn build_boundary_repair(
                                 &one_terminal_support_terminals,
                             )
                         };
-                        if std::env::var_os(
+                        if crate::env::var_os(
                             "GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW",
                         )
                         .is_some()
@@ -17335,7 +17335,7 @@ fn build_boundary_repair(
                     },
                 );
                 let early_started_at = Instant::now();
-                let early_terminal = if std::env::var_os(
+                let early_terminal = if crate::env::var_os(
                     "GLRMASK_EXPERIMENT_POSTTABLE_TERMINAL_OVERLAP",
                 )
                 .is_some()
@@ -17479,7 +17479,7 @@ fn build_boundary_repair(
             boundary_paths.token_ids.len(),
             selected_count,
         );
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE_VERBOSE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE_VERBOSE").is_some() {
             let selected = active_terminals
                 .iter()
                 .enumerate()
@@ -17621,9 +17621,9 @@ fn build_boundary_repair(
     let state_map_ms = state_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let use_concrete_delta =
-        std::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none()
-            && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
-    let lazy_seed_relations = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER")
+        crate::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none()
+            && crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+    let lazy_seed_relations = crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER")
         .is_some()
         .then(|| seed_relations.clone());
 
@@ -17724,7 +17724,7 @@ fn build_boundary_repair(
                 install_concrete_boundary_delta_templates(&mut templates, &plan);
             }
             let delta_install_ms = delta_install_started_at.elapsed().as_secs_f64() * 1000.0;
-            let seed_relations = if std::env::var_os(
+            let seed_relations = if crate::env::var_os(
                 "GLRMASK_DISABLE_FACTOR_ONE_TERMINAL_SEEDS",
             )
             .is_some()
@@ -17739,7 +17739,7 @@ fn build_boundary_repair(
                     &composed_table.terminal_offsets,
                 )
             };
-            let seed_relations = if std::env::var_os("GLRMASK_EXPERIMENT_DROP_ONE_TERMINAL_BOUNDARY").is_some() {
+            let seed_relations = if crate::env::var_os("GLRMASK_EXPERIMENT_DROP_ONE_TERMINAL_BOUNDARY").is_some() {
                 BTreeMap::new()
             } else {
                 seed_relations
@@ -17845,7 +17845,7 @@ fn build_boundary_repair(
                 },
                 || {
                     let started_at = Instant::now();
-                    let result = if std::env::var_os(
+                    let result = if crate::env::var_os(
                         "GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE",
                     )
                     .is_some()
@@ -17920,7 +17920,7 @@ fn build_boundary_repair(
             (template_result, terminal_result, None)
         };
     let (terminal_dwa, terminal_ms) = terminal_dwa;
-    let profile_delta_selected = if std::env::var_os(
+    let profile_delta_selected = if crate::env::var_os(
         "GLRMASK_PROFILE_BOUNDARY_SEED_TEMPLATE_DELTA",
     )
     .is_some()
@@ -17951,7 +17951,7 @@ fn build_boundary_repair(
         }
     }
     let template_publish_ms = template_publish_started_at.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_COMPOSE_BUILD_FULL_TEMPLATE_CACHE").is_some() {
+    if crate::env::var_os("GLRMASK_COMPOSE_BUILD_FULL_TEMPLATE_CACHE").is_some() {
         let cache_started_at = Instant::now();
         composition_parser_templates_by_terminal = build_complete_composed_parser_template_cache(
             composed_table,
@@ -17988,7 +17988,7 @@ fn build_boundary_repair(
     // the proper-internal boundary invariant.
     let static_boundary_shards = if authoritative_segmented_boundary
         && !dynamic_boundary_backend
-        && std::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS").is_none()
+        && crate::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS").is_none()
         && boundary_special_token_terminals.is_empty()
         && let Some(plan) = concrete_delta_plan.as_ref()
     {
@@ -18028,7 +18028,7 @@ fn build_boundary_repair(
     let parser_started_at = Instant::now();
     let (terminal_automaton, id_map) = terminal_dwa.into_parts();
     if let TerminalAutomaton::Dwa(dwa) = &terminal_automaton {
-        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_WEIGHTED_TERMINAL_PATHS").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_WEIGHTED_TERMINAL_PATHS").is_some() {
             let started_at = Instant::now();
             let mut stack = vec![(dwa.start_state(), Vec::<i32>::new(), Weight::all())];
             let mut accepted_paths = 0usize;
@@ -18088,11 +18088,11 @@ fn build_boundary_repair(
             .resize(plan.synthetic_num_terminals as usize, "<boundary-delta>".to_string());
     }
     let use_direct_parser =
-        std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some()
-            || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_some();
+        crate::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some()
+            || crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_some();
     let validate_direct_parser =
-        std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
-    if std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
+        crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
+    if crate::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && !use_direct_parser
         && !validate_direct_parser
     {
@@ -18267,7 +18267,7 @@ fn build_boundary_repair(
     let mut boundary_minimize_ms = 0.0;
     let parser_dwa = if pre_hashcons_states >= boundary_parser_minimize_min_states()
         && parser_builder_skips_internal_minimization()
-        && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
+        && crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
     {
         let hashcons_started_at = Instant::now();
         let hashconsed = reverse_hashcons_owned(parser_dwa);
@@ -19934,7 +19934,7 @@ pub(crate) fn compose_constraints(
     let all_children_nonnullable = children
         .iter()
         .all(|child| !child.constraint.table.embedded_start_nullable());
-    let use_legacy_splice = std::env::var_os("GLRMASK_EXPERIMENT_FORCE_EXPLICIT_SUBGRAMMAR_CONTROLS").is_none()
+    let use_legacy_splice = crate::env::var_os("GLRMASK_EXPERIMENT_FORCE_EXPLICIT_SUBGRAMMAR_CONTROLS").is_none()
         && components_have_no_explicit_controls(parent, children)
         && components_have_no_compiled_eof_stack_rewrites(parent, children)
         && (all_children_nonnullable
@@ -20031,7 +20031,7 @@ pub(crate) fn compose_constraints(
         && (component_constraints
             .iter()
             .all(|constraint| constraint.composition_grammar_summary.is_some())
-            || std::env::var_os("GLRMASK_PREPARE_COMPOSITION_GRAMMAR_SUMMARY").is_some())
+            || crate::env::var_os("GLRMASK_PREPARE_COMPOSITION_GRAMMAR_SUMMARY").is_some())
     {
         compose_nonnullable_grammar_adjacency_summaries(
             &component_constraints,
@@ -20168,7 +20168,7 @@ pub(crate) fn compose_constraints(
     // static-mask finalization. DynamicConstraint is the existing exact runtime
     // backend for this representation. This establishes the link-time floor
     // that a structurally shared static/hybrid parser backend must approach.
-    if std::env::var_os("GLRMASK_EXPERIMENT_COMPOSE_DYNAMIC_RUNTIME").is_some() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_COMPOSE_DYNAMIC_RUNTIME").is_some() {
         let dynamic_started_at = Instant::now();
         let tokenizer_started_at = Instant::now();
         let (mut tokenizer, tokenizer_state_offsets) =
@@ -20215,7 +20215,7 @@ pub(crate) fn compose_constraints(
         });
     }
 
-    if std::env::var_os("GLRMASK_EXPERIMENT_COMPOSE_COMPONENTS_ONLY_STATIC").is_some() {
+    if crate::env::var_os("GLRMASK_EXPERIMENT_COMPOSE_COMPONENTS_ONLY_STATIC").is_some() {
         let fast_started_at = Instant::now();
         let ((tokenizer_result, tokenizer_ms), ((parser_artifacts, reuse_ms), static_dynamic_overlay)) =
             macro_join(
@@ -20241,7 +20241,7 @@ pub(crate) fn compose_constraints(
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
                         || {
-                            if std::env::var_os(
+                            if crate::env::var_os(
                                 "GLRMASK_EXPERIMENT_COMPONENT_ONLY_BUILD_DELTA_METADATA",
                             )
                             .is_some()
@@ -20327,8 +20327,8 @@ pub(crate) fn compose_constraints(
     }
 
     let needs_materialized_boundary_reference =
-        std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
-            || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some();
+        crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
+            || crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some();
 
     let (
         (mut tokenizer, tokenizer_state_offsets),
@@ -20344,7 +20344,7 @@ pub(crate) fn compose_constraints(
             tokenizer_result.1, expected_tokenizer_state_offsets,
             "predicted composed tokenizer state offsets differ from materialized union",
         );
-        if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some() {
+        if crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some() {
             let component_resets = expanded_component_reset_states(
                 &component_constraints,
                 &tokenizer_result.1,
@@ -20786,7 +20786,7 @@ fn compose_constraints_owned_parent_impl(
     if explicit_segmented_boundary != Some(SegmentedBoundaryBackend::Dynamic)
         || !parent.table.is_present()
         || children.iter().any(|input|input.constraint.has_template_parser() || !input.constraint.table.is_present()) {
-        return Err("FastBuild/LR composition requires homogeneous retained-LR Dynamic components".into());
+        return Err("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends".into());
     }
     let shared=shared_children.ok_or("retained-LR composition requires owned shared children")?;
     let owned=shared.iter().map(|child| {
@@ -21038,8 +21038,8 @@ fn compose_constraints_owned_parent_legacy_impl(
 
     parent.serialized_artifact_cache = None;
     if explicit_segmented_boundary.is_none()
-        && (std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
-            || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
+        && (crate::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
+            || crate::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
     {
         #[allow(deprecated)]
         return compose_constraints(&parent, children, vocab);
@@ -21052,14 +21052,14 @@ fn compose_constraints_owned_parent_legacy_impl(
     }
     let total_started_at = Instant::now();
     let segmented_runtime_requested = explicit_segmented_boundary.is_some()
-        || std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
+        || crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
     let two_dwa_runtime_requested = segmented_runtime_requested
         && explicit_segmented_boundary.is_none()
-        && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
+        && crate::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
     let segmented_skip_requested = explicit_segmented_boundary.is_some()
         || (segmented_runtime_requested
             && !two_dwa_runtime_requested
-            && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some());
+            && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some());
     let mut segmented_source_constraints =
         if segmented_runtime_requested && !segmented_skip_requested && !two_dwa_runtime_requested {
             let started = Instant::now();
@@ -21190,7 +21190,7 @@ fn compose_constraints_owned_parent_legacy_impl(
     // rows, which in turn forces B to enumerate arbitrary parent-local suffixes.
     let retain_linker_controls = explicit_segmented_boundary.is_some();
     let use_legacy_splice = !retain_linker_controls
-        && std::env::var_os("GLRMASK_EXPERIMENT_FORCE_EXPLICIT_SUBGRAMMAR_CONTROLS").is_none()
+        && crate::env::var_os("GLRMASK_EXPERIMENT_FORCE_EXPLICIT_SUBGRAMMAR_CONTROLS").is_none()
         && components_have_no_explicit_controls(&parent, children)
         && components_have_no_compiled_eof_stack_rewrites(&parent, children)
         && (all_children_nonnullable
@@ -21318,7 +21318,7 @@ fn compose_constraints_owned_parent_legacy_impl(
         && (component_constraints
             .iter()
             .all(|constraint| constraint.composition_grammar_summary.is_some())
-            || std::env::var_os("GLRMASK_PREPARE_COMPOSITION_GRAMMAR_SUMMARY").is_some())
+            || crate::env::var_os("GLRMASK_PREPARE_COMPOSITION_GRAMMAR_SUMMARY").is_some())
     {
         compose_nonnullable_grammar_adjacency_summaries(
             &component_constraints,
@@ -21474,7 +21474,7 @@ fn compose_constraints_owned_parent_legacy_impl(
     >::new();
     let skip_boundary_for_floor =
         explicit_segmented_boundary.is_none()
-            && std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
+            && crate::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
     let ((tokenizer_result, tokenizer_ms), (prepared_components_result, (boundary_result, boundary_ms))) =
         macro_join(
@@ -21515,7 +21515,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                                     precomputed,
                                     merged_tokenizer_state_count,
                                 );
-                                if std::env::var_os(
+                                if crate::env::var_os(
                                     "GLRMASK_VALIDATE_PRETABLE_STATE_MAP_REUSE",
                                 )
                                 .is_some()
@@ -21717,7 +21717,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                     let requested_static = |index: usize| {
                         static_boundary_components.is_none_or(|bits| bits.contains(index))
                     };
-                    let link = if std::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS")
+                    let link = if crate::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS")
                         .is_some()
                     {
                         Ok(dynamic_fallback_walk_link_output(num_components))
@@ -21886,15 +21886,15 @@ fn compose_constraints_owned_parent_legacy_impl(
     // live-state merging, tokenizer assembly, coordinate canonicalization, and
     // unfinalized constraint construction.
     let early_boundary_positive_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
-            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
-            && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
+        crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_positive = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
         && !macro_parallelism_disabled()
         && !partitioned_static_boundary_complete
         && early_boundary_positive_requested
-        && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
+        && crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
         && let Some(work) = boundary_work.take()
     {
         let allow_grouped_cancellation = composed_table.table.construction
@@ -22031,8 +22031,8 @@ fn compose_constraints_owned_parent_legacy_impl(
 
     let union_started_at = Instant::now();
     let runtime_template_advance_requested =
-        std::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some()
-            || std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some();
+        crate::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some()
+            || crate::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some();
     if commit_templates_deferred && runtime_template_advance_requested {
         let commit_template_started_at = Instant::now();
         template_dfas_by_terminal = build_commit_templates_from_raw_templates(
@@ -22055,9 +22055,9 @@ fn compose_constraints_owned_parent_legacy_impl(
     // work plus the composed LR table.  Start it before the remaining runtime
     // artifact assembly so deterministic B publication can overlap that work.
     let early_boundary_publish_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
-            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
-            && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
+        crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_publish = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
         && !macro_parallelism_disabled()
@@ -22149,7 +22149,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                 if early_boundary_positive.is_some() || early_boundary_publish.is_some() {
                     return Ok(None);
                 }
-                if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_some() {
+                if crate::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_some() {
                     return Ok(None);
                 }
                 let Some(work) = boundary_work else {
@@ -22159,7 +22159,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                 if explicit_segmented_boundary
                     == Some(SegmentedBoundaryBackend::Dynamic)
                     || (explicit_segmented_boundary.is_none()
-                        && std::env::var_os(
+                        && crate::env::var_os(
                             "GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE",
                         )
                         .is_some())
@@ -22241,7 +22241,7 @@ fn compose_constraints_owned_parent_legacy_impl(
         // finalization is independent as well: it never reads segmented A/B
         // metadata. Overlap that cache rebuild with the remaining deterministic
         // B work, then attach the overlay only after both complete.
-        let overlap_finalize_with_boundary = std::env::var_os(
+        let overlap_finalize_with_boundary = crate::env::var_os(
             "GLRMASK_EXPERIMENT_OVERLAP_FINALIZE_WITH_BOUNDARY",
         )
         .is_some()
@@ -22318,7 +22318,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                         let tsid_quotient =
                             positive.quotient_boundary_tsids(&mut boundary_id_map);
                         let normalize_started_at = Instant::now();
-                        let parser_dwa = if std::env::var_os(
+                        let parser_dwa = if crate::env::var_os(
                             "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
                         )
                         .is_some()
@@ -22430,7 +22430,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                             template_cache;
                     }
                     let boundary_num_tsids = boundary_id_map.num_tsids() as usize;
-                    let mut tokenizer_state_to_tsid = if std::env::var_os(
+                    let mut tokenizer_state_to_tsid = if crate::env::var_os(
                         "GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT",
                     )
                     .is_some()
@@ -22510,7 +22510,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                         result.constraint.composition_parser_templates_by_terminal = template_cache;
                     }
                     let boundary_num_tsids = boundary_id_map.num_tsids() as usize;
-                    let mut tokenizer_state_to_tsid = if std::env::var_os(
+                    let mut tokenizer_state_to_tsid = if crate::env::var_os(
                         "GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT",
                     )
                     .is_some()
@@ -23061,7 +23061,7 @@ fn compose_constraints_owned_parent_legacy_impl(
         .flat_map(ParserDefaultDomain::output_labels)
         .collect::<Vec<_>>();
     let mut boundary_work = boundary_work;
-    if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()
+    if crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()
         && let Some(work) = boundary_work.take()
     {
         let started_at = Instant::now();
@@ -23136,7 +23136,7 @@ fn compose_constraints_owned_parent_legacy_impl(
     }
     let boundary_work = boundary_work
         .map(|work| work.materialize(&result.constraint.table, vocab).into_parts());
-    let segmented_skip_flatten = std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN")
+    let segmented_skip_flatten = crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN")
             .is_some()
         && boundary_work.is_none()
         && result
@@ -23146,7 +23146,7 @@ fn compose_constraints_owned_parent_legacy_impl(
             .is_some_and(|overlay| {
                 !overlay.segmented_parser_components.is_empty()
                     && (overlay.segmented_boundary_parser.is_some()
-                        || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_CAPTURE").is_none())
+                        || crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_CAPTURE").is_none())
             });
     let (parser_union_result, token_cache_prebuild_ms) = if segmented_skip_flatten {
         if compose_profile_enabled() {
@@ -23226,7 +23226,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                     drop(boundary_weights);
                     automata.push(parser_nwa_preserve_defaults(&boundary_dwa));
                     let automata_len = automata.len();
-                    let validation_automata = std::env::var_os(
+                    let validation_automata = crate::env::var_os(
                         "GLRMASK_VALIDATE_COMPOSE_SINGLE_PASS_UNION",
                     )
                     .is_some()
@@ -23481,7 +23481,7 @@ pub(crate) fn accepted_original_tokens(
     dwa: &DWA,
     id_map: &InternalIdMap,
 ) -> BTreeSet<u32> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let started = profile.then(Instant::now);
     let accepted = accepted_weight_support(dwa);
     let support_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
@@ -23625,7 +23625,7 @@ mod tests {
 
         let inline_parent = r#"
             start document;
-            extern SUB;
+            extern grammar SUB;
             nt document ::= "X" SUB "!";
         "#;
         let inline_children = [("SUB", "start child; nt child ::= \"a\" \"b\";")];
@@ -23899,13 +23899,13 @@ mod tests {
         let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
             r#"
                 start document;
-                extern OUTER;
+                extern grammar OUTER;
                 nt document ::= "<" OUTER ">";
             "#,
             &[
                 (
                     "OUTER",
-                    "start outer; extern INNER; nt outer ::= \"a\" INNER;",
+                    "start outer; extern grammar INNER; nt outer ::= \"a\" INNER;",
                 ),
                 ("OUTER::INNER", "start inner; nt inner ::= \"b\";"),
             ],
@@ -24330,7 +24330,7 @@ table: &child_tables[index],
 
         let mut state = composed.start();
         assert!(state.commit_token(0));
-        let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
+        let explicitly_disabled = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
             .ok()
             .is_some_and(|value| {
                 matches!(
@@ -24410,7 +24410,7 @@ table: &child_tables[index],
             .compose_linked_children_for_test_flattened(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
             .unwrap();
 
-        let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
+        let explicitly_disabled = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
             .ok()
             .is_some_and(|value| {
                 matches!(
@@ -25059,7 +25059,7 @@ table: &child_table,
 
                 let actual_mask = actual_state.mask();
                 let expected_mask = expected_state.mask();
-                if std::env::var_os("GLRMASK_DEBUG_PREFIX10_STACKS").is_some()
+                if crate::env::var_os("GLRMASK_DEBUG_PREFIX10_STACKS").is_some()
                     && prefix == [10]
                 {
                     eprintln!("PREFIX10_ACTUAL {:?}", actual_state.debug_parser_stacks());
@@ -25515,7 +25515,7 @@ table: &child_table,
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                extern SUB;
+                extern grammar SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[("SUB", "start child; nt child ::= \"a\";")],
@@ -25705,7 +25705,7 @@ table: &child_table,
                 t PARENT_WS ::= "ab";
                 t X ::= "X";
                 t BANG ::= "!";
-                extern SUB;
+                extern grammar SUB;
                 nt document ::= X SUB BANG;
             "#,
             &[(
@@ -25855,7 +25855,7 @@ table: &child_table,
         let source_oracle = compile_inline_source_oracle(
             r#"
                 start document;
-                extern SUB;
+                extern grammar SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[(
@@ -28748,14 +28748,14 @@ table: &child_table,
         impl TrapGuard {
             fn set() -> Self {
                 unsafe {
-                    std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                    crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1"));
                 }
                 Self(true)
             }
             fn clear(&mut self) {
                 if self.0 {
                     unsafe {
-                        std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                        crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None);
                     }
                     self.0 = false;
                 }
@@ -29125,14 +29125,14 @@ table: &child_table,
     impl StrictStaticTrapGuard {
         fn arm() -> Self {
             unsafe {
-                std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1"));
             }
             Self(true)
         }
         fn disarm(&mut self) {
             if self.0 {
                 unsafe {
-                    std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                    crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None);
                 }
                 self.0 = false;
             }
@@ -29169,12 +29169,9 @@ table: &child_table,
         impl FloorFlagGuard {
             fn set(value: Option<&str>) -> Self {
                 const KEY: &str = "GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC";
-                let previous = std::env::var_os(KEY);
+                let previous = crate::env::var_os(KEY);
                 unsafe {
-                    match value {
-                        Some(v) => std::env::set_var(KEY, v),
-                        None => std::env::remove_var(KEY),
-                    }
+                    crate::__private::set_env_var(KEY, value);
                 }
                 Self { previous }
             }
@@ -29183,10 +29180,10 @@ table: &child_table,
             fn drop(&mut self) {
                 const KEY: &str = "GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC";
                 unsafe {
-                    match &self.previous {
-                        Some(v) => std::env::set_var(KEY, v),
-                        None => std::env::remove_var(KEY),
-                    }
+                    crate::__private::set_env_var(
+                        KEY,
+                        self.previous.as_deref().and_then(std::ffi::OsStr::to_str),
+                    );
                 }
             }
         }
@@ -29378,11 +29375,11 @@ table: &child_table,
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let left_path = std::env::var("GLRMASK_MINIMIZE_EQ_LEFT")
+        let left_path = crate::env::var("GLRMASK_MINIMIZE_EQ_LEFT")
             .expect("GLRMASK_MINIMIZE_EQ_LEFT must name the Stable prepared static.bin");
-        let right_path = std::env::var("GLRMASK_MINIMIZE_EQ_RIGHT")
+        let right_path = crate::env::var("GLRMASK_MINIMIZE_EQ_RIGHT")
             .expect("GLRMASK_MINIMIZE_EQ_RIGHT must name the Descending prepared static.bin");
-        let phase1 = std::env::var("PHASE1_DIR")
+        let phase1 = crate::env::var("PHASE1_DIR")
             .expect("PHASE1_DIR must name the selected10 cache root");
         let vocab = super::load_vocab(
             &std::path::Path::new(&phase1).join("vocab_dump.bin").display().to_string(),
@@ -32271,7 +32268,7 @@ table: &child_table,
 
     fn run_sizeable_json_schema_composition_benchmark(mode: &str, parent_source: &str) {
         let vocab = composition_benchmark_vocab();
-        let choices = std::env::var("GLRMASK_COMPOSE_BENCH_CHOICES")
+        let choices = crate::env::var("GLRMASK_COMPOSE_BENCH_CHOICES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(7500);
@@ -32293,7 +32290,7 @@ table: &child_table,
         let right_ms = right_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!("[compose-bench] compile right done {right_ms:.3} ms");
 
-        let composition_runs = std::env::var("GLRMASK_COMPOSE_BENCH_RUNS")
+        let composition_runs = crate::env::var("GLRMASK_COMPOSE_BENCH_RUNS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(3)
@@ -32387,7 +32384,7 @@ table: &child_table,
         )
         .unwrap();
 
-        let runs = std::env::var("GLRMASK_COMPOSE_RUNTIME_BENCH_RUNS")
+        let runs = crate::env::var("GLRMASK_COMPOSE_RUNTIME_BENCH_RUNS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(10_000)
@@ -33540,11 +33537,11 @@ table: &child_table,
         }
 
 
-        if std::env::var_os("GLRMASK_MINBOUND_LIVE_OUTER").is_some() {
-            let root = std::env::var("GLRMASK_MINBOUND_DIR").expect("GLRMASK_MINBOUND_DIR");
-            let vocab_path = std::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
+        if crate::env::var_os("GLRMASK_MINBOUND_LIVE_OUTER").is_some() {
+            let root = crate::env::var("GLRMASK_MINBOUND_DIR").expect("GLRMASK_MINBOUND_DIR");
+            let vocab_path = crate::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
             let mut vocab = load_vocab(&vocab_path);
-            if let Ok(filter_path) = std::env::var("GLRMASK_MINBOUND_VOCAB_FILTER") {
+            if let Ok(filter_path) = crate::env::var("GLRMASK_MINBOUND_VOCAB_FILTER") {
                 let allowed = fs::read_to_string(&filter_path)
                     .expect("read minimum-boundary vocab filter")
                     .split_whitespace()
@@ -33564,7 +33561,7 @@ table: &child_table,
                 Constraint::load(&fs::read(std::path::Path::new(&root).join(name)).unwrap(), &vocab).unwrap()
             };
             let mut core = load("core.bin");
-            let dispatch_name = std::env::var("GLRMASK_MINBOUND_DISPATCH")
+            let dispatch_name = crate::env::var("GLRMASK_MINBOUND_DISPATCH")
                 .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
             let mut dispatch = load(&dispatch_name);
             // Measurement-oracle fix (worktree-only): loaded artifacts keep
@@ -33960,7 +33957,7 @@ table: &dispatch.table,
                 "MINBOUND OUTER_CONCRETE_IDEAL_ACCEPTED_TOKENS {:?}",
                 ideal_accepted_tokens,
             );
-            if std::env::var_os("GLRMASK_MINBOUND_PROFILE_INTERFACE_PREFILTER").is_some() {
+            if crate::env::var_os("GLRMASK_MINBOUND_PROFILE_INTERFACE_PREFILTER").is_some() {
                 let base_pairs = visible_boundary_interface_pairs(
                     &concrete_grammar,
                     &composed_table.boundary_nonterminals,
@@ -34031,7 +34028,7 @@ table: &dispatch.table,
                 &MappedArtifact::new(concrete_ideal_minimized.clone(), common_id_map.clone()),
                 &terminal_names,
             );
-            if std::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_FACTOR_COMPARE").is_some() {
+            if crate::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_FACTOR_COMPARE").is_some() {
                 return;
             }
             let concrete_tight_weight = Weight::union_all(
@@ -34147,7 +34144,7 @@ table: &dispatch.table,
                 deferred_mismatches.len(),
                 deferred_mismatches,
             );
-            if std::env::var_os("GLRMASK_EXPERIMENT_CACHED_BOUNDARY_TEMPLATES").is_some() {
+            if crate::env::var_os("GLRMASK_EXPERIMENT_CACHED_BOUNDARY_TEMPLATES").is_some() {
                 let cached_production_started = Instant::now();
                 let (cached_templates, cached_commit_templates, cached_reported_ms) =
                     try_build_cached_composition_templates(
@@ -34967,7 +34964,7 @@ table: &dispatch.table,
                 residual_examples,
                 prefix_factor_started.elapsed().as_secs_f64() * 1000.0,
             );
-            if std::env::var_os("GLRMASK_MINBOUND_TEMPLATE_STORAGE").is_some() {
+            if crate::env::var_os("GLRMASK_MINBOUND_TEMPLATE_STORAGE").is_some() {
                 let active_raw = bincode::serialize(&old_transported)
                     .expect("serialize active transported parser templates");
                 let active_zstd = zstd::stream::encode_all(active_raw.as_slice(), 1)
@@ -35042,7 +35039,7 @@ table: &dispatch.table,
                 tight_parser_nwa_transitions,
                 tight_parser_nwa_negative_edges,
             );
-            if std::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_TEMPLATE_REUSE").is_some() {
+            if crate::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_TEMPLATE_REUSE").is_some() {
                 return;
             }
             let tight_parser_started = Instant::now();
@@ -35173,7 +35170,7 @@ table: &dispatch.table,
                 );
                 (elapsed_ms, union.artifact().0.num_states(), union.artifact().0.num_transitions())
             };
-            if std::env::var_os("GLRMASK_MINBOUND_MINIMIZED_UNION_ONLY").is_none() {
+            if crate::env::var_os("GLRMASK_MINBOUND_MINIMIZED_UNION_ONLY").is_none() {
                 let _raw_union = run_final_union("raw", tight_parser_raw_for_union);
                 let _hashcons_union = run_final_union("hashcons", tight_parser_hashconsed_for_union);
             }
@@ -35342,8 +35339,8 @@ table: &dispatch.table,
             return;
         }
 
-        let root = std::env::var("GLRMASK_MINBOUND_DIR").expect("GLRMASK_MINBOUND_DIR");
-        let vocab_path = std::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
+        let root = crate::env::var("GLRMASK_MINBOUND_DIR").expect("GLRMASK_MINBOUND_DIR");
+        let vocab_path = crate::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
         let vocab = load_vocab(&vocab_path);
         let load = |name: &str| -> Constraint {
             Constraint::load(&fs::read(format!("{root}\\{name}")).unwrap(), &vocab).unwrap()
@@ -35448,7 +35445,7 @@ table: &dispatch.table,
         );
         assert_eq!(all.len(), 13);
         let monolithic = &all[0];
-        let build_parser = std::env::var_os("GLRMASK_MINBOUND_BUILD_PARSER").is_some();
+        let build_parser = crate::env::var_os("GLRMASK_MINBOUND_BUILD_PARSER").is_some();
         let all_components_residual = {
             let monolithic = &all[0];
             let run_variant = |name: &str, indices: &[usize]| -> DWA {
@@ -35471,7 +35468,7 @@ table: &dispatch.table,
                     "MINBOUND variant_result name={name} component_union_states={} component_union_transitions={} residual_states={} residual_transitions={} residual_final_states={} residual_labels={}",
                     union.num_states(), union.num_transitions(), residual.num_states(), residual.num_transitions(), nonempty_final_states, labels.len(),
                 );
-                if std::env::var_os("GLRMASK_MINBOUND_VERBOSE_DIAG").is_some() { residual_diagnostics(name, &residual, &common_id_map, &full_terminal_names); }
+                if crate::env::var_os("GLRMASK_MINBOUND_VERBOSE_DIAG").is_some() { residual_diagnostics(name, &residual, &common_id_map, &full_terminal_names); }
                 residual
             };
 
@@ -35527,7 +35524,7 @@ table: &dispatch.table,
     // Phase 1 probe setup helpers (shared by both probe tests).
     fn phase1_load(root: &std::path::Path, name: &str) -> Constraint {
         let bytes = std::fs::read(root.join(name)).unwrap();
-        Constraint::load(&bytes, &load_vocab(&std::env::var("PHASE1_VOCAB").expect("PHASE1_VOCAB"))).unwrap()
+        Constraint::load(&bytes, &load_vocab(&crate::env::var("PHASE1_VOCAB").expect("PHASE1_VOCAB"))).unwrap()
     }
 
     // Mirror the MINBOUND deferred-data restoration (exprs + rules + metadata).
@@ -35834,7 +35831,7 @@ table: &dispatch.table,
             // shared-equivalence path (computed fresh here for exactness
             // comparison; production code computes it once per link).
             let use_shared =
-                std::env::var("PHASE1_SHARED").map(|value| value != "0").unwrap_or(false);
+                crate::env::var("PHASE1_SHARED").map(|value| value != "0").unwrap_or(false);
             let shared = use_shared.then(|| {
                 tdwa::l2p::compute_shared_l2p_equivalence(
                     "phase1_probe",
@@ -35858,7 +35855,7 @@ table: &dispatch.table,
             });
             // Phase 2 step 2 verification knob: NWA-level crossing filter
             // inside the entry point (before determinize/minimize).
-            let nwa_filter_enabled = std::env::var("PHASE1_NWAFILT")
+            let nwa_filter_enabled = crate::env::var("PHASE1_NWAFILT")
                 .map(|value| value != "0")
                 .unwrap_or(false);
             let nwa_ownership = if nwa_filter_enabled {
@@ -36705,19 +36702,19 @@ table: &dispatch.table,
         }
 
         // ---------- inputs ----------
-        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
+        let root = crate::env::var("PHASE1_DIR").unwrap_or_else(|_| {
             "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
         });
         let root = Path::new(&root).to_path_buf();
-        let vocab_path = std::env::var("PHASE1_VOCAB")
+        let vocab_path = crate::env::var("PHASE1_VOCAB")
             .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
-        let dump_dir = std::env::var("PHASE1_DUMP_DIR")
+        let dump_dir = crate::env::var("PHASE1_DUMP_DIR")
             .unwrap_or_else(|_| "/tmp/grammars25-redesign".to_string());
-        let only = std::env::var("PHASE1_ONLY").unwrap_or_default();
+        let only = crate::env::var("PHASE1_ONLY").unwrap_or_default();
         if !only.is_empty() && only != "core" && only != "schema" {
             panic!("PHASE1_ONLY must be core|schema, got {only:?}");
         }
-        let skip_oracle = std::env::var_os("PHASE1_SKIP_ORACLE").is_some();
+        let skip_oracle = crate::env::var_os("PHASE1_SKIP_ORACLE").is_some();
         let vocab = load_vocab(&vocab_path);
         eprintln!(
             "PHASE1 setup vocab_tokens={} dir={} dump_dir={dump_dir} skip_oracle={skip_oracle}",
@@ -36728,7 +36725,7 @@ table: &dispatch.table,
         // ---------- outer composition: core + dispatch, i = core ----------
         if only.is_empty() || only == "core" {
             let mut core = phase1_load(&root, "core.bin");
-            let dispatch_name = std::env::var("PHASE1_DISPATCH")
+            let dispatch_name = crate::env::var("PHASE1_DISPATCH")
                 .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
             let mut dispatch = phase1_load(&root, &dispatch_name);
             phase1_restore(&mut core, "core");
@@ -36921,7 +36918,7 @@ table: &dispatch.table,
             // must expose the raw lexer crossings (proves X_core emptiness comes
             // from the composed table, not from the merged reset/fan-out).
             let nodisallow =
-                std::env::var("PHASE1_NODISALLOW").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_NODISALLOW").map(|value| value != "0").unwrap_or(true);
             let mut nd_crossing_std = BTreeSet::new();
             if nodisallow {
                 let empty_disallowed = BTreeMap::new();
@@ -37097,7 +37094,7 @@ table: &dispatch.table,
             // exact factor oracle to the dispatch crossing DWA and report
             // terminal/token counts + time. Production does NOT wire this in
             // (see F report); this is measurement only.
-            if std::env::var("PHASE1_FACTOR").map(|value| value != "0").unwrap_or(false) {
+            if crate::env::var("PHASE1_FACTOR").map(|value| value != "0").unwrap_or(false) {
                 let mut factor_zero_width = composed.table.table.control_terminals.clone();
                 factor_zero_width
                     .extend(composed.table.table.skip_terminals.iter().copied());
@@ -37140,9 +37137,9 @@ table: &dispatch.table,
             // the DWA-level product (minimized with `minimize_owned`) of a
             // separately-run unfiltered walk over the identical id_map.
             let run_nwa_equiv =
-                std::env::var("PHASE1_NWA_EQUIV").map(|value| value != "0").unwrap_or(false);
+                crate::env::var("PHASE1_NWA_EQUIV").map(|value| value != "0").unwrap_or(false);
             let nwafilt_on =
-                std::env::var("PHASE1_NWAFILT").map(|value| value != "0").unwrap_or(false);
+                crate::env::var("PHASE1_NWAFILT").map(|value| value != "0").unwrap_or(false);
             if run_nwa_equiv && nwafilt_on {
                 let w_unfilt = phase1_run_walk(
                     "outer_dispatch_full_unfilt",
@@ -37205,7 +37202,7 @@ table: &dispatch.table,
                 ti_cross_outer = tb;
                 // TI determinization anatomy: same inputs through the replica to
                 // expose the determinized (pre-minimize) size.
-                if std::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true) {
+                if crate::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true) {
                     if let Some((dwa_tib2, id_tib2)) = phase1_run_walk_replica(
                         "outer_dispatch_ti_b2reuse",
                         &composed.tokenizer,
@@ -37256,9 +37253,9 @@ table: &dispatch.table,
             );
 
             let bypass =
-                std::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
             let run_b1 =
-                std::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
             if bypass {
                 // b2: standard id_map reused (analysis amortized) — must reproduce.
                 if let Some((dwa_b2, id_b2)) = phase1_run_walk_replica(
@@ -37351,7 +37348,7 @@ table: &dispatch.table,
             // §2.4.3 vehicle): same standard walk entry point, subset
             // initial_state_map; must reproduce the TI walk exactly.
             let run_b3 =
-                std::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
             if run_b3 {
                 let state_map_dispatch = phase1_restricted_state_map(
                     composed.tokenizer.num_states() as usize,
@@ -37438,7 +37435,7 @@ table: &dispatch.table,
 
             // DynamicDirect cross-checks at a core position and a dispatch position.
             let run_dyn =
-                std::env::var("PHASE1_DYNCHECK").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_DYNCHECK").map(|value| value != "0").unwrap_or(true);
             if run_dyn {
             let dyn_started = Instant::now();
             let dyn_placeholder = terminal(&core, "PROGRAMMATIC_TOOL_SUFFIX");
@@ -37703,9 +37700,9 @@ table: &dispatch.table,
             );
 
             let bypass =
-                std::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
             let run_b1 =
-                std::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
             if bypass {
                 if let Some((dwa_b2, id_b2)) = phase1_run_walk_replica(
                     "dispatch_schema0_b2reuse",
@@ -37790,7 +37787,7 @@ table: &dispatch.table,
             // b3: equivalence restricted to Commit_i states × TI vocab (the
             // §2.4.3 vehicle); must reproduce the TI walk exactly.
             let run_b3_schema =
-                std::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
+                crate::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
             if run_b3_schema {
                 let state_map_schema0 = phase1_restricted_state_map(
                     composed.tokenizer.num_states() as usize,
@@ -37948,15 +37945,15 @@ table: &dispatch.table,
             (matches.iter().map(|(id, width, _)| (*id, *width)).collect(), post_ids)
         }
 
-        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
+        let root = crate::env::var("PHASE1_DIR").unwrap_or_else(|_| {
             "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
         });
         let root = std::path::Path::new(&root).to_path_buf();
-        let vocab_path = std::env::var("PHASE1_VOCAB")
+        let vocab_path = crate::env::var("PHASE1_VOCAB")
             .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
         let vocab = load_vocab(&vocab_path);
         let mut core = phase1_load(&root, "core.bin");
-        let dispatch_name = std::env::var("PHASE1_DISPATCH")
+        let dispatch_name = crate::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch = phase1_load(&root, &dispatch_name);
         phase1_restore(&mut core, "core");

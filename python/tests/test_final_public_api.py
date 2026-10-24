@@ -85,7 +85,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     assert set(bound.externs) == {'T', 'C'}
     with pytest.raises(ValueError, match="already bound"):
         _bound_snapshot(bound, 'T', glrmask.TokenSet([8]))
-    with pytest.raises(ValueError, match="no external"):
+    with pytest.raises(ValueError, match="there is no .*extern named"):
         _bound_snapshot(bound, 'missing', child)
     with pytest.raises(ValueError, match="qualified paths"):
         _bound_snapshot(bound, 'C::sub', child)
@@ -143,7 +143,7 @@ def test_token_set_has_no_introspection_accessors():
     assert not hasattr(glrmask.Vocab, "tokens")
     assert not hasattr(glrmask.Vocab, "token_ranges")
     value = glrmask.TokenSet([7, 7, 3])
-    assert repr(value) == "TokenSet[3..=3, 7..=7]"
+    assert repr(value) == "TokenSet.from_ranges([range(3, 4), range(7, 8)])"
     assert value == glrmask.TokenSet.from_ranges([range(3, 4), range(7, 8)])
     for name in ["ids", "ranges", "size", "__len__"]:
         assert not hasattr(value, name), name
@@ -157,9 +157,9 @@ def test_token_set_and_sparse_membership_validation():
     for id in [0, 3, 62, 64, 2**32-1]:
         value = glrmask.TokenSet([id])
         bound = _bound_snapshot(g, "item", value)
-        with pytest.raises(ValueError, match="unknown exact token ID|not present"):
+        with pytest.raises(ValueError, match="is not in the vocabulary"):
             bound.compile(v)
-        with pytest.raises(ValueError, match="unknown exact token ID|not present"):
+        with pytest.raises(ValueError, match="is not in the vocabulary"):
             _bound_snapshot(m, "item", value).compile(v)
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
@@ -217,3 +217,51 @@ def test_token_trie_settings_value_semantics_and_validation():
         glrmask.TokenTrie(parser_backend="lr-table")
     with pytest.raises(TypeError):
         glrmask.TokenTrie(merge_equivalent_tokens=1)
+
+
+def test_version_metadata_and_module_attributes_agree():
+    import importlib.metadata
+
+    assert glrmask.__version__ == importlib.metadata.version("glrmask")
+    v = vocab()
+    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    c = g.compile(v)
+    assert type(v).__module__ == "glrmask"
+    assert type(c).__module__ == "glrmask"
+    assert type(c.start()).__module__ == "glrmask"
+
+
+def test_module_load_takes_only_bytes_and_from_expr_is_positional():
+    v = vocab()
+    module = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    data = module.save()
+    assert glrmask.Module.load(data) is not None
+    with pytest.raises(TypeError):
+        glrmask.Module.load(data, v)
+    grammar = glrmask.Grammar.from_expr(glrmask.TokenSet([0]))
+    assert grammar.compile(v).start().mask()[0]
+
+
+def test_public_reprs_are_stable_and_python_quoted():
+    one = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    assert repr(one) == "<glrmask.Vocab: 1 token>"
+    two = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
+    assert repr(two) == "<glrmask.Vocab: 2 tokens>"
+
+    assert repr(glrmask.TokenSet([])) == "TokenSet.from_ranges([])"
+    assert repr(glrmask.TokenSet.from_ranges([range(0, 10), range(20, 30)])) == (
+        "TokenSet.from_ranges([range(0, 10), range(20, 30)])"
+    )
+    wide = glrmask.TokenSet.from_ranges([range(index, index + 1) for index in range(0, 18, 2)])
+    assert repr(wide) == "<glrmask.TokenSet: 9 tokens in 9 ranges>"
+
+    grammar = glrmask.Grammar.from_glrm(
+        "glrm 1; start root; extern token TOK; extern grammar child; nt root = TOK;"
+    )
+    externs = grammar.externs
+    assert repr(externs["TOK"]) == "Extern(name='TOK', kind='token')"
+    assert repr(externs) == (
+        "Externs({'TOK': Extern(name='TOK', kind='token'), "
+        "'child': Extern(name='child', kind='grammar')})"
+    )
+    assert repr(glrmask.Grammar.from_ebnf('start ::= "a"').externs) == "Externs({})"

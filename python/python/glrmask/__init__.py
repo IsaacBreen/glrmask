@@ -53,6 +53,7 @@ from ._glrmask import (
     Module,
     TokenTrie,
     Vocab,
+    __version__,
     _internal,
 )
 
@@ -72,5 +73,6 @@ __all__ = [
     "Module",
     "TokenTrie",
     "Vocab",
+    "__version__",
     "_internal",
 ]

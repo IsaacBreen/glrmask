@@ -577,7 +577,7 @@ fn advance_trace_step_to_dict<'py>(
 // ---------------------------------------------------------------------------
 
 /// Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.
-#[pyclass(name = "Vocab", from_py_object)]
+#[pyclass(name = "Vocab", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
@@ -588,6 +588,15 @@ pub struct PyVocab {
 impl PyVocab {
     /// Number of byte-backed entries; special IDs are not counted.
     fn __len__(&self) -> usize { self.inner.len() }
+
+    fn __repr__(&self) -> String {
+        let tokens = self.inner.len();
+        if tokens == 1 {
+            "<glrmask.Vocab: 1 token>".to_string()
+        } else {
+            format!("<glrmask.Vocab: {tokens} tokens>")
+        }
+    }
 
     /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
     #[staticmethod]
@@ -645,7 +654,7 @@ fn parse_vocab_partition_strategy(value: Option<&str>) -> PyResult<glrmask::Voca
         ))),
     }
 }
-#[pyclass(name = "VocabPartition", from_py_object)]
+#[pyclass(name = "VocabPartition", module = "glrmask._glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocabPartition {
     inner: glrmask::VocabPartition,
@@ -744,7 +753,7 @@ impl PyVocabPartition {
 // ---------------------------------------------------------------------------
 
 /// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
-#[pyclass(name = "Constraint", from_py_object)]
+#[pyclass(name = "Constraint", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
     inner: Arc<glrmask::Constraint>,
@@ -825,7 +834,7 @@ impl PyConstraint {
 // PyDynamicConstraint
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "DynamicConstraint", from_py_object)]
+#[pyclass(name = "DynamicConstraint", module = "glrmask._glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyDynamicConstraint {
     inner: Arc<glrmask::DynamicConstraint>,
@@ -963,7 +972,7 @@ impl PyDynamicConstraint {
     }
 }
 
-#[pyclass(name = "DynamicConstraintState")]
+#[pyclass(name = "DynamicConstraintState", module = "glrmask._glrmask")]
 pub struct PyDynamicConstraintState {
     inner: OwnedDynamicState,
     max_token: u32,
@@ -1101,7 +1110,7 @@ impl PyDynamicConstraintState {
 // ---------------------------------------------------------------------------
 
 /// Mutable state for one generated sequence.
-#[pyclass(name = "ConstraintState")]
+#[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
     inner: OwnedState,
     max_token: u32,
@@ -1131,7 +1140,7 @@ impl PyConstraintState {
 
 
     /// New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.
-    #[pyo3(signature = (size=None))]
+    #[pyo3(signature = (*, size=None))]
     fn mask<'py>(
         &self,
         py: Python<'py>,
@@ -1997,6 +2006,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDynamicConstraint>()?;
     m.add_class::<PyDynamicConstraintState>()?;
     add_internal_module(m)?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.setattr(
         "__all__",
         [

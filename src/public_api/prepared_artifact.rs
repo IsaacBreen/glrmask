@@ -17,15 +17,15 @@ struct Definition {
     exact_only_token_ids: Vec<u32>,
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
-enum SlotKind { Token, Grammar, LegacyGeneric }
+enum SlotKind { Token, Grammar }
 impl From<ExternKind> for SlotKind {
     fn from(kind: ExternKind) -> Self {
-        match kind { ExternKind::Token => Self::Token, ExternKind::Grammar => Self::Grammar, ExternKind::LegacyGeneric => Self::LegacyGeneric }
+        match kind { ExternKind::Token => Self::Token, ExternKind::Grammar => Self::Grammar, _ => unreachable!("every extern kind has a binding name") }
     }
 }
 impl From<SlotKind> for ExternKind {
     fn from(kind: SlotKind) -> Self {
-        match kind { SlotKind::Token => Self::Token, SlotKind::Grammar => Self::Grammar, SlotKind::LegacyGeneric => Self::LegacyGeneric }
+        match kind { SlotKind::Token => Self::Token, SlotKind::Grammar => Self::Grammar }
     }
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
@@ -105,7 +105,7 @@ fn preflight(manifest: &Manifest) -> Result<()> {
                 Binding::Events(_) => {}
             }
         }
-        if height > graph::MAX_DEPTH { return Err(error("prepared attachment depth exceeds 64")); }
+        if height > graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
         heights.push(height); edges.push(children);
     }
     if used.iter().any(|used|!used) { return Err(error("unreferenced compiled definitions in prepared artifact")); }
@@ -269,7 +269,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
             };
             bindings.insert(name,value);
         }
-        if height>graph::MAX_DEPTH { return Err(error("prepared attachment depth exceeds 64")); }
+        if height>graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
         let boundary_trigger=match instance.boundary_trigger {0=>BoundaryTriggerDetail::None,1=>BoundaryTriggerDetail::TokenSet,
             2=>BoundaryTriggerDetail::Exact,_=>return Err(error("invalid prepared boundary-trigger policy"))};
         let slot_kinds = instance.slot_kinds.into_iter().map(|(name, kind)| (name, kind.into())).collect();

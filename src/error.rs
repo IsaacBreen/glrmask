@@ -3,7 +3,7 @@ use thiserror::Error as ThisError;
 /// The one typed decline that is a boundary request, not a mask strategy
 /// decline: `BoundaryMaskStrategy::ParserDwa` refused the boundary parser DWA.
 pub(crate) const BOUNDARY_DWA_DECLINE: &str =
-    "boundary parser DWA would be too large; use the TokenTrie or Auto boundary mask strategy";
+    "the parser DWA for a grammar boundary would be too large; use the Auto or TokenTrie boundary mask strategy";
 
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
@@ -24,41 +24,52 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
 /// A GLRMask error.
 ///
 /// Errors in grammar source include their location when known.
-#[derive(ThisError, Debug, Clone)]
-#[error("{kind}")]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Error {
     kind: ErrorKind,
     span: Option<glrmask_grammar::SourceSpan>,
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.kind)?;
+        if let Some(span) = self.span {
+            write!(f, " ({span})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Error {}
+
 /// The kind of an [`Error`].
 #[derive(ThisError, Debug, Clone)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The grammar source has a syntax error.
-    #[error("Grammar parse error: {0}")]
+    #[error("grammar error: {0}")]
     GrammarParse(String),
 
     /// The grammar could not be compiled.
-    #[error("Compilation error: {0}")]
+    #[error("{0}")]
     Compilation(String),
 
     /// A bug in GLRMask; please report it.
-    #[error("Internal compiler invariant violated: {0}")]
+    #[error("internal error (a bug in GLRMask; please report it): {0}")]
     InternalInvariant(String),
 
     /// Compiling exceeded a resource limit.
-    #[error("Resource limit exceeded: {0}")]
+    #[error("resource limit exceeded: {0}")]
     ResourceLimit(String),
 
     /// The chosen strategy cannot handle this grammar.
-    #[error("Strategy unsupported: {0}")]
+    #[error("unsupported by the chosen mask strategy: {0}")]
     StrategyUnsupported(String),
 
     /// Saved bytes could not be loaded: they are corrupt, from another GLRMask
     /// version, or for a different vocabulary.
-    #[error("Serialization error: {0}")]
+    #[error("cannot load saved bytes: {0}")]
     Serialization(String),
 }
 
@@ -202,7 +213,7 @@ mod tests {
         assert!(matches!(error.kind(), ErrorKind::InternalInvariant(_)));
         assert_eq!(
             error.to_string(),
-            "Internal compiler invariant violated: analysis coordinate escaped its domain"
+            "internal error (a bug in GLRMask; please report it): analysis coordinate escaped its domain"
         );
     }
 
@@ -231,7 +242,7 @@ mod resource_limit_tests {
             );
         }).expect_err("resource-limit signal must cross the Rayon boundary");
         assert!(matches!(error.kind(), ErrorKind::ResourceLimit(_)));
-        assert_eq!(error.to_string(), "Resource limit exceeded: projected L1 state budget");
+        assert_eq!(error.to_string(), "resource limit exceeded: projected L1 state budget");
         assert_eq!(catch_internal_invariant(|| 42).unwrap(), 42);
     }
 }

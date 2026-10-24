@@ -185,7 +185,7 @@ pub(super) fn assemble(
             }}
         }}}
     }
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
         eprintln!("[glrmask/profile][boundary_owner_program] top_flow={top_flow} abstract={count} live={} ordinary={ordinary_states} controls={control_states} states={} edges={} ms={:.3}",
             live.iter().filter(|&&b|b).count(),arena.num_states(),arena.num_transitions(),started.elapsed().as_secs_f64()*1000.0);
         if top_flow{eprintln!("[glrmask/profile][boundary_top_flow] summaries={} unknown={unknown_summaries} top_states={} cache={} reduced_fragments={reduced_fragments} input_fragment_states={before_states} retained_states={ordinary_states} flow_ms={flow_ms:.3}",

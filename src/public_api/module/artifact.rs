@@ -169,7 +169,7 @@ fn decode_source(value: Source) -> Result<Grammar> {
 }
 
 pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
-    if data.len() < 16 || &data[..8] != MAGIC { return Err(err("invalid or unsupported Module artifact version")); }
+    if data.len() < 16 || &data[..8] != MAGIC { return Err(err("they aren't a saved module, or were saved by another GLRMask version")); }
     let size = u64::from_le_bytes(data[8..16].try_into().unwrap());
     if size > MAX_BYTES || size != data.len() as u64 - 16 { return Err(err("invalid or excessive Module artifact length")); }
     let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(size).reject_trailing_bytes()
@@ -211,7 +211,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 children.push(child);
             }
         }
-        if height > graph::MAX_DEPTH { return Err(err("Module depth exceeds 64")); }
+        if height > graph::MAX_DEPTH { return Err(err("grammars are nested more than 64 levels deep")); }
         heights.push(height);
         edges.push(children);
     }

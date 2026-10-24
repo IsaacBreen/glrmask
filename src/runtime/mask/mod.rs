@@ -251,7 +251,7 @@ fn original_mask_contains(buf: &[u32], token_id: u32) -> bool {
 /// `GLRMASK_DEBUG_MASK_STAGES`; compiled only under `cfg(test)`.
 #[cfg(test)]
 fn segmented_mask_stage_trace_enabled() -> bool {
-    std::env::var_os("GLRMASK_DEBUG_MASK_STAGES").is_some()
+    crate::env::var_os("GLRMASK_DEBUG_MASK_STAGES").is_some()
 }
 
 #[cfg(test)]
@@ -457,7 +457,7 @@ fn intersect_static_dense_with_weight<'w, 'm>(
 pub(crate) fn indexed_dag_mask_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_ENABLE_INDEXED_DAG_MASK")
+        crate::env::var("GLRMASK_ENABLE_INDEXED_DAG_MASK")
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -467,13 +467,13 @@ pub(crate) fn indexed_dag_mask_enabled() -> bool {
 }
 
 fn indexed_dag_mask_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_INDEXED_DAG_MASK").is_some()
+    crate::env::var_os("GLRMASK_PROFILE_INDEXED_DAG_MASK").is_some()
 }
 
 fn dynamic_mask_equivalence_assert_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_ASSERT_DYNAMIC_MASK_EQUIVALENCE")
+        crate::env::var("GLRMASK_ASSERT_DYNAMIC_MASK_EQUIVALENCE")
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -2081,7 +2081,7 @@ mod tests {
         for ids in vocabularies {
             let vocab = Vocab::new(ids.iter().map(|&id| (id, b"a".to_vec())).collect());
             let original = crate::ConstraintSpec::builder(
-                Grammar::glrm("glrm 1; start document; extern SPECIAL; nt document = \"a\" | SPECIAL;"),
+                Grammar::glrm("glrm 1; start document; extern token SPECIAL; nt document = \"a\" | SPECIAL;"),
                 &vocab,
             ).unwrap().bind_token("SPECIAL", [70, 130]).unwrap().build().unwrap().compile().unwrap();
             let loaded = Constraint::load(original.save(), &vocab).unwrap();
@@ -2117,7 +2117,7 @@ mod tests {
             r#"start child; ignore WS; t WS ::= " "+; t WORD ::= /[a-z]+/; nt child ::= WORD;"#
         ), &vocab).unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"start document; extern child; nt document ::= "[" child "]!";"#
+            r#"start document; extern grammar child; nt document ::= "[" child "]!";"#
         ), &vocab).unwrap();
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
@@ -2197,7 +2197,7 @@ mod tests {
             (2, b"y".to_vec()),
         ]);
         let mut parent = Constraint::from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
-            "glrm 1; start start; extern child; nt start = \"x\" child;",
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
             &vocab,
             &[],
             &[],
@@ -2229,7 +2229,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -2363,19 +2363,19 @@ mod tests {
         let vocab = Vocab::new(entries);
         for nullable in [false, true] {
             let leaf_source = if nullable {
-                "glrm 1; start leaf; extern SPECIAL; nt leaf = \"a\"? | SPECIAL;"
+                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\"? | SPECIAL;"
             } else {
-                "glrm 1; start leaf; extern SPECIAL; nt leaf = \"a\" | SPECIAL;"
+                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\" | SPECIAL;"
             };
             let leaf = crate::ConstraintSpec::builder(Grammar::glrm(leaf_source), &vocab)
                 .unwrap().bind_token("SPECIAL", [11, 9001]).unwrap()
                 .build().unwrap().compile().unwrap();
             let middle_parent = Constraint::compile(Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ), &vocab).unwrap();
             let middle = middle_parent.bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
             let outer_parent = Constraint::compile(Grammar::glrm(
-                "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";",
+                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
             ), &vocab).unwrap();
             let bound = outer_parent.bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let loaded = Constraint::load(bound.save(), &vocab).unwrap();
@@ -2448,10 +2448,10 @@ mod tests {
         ] {
             let leaf = Constraint::compile(Grammar::glrm(leaf_source), &vocab).unwrap();
             let middle = Constraint::compile(Grammar::glrm(
-                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
             let bound = Constraint::compile(Grammar::glrm(
-                "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";",
+                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let alphabet = super::recursive_mask_byte_representatives(&bound);
             assert_eq!(alphabet[b'a' as usize], alphabet[b'b' as usize]);
@@ -4494,11 +4494,11 @@ impl<'a> ConstraintState<'a> {
     /// component coordinate for the same branch accumulator.
     fn try_fill_mask_segmented_deterministic_union(&self, buf: &mut [u32]) -> bool {
         if !self.constraint.uses_compact_segmented_parser_runtime()
-            && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some()
+            && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some()
         {
             return self.try_fill_mask_segmented_deterministic_union_direct(buf);
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
         let total_started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
@@ -4738,8 +4738,8 @@ impl<'a> ConstraintState<'a> {
     /// irrelevant; truncating there preserves every accepting prefix exactly.
     /// Ambiguous GSSes deliberately decline this fast path for now.
     fn try_fill_mask_segmented_single_paths(&self, buf: &mut [u32]) -> bool {
-        let profile_all = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
-        let profile_slow = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK_SLOW").is_some();
+        let profile_all = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let profile_slow = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK_SLOW").is_some();
         let profile = profile_all || profile_slow;
         let total_started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
@@ -4919,7 +4919,7 @@ impl<'a> ConstraintState<'a> {
             // dynamic component keeps using its exact lexer/parser walker.
             // Nested segmented components recurse through the same dispatch.
             shadow.fill_mask(component_buf);
-            if std::env::var_os("GLRMASK_DEBUG_SEGMENTED_COMPONENT_MASK").is_some() {
+            if crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_COMPONENT_MASK").is_some() {
                 eprintln!(
                     "[glrmask/debug][segmented_component_mask] dynamic={} terminal_offset={} mask={:?} state={:?}",
                     component.constraint.uses_dynamic_runtime(),
@@ -5055,7 +5055,7 @@ impl<'a> ConstraintState<'a> {
             let mut needs_direct_dynamic = false;
             // Vocabulary preparation is binding-local and done once; execution
             // remains the same shared optimized dynamic walker as ordinary masks.
-            let restricted = std::env::var_os("GLRMASK_DISABLE_BOUNDARY_VOCAB").is_none();
+            let restricted = crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_VOCAB").is_none();
             for (component_index, component) in
                 overlay.segmented_parser_components.iter().enumerate()
             {
@@ -5105,13 +5105,13 @@ impl<'a> ConstraintState<'a> {
                                 super::dynamic_mask::PreparedMaskVocabulary::new(self.constraint, ids)
                             });
                             prepared.as_ref().ok().is_some_and(|vocab| {
-                                if std::env::var_os("GLRMASK_DISABLE_BOUNDARY_FRONTIER_SELECTION").is_some() {
+                                if crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_FRONTIER_SELECTION").is_some() {
                                     return vocab.or_mask(self, buf).expect("exact vocabulary mask failed");
                                 }
                                 let Some(frontier) = self.segmented_boundary_initial_frontier(shard)
                                     else { return false; };
                                 if frontier.is_empty() { return true; }
-                                if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDARY_CANDIDATE_TRIE").is_some() {
+                                if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDARY_CANDIDATE_TRIE").is_some() {
                                     eprintln!("[glrmask/profile][boundary_initial_frontier] component={} before={} after={}",
                                         shard.start_component, self.state.len(), frontier.len());
                                 }
@@ -5901,7 +5901,7 @@ impl<'a> ConstraintState<'a> {
         top_live: &impl Fn(Option<u32>) -> bool,
         buf: &mut [u32],
     ) -> bool {
-        let started = std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
+        let started = crate::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
         let mut group_count = 0;
         for (stacks, accumulator) in gss.partition_by_accumulator() {
             group_count += 1;
@@ -6136,7 +6136,7 @@ impl<'a> ConstraintState<'a> {
         } else {
             &boundary.parser_dwa
         };
-        let debug_boundary = std::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
+        let debug_boundary = crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let boundary_tsids = if recursive_parser && boundary.uses_composed_tsid_coordinate {
                 self.constraint
@@ -6181,7 +6181,7 @@ impl<'a> ConstraintState<'a> {
                 // evaluations dominate ordinary states; time them separately
                 // from DynamicDirect and commits.
                 let single_started =
-                    std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
+                    crate::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
                 let mut single_paths = 0usize;
                 // Phase breakdown for hotspot attribution on slow evaluations
                 // (allowed = exclusion accumulator projection, walk = DWA
@@ -6385,7 +6385,7 @@ impl<'a> ConstraintState<'a> {
                 let mut complete = true;
                 let dag = gss.indexed_dag();
                 let profile_static =
-                    std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some();
+                    crate::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some();
                 let dag_started = profile_static.then(Instant::now);
                 if !recursive_parser
                     && let Some(compact) = boundary.compact_parser_dwa.as_ref()
@@ -6577,7 +6577,7 @@ impl<'a> ConstraintState<'a> {
     ) {
         const MAX_FALLBACK_MASKS: usize = 512;
 
-        let profile = std::env::var_os("GLRMASK_PROFILE_SEED_EXCLUSIONS").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SEED_EXCLUSIONS").is_some();
         let started = profile.then(Instant::now);
         blocked.clear();
         blocked.resize(self.constraint.seed_universe_dense.len(), 0);
@@ -8563,7 +8563,7 @@ impl<'a> ConstraintState<'a> {
             .as_ref()
             .is_some_and(|overlay| {
                 (!overlay.segmented_parser_components.is_empty()
-                    && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some())
+                    && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some())
                     || (overlay.segmented_mask_authoritative
                         && (!overlay.segmented_parser_components.is_empty()
                             || overlay.segmented_static_baseline))
@@ -8611,14 +8611,14 @@ impl<'a> ConstraintState<'a> {
 
     fn add_admissible_scoped_ignore_tokens(&self, buf: &mut [u32]) {
         if self.constraint.static_dynamic_overlay.is_none()
-            || std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
+            || crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
         {
             return;
         }
         let reset_state = self.constraint.runtime_commit_initial_state();
-        let use_fusions = std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_FUSIONS").is_some();
+        let use_fusions = crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_FUSIONS").is_some();
         let use_residual_possible_matches =
-            std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_RESIDUAL_PM").is_some();
+            crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_RESIDUAL_PM").is_some();
         let mut suffix_mask = use_fusions.then(|| vec![0u32; buf.len()]);
         let mut candidate_mask = use_fusions.then(|| vec![0u32; buf.len()]);
         for (&tokenizer_state, gss) in self.state.iter() {
@@ -8692,7 +8692,7 @@ impl<'a> ConstraintState<'a> {
     fn lookahead_factored_mask_shadow(&self) -> Option<Box<Self>> {
         if self.constraint.has_template_parser() { return None; }
         if self.constraint.static_dynamic_overlay.is_none()
-            || std::env::var_os("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR").is_none()
+            || crate::env::var_os("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR").is_none()
         {
             return None;
         }
@@ -8702,7 +8702,7 @@ impl<'a> ConstraintState<'a> {
         // differential work, but do not accumulate every intermediate factor:
         // only the deepest certified subset can add anything the shallower
         // subset could add, while carrying at least the same lookahead guards.
-        let max_factor_depth = std::env::var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH")
+        let max_factor_depth = crate::env::var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(2)
@@ -8712,7 +8712,7 @@ impl<'a> ConstraintState<'a> {
             let mut factor = gss.clone();
             let mut blocked = SmallVec::<[TerminalID; 8]>::new();
             let mut deepest = None::<ParserGSS>;
-            let use_fast_factor = std::env::var_os(
+            let use_fast_factor = crate::env::var_os(
                 "GLRMASK_EXPERIMENT_FAST_LOOKAHEAD_FACTOR",
             )
             .is_some();
@@ -8878,7 +8878,7 @@ impl<'a> ConstraintState<'a> {
                     })
                 })
         });
-        let prepared_boundary_domain = std::env::var_os("GLRMASK_DISABLE_BOUNDARY_VOCAB").is_none()
+        let prepared_boundary_domain = crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_VOCAB").is_none()
             && overlay.is_some_and(|overlay| overlay.segmented_parser_components.iter().any(|component| {
                 component.boundary.as_ref().is_some_and(|shard| {
                     matches!(shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)
@@ -8941,7 +8941,7 @@ impl<'a> ConstraintState<'a> {
             // bypass both the state-local last-mask cache and the lower-level
             // dynamic memo so repeated calls expose recomputation cost.
             let disable_dynamic_mask_cache = !super::dynamic_mask::dynamic_mask_cache_enabled();
-            let profile_dynamic_cache = std::env::var("GLRMASK_PROFILE_DYNAMIC_STATE_CACHE_GENERATION")
+            let profile_dynamic_cache = crate::env::var("GLRMASK_PROFILE_DYNAMIC_STATE_CACHE_GENERATION")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 == Some(self.generation);
@@ -8984,7 +8984,7 @@ impl<'a> ConstraintState<'a> {
             }
             return;
         }
-        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
+        if crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
             && self
                 .constraint
                 .static_dynamic_overlay
@@ -8993,7 +8993,7 @@ impl<'a> ConstraintState<'a> {
         {
             if self.try_fill_mask_segmented_single_paths(mask) {
                 self.update_control_special_token_mask(mask);
-                if std::env::var_os("GLRMASK_VALIDATE_SEGMENTED_PARSER_MASK").is_some() {
+                if crate::env::var_os("GLRMASK_VALIDATE_SEGMENTED_PARSER_MASK").is_some() {
                     let mut reference = vec![0u32; mask.len()];
                     self.fill_mask_uncached(&mut reference);
                     self.update_control_special_token_mask(&mut reference);
@@ -9028,7 +9028,7 @@ impl<'a> ConstraintState<'a> {
         }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
-            let factor_profile = std::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
+            let factor_profile = crate::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
             let factor_started = factor_profile.then(Instant::now);
             if let Some(shadow) = self.lookahead_factored_mask_shadow() {
                 let factor_ns = factor_started.map_or(0, elapsed_ns);
@@ -9068,7 +9068,7 @@ impl<'a> ConstraintState<'a> {
             }
         }
         self.add_admissible_scoped_ignore_tokens(mask);
-        if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
+        if crate::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
             super::dynamic_mask::or_mask_dynamic_additions(self, mask);
         }
         self.clear_late_grammar_placeholder_mask(mask);

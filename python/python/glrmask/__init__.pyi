@@ -41,11 +41,33 @@ assert state.is_accepting()
 from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from types import ModuleType
-from typing import Any, ClassVar, Iterable, Literal, Optional, Sequence, Union, final, overload
+from typing import Any, ClassVar, Iterable, Literal, Optional, Sequence, TypeVar, Union, final, overload
 import numpy as np
 from numpy.typing import NDArray
 
+_T = TypeVar("_T")
+
 _internal: ModuleType
+
+__version__: str
+"""The GLRMask version, for example "1.0.0"."""
+__all__: list[str] = [
+    "BoundaryMaskStrategy",
+    "Constraint",
+    "ConstraintState",
+    "Expr",
+    "Extern",
+    "Externs",
+    "Grammar",
+    "MaskStrategy",
+    "Module",
+    "ParserBackend",
+    "TokenSet",
+    "TokenTrie",
+    "Vocab",
+    "__version__",
+    "_internal",
+]
 
 @final
 class MaskStrategy:
@@ -88,7 +110,7 @@ class TokenTrie:
     """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
 
     `TokenTrie()` is the same as `MaskStrategy.TOKEN_TRIE`."""
-    def __init__(self, *, parser_backend: ParserBackend = ParserBackend.LR_TABLE, merge_equivalent_tokens: bool = False) -> None: ...
+    def __new__(cls, *, parser_backend: Optional[ParserBackend] = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
     @property
     def parser_backend(self) -> ParserBackend:
         """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
@@ -106,7 +128,7 @@ class TokenSet:
 
     In a grammar, it matches any one of its tokens. Every ID must be in the vocabulary.
     """
-    def __init__(self, ids: Iterable[int]) -> None:
+    def __new__(cls, ids: Iterable[int]) -> TokenSet:
         """Creates a set from `ids`."""
         ...
     @staticmethod
@@ -114,9 +136,9 @@ class TokenSet:
         """Creates a set from `range` objects, which must have step 1."""
         ...
     def __repr__(self) -> str:
-        """The set as ranges, for example `TokenSet[0..=9, 20..=29]`."""
+        """An expression that rebuilds the set, or a summary for large sets."""
         ...
-    def __eq__(self, other: object) -> bool:
+    def __eq__(self, other: object, /) -> bool:
         """Whether both sets contain the same IDs."""
         ...
 
@@ -169,7 +191,7 @@ class Extern:
     def __repr__(self) -> str:
         """The externs, for debugging."""
         ...
-    def __eq__(self, other: object) -> bool:
+    def __eq__(self, other: object, /) -> bool:
         """Whether both have the same name and kind."""
         ...
 
@@ -183,7 +205,7 @@ class Externs(Mapping[str, Extern]):
     def unbound(self) -> Externs:
         """Only the externs that are not yet bound."""
         ...
-    def __getitem__(self, key: str) -> Extern:
+    def __getitem__(self, key: str, /) -> Extern:
         """The extern named `key`. Raises `KeyError` if there is none."""
         ...
     def __iter__(self) -> Iterator[str]:
@@ -192,9 +214,12 @@ class Externs(Mapping[str, Extern]):
     def __len__(self) -> int:
         """The number of externs."""
         ...
-    def get(self, key: str, default: Optional[Extern] = None) -> Optional[Extern]:
+    @overload
+    def get(self, key: str, /) -> Optional[Extern]:
         """The extern named `key`, or `default` if there is none."""
         ...
+    @overload
+    def get(self, key: str, default: Optional[Union[Extern, _T]], /) -> Union[Extern, _T]: ...
     def keys(self) -> list[str]:  # type: ignore[override]
         """The extern names, in declaration order."""
         ...
@@ -207,7 +232,7 @@ class Externs(Mapping[str, Extern]):
     def __repr__(self) -> str:
         """The debug representation."""
         ...
-    def __eq__(self, other: object) -> bool:
+    def __eq__(self, other: object, /) -> bool:
         """Whether both list the same externs in the same order."""
         ...
 
@@ -239,7 +264,7 @@ class Expr:
 @final
 class Module:
     """A grammar you can compose with others and partly compile before its externs are bound."""
-    def __init__(self, source: Grammar, /) -> None:
+    def __new__(cls, source: Grammar, /) -> Module:
         """Creates a module from a grammar."""
         ...
     @overload
@@ -260,8 +285,8 @@ class Module:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> None:
         """Compiles as much as possible for `vocab` now, so later compiles are fast.
 
@@ -272,8 +297,8 @@ class Module:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
         """Compiles the module for `vocab`, reusing any precompiled work.
 
@@ -300,11 +325,8 @@ class Module:
         """
         ...
     @staticmethod
-    def load(data: bytes) -> Module:
-        """Loads a module saved with `save`.
-
-        Precompiled work applies only to the vocabulary it was built for; compiling with a different one is an error.
-        """
+    def load(data: bytes, /) -> Module:
+        """Loads a module saved with `save()`."""
         ...
 
 @final
@@ -340,8 +362,8 @@ class Grammar:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Module:
         """Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.
 
@@ -352,8 +374,8 @@ class Grammar:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: Union[MaskStrategy, TokenTrie] = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
         """Compiles the grammar for `vocab`.
 
@@ -361,7 +383,7 @@ class Grammar:
         """
         ...
     @staticmethod
-    def from_expr(expr: Union[Expr, Grammar, TokenSet]) -> Grammar:
+    def from_expr(expr: Union[Expr, Grammar, TokenSet], /) -> Grammar:
         """Creates a grammar from an expression.
 
         Use it to require an end token after a grammar: `Grammar.from_expr(Expr.sequence(grammar, TokenSet([eos_id])))`.
@@ -429,7 +451,7 @@ class ConstraintState:
     def __copy__(self) -> ConstraintState:
         """A copy of the state, for trying tokens without changing this one."""
         ...
-    def mask(self, size: Optional[int] = None) -> NDArray[np.bool_]:
+    def mask(self, *, size: Optional[int] = None) -> NDArray[np.bool_]:
         """The tokens allowed next, as a Boolean array indexed by token ID.
 
         `size` sets the array length, for example to match your logits; it must cover every token ID. All entries are `False` when nothing can follow: the sequence is complete, or a commit failed.

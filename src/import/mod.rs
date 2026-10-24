@@ -450,7 +450,7 @@ fn dynamic_named_alternatives(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<Vec<ast::NamedGrammar>> {
-    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let profile_top = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let parse_started = profile_top.then(std::time::Instant::now);
     let named = parse(source)?;
     let parse_ms = parse_started
@@ -472,7 +472,7 @@ fn dynamic_named_alternatives_from_named(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<Vec<ast::NamedGrammar>> {
-    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let profile_top = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let factor_started = profile_top.then(std::time::Instant::now);
     let mut factored = factor_named_grammar(named);
     let factor_ms = factor_started
@@ -809,7 +809,7 @@ fn compile_dynamic_from_source(
     end_token_ids: &[u32],
 ) -> crate::Result<DynamicConstraint> {
     let backend = crate::runtime::parser_backend::DynamicParserBackend::LrTable;
-    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let profile_top = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started = profile_top.then(std::time::Instant::now);
     let import_started = profile_top.then(std::time::Instant::now);
     let alternatives = dynamic_named_alternatives(source, parse, transform, end_token_ids)?;
@@ -915,7 +915,7 @@ fn compile_dynamic_serialized_from_source_profiled(
                 backend,
             )?
         };
-        let direct_residual_master_provers_enabled = std::env::var(
+        let direct_residual_master_provers_enabled = crate::env::var(
             "GLRMASK_DYNAMIC_DIRECT_RESIDUAL_MASTER_PROVERS",
         )
         .ok()
@@ -926,7 +926,7 @@ fn compile_dynamic_serialized_from_source_profiled(
             )
         })
         .unwrap_or(true)
-            || std::env::var("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_MASTER_PROVERS")
+            || crate::env::var("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_MASTER_PROVERS")
                 .ok()
                 .is_some_and(|value| {
                     !matches!(
@@ -961,7 +961,7 @@ fn compile_dynamic_serialized_from_source_profiled(
                 .inner
                 .dynamic_mask_vocab
                 .has_terminal_observation_classes()
-                && std::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES")
+                && crate::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES")
                     .ok()
                     .is_none_or(|value| {
                         !matches!(value.trim(), "0" | "false" | "no" | "off")
@@ -992,7 +992,7 @@ fn compile_dynamic_serialized_from_source_profiled(
             }
             constraint.inner.dynamic_mask_vocab = dynamic_mask_vocab;
             if profile
-                || std::env::var_os("GLRMASK_PROFILE_DIRECT_RESIDUAL_MASTER_PROVERS").is_some()
+                || crate::env::var_os("GLRMASK_PROFILE_DIRECT_RESIDUAL_MASTER_PROVERS").is_some()
             {
                 if let Some((entries, product_pairs, edges)) = result {
                     eprintln!(
@@ -1080,7 +1080,7 @@ pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
 }
 
 pub(crate) fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
-    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let profile_top = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let parse_top_started = profile_top.then(std::time::Instant::now);
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
@@ -2749,7 +2749,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern payload;
+                extern grammar payload;
                 nt document ::= "X" payload "!";
             "#,
             &[("payload", &child)],
@@ -2793,8 +2793,8 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern left;
-                extern right;
+                extern grammar left;
+                extern grammar right;
                 nt document ::= "X" left right "!";
             "#,
             &[("left", &child), ("right", &child)],
@@ -2831,7 +2831,7 @@ mod tests {
             start document;
             grammar wrapper {
                 start value;
-                extern leaf;
+                extern grammar leaf;
                 nt value = "[" leaf "]";
             };
             nt document = "<" wrapper ">";
@@ -2863,7 +2863,7 @@ mod tests {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                extern child;
+                extern grammar child;
                 nt document ::= "<" child ">";
             "#,
             &[("child", &child)],
@@ -2904,7 +2904,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let source = "start document; extern child; nt document ::= child;";
+        let source = "start document; extern grammar child; nt document ::= child;";
 
         let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
             .expect("an unresolved extern is a valid late-binding slot");
@@ -2951,7 +2951,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern child;
+                extern grammar child;
                 nt document ::= child "!";
             "#,
             &[("child", &child)],
@@ -2990,7 +2990,7 @@ mod tests {
         )
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-            "start document; extern child; nt document ::= child;",
+            "start document; extern grammar child; nt document ::= child;",
             &[("child", &child)],
             &vocab,
             &[1],

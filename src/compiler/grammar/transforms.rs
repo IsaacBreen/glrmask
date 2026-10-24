@@ -61,7 +61,7 @@ pub(crate) fn with_epsfree_prepass_override<T>(
 /// disables it; any other value (or no value) leaves it enabled.
 fn epsfree_prepass_enabled() -> bool {
     epsfree_prepass_override().unwrap_or_else(|| {
-        std::env::var_os("GLRMASK_EPSFREE_PREPASS")
+        crate::env::var_os("GLRMASK_EPSFREE_PREPASS")
             .map_or(true, |value| value.to_str() != Some("0"))
     })
 }
@@ -91,7 +91,7 @@ fn apply_epsfree_prepass(grammar: GrammarDef) -> GrammarDef {
 }
 
 fn env_var_enabled(key: &str, default: bool) -> bool {
-    std::env::var(key)
+    crate::env::var(key)
         .map(|v| {
             let n = v.trim().to_ascii_lowercase();
             !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
@@ -100,8 +100,8 @@ fn env_var_enabled(key: &str, default: bool) -> bool {
 }
 
 fn compile_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -673,11 +673,11 @@ pub(crate) fn inline_single_use_nonterminals(
 fn remove_cyclic_inline_candidates(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
 ) {
-    if std::env::var_os("GLRMASK_DISABLE_INLINE_CANDIDATE_SCC").is_some() {
+    if crate::env::var_os("GLRMASK_DISABLE_INLINE_CANDIDATE_SCC").is_some() {
         remove_cyclic_inline_candidates_by_reachability(inline_candidates);
         return;
     }
-    let mut reference = std::env::var_os("GLRMASK_VALIDATE_INLINE_CANDIDATE_SCC")
+    let mut reference = crate::env::var_os("GLRMASK_VALIDATE_INLINE_CANDIDATE_SCC")
         .is_some()
         .then(|| inline_candidates.clone());
     remove_cyclic_inline_candidates_scc(inline_candidates);
@@ -1309,7 +1309,7 @@ fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalize
 
     let protected_nonterminals = collect_protected_nonterminals(&normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals, normalized.start);
-    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+    let max_reduction_len = crate::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
@@ -1370,7 +1370,7 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
     discard_reflexive_unit_rules(&mut normalized.rules);
     let protected_nonterminals = collect_protected_nonterminals(&normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals, normalized.start);
-    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+    let max_reduction_len = crate::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
@@ -1541,7 +1541,7 @@ fn prepare_grammar_transforms_impl(
         );
     }
 
-    let skip_identical_merges = std::env::var("GLRMASK_SKIP_IDENTICAL_NT_MERGE")
+    let skip_identical_merges = crate::env::var("GLRMASK_SKIP_IDENTICAL_NT_MERGE")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
     if !skip_identical_merges {
@@ -1566,7 +1566,7 @@ fn prepare_grammar_transforms_impl(
         }
     }
 
-    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+    let max_reduction_len = crate::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);

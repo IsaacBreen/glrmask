@@ -248,7 +248,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         }
         static UNION_PAIR_MEMO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let use_union_pair_memo = full_walk_acceleration_enabled() && *UNION_PAIR_MEMO.get_or_init(|| {
-            !std::env::var("GLRMASK_DISABLE_LAZY_UNION_PAIR_MEMO").ok().is_some_and(|value| {
+            !crate::env::var("GLRMASK_DISABLE_LAZY_UNION_PAIR_MEMO").ok().is_some_and(|value| {
                 matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
             })
         });
@@ -406,7 +406,7 @@ impl<'a> FullWalkLazyUnion<'a> {
                 && index < cache.metadata.len()
         };
         if !valid {
-            if std::env::var_os("GLRMASK_PROFILE_INVALID_LAZY_UNION_STATE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_INVALID_LAZY_UNION_STATE").is_some() {
                 let cache = unsafe { &*self.cache.get() };
                 eprintln!(
                     "[glrmask/profile][invalid_lazy_union_state] state={} base={} index={} subsets={} rows={} metadata={} reserved={}",
@@ -1573,7 +1573,7 @@ fn precollapse_master_decision(
             // liveness certificate. Refuse impossible candidates BEFORE any
             // per-terminal construction; this only removes an acceleration.
             let filter_source_live =
-                std::env::var_os("GLRMASK_DISABLE_PROOF_SOURCE_LIVE_GATE").is_none();
+                crate::env::var_os("GLRMASK_DISABLE_PROOF_SOURCE_LIVE_GATE").is_none();
             let eligible = admitted
                 .iter_ones()
                 .map(|terminal| terminal as TerminalID)
@@ -1688,7 +1688,7 @@ fn precollapse_master_decision(
             // consuming explicitly/prepared quotients when present, but do not
             // synthesize them online for the O2 runtime.
             if needs_quotient && !eligible.is_empty() && !vocab.is_grammar_quotiented() {
-                if std::env::var_os("GLRMASK_DISABLE_DEMAND_TERMINAL_PROOF").is_none() {
+                if crate::env::var_os("GLRMASK_DISABLE_DEMAND_TERMINAL_PROOF").is_none() {
                     // The admitted candidate list is already exact. Preparing all
                     // broad terminals here puts unrelated grammar-wide work on a
                     // single mask's cold path. Reuse the existing per-terminal
@@ -1990,7 +1990,7 @@ pub(super) fn try_scalar_dispatch(
         });
     let precollapse_master_decision = (master_may_apply
         && !skip_single_virtual_precollapse
-        && std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none())
+        && crate::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none())
         .then(|| {
             precollapse_master_decision(
                 state,
@@ -2352,7 +2352,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
     // into a coordinate that no longer identifies one exact source state.
     let precollapse_master_decision = (root_branches.len() >= 2
         && root_branches.iter().all(|branch| branch.initial_prune_guard.is_passed())
-        && std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none()).then(|| {
+        && crate::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none()).then(|| {
         precollapse_master_decision(
             state,
             vocab,
@@ -2710,7 +2710,7 @@ impl FullWalkGuardedPair {
 fn full_walk_guarded_pair_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_GUARDED_BOUND_CONTINUATION").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_GUARDED_BOUND_CONTINUATION").is_none()
     })
 }
 
@@ -5968,7 +5968,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     debug_assert!(trie.full_walk_max_parent_depth() < 255);
 
     let profile_walk = dynamic_mask_profile_enabled(state.generation);
-    let profile_kernel = std::env::var("GLRMASK_PROFILE_DYNAMIC_KERNEL_GENERATION")
+    let profile_kernel = crate::env::var("GLRMASK_PROFILE_DYNAMIC_KERNEL_GENERATION")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         == Some(state.generation);
@@ -6044,7 +6044,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // parser-admission singleton test.
     static SINGLETON_POSITIVE_REBUILD_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let singleton_positive_rebuild = *SINGLETON_POSITIVE_REBUILD_ENABLED
-        .get_or_init(|| std::env::var_os("GLRMASK_DISABLE_SINGLETON_POSITIVE_REBUILD").is_none())
+        .get_or_init(|| crate::env::var_os("GLRMASK_DISABLE_SINGLETON_POSITIVE_REBUILD").is_none())
         && state.constraint.ignore_terminal.is_none()
         && root_branches
             .iter()
@@ -6086,7 +6086,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         std::sync::OnceLock::new();
     let effective_singleton_positive_rebuild = *EFFECTIVE_SINGLETON_POSITIVE_REBUILD_ENABLED
         .get_or_init(|| {
-            std::env::var_os("GLRMASK_DISABLE_EFFECTIVE_SINGLETON_POSITIVE_REBUILD").is_none()
+            crate::env::var_os("GLRMASK_DISABLE_EFFECTIVE_SINGLETON_POSITIVE_REBUILD").is_none()
         })
         && root_branches
             .iter()
@@ -6129,7 +6129,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     let mut llg_master_decision = llg_master_decision;
     static GENERIC_MASTER_PROOF_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let generic_master_proof_enabled = *GENERIC_MASTER_PROOF_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_GENERIC_MASTER_PROOF").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_GENERIC_MASTER_PROOF").is_none()
     });
     let generic_master_candidates = if generic_master_proof_enabled
         && llg_master_decision.is_none()
@@ -6145,7 +6145,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                 let mut candidates = SmallVec::<[TerminalID; 4]>::new();
                 let lexer_state = root_branches[0].tokenizer_config;
                 let filter_first_bytes =
-                    std::env::var_os("GLRMASK_DISABLE_GENERIC_MASTER_FIRST_BYTES").is_none();
+                    crate::env::var_os("GLRMASK_DISABLE_GENERIC_MASTER_FIRST_BYTES").is_none();
                 let first_bytes = filter_first_bytes.then(|| safe_plus.first_bytes());
                 let exact_source = root_branches[0].exact_tokenizer_state;
                 for terminal in admitted.iter_ones().map(|terminal| terminal as TerminalID) {
@@ -6184,7 +6184,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                     .exact_tokenizer_state
                     .is_some_and(|source| vocab.has_prepared_master_prover_row(source));
                 let candidate_limit = if prepared_wide { 8 } else { 2 };
-                if std::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
+                if crate::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
                     eprintln!("[candidate_gate] generation={} lexer={} exact={:?} candidates={} limit={} first_bytes_gate={}",
                         state.generation, lexer_state, exact_source, candidates.len(), candidate_limit, filter_first_bytes);
                 }
@@ -6351,7 +6351,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                     .unwrap_or(0),
             )
         };
-        let prefer_bounded_radius = std::env::var_os("GLRMASK_DISABLE_VIRTUAL_RADIUS_FIRST").is_none()
+        let prefer_bounded_radius = crate::env::var_os("GLRMASK_DISABLE_VIRTUAL_RADIUS_FIRST").is_none()
             && exact_source.is_some_and(|source| {
             safe_plus_candidates.iter().copied().any(|terminal| {
                 state
@@ -6400,7 +6400,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // body envelope that cannot finish its terminal on a safe-string atom.
     static SAFE_ENVELOPE_UPPER_ENABLED: OnceLock<bool> = OnceLock::new();
     let mut safe_envelope_upper = if *SAFE_ENVELOPE_UPPER_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_SAFE_ENVELOPE_UPPER").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_SAFE_ENVELOPE_UPPER").is_none()
     }) && HOT_SINGLE_ROOT && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
         && vocab.llg_master_trie().is_some()
@@ -6459,7 +6459,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             Some(base)
         }
     };
-    if std::env::var_os("GLRMASK_DIAG_SAFE_ENVELOPE_UPPER").is_some() {
+    if crate::env::var_os("GLRMASK_DIAG_SAFE_ENVELOPE_UPPER").is_some() {
         eprintln!(
             "[safe_envelope_upper] generation={} lower={:?} upper={:?} work={:?}",
             state.generation,
@@ -6475,7 +6475,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // to, or even larger than, the ordinary vocabulary walk. Gate the route on
     // exact precomputed strict-walk volume without changing proof semantics.
     if let Some(decision) = llg_master_decision {
-        let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
+        let max_permille = crate::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1000);
@@ -6485,7 +6485,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                 residual_ops.saturating_mul(1000)
                     <= ordinary_ops.saturating_mul(max_permille)
             });
-        if std::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
+        if crate::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
             eprintln!("[candidate_gate_master] generation={} radius={} whitespace={} ordinary={} residual={:?} profitable={}",
                 state.generation, decision.safe_radius, decision.whitespace, ordinary_ops,
                 vocab.llg_master_residual_ops(decision.safe_radius, decision.whitespace), profitable);
@@ -6521,7 +6521,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // decisions are identical for both polarities.
     static FORCE_POSITIVE_REBUILD: OnceLock<bool> = OnceLock::new();
     let force_positive_rebuild = *FORCE_POSITIVE_REBUILD
-        .get_or_init(|| std::env::var_os("GLRMASK_EXPERIMENT_FORCE_POSITIVE_REBUILD").is_some())
+        .get_or_init(|| crate::env::var_os("GLRMASK_EXPERIMENT_FORCE_POSITIVE_REBUILD").is_some())
         && llg_master_decision.is_none()
         && state.constraint.ignore_terminal.is_none()
         && root_branches
@@ -6551,7 +6551,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         && state.constraint.ignore_terminal.is_none()
         && !profile_walk && !profile_kernel
         && *SCALAR_HOT_POSITIVE_REBUILD_ENABLED.get_or_init(|| {
-            std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+            crate::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
         })
         && HOT_SINGLE_ROOT && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
@@ -6627,7 +6627,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // and keep their previous hot-lane selection.
     static SINGLE_BYTE_ROOT_WALK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let sparse_root_walk_enabled = *SINGLE_BYTE_ROOT_WALK_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_SINGLE_BYTE_ROOT_WALK").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_SINGLE_BYTE_ROOT_WALK").is_none()
     });
     let hoisted_root_coord = (root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed())
@@ -6658,7 +6658,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         .map(|(start, end, _)| end.saturating_sub(start) as u64);
     static DENSE_HOT_MIN_ROOT_OPS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let dense_hot_min_root_ops = *DENSE_HOT_MIN_ROOT_OPS.get_or_init(|| {
-        std::env::var("GLRMASK_EXPERIMENT_DENSE_HOT_MIN_ROOT_OPS")
+        crate::env::var("GLRMASK_EXPERIMENT_DENSE_HOT_MIN_ROOT_OPS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(4096)
@@ -6669,8 +6669,8 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         .map_or(true, |span| dense_hot_min_root_ops == 0 || span >= dense_hot_min_root_ops);
 
     let dense_hot_negative_proof =
-        std::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_NEGATIVE").is_some()
-            && std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+        crate::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_NEGATIVE").is_some()
+            && crate::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
             && !profile_walk
             && !profile_kernel
             && HOT_SINGLE_ROOT
@@ -6717,7 +6717,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
 
     static PARSER_NARROW_HOT: OnceLock<bool> = OnceLock::new();
     let parser_narrow_root = *PARSER_NARROW_HOT.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_PARSER_NARROW_HOT").is_none()
+        crate::env::var_os("GLRMASK_DISABLE_PARSER_NARROW_HOT").is_none()
     })
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
@@ -6732,7 +6732,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                         .any(|candidate| candidate != terminal)
             });
 
-    let dense_hot_lane_would = std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+    let dense_hot_lane_would = crate::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
         && !profile_walk
         && !profile_kernel
         && HOT_SINGLE_ROOT
@@ -6752,7 +6752,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     // gate) plus a certified single-live-root-byte range. Opt-in only.
     static DENSE_HOT_ROOT_RANGE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let dense_hot_root_range_enabled = *DENSE_HOT_ROOT_RANGE_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_ROOT_RANGE").is_some()
+        crate::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_ROOT_RANGE").is_some()
     });
     // TODO(root-range-certificate): a conservative `state_has_epsilon_transitions`
     // exclusion of the certified root row was intentionally left OUT pending the
@@ -6785,13 +6785,13 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     static DENSE_HOT_ROOT_RANGE_ASSERT_ENABLED: std::sync::OnceLock<bool> =
         std::sync::OnceLock::new();
     let dense_hot_root_range_assert = *DENSE_HOT_ROOT_RANGE_ASSERT_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE").is_some()
+        crate::env::var_os("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE").is_some()
     });
     static DENSE_HOT_ROOT_RANGE_ASSERT_GENERATION: std::sync::OnceLock<Option<u64>> =
         std::sync::OnceLock::new();
     let dense_hot_root_range_assert_generation =
         *DENSE_HOT_ROOT_RANGE_ASSERT_GENERATION.get_or_init(|| {
-            std::env::var("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE_GENERATION")
+            crate::env::var("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE_GENERATION")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
         });
@@ -6850,7 +6850,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     static DENSE_HOT_SELECTION_GENERATION: std::sync::OnceLock<Option<u64>> =
         std::sync::OnceLock::new();
     let profile_selection = *DENSE_HOT_SELECTION_GENERATION.get_or_init(|| {
-        std::env::var("GLRMASK_PROFILE_DENSE_HOT_SELECTION_GENERATION")
+        crate::env::var("GLRMASK_PROFILE_DENSE_HOT_SELECTION_GENERATION")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
     }) == Some(state.generation);

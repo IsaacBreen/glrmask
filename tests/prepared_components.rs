@@ -74,6 +74,27 @@ fn inline_and_attached_paths_have_the_same_scope_rules() {
 
 
 #[test]
+fn lark_unterminated_string_reports_its_location() {
+    let source = "start: \"abc";
+    let error = Grammar::from_lark(source).unwrap_err();
+    assert_eq!(error.to_string(), "grammar error: unterminated string (line 1, column 8)");
+    let span = error.source_span().expect("a Lark lexer error retains a source span");
+    assert_eq!(&source[span.start..span.end], "\"abc");
+}
+
+#[test]
+fn loading_a_constraint_for_a_different_vocabulary_explains_the_bytes() {
+    let v = vocab();
+    let grammar = Grammar::from_glrm("start root nt root=\"x\"").unwrap();
+    let constraint = grammar.compile(&v).unwrap();
+    let other = Vocab::new(vec![(0, b"y".to_vec())]);
+    assert_eq!(
+        Constraint::load(constraint.save(), &other).unwrap_err().to_string(),
+        "cannot load saved bytes: the constraint was saved with a different vocabulary"
+    );
+}
+
+#[test]
 fn requirement_coordinates_survive_preparation_and_save_load() {
     let source="// α\nextern token MARK\nstart root\nnt root = MARK";
     let g=Grammar::from_glrm(source).unwrap();
@@ -130,7 +151,7 @@ fn compact_closed_dag_does_not_expand_during_inspection_or_persistence() {
     let loaded=PreparedGrammar::load(&bytes,&v).unwrap();
     assert!(loaded.requirements().unwrap().is_empty());
     assert_eq!(bytes,loaded.save(),"DAG round trip is canonical and preserves sharing");
-    assert!(loaded.link().unwrap_err().to_string().contains("resource limit"));
+    assert!(loaded.link().unwrap_err().to_string().contains("more than 131072 parts"));
     let mut corrupt=bytes.clone();corrupt.extend_from_slice(b"trailing");
     assert!(PreparedGrammar::load(corrupt, &vocab()).is_err());
     for cut in [0,8,15,bytes.len()-1] {assert!(PreparedGrammar::load(&bytes[..cut], &vocab()).is_err());}
@@ -141,7 +162,7 @@ fn compact_open_dag_has_bounded_requirements_but_remains_serializable() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF).unwrap().prepare(&v).unwrap();
     let wrapper=Grammar::from_glrm(PAIR).unwrap().prepare(&v).unwrap();let mut graph=leaf;
     for _ in 0..18 {graph=wrapper.bind_snapshot("LEFT",&graph).unwrap().bind_snapshot("RIGHT",&graph).unwrap();}
-    assert!(graph.requirements().unwrap_err().to_string().contains("resource limit"));
+    assert!(graph.requirements().unwrap_err().to_string().contains("too many parts"));
     let bytes=graph.save();assert!(bytes.len()<2_000_000);
     let loaded=PreparedGrammar::load(bytes,&v).unwrap();
     assert!(loaded.requirements().is_err());assert!(loaded.link().is_err());
@@ -159,7 +180,7 @@ fn source_preparation_memoizes_shared_attachments_and_checks_depth() {
     let one=Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD").unwrap().prepare(&v).unwrap();
     let mut graph=Grammar::from_glrm("start root nt root=eps").unwrap().prepare(&v).unwrap();
     for _ in 0..64 {graph=one.bind_snapshot("CHILD",&graph).unwrap();}
-    assert!(one.bind_snapshot("CHILD",&graph).unwrap_err().to_string().contains("depth"));
+    assert!(one.bind_snapshot("CHILD",&graph).unwrap_err().to_string().contains("nested more than 64 levels deep"));
     assert!(PreparedGrammar::load(graph.save(), &vocab()).is_ok());
 }
 

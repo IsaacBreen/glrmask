@@ -251,7 +251,7 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
         let mut old = current.clone();
         old[40+8..40+10].copy_from_slice(&version.to_le_bytes());
         let error = Constraint::load(&old, &vocab()).unwrap_err();
-        assert!(error.to_string().contains("unsupported constraint artifact version"),
+        assert!(error.to_string().contains("saved by another GLRMask version"),
             "pre-fix boundary artifacts must fail before executing a stored exclusion: {error}");
         assert!(Constraint::load(&old, &v).is_err());
     }

@@ -39,7 +39,7 @@ static STATE: OnceLock<Option<State>> = OnceLock::new();
 fn state() -> Option<&'static State> {
     STATE
         .get_or_init(|| {
-            let enabled = std::env::var("GLRMASK_TRACE_BUILD_REMAINDER")
+            let enabled = crate::env::var("GLRMASK_TRACE_BUILD_REMAINDER")
                 .ok()
                 .is_some_and(|value| {
                     matches!(

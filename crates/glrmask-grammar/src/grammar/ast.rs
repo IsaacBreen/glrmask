@@ -1103,7 +1103,7 @@ impl<'a> Lowerer<'a> {
             .named_rule_exprs
             .get(name)
             .cloned()
-            .ok_or_else(|| GlrMaskError::GrammarParse(format!("unknown rule referenced from SeparatedSequence: {name}")))?;
+            .ok_or_else(|| GlrMaskError::GrammarParse(format!("unknown rule in a separated sequence: {name}")))?;
         let is_terminal = *self.named_rule_is_terminal.get(name).unwrap_or(&false);
 
         // If the referenced named rule is already nonnullable, reuse its
@@ -3049,13 +3049,13 @@ fn grammar_expr_to_expr(
                 Expr::Shared(arc)
             } else {
                 return Err(GlrMaskError::GrammarParse(format!(
-                    "unresolved Ref({name}) in terminal body â€” not found in terminal rules"
+                    "terminal refers to {name}, which is not a terminal rule"
                 )));
             }
         }
         GrammarExpr::SeparatedSequence { .. } => {
             return Err(GlrMaskError::GrammarParse(
-                "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
+                "a separated sequence can't appear inside a terminal rule".into(),
             ));
         }
         GrammarExpr::ExprNFA(expr_nfa) => {
@@ -3781,7 +3781,7 @@ fn lower_with_resolved_terminal_exprs_impl(
         })
     }) {
         return Err(GlrMaskError::GrammarParse(
-            "a special LLM token terminal cannot be the ignore terminal".into(),
+            "the ignore terminal can't match a token ID".into(),
         ));
     }
     let mut lexer_partitions = BTreeMap::new();

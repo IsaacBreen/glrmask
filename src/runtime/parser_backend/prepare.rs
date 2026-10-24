@@ -319,7 +319,7 @@ fn assemble(
         completion: completion.domain,
         possible,
         unconditional,
-        profile: std::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
+        profile: crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
         advances: AtomicU64::new(0),
         admissions: AtomicU64::new(0),
         completions: AtomicU64::new(0),
@@ -407,7 +407,7 @@ pub(super) fn from_compiler_parts(
     dynamic: bool,
     preserve_coordinate: bool,
 ) -> crate::Result<PreparedTemplateParser> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let started = profile.then(Instant::now);
     let sparse_regular =
         direct_regular.is_some() && table.num_rules == 0 && table.action.is_empty();

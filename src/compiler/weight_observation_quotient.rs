@@ -73,7 +73,7 @@ impl WeightObservationQuotient {
                 class
             } else {
                 if groups.len() == MAX_ATOMS {
-                    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                         eprintln!("[glrmask/profile][weight_observation_atoms] selected=false reason=atom_budget points={} sources={} atoms_more_than={}", points.len(), unique.len(), MAX_ATOMS);
                     }
                     return None;

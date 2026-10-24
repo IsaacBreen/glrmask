@@ -226,7 +226,7 @@ impl<'a> Lexer<'a> {
                 .checked_mul(10)
                 .and_then(|value| value.checked_add((byte - b'0') as u32))
                 .ok_or_else(|| {
-                    GlrMaskError::GrammarParse("special LLM token id does not fit in u32".into())
+                    GlrMaskError::GrammarParse("token ID doesn't fit in 32 bits".into())
                 })?;
             digits += 1;
             self.pos += 1;
@@ -265,7 +265,7 @@ impl<'a> Lexer<'a> {
             let number=|lexer:&mut Self|->Result<u32,GlrMaskError>{
                 let first=lexer.advance().filter(u8::is_ascii_digit).ok_or_else(||GlrMaskError::GrammarParse("expected numeric token ID".into()))?;
                 let id=lexer.lex_number(first)?;
-                u32::try_from(id).map_err(|_|GlrMaskError::GrammarParse("token ID does not fit in u32".into()))
+                u32::try_from(id).map_err(|_|GlrMaskError::GrammarParse("token ID doesn't fit in 32 bits".into()))
             };
             let start=number(self)?;self.skip_whitespace_inline();
             let end=if self.peek()==Some(b'-'){self.pos+=1;self.skip_whitespace_inline();number(self)?}else{start};
@@ -463,8 +463,8 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b) => {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "unexpected character '{}' at position {}",
-                        b as char, self.pos
+                        "unexpected character '{}'",
+                        b as char
                     )));
                 }
             }

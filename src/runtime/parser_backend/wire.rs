@@ -36,7 +36,7 @@ pub(super) struct CompositionSeed {
 
 pub(crate) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal) -> Vec<u8> {
     let bytes = compact::encode(parser, templates);
-    if std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_WIRE").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_TEMPLATE_WIRE").is_some() {
         let decoded = compact::decode(&bytes).expect("newly encoded template programs must decode");
         assert_eq!(decoded.state_count, parser.state_count);
         assert_eq!(decoded.terminal_count, parser.terminal_count);

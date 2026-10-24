@@ -138,19 +138,19 @@ fn all_closed_candidates(grammar: &GrammarDef) -> Vec<Candidate> {
 }
 
 fn selected_modules(grammar: &GrammarDef) -> Vec<Candidate> {
-    let max_closure = std::env::var("O21137_SUBGRAMMAR_MAX_CLOSURE")
+    let max_closure = crate::env::var("O21137_SUBGRAMMAR_MAX_CLOSURE")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(64);
-    let min_rules = std::env::var("O21137_SUBGRAMMAR_MIN_RULES")
+    let min_rules = crate::env::var("O21137_SUBGRAMMAR_MIN_RULES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(3);
-    let min_calls = std::env::var("O21137_SUBGRAMMAR_MIN_CALLS")
+    let min_calls = crate::env::var("O21137_SUBGRAMMAR_MIN_CALLS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
-    let max_modules = std::env::var("O21137_SUBGRAMMAR_MAX_MODULES")
+    let max_modules = crate::env::var("O21137_SUBGRAMMAR_MAX_MODULES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(16);
@@ -495,7 +495,7 @@ fn terminal_child(source: &GrammarDef, terminal: u32) -> GrammarDef {
 }
 
 fn selected_terminals(grammar: &GrammarDef) -> Vec<u32> {
-    let filter = std::env::var("O21137_TERMINAL_FILTER").unwrap_or_else(|_| "bounded".into());
+    let filter = crate::env::var("O21137_TERMINAL_FILTER").unwrap_or_else(|_| "bounded".into());
     grammar
         .terminals
         .iter()
@@ -645,7 +645,7 @@ fn profile_owned_parent_tokenizer(
     parent: &Constraint,
     child_bindings: &[(&str, &Constraint)],
 ) {
-    if std::env::var_os("O21137_PROFILE_OWNED_PARENT_TOKENIZER").is_none() {
+    if crate::env::var_os("O21137_PROFILE_OWNED_PARENT_TOKENIZER").is_none() {
         return;
     }
     let table_inputs = child_bindings
@@ -774,7 +774,7 @@ fn prepare_nonterminal_decomposed_parts(
     );
     let planning_ms = elapsed_ms(planning_started);
 
-    let profile_setup = std::env::var_os("O21137_PROFILE_SETUP").is_some();
+    let profile_setup = crate::env::var_os("O21137_PROFILE_SETUP").is_some();
     let mut children = Vec::<Constraint>::with_capacity(unique_grammars.len());
     let mut child_ms = Vec::with_capacity(unique_grammars.len());
     for (child_index, child) in unique_grammars.into_iter().enumerate() {
@@ -849,7 +849,7 @@ fn build_nonterminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> Decompos
 }
 
 fn build_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedBuild {
-    match std::env::var("O21137_SUBGRAMMAR_KIND")
+    match crate::env::var("O21137_SUBGRAMMAR_KIND")
         .unwrap_or_else(|_| "nonterminal".into())
         .as_str()
     {
@@ -1037,12 +1037,12 @@ pub(crate) fn run(mode: &str) {
         }
         "compose-only" => {
             let parts = prepare_nonterminal_decomposed_parts(&grammar, &vocab);
-            let repeats = std::env::var("O21137_COMPOSE_REPEATS")
+            let repeats = crate::env::var("O21137_COMPOSE_REPEATS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(5)
                 .max(1);
-            let consume_original = std::env::var_os("O21137_COMPOSE_CONSUME_ORIGINAL").is_some();
+            let consume_original = crate::env::var_os("O21137_COMPOSE_CONSUME_ORIGINAL").is_some();
             assert!(
                 !consume_original || repeats == 1,
                 "O21137_COMPOSE_CONSUME_ORIGINAL requires O21137_COMPOSE_REPEATS=1",

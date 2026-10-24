@@ -445,7 +445,7 @@ impl CommitBuffers {
             flat_frontier: {
                 static LAZY_MASK_STACKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if MASK_ONLY && *LAZY_MASK_STACKS.get_or_init(|| {
-                    std::env::var("GLRMASK_LAZY_MASK_COMMIT_SCRATCH")
+                    crate::env::var("GLRMASK_LAZY_MASK_COMMIT_SCRATCH")
                         .map_or(true, |v| matches!(v.as_str(), "1" | "true"))
                 }) {
                     None

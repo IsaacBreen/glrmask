@@ -623,7 +623,7 @@ fn build_internal_token_buf_masks_from_maps(
     original_to_internal: &[u32],
     internal_to_tokens: &[Vec<u32>],
 ) -> Vec<InternalTokenBufMasks> {
-    let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
+    let grouped = crate::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -736,7 +736,7 @@ impl TokenMaskCachePrebuild {
             (groups, total_entries, max_entries)
         };
 
-        let skip_small_group_caches = std::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
+        let skip_small_group_caches = crate::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
             .map(|value| {
                 let value = value.trim();
                 value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -1162,7 +1162,7 @@ impl Constraint {
             return Ok(());
         }
         self.materialize_composition_link_metadata_for_compilation()?;
-        if std::env::var_os("GLRMASK_REPORT_ROUTE").is_some() {
+        if crate::env::var_os("GLRMASK_REPORT_ROUTE").is_some() {
             eprintln!("[glrmask/route] boundary_token_set=fallback_trie reason=summary_unknown");
         }
         let relevant = self.boundary_relevant_terminals();
@@ -1401,7 +1401,7 @@ impl Constraint {
         match detail {
             crate::runtime::BoundaryTriggerDetail::None => Ok(()),
             crate::runtime::BoundaryTriggerDetail::TokenSet => {
-                if std::env::var_os("GLRMASK_EXPERIMENT_NO_BOUNDARY_TRIGGER")
+                if crate::env::var_os("GLRMASK_EXPERIMENT_NO_BOUNDARY_TRIGGER")
                     .is_some_and(|value| value == "1")
                 {
                     return Ok(());
@@ -4004,7 +4004,7 @@ impl Constraint {
             && vocab.mask_projection_tokenizer().is_none()
             && self.tokenizer.has_any_virtual_runtime()
         {
-            let virtual_residual_mask_projection_enabled = std::env::var(
+            let virtual_residual_mask_projection_enabled = crate::env::var(
                 "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION",
             )
             .ok()
@@ -4014,7 +4014,7 @@ impl Constraint {
             // estimate charges one u32 index per candidate coordinate before
             // the projection retains only reachable sparse states.
             const DEFAULT_VIRTUAL_RESIDUAL_PROJECTION_MAX_DENSE_STATES: usize = 1024 * 1024;
-            let max_dense_states = std::env::var(
+            let max_dense_states = crate::env::var(
                 "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION_MAX_DENSE_STATES",
             )
             .ok()
@@ -4039,7 +4039,7 @@ impl Constraint {
     }
 
     pub(crate) fn prepare_dynamic_mask_runtime_artifacts(&self, vocab: &mut DynamicMaskVocab) {
-        let profile_runtime_mask = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
+        let profile_runtime_mask = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
         let max_token_started = profile_runtime_mask.then(std::time::Instant::now);
         let max_token_len = self.dynamic_runtime_max_token_byte_len(vocab);
         if let Some(started) = max_token_started {
@@ -4074,7 +4074,7 @@ impl Constraint {
         }
 
         let mask_execution_source = vocab.mask_runtime_tokenizer().unwrap_or(&self.tokenizer);
-        let eager_mask_execution = std::env::var("GLRMASK_DYNAMIC_EAGER_MASK_EXECUTION")
+        let eager_mask_execution = crate::env::var("GLRMASK_DYNAMIC_EAGER_MASK_EXECUTION")
             .ok()
             .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
         // A finite projection whose only epsilon structure is its reset
@@ -4145,7 +4145,7 @@ impl Constraint {
             return &self.dynamic_mask_vocab;
         }
         self.lazy_dynamic_mask_vocab.get_or_init(|| {
-            let profile_runtime_mask = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
+            let profile_runtime_mask = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
             let total_started = profile_runtime_mask.then(std::time::Instant::now);
             let mut vocab = self.dynamic_mask_vocab.clone();
             let materialize_started = profile_runtime_mask.then(std::time::Instant::now);
@@ -4208,8 +4208,8 @@ impl Constraint {
     }
 
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let collect_started_at = profile.then(std::time::Instant::now);
         // `token_bytes` is id-sorted. Runtime traversal needs byte-sorted,
@@ -4322,7 +4322,7 @@ impl Constraint {
                 .expect("whitespace slice regex must compile"),
         );
         let max_token_byte_len = vocab.max_token_byte_len();
-        let ascii_slice_max_token_byte_len = std::env::var(
+        let ascii_slice_max_token_byte_len = crate::env::var(
             "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_MAX_BYTES",
         )
         .ok()
@@ -4330,7 +4330,7 @@ impl Constraint {
         .filter(|&value| value != 0)
         .map_or(max_token_byte_len, |value| value.min(max_token_byte_len));
         let ascii_word = (max_token_byte_len != 0
-            && std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE").is_some())
+            && crate::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE").is_some())
         .then(|| {
             Arc::new(
                 VocabPartitionDfa::compile_utf8_regex(
@@ -4506,7 +4506,7 @@ impl Constraint {
         tokenizer: &Tokenizer,
         bounded64: Option<&[U8Set]>,
     ) -> Vec<(u32, Vec<TerminalID>, bool)> {
-        if let Ok(value) = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATES") {
+        if let Ok(value) = crate::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATES") {
             let mut states = value
                 .split(',')
                 .filter_map(|value| value.trim().parse::<u32>().ok())
@@ -4528,7 +4528,7 @@ impl Constraint {
                 return forced;
             }
         }
-        if let Ok(value) = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATE")
+        if let Ok(value) = crate::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATE")
             && let Ok(state) = value.trim().parse::<u32>()
         {
             let state = vocab.mask_projection_state(state);
@@ -4638,8 +4638,8 @@ impl Constraint {
                 (std::cmp::Reverse(left.0), &left.1)
                     .cmp(&(std::cmp::Reverse(right.0), &right.1))
             });
-            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
-                if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
+            if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+                if let Ok(value) = crate::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
                     let requested = value
                         .split(',')
                         .filter_map(|value| value.trim().parse::<u32>().ok())
@@ -4706,13 +4706,13 @@ impl Constraint {
                     );
                 }
             }
-            let max_projections = std::env::var("GLRMASK_DYNAMIC_QUOTIENT_PROJECTIONS")
+            let max_projections = crate::env::var("GLRMASK_DYNAMIC_QUOTIENT_PROJECTIONS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .filter(|&value| value > 0)
                 .unwrap_or(16);
             let mut selected = Vec::with_capacity(max_projections);
-            if std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some() {
+            if crate::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some() {
                 // H64 aliases make it worthwhile to seed several structurally
                 // distinct sources within a large single-future family.  A
                 // long bounded-repeat chain often has thousands of states with
@@ -4846,19 +4846,19 @@ impl Constraint {
         // product can cost hundreds of milliseconds, while the local bounded
         // continuation certificate handles their counter chains cheaply.
         // Keep both limits structural and overrideable for benchmarking.
-        let min_projection_tokenizer_states = std::env::var(
+        let min_projection_tokenizer_states = crate::env::var(
             "GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_MIN_STATES",
         )
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or(128);
-        let max_projection_tokenizer_states = std::env::var(
+        let max_projection_tokenizer_states = crate::env::var(
             "GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_MAX_STATES",
         )
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or(8_192);
-        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
             let started = std::time::Instant::now();
             let mut parser_rows_by_terminal = vec![0usize; self.parser_terminal_count() as usize];
             for row in (0..self.parser_symbol_count()).filter_map(|top| self.parser_advance_row(top)) {
@@ -5428,7 +5428,7 @@ impl Constraint {
             let pre_match_dead_words = pack_nodes(&pre_match_dead_nodes);
             let pre_match_frontier_words = pack_nodes(&pre_match_frontier_nodes);
 
-            let config_certificate_requested = std::env::var(
+            let config_certificate_requested = crate::env::var(
                 "GLRMASK_DYNAMIC_CONFIG_SUBTREE_CERT_STATES",
             )
             .ok()
@@ -5558,8 +5558,8 @@ impl Constraint {
                         && left.common_future_terminals.as_ref()
                             == right.common_future_terminals.as_ref()
                 });
-                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
                 {
                     let covered = config_subtree_certificates
                         .iter()
@@ -5575,7 +5575,7 @@ impl Constraint {
                     );
                 }
             }
-            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
                 eprintln!(
                     "[glrmask/profile][dynamic_projection_candidate_frontier] source_state={} futures={:?} live_nodes={} dead_subtrees={} frontier_nodes={} match_frontier_tokens={} reset_child_states={} reset_child_configs={} reset_edge_second_matches={} reset_second_match_tokens={} reset_edge_unknown={} reset_unknown_tokens={} reset_child_top={:?} reset_config_top={:?}",
                     source_state,
@@ -5728,7 +5728,7 @@ impl Constraint {
                     // as the inclusion-minimal antichain of leaf future sets:
                     // supersets add no constraint.  Measure how compact that
                     // CNF is before committing to a runtime representation.
-                    let profile_cnf = std::env::var(
+                    let profile_cnf = crate::env::var(
                         "GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES",
                     )
                     .ok()
@@ -5932,7 +5932,7 @@ impl Constraint {
                     }
                 }
                 if let [terminal] = source_future_terminals
-                    && std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES")
+                    && crate::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES")
                         .ok()
                         .is_some_and(|value| {
                             value
@@ -6037,8 +6037,8 @@ impl Constraint {
                     );
                 }
             }
-            if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
             {
                 let safe_tokens = safe_no_match_mask
                     .iter()
@@ -6110,7 +6110,7 @@ impl Constraint {
         let projection_tokenizer = vocab
             .mask_projection_tokenizer()
             .unwrap_or(&self.tokenizer);
-        if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
+        if let Ok(value) = crate::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
             let requested = value
                 .split(',')
                 .filter_map(|value| value.trim().parse::<u32>().ok())
@@ -6127,7 +6127,7 @@ impl Constraint {
                 }
             }
             for (terminal, states) in by_terminal {
-                let horizon = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_HORIZON")
+                let horizon = crate::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_HORIZON")
                     .ok()
                     .and_then(|value| value.trim().parse::<u8>().ok())
                     .filter(|&value| value > 0)
@@ -6244,7 +6244,7 @@ impl Constraint {
         // are measured.  Only projection states with exactly one full-state
         // preimage are eligible, so every remembered matched lexer state is in
         // the exact runtime tokenizer coordinate rather than a quotient alias.
-        let fusion_states = std::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_FUSION_STATES")
+        let fusion_states = crate::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_FUSION_STATES")
             .ok()
             .map(|value| {
                 value
@@ -6395,8 +6395,8 @@ impl Constraint {
                 projection.first_match_fusion_candidate_mask = Arc::from(candidate_mask);
                 projection.first_match_fusion_candidate_subtrees = Arc::from(candidate_subtrees);
                 projection.first_match_fusions = Arc::from(fusions.into_boxed_slice());
-                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
                 {
                     eprintln!(
                         "[glrmask/profile][dynamic_first_match_fusions] full_source={} projection_source={} terminal={} match_state={} fusions={} suffix_candidates={} elapsed_ms={:.3}",
@@ -6442,7 +6442,7 @@ impl Constraint {
         // is left in `unknown` and therefore still goes through the ordinary
         // exact dynamic walker at runtime.
         let first_match_step_states =
-            std::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_ONE_STEP_STATES")
+            crate::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_ONE_STEP_STATES")
                 .ok()
                 .map(|value| {
                     value
@@ -6833,8 +6833,8 @@ impl Constraint {
                 projection.first_match_step_unknown_tokens = Arc::from(unknown_tokens);
                 projection.first_match_step_unknown_subtrees = Arc::from(unknown_subtrees);
 
-                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
                 {
                     let mut unknown_second_pairs =
                         FxHashMap::<Vec<(TerminalID, usize)>, usize>::default();
@@ -7020,7 +7020,7 @@ impl Constraint {
         // the source state and every possible first terminal finalization.
         // It is therefore applicable to the multi-future lexer states that now
         // dominate the median after the single-future paths were accelerated.
-        let mut root_effect_states = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_STATES")
+        let mut root_effect_states = crate::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_STATES")
             .ok()
             .map(|value| {
                 value
@@ -7029,13 +7029,13 @@ impl Constraint {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if let Some(auto_limit) = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_LIMIT")
+        if let Some(auto_limit) = crate::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_LIMIT")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|&limit| limit > 0)
             && let Some(unique_full_states) = vocab.mask_projection_unique_full_states()
         {
-            let max_first_byte_tokens = std::env::var(
+            let max_first_byte_tokens = crate::env::var(
                 "GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_MAX_FIRST_BYTE_TOKENS",
             )
             .ok()
@@ -7132,8 +7132,8 @@ impl Constraint {
                     .take(auto_limit)
                     .map(|(_, _, _, full_source_state)| full_source_state),
             );
-            if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
             {
                 eprintln!(
                     "[glrmask/profile][dynamic_root_effect_auto_narrow] limit={} available={} selected={} max_first_byte_tokens={}",
@@ -7418,8 +7418,8 @@ impl Constraint {
                 projection.root_effect_unknown_tokens = Arc::from(unknown_tokens);
                 projection.root_effect_unknown_subtrees = Arc::from(unknown_subtrees);
 
-                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
                 {
                     eprintln!(
                         "[glrmask/profile][dynamic_root_effect] full_source={} projection_source={} futures={} classified_tokens={} post_rows={} root_rows={} fallback_unknown={} elapsed_ms={:.3}",
@@ -7442,8 +7442,8 @@ impl Constraint {
         // projection for each broad useful class and aliasing duplicate source
         // states to it. Ordinary selected projections remain exact and are
         // never discarded by this pass.
-        let profile_projection_classes = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let profile_projection_classes = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let built_count = built.len();
         let probe_count = built.iter().filter(|(_, probe)| *probe).count();
         let mut projections = Vec::<DynamicSelfLoopProjection>::new();
@@ -7553,8 +7553,8 @@ impl Constraint {
                     >= 1_024
             })
             .collect::<Vec<_>>();
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let results = families
             .into_par_iter()
             .map(|(terminal, indices)| {
@@ -7600,12 +7600,12 @@ impl Constraint {
     pub(crate) fn build_dynamic_terminal_observation_classes(
         &self,
     ) -> Vec<(TerminalID, Arc<[u32]>)> {
-        let classes = if std::env::var_os("GLRMASK_DISABLE_EARLY_OBSERVATION_FILTER").is_some() {
+        let classes = if crate::env::var_os("GLRMASK_DISABLE_EARLY_OBSERVATION_FILTER").is_some() {
             self.build_dynamic_terminal_observation_classes_filtered::<false>()
         } else {
             self.build_dynamic_terminal_observation_classes_filtered::<true>()
         };
-        if std::env::var_os("GLRMASK_ASSERT_EARLY_OBSERVATION_FILTER").is_some() {
+        if crate::env::var_os("GLRMASK_ASSERT_EARLY_OBSERVATION_FILTER").is_some() {
             assert_eq!(
                 classes,
                 self.build_dynamic_terminal_observation_classes_filtered::<false>(),
@@ -7620,7 +7620,7 @@ impl Constraint {
     fn build_dynamic_terminal_observation_classes_filtered<const EARLY_FUTURES: bool>(
         &self,
     ) -> Vec<(TerminalID, Arc<[u32]>)> {
-        if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
+        if crate::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
             return Vec::new();
         }
         if self.tokenizer.has_any_virtual_runtime() {
@@ -7803,8 +7803,8 @@ impl Constraint {
             }
         }
 
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some();
         candidates
             .into_par_iter()
             .filter_map(|terminal| {
@@ -7850,7 +7850,7 @@ impl Constraint {
         &self,
         vocab: &DynamicMaskVocab,
     ) -> bool {
-        match std::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES") {
+        match crate::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES") {
             Ok(value) => !matches!(value.trim(), "0" | "false" | "no" | "off"),
             // O2 already collapses the model vocabulary to the exact grammar
             // quotient. On the canonical runtime cohort this additional lexer
@@ -7882,7 +7882,7 @@ impl Constraint {
         {
             return;
         }
-        if std::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
+        if crate::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
             .ok()
             .is_some_and(|value| matches!(value.trim(), "0" | "false" | "no" | "off"))
         {
@@ -7905,7 +7905,7 @@ impl Constraint {
         {
             return;
         }
-        if std::env::var("GLRMASK_DYNAMIC_PROJECTED_TERMINAL_QUOTIENTS")
+        if crate::env::var("GLRMASK_DYNAMIC_PROJECTED_TERMINAL_QUOTIENTS")
             .ok()
             .is_some_and(|value| matches!(value.trim(), "0" | "false" | "no" | "off"))
         {
@@ -7962,8 +7962,8 @@ impl Constraint {
         {
             self.table.rebuild_unconditional_advance_rows();
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         // `terminal_live_states` is a legacy/static derived cache. Dynamic mask
         // and commit paths do not consume it, so rebuilding it here only adds
@@ -8048,7 +8048,7 @@ impl Constraint {
         // the O2 build path.
         let o2_prepared_master = dynamic_mask_vocab.is_grammar_quotiented()
             && dynamic_mask_vocab.llg_master_trie().is_some()
-            && std::env::var_os("GLRMASK_DISABLE_O2_PREPARED_MASTER_PROVERS").is_none();
+            && crate::env::var_os("GLRMASK_DISABLE_O2_PREPARED_MASTER_PROVERS").is_none();
         let restored_complete_master = dynamic_mask_vocab
             .has_complete_prepared_master_prover_rows(self.tokenizer.num_states() as usize);
         // Pay bounded scalar-proof setup before serving rather than during a
@@ -8056,18 +8056,18 @@ impl Constraint {
         // candidates retain the exact vocabulary walk. O2 keeps its own policy.
         let ordinary_eager = self.uses_dynamic_runtime()
             && !dynamic_mask_vocab.is_grammar_quotiented()
-            && std::env::var_os("GLRMASK_DISABLE_EAGER_CONTAINMENT_QUOTIENTS").is_none();
+            && crate::env::var_os("GLRMASK_DISABLE_EAGER_CONTAINMENT_QUOTIENTS").is_none();
         let eager_containment_quotients = !recursive_provider && (o2_prepared_master || ordinary_eager
-            || std::env::var_os("GLRMASK_EXPERIMENT_EAGER_CONTAINMENT_QUOTIENTS").is_some());
+            || crate::env::var_os("GLRMASK_EXPERIMENT_EAGER_CONTAINMENT_QUOTIENTS").is_some());
         let eager_component_state_cap = ordinary_eager.then(|| {
-            std::env::var("GLRMASK_EAGER_CONTAINMENT_MAX_STATES")
+            crate::env::var("GLRMASK_EAGER_CONTAINMENT_MAX_STATES")
                 .ok().and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(3_000)
         });
         if eager_containment_quotients {
             let started = std::time::Instant::now();
             let force_partition_provers =
-                std::env::var_os("GLRMASK_EXPERIMENT_PREPARED_PARTITION_PROVERS").is_some();
+                crate::env::var_os("GLRMASK_EXPERIMENT_PREPARED_PARTITION_PROVERS").is_some();
             if force_partition_provers {
                 let candidates = (0..self.tokenizer.num_terminals()).collect::<Vec<_>>();
                 let quotients = self
@@ -8084,7 +8084,7 @@ impl Constraint {
                     eager_component_state_cap,
                 );
             }
-            if profile || std::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {
+            if profile || crate::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {
                 eprintln!(
                     "[glrmask/profile][eager_containment_quotients] prepared={} elapsed_ms={:.3}",
                     dynamic_mask_vocab.has_projected_terminal_quotients(),
@@ -8092,16 +8092,16 @@ impl Constraint {
                 );
             }
             let prepare_master = o2_prepared_master
-                || std::env::var_os("GLRMASK_EXPERIMENT_PREPARED_MASTER_PROVERS").is_some();
+                || crate::env::var_os("GLRMASK_EXPERIMENT_PREPARED_MASTER_PROVERS").is_some();
             if prepare_master {
                 let proof_started = std::time::Instant::now();
                 let force_master =
-                    std::env::var_os("GLRMASK_EXPERIMENT_PREPARED_MASTER_PROVERS").is_some();
+                    crate::env::var_os("GLRMASK_EXPERIMENT_PREPARED_MASTER_PROVERS").is_some();
                 let (entries, product_pairs) = if restored_complete_master && !force_master {
                     (0, 0)
                 } else {
                     let include_safe_radii =
-                        std::env::var_os("GLRMASK_EXPERIMENT_PREPARED_SAFE_RADII").is_some();
+                        crate::env::var_os("GLRMASK_EXPERIMENT_PREPARED_SAFE_RADII").is_some();
                     dynamic_mask_vocab.prepare_master_provers_all_sources(
                         &self.tokenizer,
                         self.tokenizer.num_states() as usize,
@@ -8109,7 +8109,7 @@ impl Constraint {
                     )
                 };
                 if profile
-                    || std::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some()
+                    || crate::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some()
                 {
                     eprintln!(
                         "[glrmask/profile][prepared_master_provers] entries={} product_pairs={} restored={} elapsed_ms={:.3}",
@@ -8845,8 +8845,8 @@ impl Constraint {
                 advances,
             ));
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
                 "[glrmask/profile][dynamic_hot_frontiers] primary_state={} primary_support={} primary_work={} summaries={} widths={:?}",
@@ -9447,12 +9447,12 @@ impl Constraint {
         profile: bool,
     ) -> TokenMaskCacheBuildProfile {
         let skip_load_dense_group_caches = self.packed_parser_dwa.is_some()
-            && std::env::var_os("GLRMASK_SKIP_LOAD_DENSE_GROUP_CACHES").is_some();
+            && crate::env::var_os("GLRMASK_SKIP_LOAD_DENSE_GROUP_CACHES").is_some();
         let skip_load_sliding_dense_caches = self.packed_parser_dwa.is_some()
-            && std::env::var_os("GLRMASK_SKIP_LOAD_SLIDING_DENSE_CACHES").is_some();
+            && crate::env::var_os("GLRMASK_SKIP_LOAD_SLIDING_DENSE_CACHES").is_some();
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
-        let skip_small_group_caches = std::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
+        let skip_small_group_caches = crate::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
             .map(|value| {
                 let value = value.trim();
                 value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -9878,7 +9878,7 @@ impl Constraint {
         // scan (tens of milliseconds on selected10) even when that runtime
         // path is disabled. Keep ordinary/static constraints at zero cost.
         if self.static_dynamic_overlay.is_none()
-            || std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
+            || crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
         {
             self.scoped_ignore_only_tokens.clear();
             self.scoped_ignore_prefix_fusions.clear();
@@ -9936,8 +9936,8 @@ impl Constraint {
             crate::automata::weighted::dwa::take_packed_decode_token_set_inventory();
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if !self.has_template_parser() { self.table.rebuild_unconditional_advance_rows(); }
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let terminal_live_started_at = profile.then(std::time::Instant::now);
         if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
@@ -9945,11 +9945,11 @@ impl Constraint {
         }
         let terminal_live_ms = terminal_live_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let prepare_composition_cache = std::env::var_os(
+        let prepare_composition_cache = crate::env::var_os(
             "GLRMASK_EXPERIMENT_COMPONENT_ONLY_BUILD_DELTA_METADATA",
         )
         .is_some()
-            || std::env::var_os("GLRMASK_PREPARE_COMPOSITION_CACHE").is_some();
+            || crate::env::var_os("GLRMASK_PREPARE_COMPOSITION_CACHE").is_some();
         if prepare_composition_cache {
             let reset_started_at = profile.then(std::time::Instant::now);
             self.ensure_composition_reset_tokens_by_terminal();
@@ -10118,7 +10118,7 @@ impl Constraint {
         let dynamic_vocab_reused = false;
         let dynamic_vocab_ms = 0.0;
         let token_mask_caches_prebuilt = self.token_mask_caches_ready()
-            || std::env::var_os("GLRMASK_SKIP_TOKEN_MASK_REBUILD_FOR_PROFILE").is_some();
+            || crate::env::var_os("GLRMASK_SKIP_TOKEN_MASK_REBUILD_FOR_PROFILE").is_some();
         // v13+ cache artifacts can persist the portable per-internal-token
         // output fragments without persisting every derived aggregate cache.
         // Reuse those fragments independently; the remaining derived caches
@@ -10661,7 +10661,7 @@ impl Constraint {
             return Vec::new();
         };
 
-        let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
+        let grouped = crate::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
             .map(|value| {
                 let value = value.trim();
                 value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -11006,7 +11006,7 @@ impl Constraint {
     fn direct_sparse_weight_buf_cache_enabled() -> bool {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ENABLED.get_or_init(|| {
-            std::env::var("GLRMASK_DIRECT_SPARSE_WEIGHT_BUF_CACHE")
+            crate::env::var("GLRMASK_DIRECT_SPARSE_WEIGHT_BUF_CACHE")
                 .map(|value| {
                     let value = value.trim();
                     !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
@@ -11330,7 +11330,7 @@ impl Constraint {
                 transition_word_spans: None,
             };
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
         #[derive(Default)]
         struct InventoryBatch {
@@ -11521,7 +11521,7 @@ impl Constraint {
         if final_token_sets.is_empty() {
             return DirectSparseWeightBufCaches::default();
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let buf_words = self.body_mask_len();
         let direct_sparse = buf_words != 0
@@ -11612,8 +11612,8 @@ impl Constraint {
         let classify_ms = classify_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             let total_ranges = final_token_sets
                 .iter()
@@ -11993,7 +11993,7 @@ impl Constraint {
             FastDwaTransitionRow::from_entries(entries)
         };
         if !self.parser_dwa.has_shared_transition_rows()
-            || std::env::var_os("GLRMASK_EXPERIMENTAL_DISABLE_SHARED_FAST_DWA_ROWS").is_some()
+            || crate::env::var_os("GLRMASK_EXPERIMENTAL_DISABLE_SHARED_FAST_DWA_ROWS").is_some()
         {
             let rows = if rayon::current_num_threads() == 1 {
                 self.parser_dwa.states().iter().map(build).collect()
@@ -12225,7 +12225,7 @@ impl Constraint {
         direct_final_sets: &DirectSparseWeightTokenSetCache,
         inventory: WeightTokenSetInventory,
     ) -> (usize, DenseWeightMaskCache) {
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let internal_token_dense_words = self.internal_token_count().div_ceil(64);
         if internal_token_dense_words == 0 {
@@ -12309,7 +12309,7 @@ impl Constraint {
             return PackedDwaDenseWeightMaskCache::default();
         }
 
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let started = profile.then(std::time::Instant::now);
         let min_word_spans = Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS.max(
             self.internal_token_dense_words

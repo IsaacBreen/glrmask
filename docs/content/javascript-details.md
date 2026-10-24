@@ -105,7 +105,7 @@ const moduleBytes = await parent.save();
 const module = await Module.load(moduleBytes);
 ```
 
-`saveSync` and `loadSync` provide the same formats without promises. These are the Rust core's artifact formats and can be exchanged between compatible Rust, Python, C++, and Node builds. Exact vocabulary identity is validated when a vocabulary is supplied; an external-vocabulary artifact cannot load without it, and equal size is insufficient. Compatibility is not promised across releases, architectures, or unrelated builds. Keep source and configuration for long-term regeneration, and treat untrusted artifacts according to the core loader's limitations.
+`saveSync` and `loadSync` do the same without promises. Saved bytes are the same in every binding, so a constraint saved from Python loads in Node. A saved constraint doesn't include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't load saved bytes from untrusted sources.
 
 ## Errors and ownership
 

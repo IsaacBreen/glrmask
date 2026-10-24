@@ -141,7 +141,7 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::RawRegex(regex)
             } else {
                 return Err(SchemaImportError::new(format!(
-                    "multipleOf={multiple} for non-integer numbers is unsupported in the simple importer"
+                    "multipleOf={multiple} isn't supported for non-integer numbers"
                 )));
             }
         } else if let Some(range_expr) = range_expr.clone() {

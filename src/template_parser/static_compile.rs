@@ -354,7 +354,7 @@ pub(crate) fn prepare_classed_boundary_programs(
     programs: &[Option<Arc<CommitTemplateDfas>>], symbol_count: u32,
     selected: &BTreeSet<u32>,
 ) -> Result<(BTreeMap<u32, NWA>, PopLabelClasses)> {
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
         let mut states = 0usize;
         let mut edges = 0usize;
         let mut largest = (0usize, 0u32);

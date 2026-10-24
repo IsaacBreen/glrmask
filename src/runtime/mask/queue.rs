@@ -32,7 +32,7 @@ const DEPTH_BATCH_MERGE_THRESHOLD: usize = 4;
 
 pub(super) fn mask_queue_mode() -> MaskQueueMode {
 	static MODE: std::sync::OnceLock<MaskQueueMode> = std::sync::OnceLock::new();
-	*MODE.get_or_init(|| match std::env::var("GLRMASK_MASK_QUEUE_MODE") {
+	*MODE.get_or_init(|| match crate::env::var("GLRMASK_MASK_QUEUE_MODE") {
 		Ok(value) if value.trim().eq_ignore_ascii_case("target") => MaskQueueMode::Target,
 		Ok(value) if value.trim().eq_ignore_ascii_case("depth") => MaskQueueMode::Depth,
 		Ok(value) if value.trim().eq_ignore_ascii_case("depth-merge") => MaskQueueMode::DepthMerge,

@@ -595,7 +595,7 @@ impl<'a> SignedLinkContext<'a> {
                 }
             })
             .collect::<Result<_, String>>()?;
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
             eprintln!("[glrmask/profile][boundary_retained_template_sources] enabled={decode} components={} templates={} decode_ms={:.3}",
                 components.len(), self.component_template_sources.iter().map(|v| v.iter().filter(|d| d.is_some()).count()).sum::<usize>(),
                 started.elapsed().as_secs_f64() * 1000.0);
@@ -1099,7 +1099,7 @@ fn trace_transfer_characterization(
     terminal: TerminalID,
     transfer: &TerminalCharacterization,
 ) {
-    if std::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
+    if crate::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
         return;
     }
     let owner = context.terminal_owner(terminal).ok();
@@ -1123,7 +1123,7 @@ fn trace_transfer_characterization(
 /// Enabled by `GLRMASK_DEBUG_TRANSFER_LIBRARY`.
 #[cfg(test)]
 fn trace_control_fragment(label: &str, transfer: &TerminalCharacterization) {
-    if std::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
+    if crate::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
         return;
     }
     let (escapes, reduces) = format_characterization(transfer);
@@ -1140,7 +1140,7 @@ fn trace_signed_shard_parser_words(
     parser_dwa: &DWA,
     total_scoped_states: u32,
 ) {
-    if std::env::var_os("GLRMASK_DEBUG_BOUNDARY_WORDS").is_none() {
+    if crate::env::var_os("GLRMASK_DEBUG_BOUNDARY_WORDS").is_none() {
         return;
     }
     const MAX_LEN: usize = 6;
@@ -1445,7 +1445,7 @@ pub(crate) fn build_fragment_library_cached(
 ) -> Result<FragmentLibrary, String> {
     let reuse = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES");
     let result = build_fragment_library_cached_impl(context, cache, emitted, start_component, reuse)?;
-    if reuse && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_RETAINED_TEMPLATES").is_some() {
+    if reuse && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_RETAINED_TEMPLATES").is_some() {
         let reference_cache = FragmentTransferCache::new(context)?;
         let reference = build_fragment_library_cached_impl(
             context, &reference_cache, emitted, start_component, false,
@@ -1654,7 +1654,7 @@ fn build_fragment_library_cached_impl(
     templates.by_terminal.append(&mut reused.by_terminal);
     templates.by_terminal_nwa.append(&mut reused.by_terminal_nwa);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_prepared_templates] component={start_component} enabled={reuse_prepared} ordinary={ordinary_terms} reused={reused_count} rebuilt={} relocation_ms={relocation_ms:.3} total_ms={templates_ms:.3}",
             ordinary_terms - reused_count);
     }
@@ -1814,7 +1814,7 @@ impl<'a> ProjectionMemo<'a> {
             kept,
             map: rustc_hash::FxHashMap::default(),
             outer: rustc_hash::FxHashMap::default(),
-            outer_enabled: std::env::var_os("GLRMASK_DISABLE_BOUNDARY_OUTER_PROJECTION_MEMO").is_none(),
+            outer_enabled: crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_OUTER_PROJECTION_MEMO").is_none(),
             outer_hits: 0,
             cap,
             calls: 0,
@@ -1964,11 +1964,11 @@ pub(crate) fn compile_signed_shard_parser(
     // Prefix admission is existential: a successful extended terminal path
     // necessarily executes its accepting prefix. This optional reduction is
     // applied only to the completed crossing/follow-filtered lexical DWA.
-    let prefix_candidate = if std::env::var_os("GLRMASK_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+    let prefix_candidate = if crate::env::var_os("GLRMASK_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
         let started = Instant::now();
         let candidate = crate::compiler::boundary_prefix_dominance::reduce(shard_dwa);
         if let Some((reduced,stats)) = candidate.as_ref() {
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
                 let alphabet = shard_dwa.states().iter().flat_map(|state|state.transitions.keys())
                     .filter(|&&label|label>=0).map(|&label|label as u32+1).max().unwrap_or(1);
                 let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
@@ -1980,10 +1980,10 @@ pub(crate) fn compile_signed_shard_parser(
                 eprintln!("[glrmask/validate][boundary_prefix_minimal] component={start_component} exact_prefix=true pairs={} branches={}",
                     comparison.product_states,comparison.compared_branches);
             }
-            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                 eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=true elapsed_ms={:.3} stats={stats:?}",started.elapsed().as_secs_f64()*1000.0);
             }
-        } else if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        } else if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
             eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=false elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
         }
         candidate
@@ -1992,7 +1992,7 @@ pub(crate) fn compile_signed_shard_parser(
 
     let result = compile_signed_shard_parser_impl(context, library, shard_dwa, id_map, start_component)?;
     if prefix_candidate.is_some()
-        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some()
+        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some()
     {
         // Genuinely untouched lexical reference. The implementation helper
         // cannot reapply prefix reduction, irrespective of environment flags.
@@ -2013,7 +2013,7 @@ pub(crate) fn compile_signed_shard_parser(
         }
         eprintln!("[glrmask/validate][boundary_prefix_minimal_parser] component={start_component} all_prefix_exact=true pairs={} branches={}", comparison.product_states, comparison.compared_branches);
     }
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_RESULT") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_RESULT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create compiled parser diagnostics");
         let bytes = bincode::serialize(&(context.total_scoped_states,start_component,&result.parser_dwa))
@@ -2032,15 +2032,15 @@ fn compile_signed_shard_parser_impl(
     id_map: &InternalIdMap,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
-    let project = std::env::var_os("GLRMASK_BOUNDARY_CORRELATED_SUPPORT").is_some();
-    let atoms = std::env::var_os("GLRMASK_BOUNDARY_WEIGHT_ATOMS").is_some();
-    let tagged_bundles=std::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
-    let bundles = tagged_bundles||std::env::var_os("GLRMASK_BOUNDARY_DETERMINISTIC_BUNDLES").is_some();
-    let owner_program = std::env::var_os("GLRMASK_BOUNDARY_OWNER_PROGRAM").is_some();
-    let top_flow = std::env::var_os("GLRMASK_BOUNDARY_TOP_FLOW").is_some();
-    let admission_tails = std::env::var_os("GLRMASK_BOUNDARY_ADMISSION_TAILS").is_some();
+    let project = crate::env::var_os("GLRMASK_BOUNDARY_CORRELATED_SUPPORT").is_some();
+    let atoms = crate::env::var_os("GLRMASK_BOUNDARY_WEIGHT_ATOMS").is_some();
+    let tagged_bundles=crate::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
+    let bundles = tagged_bundles||crate::env::var_os("GLRMASK_BOUNDARY_DETERMINISTIC_BUNDLES").is_some();
+    let owner_program = crate::env::var_os("GLRMASK_BOUNDARY_OWNER_PROGRAM").is_some();
+    let top_flow = crate::env::var_os("GLRMASK_BOUNDARY_TOP_FLOW").is_some();
+    let admission_tails = crate::env::var_os("GLRMASK_BOUNDARY_ADMISSION_TAILS").is_some();
     let original_library=library;
-    let template_read_support=std::env::var_os("GLRMASK_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some();
+    let template_read_support=crate::env::var_os("GLRMASK_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some();
     if template_read_support&&(bundles||owner_program||top_flow||admission_tails){
         return Err("template-domain experiment requires the ordinary unrestricted assembly control".into());
     }
@@ -2048,13 +2048,13 @@ fn compile_signed_shard_parser_impl(
         prepare_domain_filtered_templates(context,library,start_component)
     }else{None};
     let library=prepared_library.as_ref().unwrap_or(library);
-    let backward=std::env::var_os("GLRMASK_BOUNDARY_BACKWARD_PREIMAGE").is_some();
+    let backward=crate::env::var_os("GLRMASK_BOUNDARY_BACKWARD_PREIMAGE").is_some();
     if backward&&(project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support){
         return Err("backward preimage must be tested against unrestricted ordinary assembly".into());
     }
     let direct_requested=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_DIRECT_NATIVE_PROGRAM");
     let direct=if direct_requested && !(backward||project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support)
-        && std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_none()
+        && crate::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_none()
     { direct_program::compile(context,library,shard_dwa,start_component) }else{None};
     let used_direct=direct.is_some();
     let preimage=if backward{try_compile_backward_preimage(context,library,shard_dwa,start_component)}else{None};
@@ -2065,7 +2065,7 @@ fn compile_signed_shard_parser_impl(
             context, library, shard_dwa, id_map, start_component, project, atoms, bundles, owner_program, top_flow, admission_tails,
         )?,
     };
-    if used_direct && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_NATIVE_PROGRAM").is_some(){
+    if used_direct && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_NATIVE_PROGRAM").is_some(){
         // This calls the untouched range-arena implementation directly, never
         // the wrapper that selects the new program representation.
         let reference=compile_signed_shard_parser_with_support(
@@ -2084,7 +2084,7 @@ fn compile_signed_shard_parser_impl(
             context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
         eprintln!("[glrmask/validate][boundary_direct_program] component={start_component} all_prefix_exact=true complete_and_external=true products={} branches={}",comparison.product_states,comparison.compared_branches);
     }
-    if used_preimage&&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BACKWARD_PREIMAGE").is_some(){
+    if used_preimage&&crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BACKWARD_PREIMAGE").is_some(){
         let reference=compile_signed_shard_parser_with_support(
             context,original_library,shard_dwa,id_map,start_component,false,false,false,false,false,false,
         )?;
@@ -2097,7 +2097,7 @@ fn compile_signed_shard_parser_impl(
         eprintln!("[glrmask/validate][boundary_backward_preimage] component={start_component} complete_and_external=true");
     }
     if prepared_library.is_some()
-        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some()
+        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some()
     {
         let reference=compile_signed_shard_parser_with_support(
             context,original_library,shard_dwa,id_map,start_component,
@@ -2111,7 +2111,7 @@ fn compile_signed_shard_parser_impl(
             context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
         eprintln!("[glrmask/validate][boundary_template_read_support] component={start_component} complete_and_external=true");
     }
-    if (project || atoms) && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CORRELATED_SUPPORT").is_some() {
+    if (project || atoms) && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CORRELATED_SUPPORT").is_some() {
         let reference = compile_signed_shard_parser_with_support(
             context, library, shard_dwa, id_map, start_component, false, false, bundles, owner_program, top_flow, admission_tails,
         )?;
@@ -2126,7 +2126,7 @@ fn compile_signed_shard_parser_impl(
     // semantics: DEFAULT priority and accumulated acceptance over every stack
     // prefix. Keep the old literal-word check available above; this flag does
     // not suppress any of its assertions or reinterpret a real counterexample.
-    if (project || atoms) && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_PREFIX").is_some() {
+    if (project || atoms) && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_PREFIX").is_some() {
         let reference = compile_signed_shard_parser_with_support(
             context, library, shard_dwa, id_map, start_component, false, false, bundles, owner_program, top_flow, admission_tails,
         )?;
@@ -2142,7 +2142,7 @@ fn compile_signed_shard_parser_impl(
         eprintln!("[glrmask/validate][boundary_atom_prefix] component={start_component} exact=true pairs={} branches={}",
             comparison.product_states, comparison.compared_branches);
     }
-    if admission_tails && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ADMISSION_TAILS").is_some() {
+    if admission_tails && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ADMISSION_TAILS").is_some() {
         let reference=compile_signed_shard_parser_with_support(
             context,library,shard_dwa,id_map,start_component,project,atoms,bundles,owner_program,top_flow,false,
         )?;
@@ -2152,7 +2152,7 @@ fn compile_signed_shard_parser_impl(
         if let Some(difference)=comparison.difference{return Err(format!("admission-tail changed arbitrary-prefix mask: {difference:?}"));}
         eprintln!("[glrmask/validate][boundary_admission_tails] component={start_component} exact=true pairs={} branches={}",comparison.product_states,comparison.compared_branches);
     }
-    if top_flow && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOP_FLOW").is_some() {
+    if top_flow && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOP_FLOW").is_some() {
         let reference=compile_signed_shard_parser_with_support(
             context,library,shard_dwa,id_map,start_component,project,atoms,bundles,owner_program,false,admission_tails,
         )?;
@@ -2162,7 +2162,7 @@ fn compile_signed_shard_parser_impl(
         if let Some(difference)=comparison.difference{return Err(format!("top-flow changed arbitrary-prefix mask: {difference:?}"));}
         eprintln!("[glrmask/validate][boundary_top_flow] component={start_component} exact=true pairs={} branches={}",comparison.product_states,comparison.compared_branches);
     }
-    if owner_program && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_OWNER_PROGRAM").is_some() {
+    if owner_program && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_OWNER_PROGRAM").is_some() {
         let reference = compile_signed_shard_parser_with_support(
             context, library, shard_dwa, id_map, start_component, project, atoms, bundles, false, false, admission_tails,
         )?;
@@ -2175,7 +2175,7 @@ fn compile_signed_shard_parser_impl(
         eprintln!("[glrmask/validate][boundary_owner_program] component={start_component} exact=true pairs={} branches={}",
             comparison.product_states,comparison.compared_branches);
     }
-    if tagged_bundles&&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TAGGED_BUNDLES").is_some(){
+    if tagged_bundles&&crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TAGGED_BUNDLES").is_some(){
         let reference=compile_signed_shard_parser_with_support(
             context,library,shard_dwa,id_map,start_component,project,atoms,false,owner_program,top_flow,admission_tails,
         )?;
@@ -2187,7 +2187,7 @@ fn compile_signed_shard_parser_impl(
             context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
         eprintln!("[glrmask/validate][boundary_tagged_bundles] component={start_component} complete_and_external=true");
     }
-    if bundles && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DETERMINISTIC_BUNDLES").is_some() {
+    if bundles && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DETERMINISTIC_BUNDLES").is_some() {
         let reference = compile_signed_shard_parser_with_support(
             context, library, shard_dwa, id_map, start_component, project, atoms, false, owner_program, top_flow, admission_tails,
         )?;
@@ -2211,7 +2211,7 @@ fn try_compile_backward_preimage(
     let prepared=super::boundary_preimage::build(lexical,&library.templates.by_terminal_nwa,
         &controls,context.closure.max_controls_per_gap as usize);
     let Some(prepared)=prepared else{
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_backward_preimage] component={start_component} selected=false stage=preimage elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);}
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_backward_preimage] component={start_component} selected=false stage=preimage elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);}
         return None;
     };
     let mut arena=prepared.nwa;
@@ -2235,7 +2235,7 @@ fn try_compile_backward_preimage(
                 .unwrap_or_else(||minimize_acyclic_owned_with_pointwise_class_order(reverse_hashcons_owned(dwa),PointwiseClassOrder::DescendingDomain))
         });
     let normalize_ms=phase.elapsed().as_secs_f64()*1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
         eprintln!("[glrmask/profile][boundary_backward_preimage] component={start_component} selected=true positive_states={signed_states} positive_edges={signed_transitions} result_states={} result_edges={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} total_ms={:.3} profile={:?}",candidate.num_states(),candidate.num_transitions(),started.elapsed().as_secs_f64()*1000.0,prepared.profile);
     }
     Some(SignedShardOutput{parser_dwa:candidate,templates_ms:library.templates_ms,compose_ms,resolve_ms,normalize_ms,signed_states,signed_transitions,terms:library.ordinary_terms})
@@ -2266,7 +2266,7 @@ fn prepare_domain_filtered_templates(
             }
         }else{declined+=1;}
     }
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
         eprintln!("[glrmask/profile][boundary_template_read_support] component={start_component} selected={selected} declined={declined} before_states={before_states} after_states={after_states} before_edges={before_edges} after_edges={after_edges} prepare_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
     }
     (selected>0).then_some(result)
@@ -2285,13 +2285,13 @@ fn try_compile_with_predecessor_support(
         super::boundary_stack_support::build(&tables,&context.state_offsets,&context.links,context.total_scoped_states)
     });
     let certificate=match certificate {Ok(value)=>value,Err(error)=>{
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} declined={error}");}
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} declined={error}");}
         return None;
     }};
     let domain_ms=start.elapsed().as_secs_f64()*1000.0;
     let output_domain=Weight::union_all(arena.states().iter().filter_map(|s|s.final_weight.as_ref()));
     if output_domain.is_full(){return None;}
-    let fused=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_PREDECESSOR_SUPPORT").is_some();
+    let fused=crate::env::var_os("GLRMASK_BOUNDARY_NATIVE_PREDECESSOR_SUPPORT").is_some();
     let mut resolve_ms=0.0;
     let mut support_ms=0.0;
     let mut support=None;
@@ -2308,12 +2308,12 @@ fn try_compile_with_predecessor_support(
         support=Some(certificate.restrict(&mut positive).ok()?);
         support_ms=t.elapsed().as_secs_f64()*1000.0;
         let trim_reference=(crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TRIM_POSITIVE")
-            &&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TRIM_POSITIVE").is_some()).then(||positive.clone());
+            &&crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TRIM_POSITIVE").is_some()).then(||positive.clone());
         if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TRIM_POSITIVE"){
             let started=Instant::now();
             if let Some((compacted,stats))=super::boundary_stack_support::trim::compact(&positive){
                 positive=compacted;
-                if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+                if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
                     eprintln!("[glrmask/profile][boundary_trim_positive] component={start_component} selected=true ms={:.3} stats={stats:?}",started.elapsed().as_secs_f64()*1000.0);
                 }
             }
@@ -2330,11 +2330,11 @@ fn try_compile_with_predecessor_support(
         compiled
     };
     let total_ms=start.elapsed().as_secs_f64()*1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
         eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} fused={fused} selected=true domain_ms={domain_ms:.3} domain_states={} effects={} resolve_ms={resolve_ms:.3} support_ms={support_ms:.3} encode_ms={encode_ms:.3} compile_ms={compile_ms:.3} total_ms={total_ms:.3} stats={support:?}",
             certificate.state_count(),certificate.effect_count());
     }
-    if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREDECESSOR_SUPPORT").is_some(){
+    if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREDECESSOR_SUPPORT").is_some(){
         let mut reference=arena.clone();
         resolve_negative_codes_in_nwa(&mut reference,false);
         if fused {
@@ -2416,12 +2416,12 @@ fn compile_native_global_atoms_impl(
         &native, &decoder, crate::compiler::glr::labels::DEFAULT_LABEL,
     )?;
     let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_native_global] component={start_component} points={} atoms={} rows={} encode_ms={encode_ms:.3} compile_ms={compile_ms:.3} total_ms={:.3} states={} edges={} codec={:?} minimize={minimize_profile:?}",
             quotient.point_count(), quotient.atom_count(), quotient.rows(), encode_ms + compile_ms,
             candidate.num_states(), candidate.num_transitions(), quotient.stats);
     }
-    if signed && read_context.is_none() && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_GLOBAL").is_some() {
+    if signed && read_context.is_none() && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_GLOBAL").is_some() {
         // Independent reference: original coordinates, original signed arena,
         // original resolver/normalizer, before legacy minimization. Budget
         // exhaustion and any mismatch are hard failures, never equivalence.
@@ -2449,7 +2449,7 @@ fn try_compile_with_weight_atoms(
     use crate::compiler::stages::parser_dwa::normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count;
     use rustc_hash::FxHashMap;
 
-    if std::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER").as_deref() == Ok("late") {
+    if crate::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER").as_deref() == Ok("late") {
         return try_compile_with_late_weight_atoms(arena, parser_states, start_component);
     }
 
@@ -2476,7 +2476,7 @@ fn try_compile_with_weight_atoms(
     let quotient = match WeightObservationQuotient::new(&domain, &sources) {
         Some(quotient) => quotient,
         None => {
-            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                 eprintln!("[glrmask/profile][boundary_weight_atoms] component={start_component} selected=false stage=quotient sources={} elapsed_ms={:.3}",
                     sources.len(), started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -2485,7 +2485,7 @@ fn try_compile_with_weight_atoms(
     };
     let atom_ms = started.elapsed().as_secs_f64() * 1000.0;
     let mut encoded = arena.clone();
-    let keep_identity = std::env::var_os("GLRMASK_BOUNDARY_ATOM_KEEP_IDENTITY").is_some();
+    let keep_identity = crate::env::var_os("GLRMASK_BOUNDARY_ATOM_KEEP_IDENTITY").is_some();
     for state in encoded.states_mut() {
         if let Some(weight) = state.final_weight.as_mut() {
             if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
@@ -2505,7 +2505,7 @@ fn try_compile_with_weight_atoms(
     // topology are separate transformations. The fused compiler internally
     // hash-conses the positive NWA; DEFAULT support observes that topology.
     // Keep an ordinary-topology reference before accepting the fused route.
-    let normalizer = std::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER")
+    let normalizer = crate::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER")
         .unwrap_or_else(|_| "fused".to_owned());
     let normalized = match normalizer.as_str() {
         "fused" => normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
@@ -2528,7 +2528,7 @@ fn try_compile_with_weight_atoms(
     let mut parser_dwa = match normalized {
         Some(dwa) => dwa,
         None => {
-            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                 eprintln!("[glrmask/profile][boundary_weight_atoms] component={start_component} selected=false stage=normalize points={} atoms={} rows={} elapsed_ms={:.3}",
                     quotient.point_count(), quotient.atom_count(), quotient.rows(), started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -2539,7 +2539,7 @@ fn try_compile_with_weight_atoms(
     let normalize_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
     // Explicit diagnostic exports for independent minimizer experiments.
     // No export is performed in measured production configurations.
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create atom diagnostic directory");
         let stem = format!("component-{start_component}-{normalizer}");
@@ -2557,7 +2557,7 @@ fn try_compile_with_weight_atoms(
     }
     // Compare the semantic stage itself, before any legacy minimization can
     // introduce a representation-dependent DEFAULT guard difference.
-    if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_NORMALIZER").is_some() {
+    if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_NORMALIZER").is_some() {
         let mut positive = arena.clone();
         resolve_negative_codes_in_nwa(&mut positive, false);
         let reference = normalize_weighted_parser_stack_nwa_for_parser_state_count(
@@ -2583,7 +2583,7 @@ fn try_compile_with_weight_atoms(
             comparison.product_states, comparison.compared_branches);
     }
     let minimize_started = Instant::now();
-    parser_dwa = if std::env::var_os("GLRMASK_BOUNDARY_ATOM_NATIVE_MINIMIZE").is_some() {
+    parser_dwa = if crate::env::var_os("GLRMASK_BOUNDARY_ATOM_NATIVE_MINIMIZE").is_some() {
         crate::compiler::boundary_bit_minimize::minimize_finite_bits(
             &parser_dwa, quotient.rows(), crate::compiler::glr::labels::DEFAULT_LABEL,
         )?.0
@@ -2607,7 +2607,7 @@ fn try_compile_with_weight_atoms(
     }
     let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
     let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_weight_atoms] component={} points={} atoms={} source_weights={} normalizer={} atom_ms={:.3} encode_total_ms={:.3} normalize_ms={:.3} minimize_ms={:.3} decode_ms={:.3} parser_states={} parser_trans={} total_ms={:.3}",
             start_component, quotient.point_count(), quotient.atom_count(), quotient.source_count(),
             normalizer, atom_ms, encode_ms, normalize_ms, minimize_ms, decode_ms,
@@ -2654,7 +2654,7 @@ fn try_compile_with_late_weight_atoms(
     let normalize_ms = started.elapsed().as_secs_f64() * 1000.0;
     let quotient_started = Instant::now();
     let domain = crate::compiler::constraint_compose::accepted_weight_support(&parser_dwa);
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create ordinary normalization diagnostic directory");
         let stem = format!("component-{start_component}-original");
@@ -2676,7 +2676,7 @@ fn try_compile_with_late_weight_atoms(
             return None;
         }
     };
-    let validate_derived = std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_DERIVED").is_some();
+    let validate_derived = crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_DERIVED").is_some();
     let mut memo = FxHashMap::<usize, (Weight, Weight)>::default();
     let mut encode = |weight: &mut Weight| {
         let pair = memo.entry(weight.ptr_key()).or_insert_with(|| {
@@ -2695,7 +2695,7 @@ fn try_compile_with_late_weight_atoms(
     }
     let encoded_weights = memo.len();
     let encode_ms = quotient_started.elapsed().as_secs_f64() * 1000.0;
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create late atom diagnostic directory");
         let stem = format!("component-{start_component}-late");
@@ -2761,7 +2761,7 @@ fn compile_signed_shard_parser_with_support(
     }
     let depths = context.closure.max_controls_per_gap as usize + 1;
     let compose_started = Instant::now();
-    let no_controls_diagnostic = std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
+    let no_controls_diagnostic = crate::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
     let assemble_unrestricted = || -> Result<(NWA,usize,usize),String> {
     if !deterministic_bundles && !admission_tails && !no_controls_diagnostic {
         let controls = library.entry_keys.iter().zip(&library.finish_keys)
@@ -2814,11 +2814,11 @@ fn compile_signed_shard_parser_with_support(
     // depth (shared body, single exit — sound: entries converge, the exit
     // continuation is identical, so no cross-continuation leakage), exiting to
     // the destination depth 0 with the stamped lexical weight.
-    let tagged_requested=deterministic_bundles&&std::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
+    let tagged_requested=deterministic_bundles&&crate::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
     let tagged_index=if tagged_requested{
         let started=Instant::now();
         let index=super::boundary_tagged_templates::TaggedTemplates::build(&library.templates.by_terminal_nwa);
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
             eprintln!("[glrmask/profile][boundary_tagged_index] component={start_component} selected={} ms={:.3} profile={:?}",index.is_some(),started.elapsed().as_secs_f64()*1000.0,index.as_ref().map(|i|&i.profile));
         }
         index
@@ -2860,7 +2860,7 @@ fn compile_signed_shard_parser_with_support(
                         None=>library.templates.build_bundle_profiled(&terminals).0,
                     };
                     if !bundle.is_acyclic() { return Err("ordinary boundary bundle unexpectedly cyclic".into()); }
-                    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                         eprintln!("[glrmask/profile][boundary_bundle] component={start_component} terminals={} tagged={} raw_states={input_states} states={} edges={}",
                             terminals.len(), tagged_index.is_some(), bundle.num_states(), bundle.num_transitions());
                     }
@@ -2938,11 +2938,11 @@ fn compile_signed_shard_parser_with_support(
             }
         }
     }
-    if deterministic_bundles && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if deterministic_bundles && crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_bundles_total] component={start_component} unique={bundle_count} input_states={bundle_input_states} appended_states={ordinary_appended_states} tagged_instantiation_ms={tagged_instantiation_ms:.3} ms={:.3}",
             bundle_started.elapsed().as_secs_f64()*1000.0);
     }
-    if admission_tails && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+    if admission_tails && crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
         eprintln!("[glrmask/profile][boundary_admission_tails] component={start_component} templates={} build_ms={admission_build_ms:.3} ending_edges={ending_edges} continuing_edges={continuing_edges} ending_before_states={ending_before_states} ending_after_states={ending_after_states} fallbacks={admission_fallbacks} ordinary_appended={ordinary_appended_states}",admission_cache.len());
     }
     // Bounded zero-width control program: Entry/Finish fragments cloned per
@@ -3010,7 +3010,7 @@ fn compile_signed_shard_parser_with_support(
     };
     // Diagnostic only: retain the unchanged signed input for standalone
     // exact parser/compiler experiments. No work when this flag is absent.
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_PARSER_NWA") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_PARSER_NWA") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create parser NWA diagnostic directory");
         let states = arena.states().iter().map(|state| (
@@ -3023,7 +3023,7 @@ fn compile_signed_shard_parser_with_support(
     }
     // Diagnostic only; placed before the native early return so every
     // backend exports the identical original table/link certificate input.
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_STACK_DOMAIN") {
+    if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_STACK_DOMAIN") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).expect("create stack-domain diagnostics");
         let tables = (0..context.state_offsets.len()).map(|owner|
@@ -3044,7 +3044,7 @@ fn compile_signed_shard_parser_with_support(
                 compose_ms:assembly_ms+prepare_ms,resolve_ms:0.0,normalize_ms:compile_ms,
                 signed_states:arena.states().len(),signed_transitions:arena.num_transitions(),terms:library.ordinary_terms});
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} selected=false exact_original_fallback=true");}
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} selected=false exact_original_fallback=true");}
     }
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_NATIVE_GLOBAL_ATOMS") {
         let assembly_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
@@ -3104,7 +3104,7 @@ fn compile_signed_shard_parser_with_support(
             }
             for (_, weight) in &mut state.epsilons { project(weight); }
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
             let pairs = support.range_entries().map(|(lo, hi, tokens)| {
                 (u128::from(hi) - u128::from(lo) + 1) * (tokens.len() as u128)
             }).sum::<u128>();
@@ -3151,18 +3151,18 @@ fn compile_signed_shard_parser_with_support(
     let pre_normalize_started = Instant::now();
     let pre_normalize_states = arena.num_states();
     let pre_normalize_edges = arena.num_transitions();
-    let hashcons_enabled = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_NWA_HASHCONS").is_some();
-    let support_mode = std::env::var("GLRMASK_EXPERIMENT_BOUNDARY_NWA_SUPPORT").ok();
-    let guarded_hashcons = std::env::var_os("GLRMASK_BOUNDARY_GUARDED_NWA_HASHCONS").is_some();
+    let hashcons_enabled = crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_NWA_HASHCONS").is_some();
+    let support_mode = crate::env::var("GLRMASK_EXPERIMENT_BOUNDARY_NWA_SUPPORT").ok();
+    let guarded_hashcons = crate::env::var_os("GLRMASK_BOUNDARY_GUARDED_NWA_HASHCONS").is_some();
     let pre_normalize_enabled = guarded_hashcons || hashcons_enabled || support_mode.is_some();
     let pre_normalize_reference = (pre_normalize_enabled
-        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NWA_HASHCONS").is_some())
+        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NWA_HASHCONS").is_some())
         .then(|| arena.clone());
     if let Some(mode) = support_mode.as_deref() {
         let profile = crate::automata::weighted_u32::nwa_support::restrict_acyclic_nwa_support(
             &mut arena, mode != "backward",
         )?;
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
             eprintln!("[glrmask/profile][boundary_positive_nwa_support] start_component={start_component} mode={mode} states={} edges_before={} edges_after={} backward_ms={:.3} forward_ms={:.3}",
                 profile.states, profile.edges_before, profile.edges_after, profile.backward_ms, profile.forward_ms);
         }
@@ -3177,7 +3177,7 @@ fn compile_signed_shard_parser_with_support(
         );
     }
     let pre_normalize_ms = pre_normalize_started.elapsed().as_secs_f64() * 1000.0;
-    if pre_normalize_enabled && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if pre_normalize_enabled && crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!(
             "[glrmask/profile][boundary_positive_nwa_hashcons] start_component={start_component} before_states={pre_normalize_states} before_edges={pre_normalize_edges} after_states={} after_edges={} elapsed_ms={pre_normalize_ms:.3}",
             arena.num_states(), arena.num_transitions(),
@@ -3240,7 +3240,7 @@ fn compile_signed_shard_parser_with_support(
     let kept = candidate_kept_internal_tokens(id_map, &candidates);
     let kept_count = kept.iter().filter(|&&keep| keep).count();
     let (mut cells_outer_before, mut cells_inner_before) = (0usize, 0usize);
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         let mut cells = rustc_hash::FxHashMap::<usize, (usize, usize)>::default();
         for state in parser_dwa.states() {
             for weight in state.transitions.entries().map(|(_, _, weight)| weight)
@@ -3267,7 +3267,7 @@ fn compile_signed_shard_parser_with_support(
         }
     }
     let project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][signed_shard_projection_outer] start_component={start_component} enabled={} entries={} hits={}", memo.outer_enabled, memo.outer.len(), memo.outer_hits);
         eprintln!(
             "[glrmask/profile][signed_shard_projection_memo] start_component={start_component} calls={} hits={} misses={} no_drop={} rebuilds={} entries={} cap_rejections={} unchanged_weights={} remapped_weights={}",
@@ -3308,7 +3308,7 @@ fn compile_signed_shard_parser_with_support(
     let pre_hash_trans = parser_dwa.num_transitions();
     let pre_hash_acyclic = parser_dwa.is_acyclic();
     let atom_minimize = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE");
-    if atom_minimize || std::env::var_os("GLRMASK_BOUNDARY_FINITE_POINT_MINIMIZE").is_some() {
+    if atom_minimize || crate::env::var_os("GLRMASK_BOUNDARY_FINITE_POINT_MINIMIZE").is_some() {
         let finite_started = Instant::now();
         let mut domain_ms = 0.0;
         let result = if atom_minimize {
@@ -3327,7 +3327,7 @@ fn compile_signed_shard_parser_with_support(
         };
         if let Some((candidate, profile)) = result {
             let finite_ms = finite_started.elapsed().as_secs_f64() * 1000.0;
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FINITE_MINIMIZE").is_some() {
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FINITE_MINIMIZE").is_some() {
                 let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
                     &parser_dwa, &candidate, context.total_scoped_states, 500_000,
                 )?;
@@ -3337,7 +3337,7 @@ fn compile_signed_shard_parser_with_support(
                 eprintln!("[glrmask/validate][boundary_finite_minimize] component={start_component} exact=true pairs={} branches={}",
                     comparison.product_states, comparison.compared_branches);
             }
-            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
                 eprintln!("[glrmask/profile][boundary_finite_minimize] component={start_component} atom_mode={atom_minimize} selected=true input_states={pre_hash_states} input_transitions={pre_hash_trans} domain_ms={domain_ms:.3} total_ms={finite_ms:.3} output_states={} output_transitions={} profile={profile:?}",
                     candidate.num_states(), candidate.num_transitions());
             }
@@ -3352,7 +3352,7 @@ fn compile_signed_shard_parser_with_support(
                 terms: library.ordinary_terms,
             });
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
             eprintln!("[glrmask/profile][boundary_finite_minimize] component={start_component} selected=false domain_ms={domain_ms:.3} attempted_ms={:.3}",
                 finite_started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -3380,7 +3380,7 @@ fn compile_signed_shard_parser_with_support(
     );
     let minimize_order = "descending";
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!(
             "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} candidates={} kept_internals={} cells_outer_before={} cells_inner_before={} project_ms={project_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_order={minimize_order} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
             library.ordinary_terms,
@@ -3437,7 +3437,7 @@ pub(crate) fn publish_signed_shard(
 /// evaluating any `DynamicDirect` boundary shard panics loudly instead of
 /// silently contributing exact dynamic masks on a claimed static path.
 pub(crate) fn strict_static_dynamic_trap_enabled() -> bool {
-    std::env::var_os("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC").is_some()
+    crate::env::var_os("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC").is_some()
 }
 
 /// Strict-static trap for every dynamic mask fallback reachable from a
@@ -4002,10 +4002,10 @@ mod tests {
         // fallback panics loudly instead of contributing hidden admissions.
         // Serialized with all other process-env mutation in the test build.
         let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1") };
+        unsafe { crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1")) };
         assert!(strict_static_dynamic_trap_enabled());
         let fired = std::panic::catch_unwind(|| strict_static_trap_dynamic("test_caller"));
-        unsafe { std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC") };
+        unsafe { crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None) };
         assert!(
             fired.is_err(),
             "strict-static trap must panic on a dynamic fallback entry point"

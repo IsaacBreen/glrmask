@@ -264,7 +264,7 @@ impl TemplateParser {
             link_grammar: None,
             possible: Vec::new(),
             unconditional: Vec::new(),
-            profile: std::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
+            profile: crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
             advances: AtomicU64::new(0),
             admissions: AtomicU64::new(0),
             completions: AtomicU64::new(0),

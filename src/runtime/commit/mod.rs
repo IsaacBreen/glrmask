@@ -595,7 +595,7 @@ static VALIDATE_TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn template_advance_enabled() -> bool {
     *TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| std::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some())
+        .get_or_init(|| crate::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some())
 }
 
 #[inline]
@@ -605,7 +605,7 @@ fn template_advance_selected(constraint: &Constraint) -> bool {
 
 fn validate_template_advance_enabled() -> bool {
     *VALIDATE_TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())
+        .get_or_init(|| crate::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())
 }
 
 fn advance_parser_stacks(
@@ -1053,7 +1053,7 @@ fn commit_assertion_flags() -> u8 {
     *FLAGS.get_or_init(|| {
         let mut flags = 0;
         if cfg!(debug_assertions)
-            || std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
+            || crate::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
                 .map(|value| {
                     let normalized = value.trim().to_ascii_lowercase();
                     matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -1062,7 +1062,7 @@ fn commit_assertion_flags() -> u8 {
         {
             flags |= COMMIT_ASSERT_MASK_EQUIVALENCE;
         }
-        if std::env::var("GLRMASK_ASSERT_COMMIT_FAST_PATH_EQUIVALENCE")
+        if crate::env::var("GLRMASK_ASSERT_COMMIT_FAST_PATH_EQUIVALENCE")
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -1104,7 +1104,7 @@ fn canonical_commit_state_for_equivalence_assert(
 }
 
 fn profile_allow_fast_paths() -> bool {
-    std::env::var("GLRMASK_PROFILE_ALLOW_FAST_PATHS")
+    crate::env::var("GLRMASK_PROFILE_ALLOW_FAST_PATHS")
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -1391,7 +1391,7 @@ fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStat
         return;
     }
 
-    let debug = std::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
+    let debug = crate::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
     let old = std::mem::take(state).entries;
     let mut index = 0usize;
     while index < old.len() {
@@ -1483,7 +1483,7 @@ fn coalesce_uniform_runtime_source_states(
         return;
     }
 
-    let debug = std::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
+    let debug = crate::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
     let old = std::mem::take(state).entries;
 
     // Product states are a boundary-only representation. The whole source
@@ -3833,7 +3833,7 @@ fn language_small_queue_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         let flag = |name: &str| {
-            std::env::var(name).ok().map(|value| {
+            crate::env::var(name).ok().map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
             })
@@ -4163,7 +4163,7 @@ fn commit_bytes_language_small_queue_fast_path_observed<O: CommitObserver>(
         return None;
     }
 
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
+    let profile_enabled = crate::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
     let top_values =
         language_queue_top_value_count_at_most(state, LANGUAGE_QUEUE_MIN_TOP_VALUES);
     if top_values < LANGUAGE_QUEUE_MIN_TOP_VALUES {
@@ -7170,7 +7170,7 @@ fn try_commit_flat_frontier_in_place_observed<O: CommitObserver>(
     frontier.reclaim_retired_gss();
     macro_rules! flat_decline {
         ($reason:literal) => {{
-            if std::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some() {
+            if crate::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some() {
                 eprintln!("[glrmask/debug][commit_path] flat_frontier_decline reason={}", $reason);
             }
             return None;
@@ -7557,7 +7557,7 @@ fn try_commit_direct_linear_in_place_observed<O: CommitObserver>(
     let result = (|| {
     if constraint.has_template_parser() { return None; }
 
-    let debug_path = std::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
+    let debug_path = crate::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
     let (&start_tokenizer_state, gss) = state.iter().next()?;
     let acc = gss.single_path_acc()?;
     if !acc.is_empty()
@@ -7733,7 +7733,7 @@ fn maybe_normalize_lookahead_invariant_reductions(
 
     if constraint.static_dynamic_overlay.is_none()
         || constraint.uses_compact_segmented_parser_runtime()
-        || std::env::var_os("GLRMASK_EXPERIMENT_EAGER_INVARIANT_REDUCTIONS").is_none()
+        || crate::env::var_os("GLRMASK_EXPERIMENT_EAGER_INVARIANT_REDUCTIONS").is_none()
     {
         return;
     }
@@ -7895,7 +7895,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
         return Ok(());
     }
 
-    let debug_path = std::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
+    let debug_path = crate::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
     if debug_path {
         eprintln!(
             "[glrmask/debug][commit_input] entries={} keys_paths={:?}",
@@ -8688,7 +8688,7 @@ impl<'a> ConstraintState<'a> {
                 // is currently proved for retaining a composed result.
                 && !self.constraint.uses_compact_segmented_parser_runtime()
                 && (self.dynamic_mask_projection_state_eq(&previous_state, &self.state)
-                    || (std::env::var_os(
+                    || (crate::env::var_os(
                         "GLRMASK_DISABLE_DYNAMIC_MASK_PARSER_RELATIVE_COMMIT_REUSE",
                     )
                     .is_none()
@@ -8895,7 +8895,7 @@ impl<'a> ConstraintState<'a> {
                     && entry.admitted == admitted
             })
         {
-            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_COMMIT_REUSE").is_some() {
+            if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_COMMIT_REUSE").is_some() {
                 eprintln!(
                     "[glrmask/profile][parser_relative_commit_reuse] generation={} result=cache_hit left={} right={} admitted={}",
                     self.generation,
@@ -8997,7 +8997,7 @@ impl<'a> ConstraintState<'a> {
 
         let vocab = self.constraint.dynamic_mask_vocab_for_runtime();
         let trie = vocab.trie.as_ref();
-        let max_byte_steps = std::env::var(
+        let max_byte_steps = crate::env::var(
             "GLRMASK_DYNAMIC_MASK_PARSER_RELATIVE_COMMIT_REUSE_MAX_STEPS",
         )
         .ok()
@@ -9009,7 +9009,7 @@ impl<'a> ConstraintState<'a> {
         // fixed transition-work budget keeps adversarial/non-equivalent pairs
         // from degenerating into a second full vocabulary traversal.
         .unwrap_or(2_048);
-        let started = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_COMMIT_REUSE")
+        let started = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_COMMIT_REUSE")
             .is_some()
             .then(std::time::Instant::now);
         let mut stack = vec![(0u32, *left_source, *right_source)];
@@ -9714,10 +9714,10 @@ mod tests {
         ] {
             let child = Constraint::compile(Grammar::glrm(source), &vocab).unwrap();
             let middle = Constraint::compile(Grammar::glrm(
-                r#"start middle; extern child; nt middle ::= "[" child "]";"#,
+                r#"start middle; extern grammar child; nt middle ::= "[" child "]";"#,
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("child", child).unwrap();
             let outer = Constraint::compile(Grammar::glrm(
-                r#"start outer; extern middle; nt outer ::= middle "!";"#,
+                r#"start outer; extern grammar middle; nt outer ::= middle "!";"#,
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let loaded = Constraint::load(outer.save(), &vocab).unwrap();
             for constraint in [&outer, &loaded] {
@@ -9866,7 +9866,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -9933,7 +9933,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
+                "glrm 1; start document; extern grammar child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
             ),
             &vocab,
         )
@@ -10123,10 +10123,10 @@ mod tests {
         use crate::ds::bitset::BitSet;
         use std::collections::BTreeMap;
 
-        let path = std::env::var("GLRMASK_DEBUG_ARTIFACT").expect("GLRMASK_DEBUG_ARTIFACT");
+        let path = crate::env::var("GLRMASK_DEBUG_ARTIFACT").expect("GLRMASK_DEBUG_ARTIFACT");
         let bytes = std::fs::read(path).unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
-            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+            &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
         let constraint = Constraint::load(&bytes, &vocab).unwrap();
         let mut state = constraint.start();
         assert!(state.commit_bytes(b"const x = tools.tool_0({})"));
@@ -10256,10 +10256,10 @@ mod tests {
             eprintln!("WEIGHT_TRANSPORT {name} l1={l1:?}");
         }
 
-        let core_path = std::env::var("GLRMASK_DEBUG_CORE_ARTIFACT").unwrap();
-        let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
+        let core_path = crate::env::var("GLRMASK_DEBUG_CORE_ARTIFACT").unwrap();
+        let fast_path = crate::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
-            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+            &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
         let core = Constraint::load(&std::fs::read(core_path).unwrap(), &vocab).unwrap();
         let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
         dump("core", &core, 38, 443);
@@ -10315,9 +10315,9 @@ mod tests {
             }
         }
 
-        let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
+        let full_path = crate::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
-            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+            &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
         let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
         dump_case(&full, "tools_reset_a", 0, &[0,22,198,18], &[739,2446,7255,21966]);
         dump_case(&full, "tools_reset_b", 0, &[0,22,198,167], &[739,2446,7255,21966]);
@@ -10332,17 +10332,17 @@ mod tests {
     fn debug_selected10_iterated_mask_factor() {
         use std::time::Instant;
 
-        let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
-        let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
+        let fast_path = crate::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
+        let full_path = crate::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
-            &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
+            &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
         let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
         let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
         unsafe {
-            std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", "1");
-            std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", "2");
-            std::env::set_var("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY", "1");
-            std::env::remove_var("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY");
+            crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", Some("1"));
+            crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", Some("2"));
+            crate::__private::set_env_var("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY", Some("1"));
+            crate::__private::set_env_var("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY", None);
         }
         let prefixes: &[&[u8]] = &[
             b"",
@@ -10924,7 +10924,7 @@ nt start ::= item item? item?;
         )
         .unwrap();
         let parent = Constraint::compile(
-            Grammar::glrm("glrm 1; start document; extern body; nt document = body;"),
+            Grammar::glrm("glrm 1; start document; extern grammar body; nt document = body;"),
             &vocab,
         )
         .unwrap();

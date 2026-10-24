@@ -14,8 +14,7 @@ fn assert_lr_composition_rejected<T>(result: glrmask::Result<T>) {
         Err(error) if matches!(error.kind(), glrmask::ErrorKind::Compilation(_)) => {
             let glrmask::ErrorKind::Compilation(message) = error.kind() else { unreachable!() };
             assert!(
-                message.contains("LR-backed components") ||
-                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
+                message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }
         Err(error) => panic!("unexpected composition error: {error}"),
         Ok(_) => panic!("LR-backed composition unexpectedly succeeded"),
@@ -165,7 +164,7 @@ nt start = CONTROL payload;
         .bind_token("CONTROL", [7]).unwrap()
         .bind_token("payload", [7]).unwrap()
         .build().unwrap();
-    assert!(narrow.compile().unwrap_err().to_string().contains("requires a grammar"));
+    assert!(narrow.compile().unwrap_err().to_string().contains("is a grammar extern"));
     let mut widened = Grammar::from_glrm(source).unwrap();
     widened.bind("CONTROL", glrmask::TokenSet::from(7)).unwrap();
     widened.bind("payload", glrmask::TokenSet::from(7)).unwrap();
@@ -710,7 +709,7 @@ fn grammar_source_bindings_validate_parent_declarations() {
         .bind_grammar("missing", Grammar::ebnf(r#"start ::= "x""#))
         .unwrap_err()
         .to_string();
-    assert!(unknown.contains("no external"), "{unknown}");
+    assert!(unknown.contains("no extern named"), "{unknown}");
 }
 
 #[test]
@@ -888,4 +887,19 @@ nt start = WORD;
     assert!(left.commit_token(1));
     assert!(right.commit_token(1));
     assert_eq!(left.mask(), right.mask());
+}
+
+#[test]
+fn extern_without_a_kind_is_rejected_at_the_declaration() {
+    let source = "glrm 1;\nstart root;\nextern child;\nnt root = \"x\";\n";
+    let error = Grammar::from_glrm(source).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "grammar error: external declarations require 'extern token NAME' or 'extern grammar NAME' (line 3, column 13)"
+    );
+    let span = error.source_span().expect("the rejection points at the declaration");
+    let declaration = source.find("extern child;").unwrap();
+    assert!(span.start >= declaration, "span {span:?}");
+    assert!(span.end <= declaration + "extern child;".len(), "span {span:?}");
+    assert_eq!(span.line, 3);
 }

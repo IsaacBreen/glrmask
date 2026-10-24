@@ -334,7 +334,7 @@ fn ordinary_lr_and_o2_static_are_isolated_across_reload() {
     let vocab = vocab();
     let source = r#"start ::= ("(" start ")")?"#;
     const CHILD: &str = "GLRMASK_DYNAMIC_BACKEND_TEST_CHILD";
-    if let Ok(directory) = std::env::var(CHILD) {
+    if let Ok(directory) = crate::env::var(CHILD) {
         let directory = std::path::Path::new(&directory);
         // Ordinary Dynamic always retains the LR table; there is no
         // process-wide backend switch.

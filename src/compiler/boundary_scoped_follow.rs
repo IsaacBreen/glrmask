@@ -95,7 +95,7 @@ pub(crate) fn optimized_scoped_follow_relation(grammar: &AnalyzedGrammar,
     let candidate = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_FOLLOW_DELTA")
         .then(|| super::boundary_scoped_follow_delta::scoped_ignore_follow_relation(grammar, counts, labels)).flatten();
     if let Some(candidate) = candidate {
-        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_SCOPED_FOLLOW_DELTA").is_some() {
+        if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_SCOPED_FOLLOW_DELTA").is_some() {
             assert_eq!(Some(&candidate), reference().as_ref(),
                 "ignore-delta differs from unchanged padded grammar relation");
         }

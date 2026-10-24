@@ -558,7 +558,7 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
     if unsupported.is_empty() {
         Ok(())
     } else {
-        Err(SchemaImportError::at(location, format!("Unimplemented keys: {unsupported:?}")))
+        Err(SchemaImportError::at(location, format!("unsupported keywords: {unsupported:?}")))
     }
 }
 

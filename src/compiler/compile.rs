@@ -59,10 +59,20 @@ impl glrmask_vocab::__private::VocabDerivedArtifact for VocabContentDigest {}
 /// invoke outside per-schema timing.  Transfer artifacts can therefore verify
 /// that the parent supplied the same vocabulary as the compile worker without
 /// rescanning every token byte string for every schema load.
+#[derive(Debug)]
+struct VocabFingerprint {
+    fingerprint: [u8; 32],
+}
+
+impl glrmask_vocab::__private::VocabDerivedArtifact for VocabFingerprint {}
+
 /// Fingerprint of a vocabulary's complete public identity: every ID-to-bytes
 /// mapping plus the special (exact-only) token ID set. Persisted artifacts store
 /// this fingerprint instead of the vocabulary.
 pub(crate) fn vocab_fingerprint(vocab: &crate::Vocab) -> [u8; 32] {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabFingerprint>() {
+        return cached.fingerprint;
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"glrmask-vocab-fingerprint-v1\0");
     hasher.update(&(vocab.len() as u64).to_le_bytes());
@@ -76,7 +86,9 @@ pub(crate) fn vocab_fingerprint(vocab: &crate::Vocab) -> [u8; 32] {
     for token_id in special {
         hasher.update(&token_id.to_le_bytes());
     }
-    *hasher.finalize().as_bytes()
+    let fingerprint = *hasher.finalize().as_bytes();
+    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabFingerprint { fingerprint }));
+    fingerprint
 }
 
 pub(crate) fn vocab_content_digest(vocab: &crate::Vocab) -> [u8; 32] {    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabContentDigest>() {
@@ -84,7 +96,7 @@ pub(crate) fn vocab_content_digest(vocab: &crate::Vocab) -> [u8; 32] {    if let
     }
     let buffered = crate::compiler::boundary_env::enabled("GLRMASK_BUFFERED_VOCAB_DIGEST");
     let digest = compute_vocab_content_digest(vocab, buffered);
-    if buffered && std::env::var_os("GLRMASK_VALIDATE_BUFFERED_VOCAB_DIGEST").is_some() {
+    if buffered && crate::env::var_os("GLRMASK_VALIDATE_BUFFERED_VOCAB_DIGEST").is_some() {
         assert_eq!(digest, compute_vocab_content_digest(vocab, false),
             "buffered vocabulary digest changed the canonical byte transcript");
         eprintln!("[glrmask/validate][buffered_vocab_digest] exact=true tokens={}", vocab.len());
@@ -195,7 +207,7 @@ pub(crate) fn prepare_vocab_for_dynamic_compile(vocab: &crate::Vocab) {
 }
 
 pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
-    let profile = std::env::var_os("GLRMASK_PROFILE_VOCAB_PREPARE").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_VOCAB_PREPARE").is_some();
     let run = |name: &str, f: &mut dyn FnMut()| {
         let started = std::time::Instant::now();
         f();
@@ -285,6 +297,26 @@ mod buffered_digest_tests {
             writer.flush(); writer.flush();
             assert_eq!(hash.finalize(), blake3::hash(&input), "piece size={size}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::vocab_fingerprint;
+    use crate::Vocab;
+
+    #[test]
+    fn fingerprint_is_stable_across_calls_and_clones_and_distinct_per_vocab() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
+            .with_special_tokens([1]);
+        let first = vocab_fingerprint(&vocab);
+        let cloned = vocab.clone();
+        assert_eq!(vocab_fingerprint(&cloned), first);
+        assert_eq!(vocab_fingerprint(&vocab), first);
+
+        let other = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())])
+            .with_special_tokens([1]);
+        assert_ne!(vocab_fingerprint(&other), first);
     }
 }
 

@@ -1,6 +1,13 @@
 //! Owned Module/Expr facade and Externs mapping view.
 use super::*;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::types::PyString;
+
+fn extern_repr(py: Python<'_>, name: &str, kind: &str) -> PyResult<String> {
+    let name = PyString::new(py, name).repr()?.to_string();
+    let kind = PyString::new(py, kind).repr()?.to_string();
+    Ok(format!("Extern(name={name}, kind={kind})"))
+}
 
 /// One declared extern contract on a Grammar or Module.
 #[pyclass(name = "Extern", module = "glrmask", frozen, from_py_object)]
@@ -22,8 +29,8 @@ impl PyExtern {
         &self.kind
     }
 
-    fn __repr__(&self) -> String {
-        format!("Extern(name={:?}, kind={:?})", self.name, self.kind)
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        extern_repr(py, &self.name, &self.kind)
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -36,7 +43,7 @@ impl From<glrmask::Extern> for PyExtern {
         let kind = match e.kind() {
             glrmask::ExternKind::Token => "token".to_string(),
             glrmask::ExternKind::Grammar => "grammar".to_string(),
-            _ => "grammar".to_string(),
+            _ => unreachable!("every extern kind has a binding name"),
         };
         Self {
             name: e.name().to_string(),
@@ -83,7 +90,7 @@ impl PyExterns {
     }
 
     /// The extern named `key`, or `default` if there is none.
-    #[pyo3(signature = (key, default = None))]
+    #[pyo3(signature = (key, default = None, /))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if let Some(e) = self.entries.iter().find(|e| e.name == key) {
             Ok(e.clone().into_pyobject(py)?.into_any().unbind())
@@ -117,13 +124,13 @@ impl PyExterns {
             .collect()
     }
 
-    fn __repr__(&self) -> String {
-        let pairs: Vec<String> = self
-            .entries
-            .iter()
-            .map(|e| format!("{:?}: {:?}", e.name, e))
-            .collect();
-        format!("Externs({{{}}})", pairs.join(", "))
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut pairs: Vec<String> = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let key = PyString::new(py, &entry.name).repr()?.to_string();
+            pairs.push(format!("{key}: {}", extern_repr(py, &entry.name, &entry.kind)?));
+        }
+        Ok(format!("Externs({{{}}})", pairs.join(", ")))
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -489,10 +496,9 @@ impl PyModule {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (data, vocab = None))]
-    fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
+    #[pyo3(signature = (data, /))]
+    fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         let data = data.to_vec();
-        let vocab = vocab.map(|v| v.inner.clone());
         py.detach(move || glrmask::Module::load(&data))
             .map(Self::from_inner)
             .map_err(api_error)

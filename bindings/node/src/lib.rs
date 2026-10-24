@@ -57,7 +57,7 @@ pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec
         let kind = match e.kind() {
             g::ExternKind::Token => "token",
             g::ExternKind::Grammar => "grammar",
-            _ => "grammar",
+            _ => unreachable!("every extern kind has a binding name"),
         };
         NativeExtern {
             name: e.name().to_string(),

@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::runtime::constraint::{DeltaReplayProfileStats, DenseToBufProfileStats};
 
 pub(super) fn bool_env(name: &str) -> bool {
-	std::env::var(name)
+	crate::env::var(name)
 		.map(|value| {
 			let normalized = value.trim().to_ascii_lowercase();
 			matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -62,7 +62,7 @@ pub(super) fn initialize_runtime_config() {
 fn emit_line_with_optional_file(line: &str, file_env_var: &str) {
 	println!("{line}");
 
-	let Ok(path) = std::env::var(file_env_var) else {
+	let Ok(path) = crate::env::var(file_env_var) else {
 		return;
 	};
 
@@ -89,7 +89,7 @@ pub(super) fn emit_mask_acc_merge_profile_line(line: &str) {
 }
 
 pub(super) fn emit_mask_fast_conversion_profile_line(line: &str) {
-	let Ok(path) = std::env::var("GLRMASK_PROFILE_MASK_FAST_CONVERSION_FILE") else {
+	let Ok(path) = crate::env::var("GLRMASK_PROFILE_MASK_FAST_CONVERSION_FILE") else {
 		return;
 	};
 

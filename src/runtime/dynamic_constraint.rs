@@ -1380,7 +1380,7 @@ impl DynamicConstraint {
     }
 
     fn payload_for_constraint(constraint: &Constraint) -> DynamicConstraintPayloadV2 {
-        let retain_terminal_exprs = std::env::var("GLRMASK_DYNAMIC_TRANSFER_TERMINAL_EXPRS")
+        let retain_terminal_exprs = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_TERMINAL_EXPRS")
             .ok()
             .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
         let terminal_exprs = retain_terminal_exprs
@@ -1598,7 +1598,7 @@ impl DynamicConstraint {
             Vec::new()
         };
         let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
-        let residual_runtime_oracles = std::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
+        let residual_runtime_oracles = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
             .ok()
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
             .then(|| constraint.tokenizer.virtual_residual_runtime_oracles())
@@ -1655,7 +1655,7 @@ impl DynamicConstraint {
     fn transfer_sections_v12_from_constraint(
         constraint: &Constraint,
     ) -> DynamicConstraintTransferSectionsV12 {
-        let profile_transfer = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile_transfer = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile_transfer.then(std::time::Instant::now);
         let base_started = profile_transfer.then(std::time::Instant::now);
         let table = Self::compact_table_bytes_for_transfer(constraint);
@@ -1722,7 +1722,7 @@ impl DynamicConstraint {
             (Vec::new(), None)
         };
         let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
-        let residual_runtime_oracles = std::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
+        let residual_runtime_oracles = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
             .ok()
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
             .then(|| constraint.tokenizer.virtual_residual_runtime_oracles())
@@ -1778,7 +1778,7 @@ impl DynamicConstraint {
 
         let base_ms = base_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let residual_enabled = std::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
+        let residual_enabled = crate::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
             .ok()
             .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
         let mut residual_prepare_ms = 0.0;
@@ -1855,7 +1855,7 @@ impl DynamicConstraint {
         if self.inner.has_template_parser() || self.alternatives.iter().any(Constraint::has_template_parser) {
             return self.save_template_alternatives();
         }
-        let profile_transfer = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile_transfer = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile_transfer.then(std::time::Instant::now);
         let sections_started = profile_transfer.then(std::time::Instant::now);
         let alternatives = std::iter::once(&self.inner)
@@ -1966,7 +1966,7 @@ impl DynamicConstraint {
     }
 
     fn load_transfer_v11(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
-        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
         let total_started = profile.then(std::time::Instant::now);
 
         // `load_with_vocab` is a borrowed API, while the backed table/tokenizer
@@ -2262,7 +2262,7 @@ impl DynamicConstraint {
     }
 
     fn load_transfer_v12(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
-        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
         let payload_header_len = if version == DYNAMIC_TRANSFER_VERSION {
@@ -3158,7 +3158,7 @@ impl DynamicConstraint {
                 crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab),
             );
         };
-        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
         let from_started = profile.then(std::time::Instant::now);
         let full_vocab_template =
             crate::compiler::constraint_possible_matches::prepared_runtime_dynamic_vocab_for_vocab(
@@ -3253,7 +3253,7 @@ impl DynamicConstraint {
         if version == LEGACY_DYNAMIC_TRANSFER_VERSION_V11 {
             return Self::load_transfer_v11(bytes, vocab);
         }
-        let load_profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let load_profile = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
         let load_total_started = load_profile.then(std::time::Instant::now);
         let payload_decode_started = load_profile.then(std::time::Instant::now);
         let exact_virtual_metadata = matches!(

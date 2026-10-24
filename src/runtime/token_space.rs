@@ -288,7 +288,7 @@ impl Constraint {
 			terminal,
 			self.max_token_byte_len(),
 		);
-		if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
+		if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
 			eprintln!(
 				"[glrmask/profile][pending_guard_bounded_reachability] state={} terminal={} impossible={:?} epsilon={} virtual={} max_token_len={}",
 				tokenizer_state,
@@ -317,7 +317,7 @@ impl Constraint {
 				.last()
 				.is_some_and(|&end| end as usize == self.internal_token_buf_flat_len());
 		let materialized_ready = self.internal_token_buf_masks.len() == internal_count;
-		if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
+		if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
 			eprintln!(
 				"[glrmask/profile][possible_match_public_empty] internal_count={} offsets={} flat_len={} materialized={} flat_ready={} materialized_ready={}",
 				internal_count,

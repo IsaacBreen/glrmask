@@ -460,7 +460,7 @@ fn summarize_rules_module_r1(
     }
     let mut pending = (0..rules.len()).collect::<Vec<_>>();
     let mut queued = vec![false; rules.len()];
-    let validate = std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_R1_FRONTIER").is_some();
+    let validate = crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_R1_FRONTIER").is_some();
     let mut rule_evaluations = 0usize;
     let fixed_point_started = profiling.then(Instant::now);
     let mut converged = false;
@@ -764,7 +764,7 @@ fn summarize_root_r1(constraint: &Constraint, vocab: &crate::Vocab,
 
 fn candidate_ids_for_r1(vocab: &crate::Vocab, language: ByteLanguage) -> Vec<u32> {
     if language.bytes.count() == 0 { return Vec::new(); }
-    if std::env::var_os("GLRMASK_DISABLE_BOUNDARY_R1_TRIE_MAP").is_none()
+    if crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_R1_TRIE_MAP").is_none()
         && let Some(ids) = super::constraint_possible_matches::prepared_proper_prefix_byte_candidates(
             vocab, &language.bytes.0)
     {
@@ -1328,7 +1328,7 @@ pub(crate) fn build_root_call_candidates_with_queries(
     } else {
         root_call_candidate_ids_reference(vocab, language.bytes, entries.as_deref())
     };
-    if indexed && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ROOT_PREFIX_INDEX").is_some() {
+    if indexed && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ROOT_PREFIX_INDEX").is_some() {
         assert_eq!(candidate_ids,
             root_call_candidate_ids_reference(vocab, language.bytes, entries.as_deref()),
             "indexed root CALL candidates differ from the original full prefix scan");

@@ -58,7 +58,7 @@ fn check(c: &Constraint, vocab: &[(u32, Vec<u8>)], words: &[Vec<u8>]) {
 fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
     if crate::isolate_environment_test(false) { return; }
     let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1"); }
+    unsafe { crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", Some("1")); }
     let mut tokens = (0..128u32).map(|id| (id, vec![id as u8])).collect::<Vec<_>>();
     tokens.extend(["xay", "xby", "xaby", "xy", "xa", "ay", "ab", "by", "pxayq"]
         .iter().enumerate().map(|(id, s)| (256 + id as u32, s.as_bytes().to_vec())));
@@ -87,7 +87,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             check(&outer, &tokens, &outer_words);
         }
     }
-    unsafe { std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC"); }
+    unsafe { crate::__private::set_env_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", None); }
 }
 
 #[test]

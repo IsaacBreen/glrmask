@@ -99,6 +99,10 @@ name = "bounded_string_array_close"
 harness = false
 
 [[example]]
+name = "o21137_subgrammar_bench"
+required-features = ["internal-api"]
+
+[[example]]
 name = "profile_glr"
 
 [[example]]

@@ -93,7 +93,7 @@ impl Expr {
         ) -> Result<crate::grammar::ast::GrammarExpr> {
             *count += 1;
             if depth > graph::MAX_DEPTH || *count > graph::MAX_NODES {
-                return Err(Error::Compilation("expression graph exceeds depth/node limits".into()));
+                return Err(Error::Compilation("the expression is too large or too deeply nested".into()));
             }
             Ok(match expr.0.as_ref() {
                 ExprNode::Leaf(leaf) => {

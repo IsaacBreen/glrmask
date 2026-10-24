@@ -9,12 +9,12 @@ fn minimize_symbolic_class_boundary(graph: DWA) -> DWA {
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE")
         && let Some((candidate, profile)) = crate::compiler::boundary_bit_minimize::minimize_finite_final_atoms(
             &graph, crate::compiler::glr::labels::DEFAULT_LABEL) {
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
             eprintln!("[glrmask/profile][symbolic_class_finite_minimize] selected=true profile={profile:?}");
         }
         candidate
     } else {
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
             eprintln!("[glrmask/profile][symbolic_class_finite_minimize] selected=false");
         }
         crate::automata::weighted::minimize_acyclic::minimize_acyclic_owned(graph)
@@ -180,7 +180,7 @@ fn compile_shared_classed_prepared(
         }}}
     }
     drop(add);
-    let profiling=std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let profiling=crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     if profiling {eprintln!("[glrmask/profile][native_compact_template_program_contract] templates={} instances={} logical_states={estimated_states} logical_edges={estimated_edges} coefficients={} lexical_states={} depth={max_controls:?} domain_full={} domain_points={}",dense_templates.len(),instances.len(),coefficients.len(),lexical.states().len(),domain.is_full(),domain.range_entries().map(|(lo,hi,tokens)|(u128::from(hi)-u128::from(lo)+1)*tokens.len() as u128).sum::<u128>());}
     if !(1..=200_000).contains(&estimated_states) || coefficients.len()>2048 {
         if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage=instance_budget");} return None;
@@ -218,7 +218,7 @@ fn compile_shared_classed_prepared(
     let publication_classes=restore_finite_pop_defaults(&mut symbolic,classes)?;
     let phase=Instant::now();
     let parser_dwa=publication_classes.compile_positive_dwa(symbolic,8_000_000).ok()?;
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
         eprintln!("[glrmask/profile][native_compact_template_program] selected=true context={} templates={} instances={} coefficients={} prepare_ms={prepare_ms:.3} class_ms={:.3} total_ms={:.3} native={profile:?} minimize={min_profile:?}",
             context.is_some(),refs.len(),instances.len(),coefficients.len(),phase.elapsed().as_secs_f64()*1000.0,started.elapsed().as_secs_f64()*1000.0);
     }

@@ -41,7 +41,7 @@ pub(crate) use compile::compile_owned;
 mod terminal_ended_characterization_tests;
 
 pub(crate) fn macro_parallelism_disabled() -> bool {
-    std::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")
+    crate::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
@@ -51,9 +51,9 @@ pub(crate) fn macro_parallelism_disabled() -> bool {
 
 pub(crate) fn macro_profile_enabled() -> bool {
     macro_parallelism_disabled()
-        && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some())
+        && (crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some())
 }
 
 pub(crate) fn report_macro_item_timings(label: &str, timings_ms: &[f64]) {
@@ -128,7 +128,7 @@ where
 /// diagnostics and performance comparisons; it must not change schema
 /// semantics.
 pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
-    match std::env::var("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS") {
+    match crate::env::var("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS") {
         Err(_) => true,
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,

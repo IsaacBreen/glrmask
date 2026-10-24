@@ -1914,7 +1914,7 @@ fn main() {
         // versioned JSON record per static boundary link; this keeps the
         // detailed funnel/span instrumentation out of ordinary benchmark runs.
         unsafe {
-            std::env::set_var("GLRMASK_BOUNDARY_ANALYSIS_JSON", "1");
+            glrmask::__private::set_env_var("GLRMASK_BOUNDARY_ANALYSIS_JSON", Some("1"));
         }
     }
     match sub {

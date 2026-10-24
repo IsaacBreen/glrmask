@@ -32,23 +32,35 @@ pub struct glrmask_externs(Vec<glrmask_extern_item>);
 }
 #[repr(C)] pub struct glrmask_marker_event { pub id: u32, pub byte_offset: u64 }
 
+const REJECTED: i32 = 6;
+
+fn status(kind: core::ErrorKind) -> i32 {
+    match kind {
+        core::ErrorKind::InvalidArgument => 1,
+        core::ErrorKind::Engine => 2,
+        core::ErrorKind::Panic => 3,
+        core::ErrorKind::BufferTooSmall => 4,
+        core::ErrorKind::Closed => 5,
+    }
+}
+
 thread_local! { static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) }; }
 fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
     match core::guarded(f) {
         Ok(()) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
         Err(e) => {
             LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
-            e.kind as i32
+            status(e.kind)
         }
     }
 }
 fn commit_ffi(f: impl FnOnce() -> Result<bool>) -> i32 {
     match core::guarded(f) {
         Ok(true) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
-        Ok(false) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 6 }
+        Ok(false) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); REJECTED }
         Err(e) => {
             LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
-            e.kind as i32
+            status(e.kind)
         }
     }
 }
@@ -249,7 +261,7 @@ data!(glrmask_events_data, glrmask_events, glrmask_marker_event);
             kind: match item.kind {
                 g::ExternKind::Token => 0,
                 g::ExternKind::Grammar => 1,
-                _ => 1,
+                _ => unreachable!("every extern kind has a binding name"),
             },
         };
         Ok(())

@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 pub(crate) fn profile_summary_enabled() -> bool {
-    std::env::var("GLRMASK_PROFILE_COMPILE_SUMMARY")
+    crate::env::var("GLRMASK_PROFILE_COMPILE_SUMMARY")
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")

@@ -291,7 +291,7 @@ fn build_ordered_vocab_prefix_tree(ordered_vocab: &OrderedVocab) -> VocabPrefixT
 fn ordered_vocab_cache_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE")
+        crate::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE")
             .map(|value| {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
@@ -303,7 +303,7 @@ fn ordered_vocab_cache_enabled() -> bool {
 fn ordered_vocab_cache_capacity() -> usize {
     static CAPACITY: OnceLock<usize> = OnceLock::new();
     *CAPACITY.get_or_init(|| {
-        std::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE_CAPACITY")
+        crate::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE_CAPACITY")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(4)
@@ -399,8 +399,8 @@ fn ordered_vocab_cache_source_original_to_ordered(
 }
 
 fn compile_profile_requested() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
 fn emit_ordered_vocab_cache_profile(profile: OrderedVocabCacheProfile) {
@@ -649,7 +649,7 @@ fn range_set_from_u128_mask(mask: u128) -> RangeSetBlaze<u32> {
 
 #[inline]
 fn pm_vocab_equiv_enabled() -> bool {
-    std::env::var("GLRMASK_PM_VOCAB_EQUIV")
+    crate::env::var("GLRMASK_PM_VOCAB_EQUIV")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
@@ -1436,7 +1436,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     ordered_vocab: &OrderedVocab,
 ) -> (PossibleMatchVocabMap, RuntimePossibleMatchesByTerminal) {
     let num_ordered_tokens = ordered_vocab.ordered_to_originals.len();
-    let pmv_detail_enabled = std::env::var("GLRMASK_PROFILE_PMV_DETAIL")
+    let pmv_detail_enabled = crate::env::var("GLRMASK_PROFILE_PMV_DETAIL")
         .map(|value| value == "1")
         .unwrap_or(false);
 
@@ -1968,19 +1968,19 @@ fn validate_group_pmv_outputs(
         panic!("group PMV validation failed: possible match weight mismatch for terminal {:?}", mismatch);
     }
 
-    if std::env::var_os("GLRMASK_PROFILE_PMV_DETAIL").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_PMV_DETAIL").is_some() {
         eprintln!("[glrmask/profile][pmv_validate] legacy_expand_compare_ms={:.3}", elapsed_ms(started_at));
     }
 }
 
 fn group_pmv_validation_enabled() -> bool {
-    std::env::var("GLRMASK_VALIDATE_GROUP_PMV")
+    crate::env::var("GLRMASK_VALIDATE_GROUP_PMV")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
 fn group_pmv_legacy_enabled() -> bool {
-    std::env::var("GLRMASK_PM_USE_LEGACY_PMV")
+    crate::env::var("GLRMASK_PM_USE_LEGACY_PMV")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -1996,7 +1996,7 @@ fn nfa_powerset_collect_default(state_count: usize, root_terminal_union: usize) 
 }
 
 fn nfa_powerset_collect_enabled(state_count: usize, root_terminal_union: usize) -> bool {
-    std::env::var("GLRMASK_PM_NFA_POWERSET_COLLECT")
+    crate::env::var("GLRMASK_PM_NFA_POWERSET_COLLECT")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
@@ -2285,27 +2285,27 @@ fn build_possible_match_powerset_view(
 }
 
 fn sparse_root_collect_enabled() -> bool {
-    std::env::var("GLRMASK_PM_SPARSE_ROOT_COLLECT")
+    crate::env::var("GLRMASK_PM_SPARSE_ROOT_COLLECT")
         .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
         .unwrap_or(true)
 }
 
 fn sparse_root_state_limit() -> usize {
-    std::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_STATES")
+    crate::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(128)
 }
 
 fn sparse_root_terminal_limit() -> usize {
-    std::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_TERMINALS")
+    crate::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_TERMINALS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(16)
 }
 
 fn batched_demand_collect_enabled(structured_dispatch: bool) -> bool {
-    std::env::var("GLRMASK_PM_BATCHED_DEMAND_COLLECT")
+    crate::env::var("GLRMASK_PM_BATCHED_DEMAND_COLLECT")
         .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
         .unwrap_or(structured_dispatch)
 }
@@ -2909,8 +2909,8 @@ fn collect_batched_demand_possible_matches(
         state_classes[state as usize] = class_id;
     }
     let class_ms = elapsed_ms(class_started_at);
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
             "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
@@ -2975,7 +2975,7 @@ fn collect_batched_demand_possible_matches_precomputed(
             })
         })
         .collect::<Vec<_>>();
-    let use_future_prune = std::env::var("GLRMASK_PM_POWERSET_FUTURE_DEMAND_PRUNE")
+    let use_future_prune = crate::env::var("GLRMASK_PM_POWERSET_FUTURE_DEMAND_PRUNE")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
@@ -3055,8 +3055,8 @@ fn collect_batched_demand_possible_matches_precomputed(
         state_classes[state as usize] = class_id;
     }
     let class_ms = elapsed_ms(class_started_at);
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
             "[glrmask/profile][batched_demand_powerset_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} future_mask_ms={:.3} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
@@ -3185,7 +3185,7 @@ fn prepared_runtime_dynamic_vocab(
         // It avoids artificial root partitions that make the full vocabulary
         // walk revisit equivalent prefix structure. Keep the older partitioned
         // layout only as a diagnostic escape hatch for regression comparison.
-        if std::env::var_os("GLRMASK_LEGACY_PARTITIONED_DYNAMIC_MASK_TRIE").is_none() {
+        if crate::env::var_os("GLRMASK_LEGACY_PARTITIONED_DYNAMIC_MASK_TRIE").is_none() {
             let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
                 artifacts.trie.as_ref(),
             ));
@@ -3261,7 +3261,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     // Default to the validated finite word language. This is vocabulary-only
     // preparation; every runtime use still needs an exact residual proof and
     // must beat the already-certified route by the conservative work margin.
-    let ascii_slice_max_token_byte_len = std::env::var(
+    let ascii_slice_max_token_byte_len = crate::env::var(
         "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_MAX_BYTES",
     )
     .ok()
@@ -3269,7 +3269,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     .filter(|&value| value != 0)
     .map_or(16.min(max_token_byte_len), |value| value.min(max_token_byte_len));
     let ascii_word = (max_token_byte_len != 0
-        && std::env::var_os("GLRMASK_DISABLE_DIRECT_RESIDUAL_WORD_SLICE").is_none())
+        && crate::env::var_os("GLRMASK_DISABLE_DIRECT_RESIDUAL_WORD_SLICE").is_none())
     .then(|| {
         Arc::new(
             VocabPartitionDfa::compile_utf8_regex(
@@ -3824,8 +3824,8 @@ fn compute_constraint_possible_matches_with_artifacts(
         .iter()
         .filter(|&&active| active)
         .count();
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
             "[glrmask/profile][pm_delayed_terminal_demand] terminals={} accepting_future_states={} query_states={} relevant_states={} total_terminals={} total_states={}",
@@ -3862,8 +3862,8 @@ fn compute_constraint_possible_matches_with_artifacts(
             &trie_build_states,
             &demand,
         );
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
                 "[glrmask/profile][trie_build_batched_demand] states={} terminals={} classes={} ms={:.3}",
@@ -3899,13 +3899,13 @@ fn compute_constraint_possible_matches_with_artifacts(
         // but avoids replaying the vocabulary independently for every demanded
         // terminal. It wins broadly on small deterministic powerset views around
         // p90; larger views can regress, so keep a conservative structural cap.
-        let powerset_batched_requested = std::env::var("GLRMASK_PM_POWERSET_BATCHED_DEMAND")
+        let powerset_batched_requested = crate::env::var("GLRMASK_PM_POWERSET_BATCHED_DEMAND")
             .map(|value| {
                 let value = value.trim();
                 value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
             })
             .unwrap_or(true);
-        let powerset_batched_max_states = std::env::var("GLRMASK_PM_POWERSET_BATCHED_MAX_STATES")
+        let powerset_batched_max_states = crate::env::var("GLRMASK_PM_POWERSET_BATCHED_MAX_STATES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(512);
@@ -3939,7 +3939,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             .0
         };
         if powerset_batched
-            && std::env::var_os("GLRMASK_PM_POWERSET_BATCHED_STRICT_REFERENCE").is_some()
+            && crate::env::var_os("GLRMASK_PM_POWERSET_BATCHED_STRICT_REFERENCE").is_some()
         {
             let strict_started_at = Instant::now();
             let (reference, _) =
@@ -4042,8 +4042,8 @@ fn compute_constraint_possible_matches_with_artifacts(
             let view_state = powerset.raw_start_to_view[raw_state as usize] as usize;
             state_classes[raw_state as usize] = view_result.state_classes[view_state];
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
                 "[glrmask/profile][trie_build_nfa_powerset] raw_states={} view_states={} root_view_states={} classes={} collector={} view_build_ms={:.3}",
@@ -4060,8 +4060,8 @@ fn compute_constraint_possible_matches_with_artifacts(
             class_maps: view_result.class_maps,
         }
     } else if use_sparse_root_collect {
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
                 "[glrmask/profile][trie_build_sparse_root] states={} terminals={} max_states={} max_terminals={}",
@@ -4118,7 +4118,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         deferred_vocab_singleton_original_ids: None,
     };
 
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
         eprintln!("[glrmask/profile][possible_match_vocab] original_tokens={} ordered_byte_tokens={} possible_match_tokens={}", original_token_count, ordered_vocab.ordered_to_originals.len(), possible_matches_id_map.vocab_tokens.internal_to_originals.len());
     }
 
@@ -4173,7 +4173,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         emit_ordered_vocab_cache_profile(full_profile);
         let vocab_equiv_started_at = Instant::now();
-        let use_naive = std::env::var("GLRMASK_PM_VOCAB_EQUIV_NAIVE")
+        let use_naive = crate::env::var("GLRMASK_PM_VOCAB_EQUIV_NAIVE")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let pm_vocab_map = if use_naive || tokenizer.has_epsilon_transitions() {
@@ -4185,8 +4185,8 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         } else {
             compute_pm_vocab_equivalence_map_fast(tokenizer, full_artifacts.ordered_vocab.as_ref())
         };
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
                 "[glrmask/profile][pm_vocab_equiv] original_tokens={} pm_vocab_classes={} mode={} ms={:.3}",

@@ -34,7 +34,7 @@ fn key<T:InstanceNode>(node:&T)->usize { node.identity() }
 pub(super) fn source_identity(node:&Grammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 pub(super) fn prepared_identity(node:&PreparedGrammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 fn limit(message: &str) -> Error {
-    Error::Compilation(format!("component graph resource limit: {message}"))
+    Error::Compilation(format!("{message}"))
 }
 fn prepend(prefix: &str, child: &Requirement) -> Requirement {
     let mut path = prefix.split("::").map(str::to_owned).collect::<Vec<_>>();
@@ -45,17 +45,17 @@ fn prepend(prefix: &str, child: &Requirement) -> Requirement {
 fn analyze<'a, T:InstanceNode>(root: &'a T, describe: impl Fn(&'a T) -> Result<View<'a, T>>) -> Result<Index<'a, T>> {
     fn visit<'a, T:InstanceNode>(node: &'a T, depth: usize, describe: &impl Fn(&'a T) -> Result<View<'a, T>>,
         index: &mut Index<'a, T>, active: &mut HashSet<usize>, ports: &mut usize) -> Result<()> {
-        if depth > MAX_DEPTH { return Err(limit("attachment depth exceeds 64")); }
+        if depth > MAX_DEPTH { return Err(limit("grammars are nested more than 64 levels deep")); }
         let id = key(node);
         if let Some(entry) = index.nodes.get(&id) {
-            if depth + entry.height > MAX_DEPTH { return Err(limit("attachment depth exceeds 64")); }
+            if depth + entry.height > MAX_DEPTH { return Err(limit("grammars are nested more than 64 levels deep")); }
             return Ok(());
         }
-        if !active.insert(id) { return Err(Error::Compilation("cyclic component attachment graph".into())); }
-        if index.nodes.len() + active.len() > MAX_NODES { return Err(limit("too many distinct instances")); }
+        if !active.insert(id) { return Err(Error::Compilation("a module is bound inside itself".into())); }
+        if index.nodes.len() + active.len() > MAX_NODES { return Err(limit("the composition has too many parts")); }
         let view = describe(node)?;
         *ports = ports.checked_add(view.ports).ok_or_else(||limit("port count overflow"))?;
-        if *ports > MAX_PORTS { return Err(limit("too many declared ports")); }
+        if *ports > MAX_PORTS { return Err(limit("the composition has too many externs")); }
         let mut height = 0;
         let mut first = view.local.first().cloned();
         let mut expanded = 1usize;
@@ -84,10 +84,10 @@ impl<T:InstanceNode> Index<'_, T> {
         let mut visited = 0usize;
         while let Some((id, prefix)) = pending.pop() {
             visited += 1;
-            if visited > MAX_NODES { return Err(limit("expanded requirement traversal exceeds its limit")); }
+            if visited > MAX_NODES { return Err(limit("the composition expands to too many parts")); }
             let entry = &self.nodes[&id];
             for local in &entry.view.local {
-                if result.len() == MAX_REQUIREMENTS { return Err(limit("too many expanded requirement paths")); }
+                if result.len() == MAX_REQUIREMENTS { return Err(limit("the composition expands to too many parts")); }
                 let mut requirement = local.clone();
                 requirement.path.splice(0..0, prefix.iter().cloned());
                 result.push(requirement);
@@ -104,7 +104,7 @@ impl<T:InstanceNode> Index<'_, T> {
     }
     fn expansion_preflight(&self) -> Result<()> {
         if self.nodes[&self.root].expanded > MAX_EXPANDED_INSTANCES {
-            return Err(limit("linking would expand more than 131072 component instances; the prepared DAG can still be saved or specialized"));
+            return Err(limit("compiling would expand the composition to more than 131072 parts"));
         }
         Ok(())
     }
@@ -224,11 +224,11 @@ impl Summary {
         })
     }
     fn check_height(&self)->Result<()> {
-        if self.height()>MAX_DEPTH {Err(limit("attachment depth exceeds 64"))} else {Ok(())}
+        if self.height()>MAX_DEPTH {Err(limit("grammars are nested more than 64 levels deep"))} else {Ok(())}
     }
     fn expansion_preflight(&self)->Result<()> {
         if self.instances>MAX_EXPANDED_INSTANCES as u128 {
-            Err(limit("linking would expand more than 131072 component instances; the prepared DAG can still be saved or specialized"))
+            Err(limit("compiling would expand the composition to more than 131072 parts"))
         } else {Ok(())}
     }
     fn requirements(&self)->Result<Vec<Requirement>> {
@@ -237,9 +237,9 @@ impl Summary {
             let mut result=Vec::new();let mut pending=vec![(self,Vec::<String>::new())];let mut visited=0usize;
             while let Some((node,prefix))=pending.pop() {
                 visited+=1;
-                if visited>MAX_NODES {return Err(limit("expanded requirement traversal exceeds its limit"));}
+                if visited>MAX_NODES {return Err(limit("the composition expands to too many parts"));}
                 for local in node.local.values() {
-                    if result.len()==MAX_REQUIREMENTS {return Err(limit("too many expanded requirement paths"));}
+                    if result.len()==MAX_REQUIREMENTS {return Err(limit("the composition expands to too many parts"));}
                     let mut requirement=local.as_ref().clone();
                     requirement.path.splice(0..0,prefix.iter().cloned());result.push(requirement);
                 }
@@ -278,7 +278,7 @@ pub(super) fn prepared_summary(root:&PreparedGrammar)->Result<Arc<Summary>> {
             let child=match value {
                 ModuleBinding::Module(c)=> {
                     if !static_constraint_targets(c.inner.as_ref(),&vocab) {
-                        return Err(Error::Compilation("prepared child targets an incompatible vocabulary".into()));
+                        return Err(Error::Compilation("the bound modules were precompiled for different vocabularies".into()));
                     }
                     Some(prepared_summary(c)?)
                 },_=>None,

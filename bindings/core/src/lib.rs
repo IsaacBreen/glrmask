@@ -10,6 +10,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use glrmask::__private::ConstraintStateExt as _;
 pub use glrmask;
 
+// C status codes are fixed by glrmask.h; a new kind needs a new status value there.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind { InvalidArgument = 1, Engine = 2, Panic = 3, BufferTooSmall = 4, Closed = 5 }

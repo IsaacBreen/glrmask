@@ -1760,7 +1760,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     {
         return Vec::new();
     }
-    let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
     let tail_started = profile.then(std::time::Instant::now);
     let mut tail = Vec::with_capacity(32 * 1024);
     // Deduplicating tiny seed maps costs more bookkeeping than it saves. Large
@@ -1979,7 +1979,7 @@ fn decode_token_mask_cache_impl(
         {
             return Err("invalid fast token-mask prefix padding".to_owned());
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let tail_started = profile.then(std::time::Instant::now);
         let tail_bytes = input
             .get(FAST_HEADER_LEN..tail_end)
@@ -2051,7 +2051,7 @@ fn decode_token_mask_cache_impl(
                 .collect::<Result<Vec<_>, _>>()?
         };
         let mut pos = prefix_start;
-        let materialize_prefix = std::env::var_os("GLRMASK_MATERIALIZE_TMC_PREFIX").is_some();
+        let materialize_prefix = crate::env::var_os("GLRMASK_MATERIALIZE_TMC_PREFIX").is_some();
         let word_group_prefix_buf_masks = if aligned_prefix && !materialize_prefix {
             if let Some((backing, section_start)) = backing.as_ref() {
                 let absolute_start = section_start
@@ -2105,7 +2105,7 @@ fn decode_token_mask_cache_impl(
     let tail_end = HEADER_LEN
         .checked_add(tail_len)
         .ok_or_else(|| "token-mask cache tail overflow".to_owned())?;
-    let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+    let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
     let tail_started = profile.then(std::time::Instant::now);
     let tail = bincode::deserialize::<TokenMaskCacheTail>(
         input
@@ -6159,7 +6159,7 @@ impl Constraint {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             if recorded != crate::compiler::compile::vocab_fingerprint(vocab) {
                 return Err(crate::Error::Serialization(
-                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                    "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
             Self::load_body_artifact_with_vocab(body, vocab)
@@ -6229,8 +6229,8 @@ impl Constraint {
                 return clone_serialized_artifact(bytes.as_slice());
             }
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
-        if std::env::var_os("GLRMASK_PROFILE_CACHE_ARTIFACT").is_some() {
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        if crate::env::var_os("GLRMASK_PROFILE_CACHE_ARTIFACT").is_some() {
             let started = std::time::Instant::now();
             let cache_sizes = [
                 ("word_sparse", bincode::serialized_size(&self.word_group_sparse_masks).unwrap_or(0)),
@@ -7112,7 +7112,7 @@ impl Constraint {
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
                 return Err(crate::Error::Serialization(
-                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                    "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
             let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
@@ -7151,7 +7151,7 @@ impl Constraint {
             || &bytes[..CONSTRAINT_ARTIFACT_MAGIC.len()] != CONSTRAINT_ARTIFACT_MAGIC
         {
             return Err(crate::Error::Serialization(
-                "invalid or unsupported constraint artifact envelope".to_owned(),
+                "they aren't a saved constraint, or were saved by another GLRMask version".to_owned(),
             ));
         }
         let mut fingerprint = [0u8; 32];
@@ -7339,7 +7339,7 @@ impl Constraint {
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
                 return Err(crate::Error::Serialization(
-                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                    "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
             let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
@@ -8401,7 +8401,7 @@ impl Constraint {
         owned_artifact: Option<std::sync::Arc<Vec<u8>>>,
         supplied_vocab: Option<&crate::Vocab>,
     ) -> crate::Result<Self> {
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let decompress_ms = 0.0;
         if bytes.len() < CONSTRAINT_HEADER_LEN || !bytes.starts_with(&CONSTRAINT_MAGIC) {
@@ -8416,9 +8416,9 @@ impl Constraint {
                 | EXTERNAL_LR_CONSTRAINT_VERSION
                 | EXTERNAL_DWA_CONSTRAINT_VERSION
         ) {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported constraint artifact version {version}: recompile the pre-release artifact"
-            )));
+            return Err(crate::GlrMaskError::Serialization(
+                "they were saved by another GLRMask version".to_owned(),
+            ));
         }
         let deferred = supplied_vocab.is_none();
         let external_vocab = supplied_vocab;
@@ -8673,7 +8673,7 @@ impl Constraint {
         }
         let rebuild_started = profile.then(std::time::Instant::now);
         let skip_runtime_rebuild_for_profile = deferred
-            || std::env::var_os("GLRMASK_SKIP_RUNTIME_REBUILD_FOR_PROFILE").is_some();
+            || crate::env::var_os("GLRMASK_SKIP_RUNTIME_REBUILD_FOR_PROFILE").is_some();
         if !skip_runtime_rebuild_for_profile {
             // Current late-bind artifacts are written with linker-only
             // placeholder token IDs removed from the public token coordinate.
@@ -8740,7 +8740,7 @@ impl Constraint {
                 Arc::clone(&constraint.tokenizer),wire,
             ).map_err(crate::GlrMaskError::Serialization)?;
             constraint.boundary_completion_index=Some(Arc::new(prepared));
-            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+            if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
                 eprintln!("[glrmask/profile][component_completion_load] certified=true ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
             }
         }
@@ -9522,21 +9522,21 @@ mod tests {
         assert!(Constraint::load(raw, &crate::public_api::constraint_vocab(&constraint))
             .unwrap_err()
             .to_string()
-            .contains("envelope"));
+            .contains("they aren't a saved constraint"));
 
         let mut previous_version = saved;
         previous_version[CONSTRAINT_ARTIFACT_HEADER_LEN + 8..CONSTRAINT_ARTIFACT_HEADER_LEN + 10].copy_from_slice(&2u16.to_le_bytes());
         assert!(Constraint::load(&previous_version, &crate::public_api::constraint_vocab(&constraint))
             .unwrap_err()
             .to_string()
-            .contains("unsupported"));
+            .contains("saved by another GLRMask version"));
 
         let mut previous_schema = constraint.save();
         previous_schema[CONSTRAINT_ARTIFACT_HEADER_LEN + 8..CONSTRAINT_ARTIFACT_HEADER_LEN + 10].copy_from_slice(&8u16.to_le_bytes());
         assert!(Constraint::load(&previous_schema, &crate::public_api::constraint_vocab(&constraint))
             .unwrap_err()
             .to_string()
-            .contains("unsupported"));
+            .contains("saved by another GLRMask version"));
 
         // v25 was the last development wire before recursive compiler-view
         // detachment. Pre-release artifacts are intentionally not migrated:
@@ -9547,7 +9547,7 @@ mod tests {
         assert!(Constraint::load(&previous_development, &crate::public_api::constraint_vocab(&constraint))
             .unwrap_err()
             .to_string()
-            .contains("unsupported"));
+            .contains("saved by another GLRMask version"));
 
         let mut lr_envelope = constraint.save();
         lr_envelope[CONSTRAINT_ARTIFACT_HEADER_LEN + 8..CONSTRAINT_ARTIFACT_HEADER_LEN + 10].copy_from_slice(&EXTERNAL_LR_CONSTRAINT_VERSION.to_le_bytes());
@@ -9813,7 +9813,7 @@ mod tests {
     fn current_constraint_artifact_preserves_static_dynamic_overlay() {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let parent = Constraint::compile(crate::Grammar::glrm(
-            "glrm 1; start root; extern child; nt root = \"a\" child;"), &vocab).unwrap();
+            "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
@@ -10131,7 +10131,7 @@ mod tests {
         let mut saved = tiny_constraint().save();
         saved[CONSTRAINT_ARTIFACT_HEADER_LEN + 8..CONSTRAINT_ARTIFACT_HEADER_LEN + 10].copy_from_slice(&PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION.to_le_bytes());
         let error = Constraint::load(&saved, &crate::public_api::constraint_vocab(&tiny_constraint())).unwrap_err().to_string();
-        assert!(error.contains("unsupported"), "{error}");
+        assert!(error.contains("saved by another GLRMask version"), "{error}");
     }
 
     #[test]

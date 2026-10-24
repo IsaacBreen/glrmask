@@ -355,7 +355,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         for token in sequence:
             assert state.commit_token(token)
         assert state.is_accepting()
-        mask = state.mask(end_token + 1)
+        mask = state.mask(size=end_token + 1)
         assert not mask[end_token]
         mask[end_token] = True
         assert mask[end_token]

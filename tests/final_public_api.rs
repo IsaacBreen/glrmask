@@ -336,7 +336,7 @@ fn focused_4_open_child_rejection() {
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     let open_child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     let err = parent.bind("child", open_child).unwrap_err().to_string();
-    assert!(err.contains("cannot bind \"child\": the value has unbound externs [\"item\"]"), "{err}");
+    assert!(err.contains("cannot bind \"child\" to a value with unbound externs: \"item\""), "{err}");
 
     // Also via Expr
     let open_expr = Expr::sequence([Expr::from(Module::new(&Grammar::from_glrm(OPEN).unwrap()))]);

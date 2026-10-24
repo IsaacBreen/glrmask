@@ -220,7 +220,7 @@ impl<'a> Lexer<'a> {
                 .checked_mul(10)
                 .and_then(|value| value.checked_add((byte - b'0') as u32))
                 .ok_or_else(|| {
-                    GlrMaskError::GrammarParse("special LLM token id does not fit in u32".into())
+                    GlrMaskError::GrammarParse("token ID doesn't fit in 32 bits".into())
                 })?;
             digits += 1;
             self.pos += 1;

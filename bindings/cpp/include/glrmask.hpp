@@ -63,11 +63,11 @@ enum class ParserBackend : std::uint32_t {
 };
 
 /// What an extern can be bound to.
-enum class ExternKind {
+enum class ExternKind : std::uint32_t {
     /// A token set or token ID.
-    Token,
+    Token = GLRMASK_EXTERN_TOKEN,
     /// A grammar, module, expression, token set or token ID.
-    Grammar
+    Grammar = GLRMASK_EXTERN_GRAMMAR
 };
 
 /// A GLRMask error.
@@ -223,7 +223,7 @@ inline std::vector<Extern> take_externs(glrmask_externs* raw) {
     for (std::size_t i = 0; i < len; ++i) {
         glrmask_extern value{}; check(glrmask_externs_get(raw, i, &value));
         Extern e; e.name.assign(value.name, value.name_len);
-        e.kind = value.kind == GLRMASK_EXTERN_TOKEN ? ExternKind::Token : ExternKind::Grammar;
+        e.kind = static_cast<ExternKind>(value.kind);
         result.push_back(std::move(e));
     }
     return result;

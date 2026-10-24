@@ -155,16 +155,14 @@ After an end token added with `Expr::sequence` is committed, or after a commit f
 
 ```cpp
 auto bytes = constraint.save();
-auto restored = glrmask::Constraint::load(bytes);
-
-auto external = constraint.save(true);       // Do not store the vocabulary.
-auto rebound = glrmask::Constraint::load(external, &vocab);
+auto restored = glrmask::Constraint::load(bytes, vocab);
 
 auto module_bytes = parent.save();
-auto module = glrmask::Module::load(module_bytes, &vocab);
+auto module = glrmask::Module::load(module_bytes);
+auto compiled = module.compile(vocab);
 ```
 
-These are the Rust core's artifact formats, not C++ object serialization. Compatible builds of Rust, Python, C++, and Node can exchange them. Exact vocabulary identity is checked when a vocabulary is supplied; an external-vocabulary artifact cannot load without it, and equal vocabulary size is insufficient. Artifact compatibility is not promised across releases, architectures, or unrelated builds, so keep the source and configuration when long-term regeneration matters. Treat untrusted artifacts according to the core loader's limitations.
+Saved bytes are the same in every binding, so a constraint saved from Python loads in C++. A saved constraint doesn't include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't load saved bytes from untrusted sources.
 
 ## Errors and ownership
 

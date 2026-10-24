@@ -89,7 +89,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     value = glrmask.TokenSet([63, 7])
     gc.collect()
     v = vocab()
-    assert repr(value) == "TokenSet[7..=7, 63..=63]"
+    assert repr(value) == "TokenSet.from_ranges([range(7, 8), range(63, 64)])"
     c = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", value).compile(v)
     mask = c.start().mask()
     assert mask[7] and mask[63]

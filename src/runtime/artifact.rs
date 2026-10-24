@@ -2400,7 +2400,7 @@ impl DynamicMaskTrie {
     /// large groups without any partition-specific masking logic.
     pub(crate) fn from_partitioned_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
         static DIRECT_FLAT: OnceLock<bool> = OnceLock::new();
-        if *DIRECT_FLAT.get_or_init(|| std::env::var("GLRMASK_DIRECT_FLAT_MASK_TRIE")
+        if *DIRECT_FLAT.get_or_init(|| crate::env::var("GLRMASK_DIRECT_FLAT_MASK_TRIE")
             .map_or(true, |value| matches!(value.as_str(), "1" | "true")))
         {
             return Self::from_partitioned_sorted_direct(entries);
@@ -5701,7 +5701,7 @@ impl DynamicMaskVocab {
             })
             .collect::<Vec<_>>();
         let verify_combined =
-            std::env::var_os("GLRMASK_VERIFY_DIRECT_RESIDUAL_MASTER_PROVERS").is_some();
+            crate::env::var_os("GLRMASK_VERIFY_DIRECT_RESIDUAL_MASTER_PROVERS").is_some();
         let build_whitespace = || {
             candidates
                 .par_iter()
@@ -5966,7 +5966,7 @@ impl DynamicMaskVocab {
             mismatches: usize,
             unknown: usize,
         }
-        let verify = std::env::var_os("GLRMASK_VERIFY_PREPARED_MASTER_PROVERS").is_some();
+        let verify = crate::env::var_os("GLRMASK_VERIFY_PREPARED_MASTER_PROVERS").is_some();
         let jobs = quotients
             .par_iter()
             .flat_map_iter(|(terminal, quotient)| {
@@ -6053,7 +6053,7 @@ impl DynamicMaskVocab {
                     .push(job.terminal);
             }
         }
-        if std::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {
+        if crate::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {
             eprintln!(
                 "[glrmask/profile][prepared_master_pair_work] jobs={} work_ms={:.3} max_pair_ms={:.3}",
                 quotients.len() * 2,
@@ -7379,17 +7379,17 @@ impl DynamicMaskVocab {
             }
         }
 
-        let state_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_STATE_CAP")
+        let state_cap = crate::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_STATE_CAP")
             .ok().and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(2048);
-        let built = if std::env::var_os("GLRMASK_DISABLE_DEMAND_PROOF_CAP").is_none() {
-            let edge_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_EDGE_CAP")
+        let built = if crate::env::var_os("GLRMASK_DISABLE_DEMAND_PROOF_CAP").is_none() {
+            let edge_cap = crate::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_EDGE_CAP")
                 .ok().and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_else(|| state_cap.saturating_mul(128));
             let quotient = source.build_terminal_projected_quotient_for_containment_bounded(
                 terminal, state_cap, edge_cap,
             );
-            if std::env::var_os("GLRMASK_DIAG_DEMAND_PROOF_CAP").is_some() {
+            if crate::env::var_os("GLRMASK_DIAG_DEMAND_PROOF_CAP").is_some() {
                 eprintln!("[demand_proof_cap] terminal={} state_cap={} edge_cap={} built={}",
                     terminal, state_cap, edge_cap, quotient.is_some());
             }
@@ -7563,15 +7563,15 @@ impl DynamicMaskVocab {
         }
         static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let diagnostic = *PROFILE.get_or_init(|| {
-            std::env::var_os("GLRMASK_PROFILE_RAW_TERMINAL_RADIUS").is_some()
+            crate::env::var_os("GLRMASK_PROFILE_RAW_TERMINAL_RADIUS").is_some()
         });
         static BATCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let batch_rows = *BATCH.get_or_init(|| {
-            std::env::var_os("GLRMASK_DISABLE_RAW_RADIUS_BATCH_ROWS").is_none()
+            crate::env::var_os("GLRMASK_DISABLE_RAW_RADIUS_BATCH_ROWS").is_none()
         });
         let verify_rows = *VERIFY.get_or_init(|| {
-            std::env::var_os("GLRMASK_ASSERT_RAW_RADIUS_BATCH_ROWS").is_some()
+            crate::env::var_os("GLRMASK_ASSERT_RAW_RADIUS_BATCH_ROWS").is_some()
         });
         let started = diagnostic.then(std::time::Instant::now);
         let mut work = 0usize;
@@ -8217,7 +8217,7 @@ impl DynamicMaskVocab {
         // unchanged. Experiment only until representative measurements pass.
         static DIRECT_COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *DIRECT_COPY.get_or_init(|| {
-            std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_DENSE_ONLY").is_some()
+            crate::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_DENSE_ONLY").is_some()
         }) {
             return DynamicMaskCachePayload::Dense(Arc::from(mask));
         }
@@ -8251,7 +8251,7 @@ impl DynamicMaskVocab {
         // Opt-in bounded capacity experiment; default and key semantics unchanged.
         static CACHE_BUDGET_MIB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         let budget_mib = *CACHE_BUDGET_MIB.get_or_init(|| {
-            std::env::var("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_BUDGET_MIB")
+            crate::env::var("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_BUDGET_MIB")
                 .ok().and_then(|s| s.parse::<usize>().ok())
                 .filter(|n| (1..=64).contains(n)).unwrap_or(32)
         });
@@ -9169,7 +9169,7 @@ pub(crate) mod original_token_map_artifact_serde {
         if !PACKED.with(Cell::get) {
             return value.serialize(serializer);
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let pack_started = profile.then(std::time::Instant::now);
         let packed = pack_fixed(value);
@@ -9204,7 +9204,7 @@ pub(crate) mod original_token_map_artifact_serde {
         if !PACKED.with(Cell::get) {
             return Vec::<u32>::deserialize(deserializer);
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let packed = Vec::<u8>::deserialize(deserializer)?;
         let packed_len = packed.len();
@@ -9800,7 +9800,7 @@ pub(crate) mod token_bytes_artifact_serde {
         if !PACKED.with(Cell::get) {
             return Arc::<BTreeMap<u32, Vec<u8>>>::deserialize(deserializer);
         }
-        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total = profile.then(std::time::Instant::now);
         let packed_started = profile.then(std::time::Instant::now);
         let packed = Vec::<u8>::deserialize(deserializer)?;

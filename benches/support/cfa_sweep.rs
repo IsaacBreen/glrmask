@@ -48,8 +48,8 @@ pub fn assert_release_benchmark(bench: &str) {
 
 pub fn force_single_threaded_compile() {
     unsafe {
-        std::env::set_var("GLRMASK_COMPILE_THREADS", "1");
-        std::env::set_var("RAYON_NUM_THREADS", "1");
+        glrmask::__private::set_env_var("GLRMASK_COMPILE_THREADS", Some("1"));
+        glrmask::__private::set_env_var("RAYON_NUM_THREADS", Some("1"));
     }
 }
 
@@ -229,8 +229,8 @@ fn case_matches_filter(group_name: &str, case: &BenchCase, filter: &str) -> bool
 
 pub fn profile_single_builds(cases: &[&BenchCase], vocab: &Vocab) {
     unsafe {
-        std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
-        std::env::set_var("GLRMASK_PROFILE_COMPILE_SUMMARY", "1");
+        glrmask::__private::set_env_var("GLRMASK_PROFILE_COMPILE", Some("1"));
+        glrmask::__private::set_env_var("GLRMASK_PROFILE_COMPILE_SUMMARY", Some("1"));
     }
     for case in cases {
         eprintln!(
@@ -240,8 +240,8 @@ pub fn profile_single_builds(cases: &[&BenchCase], vocab: &Vocab) {
         build_schema(case, vocab);
     }
     unsafe {
-        std::env::remove_var("GLRMASK_PROFILE_COMPILE");
-        std::env::remove_var("GLRMASK_PROFILE_COMPILE_SUMMARY");
+        glrmask::__private::set_env_var("GLRMASK_PROFILE_COMPILE", None);
+        glrmask::__private::set_env_var("GLRMASK_PROFILE_COMPILE_SUMMARY", None);
     }
 }
 

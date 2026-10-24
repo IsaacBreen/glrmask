@@ -191,7 +191,7 @@ fn certify_caps(
             terminal, 1, table, grammar, templates, vocab, id_map,
         );
         let verify_stabilization = cfg!(debug_assertions)
-            || std::env::var_os("GLRMASK_VERIFY_TERMINAL_RUN_CERTIFICATES").is_some();
+            || crate::env::var_os("GLRMASK_VERIFY_TERMINAL_RUN_CERTIFICATES").is_some();
         let mut pending_cap = None;
 
         for exponent in 2..=max_exponent {
@@ -350,7 +350,7 @@ pub(crate) fn collapse_certified_terminal_runs(
     templates: &Templates,
     vocab: &Vocab,
 ) -> TerminalRunCollapseProfile {
-    if std::env::var_os("GLRMASK_DISABLE_CERTIFIED_TERMINAL_RUN_COLLAPSE").is_some() {
+    if crate::env::var_os("GLRMASK_DISABLE_CERTIFIED_TERMINAL_RUN_COLLAPSE").is_some() {
         return TerminalRunCollapseProfile::default();
     }
     let Some(l2p) = families.l2p.as_ref() else {
@@ -406,8 +406,8 @@ pub(crate) fn collapse_certified_terminal_runs(
     ));
     let rewrite_ms = rewrite_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_DEBUG_CERTIFIED_TERMINAL_RUNS").is_some()
+    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || crate::env::var_os("GLRMASK_DEBUG_CERTIFIED_TERMINAL_RUNS").is_some()
     {
         eprintln!(
             "[glrmask/profile][certified_terminal_runs] candidates={:?} caps={:?} states={}->{} transitions={}->{} certificate_ms={:.3} rewrite_ms={:.3}",

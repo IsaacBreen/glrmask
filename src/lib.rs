@@ -53,6 +53,7 @@
 pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
+pub(crate) mod env;
 mod error;
 mod public_api;
 // Data-only parser construction remains an unstable tooling API.
@@ -111,7 +112,7 @@ pub(crate) fn isolate_environment_test(ignored: bool) -> bool {
     const CHILD: &str = "GLRMASK_ISOLATED_ENVIRONMENT_TEST";
     let current = std::thread::current();
     let name = current.name().expect("libtest names each test thread");
-    if std::env::var(CHILD).as_deref() == Ok(name) {
+    if crate::env::var(CHILD).as_deref() == Ok(name) {
         return false;
     }
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -346,6 +347,21 @@ pub mod __private {
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
             &[],
         )
+    }
+
+    /// Sets or removes an environment variable and makes GLRMask see the change.
+    ///
+    /// # Safety
+    /// Same contract as [`std::env::set_var`].
+    pub unsafe fn set_env_var(key: &str, value: Option<&str>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        crate::env::record_override(
+            std::ffi::OsStr::new(key),
+            value.map(std::ffi::OsString::from),
+        );
     }
 
     /// Internal release-only benchmark for exact o21137 subgrammar decomposition.
