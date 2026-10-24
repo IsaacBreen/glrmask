@@ -1,4 +1,4 @@
-//! Public precompiled template composition; see docs/design/template-parser-composition.md.
+//! Public precompiled template composition; see docs/template-parser-composition.md.
 use glrmask::test_modes::MaskMode;
 fn main() -> glrmask::Result<()> {
     use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};

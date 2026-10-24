@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "_glrmask"
-version = "1.0.0"
+version = "0.4.0"
 dependencies = [
  "glrmask",
  "libmimalloc-sys",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask"
-version = "1.0.0"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "bincode",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-binding-core"
-version = "1.0.0"
+version = "0.4.0"
 dependencies = [
  "glrmask",
  "self_cell",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-c"
-version = "1.0.0"
+version = "0.4.0"
 dependencies = [
  "glrmask-binding-core",
 ]
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-node"
-version = "1.0.0"
+version = "0.4.0"
 dependencies = [
  "glrmask-binding-core",
  "napi",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-weight"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "dashmap",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-weighted-automata"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "glrmask-weight",

@@ -1,5 +1,3 @@
-> Design notes from development. Type and option names may be out of date; [GUIDE.md](../../GUIDE.md) describes the current API.
-
 # Compile a resolved grammar with your own parser
 
 `ParserCompiler` is a compile-time interface. GLRMask resolves the source and

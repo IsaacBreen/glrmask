@@ -1,14 +1,13 @@
 [package]
 name = "glrmask-weighted-automata"
-version = "0.2.0"
+version = "0.1.1"
 edition = "2024"
-rust-version = "1.88"
-description = "Part of GLRMask: weighted automata. Depend on the glrmask crate instead; this crate has no stable API."
+description = "Weighted NWA and DWA algorithms used by GLRMask"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
 [dependencies]
-glrmask-weight = { version = "=0.2.0", path = "../glrmask-weight", features = ["internal-api"] }
+glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight", features = ["internal-api"] }
 range-set-blaze = "0.3.0"
 rayon = "1"
 rustc-hash = "1"

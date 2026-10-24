@@ -2,8 +2,7 @@
 name = "glrmask-grammar"
 version = "0.2.1"
 edition = "2024"
-rust-version = "1.88"
-description = "Part of GLRMask: grammars and the EBNF, Lark and GLRM front ends. Depend on the glrmask crate instead; this crate has no stable API."
+description = "Grammar representations, transformations, and text frontends for GLRMask"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 

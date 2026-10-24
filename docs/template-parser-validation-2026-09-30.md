@@ -10,7 +10,7 @@ The table-free implementation has lower warm mean time between masks (TBM) and l
 
 Runtime source: `ea136ca4bcf8557e5d052d76004803232523e3a1`. Documentation-only follow-up commits may have a later revision; the measurements below refer to that exact runtime source.
 
-The [parser contract](design/template-parser.md) gives typed Rust/Python selection, data-only provider semantics, validation limits, and persistence requirements. The [compact evidence pack](evidence/template-parser-validation-2026-09-30.zip) contains the paired process summaries, comparison CSV, per-schema serialized sizes, adverse-cell inventory, checksums, and an integrity/arithmetic verifier.
+The [parser contract](template-parser.md) gives typed Rust/Python selection, data-only provider semantics, validation limits, and persistence requirements. The [compact evidence pack](evidence/template-parser-validation-2026-09-30.zip) contains the paired process summaries, comparison CSV, per-schema serialized sizes, adverse-cell inventory, checksums, and an integrity/arithmetic verifier.
 
 ## What was finalized
 

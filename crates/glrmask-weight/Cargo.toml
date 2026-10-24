@@ -1,9 +1,8 @@
 [package]
 name = "glrmask-weight"
-version = "0.2.0"
+version = "0.1.1"
 edition = "2024"
-rust-version = "1.88"
-description = "Part of GLRMask: token-set weights. Depend on the glrmask crate instead; this crate has no stable API."
+description = "Interned token-set weight algebra used by GLRMask"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 

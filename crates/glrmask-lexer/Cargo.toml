@@ -2,8 +2,7 @@
 name = "glrmask-lexer"
 version = "0.2.1"
 edition = "2024"
-rust-version = "1.88"
-description = "Part of GLRMask: lexer automata. Depend on the glrmask crate instead; this crate has no stable API."
+description = "Lexer and tokenizer automata used by GLRMask"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 

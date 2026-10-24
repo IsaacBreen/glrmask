@@ -1,5 +1,3 @@
-> Design notes from development. Type and option names may be out of date; [GUIDE.md](../../GUIDE.md) describes the current API.
-
 # Compose template-DFA parsers
 
 Backend selectors and inspectors in these tooling examples require Rust's

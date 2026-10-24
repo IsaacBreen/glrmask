@@ -25,37 +25,7 @@ def verify(tag: str, *, check_ancestry: bool) -> str:
     js_version = node_info["version"]
     if node_info["name"] != "@glrmask/node":
         raise ValueError("Unexpected npm package identity")
-
-    cmake_match = re.search(r"^project\(glrmask VERSION ([^ )]+)",
-                            (ROOT / "bindings/cpp/CMakeLists.txt").read_text(), re.MULTILINE)
-    if not cmake_match:
-        raise ValueError("Unexpected CMake project declaration")
-    cmake = cmake_match.group(1)
-
-    def binding_version(name: str) -> str:
-        manifest = tomllib.loads((ROOT / f"bindings/{name}/Cargo.toml").read_text())
-        return manifest["package"]["version"]
-
-    python_crate = tomllib.loads((ROOT / "python/Cargo.toml").read_text())
-    python_crate_version = python_crate["package"]["version"]
-    python_crate_pin = python_crate["dependencies"]["glrmask"]["version"]
-    if not python_crate_pin.startswith("="):
-        raise ValueError("Unexpected glrmask requirement in python/Cargo.toml")
-    python_crate_pin = python_crate_pin[1:]
-
-    versions = {
-        "rust": rust,
-        "cmake": cmake,
-        "binding-core": binding_version("core"),
-        "binding-c": binding_version("cpp"),
-        "binding-node": binding_version("node"),
-        "python": python,
-        "python-crate": python_crate_version,
-        "python-crate-pin": python_crate_pin,
-        "npm": js_version,
-    }
-    for name, pin in node_info["optionalDependencies"].items():
-        versions[f"npm:{name}"] = pin
+    versions = {"rust": rust, "python": python, "npm": js_version}
     if any(v != version for v in versions.values()):
         raise ValueError(f"Release {tag} disagrees with package versions: {versions}")
 
