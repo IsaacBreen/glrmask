@@ -357,7 +357,9 @@ C++ throws `glrmask::Error`. In Rust, `Error::kind()` gives the kind of error an
 ## Grammar formats
 
 **JSON Schema.** Drafts 4, 6, 7, 2019-09 and 2020-12, chosen by `$schema`; without one, 2020-12. `format` is treated as
-an annotation, and `oneOf` requires exactly one match. A schema feature GLRMask can't enforce is an error.
+an annotation, and `oneOf` requires exactly one match. A schema feature GLRMask can't enforce is an error. The JSON
+has one layout, the one Python's `json.dumps` writes by default: no whitespace outside strings except a space after each
+`,` and `:`, as in `{"a": [1, 2]}`.
 
 **GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, markers, scoped grammars, and
 regular-expression intersection and subtraction. See [GLRM](docs/glrm-format.md).
