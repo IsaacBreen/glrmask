@@ -102,9 +102,9 @@ pub(crate) struct BoundaryCandidateFingerprint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SummaryPrecision {
-    RegularUpperBound,
-    ContextRefinedUpperBound,
-    BudgetWidenedUpperBound,
+    Regular,
+    ContextRefined,
+    BudgetWidened,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1005,7 +1005,7 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
-    Dense(Vec<Box<[u32; 256]>>),
+    Dense(Vec<[u32; 256]>),
     Flat(Arc<[u32]>),
     /// Compact exact dense DFA rows for tokenizers with fewer than 32,768
     /// states. The high bit marks a target state with at least one finalizer;
@@ -1028,7 +1028,7 @@ pub(crate) enum FastTokenizerTransitions {
     Fallback(usize),
     Hybrid {
         state_to_dense_row: Vec<u32>,
-        dense_rows: Vec<Box<[u32; 256]>>,
+        dense_rows: Vec<[u32; 256]>,
     },
 }
 
@@ -1282,7 +1282,7 @@ impl FastTokenizerTransitions {
         self,
         children: &[(&FastTokenizerTransitions, u32)],
     ) -> Option<Self> {
-        fn flat_rows(flat: &[u32]) -> Option<Vec<Box<[u32; 256]>>> {
+        fn flat_rows(flat: &[u32]) -> Option<Vec<[u32; 256]>> {
             let chunks = flat.chunks_exact(256);
             if !chunks.remainder().is_empty() {
                 return None;
@@ -1290,13 +1290,13 @@ impl FastTokenizerTransitions {
             chunks
                 .map(|chunk| {
                     let row: &[u32; 256] = chunk.try_into().ok()?;
-                    Some(Box::new(*row))
+                    Some(*row)
                 })
                 .collect()
         }
 
-        fn rebased_row(row: &[u32; 256], offset: u32) -> Box<[u32; 256]> {
-            let mut rebased = Box::new(*row);
+        fn rebased_row(row: &[u32; 256], offset: u32) -> [u32; 256] {
+            let mut rebased = *row;
             for target in rebased.iter_mut() {
                 if *target != u32::MAX {
                     *target = target.checked_add(offset)
@@ -3402,7 +3402,7 @@ pub(crate) struct DynamicBoundedObservationSets {
 }
 
 impl DynamicBoundedObservationSets {
-    pub(crate) fn from_raw(horizon16: Box<[U8Set]>, horizon64: Box<[U8Set]>) -> Self {
+    pub(crate) fn from_raw(horizon16: &[U8Set], horizon64: &[U8Set]) -> Self {
         debug_assert_eq!(horizon16.len(), horizon64.len());
         let mut ids = FxHashMap::<U8Set, u32>::default();
         let mut pool = Vec::<U8Set>::new();
@@ -3529,7 +3529,7 @@ pub(crate) struct DynamicLazyUnionCache {
 pub(crate) struct DynamicDenseSubset16 {
     pub(crate) root_state: u32,
     pub(crate) base_state_count: u32,
-    pub(crate) rows: Vec<Box<[u32; 256]>>,
+    pub(crate) rows: Vec<[u32; 256]>,
     pub(crate) finalizer_code: Vec<u32>,
     pub(crate) single_finalizer_continues: Vec<u8>,
     pub(crate) matched: Vec<BitSet>,
@@ -4154,12 +4154,13 @@ impl DynamicMaskVocab {
         trie: Arc<DynamicMaskTrie>,
         token_aliases: Arc<Vec<Vec<u32>>>,
     ) -> Self {
-        let mut vocab = Self::default();
-        vocab.trie = trie;
-        vocab.token_aliases = DynamicMaskAliasStore::Ordered(token_aliases);
-        vocab.pending_source = None;
-        vocab.initialized = true;
-        vocab
+        Self {
+            trie,
+            token_aliases: DynamicMaskAliasStore::Ordered(token_aliases),
+            pending_source: None,
+            initialized: true,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn fresh_runtime_instance(&self) -> Self {
@@ -6718,7 +6719,7 @@ impl DynamicMaskVocab {
             // coordinates. It remains useful for unioning execution states in
             // the strict walker, but must not be queried with ConstraintState
             // source lexer states.
-            && !(self.mask_tokenizer.is_some() && self.mask_determinized_tokenizer.is_some())
+            && (self.mask_tokenizer.is_none() || self.mask_determinized_tokenizer.is_none())
     }
 
     #[inline]
@@ -8480,8 +8481,8 @@ impl DynamicMaskVocab {
         &mut self,
         token_bytes: &BTreeMap<u32, Vec<u8>>,
     ) {
-        let mut canonical_meta = Vec::<Option<(u16, bool)>>::new();
-        canonical_meta.reserve(self.canonical_token_count());
+        let mut canonical_meta =
+            Vec::<Option<(u16, bool)>>::with_capacity(self.canonical_token_count());
         for canonical in 0..self.canonical_token_count() as u32 {
             let Some(originals) = self.token_ids(canonical) else {
                 return;

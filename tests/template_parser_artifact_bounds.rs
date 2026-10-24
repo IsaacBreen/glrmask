@@ -19,7 +19,7 @@ fn vocab() -> Vocab {
     ])
 }
 
-fn fixture(optimization: MaskStrategy, external: bool) -> Vec<u8> {
+fn fixture(optimization: MaskStrategy, _external: bool) -> Vec<u8> {
     let program = ParserProgram::new(ParserDefinition {
         stack_symbol_count: 2,
         terminals: vec![
@@ -43,11 +43,7 @@ fn fixture(optimization: MaskStrategy, external: bool) -> Vec<u8> {
             TemplateBuildOptions::default().optimization(optimization),
         )
         .unwrap();
-    if external {
-        constraint.save()
-    } else {
-        constraint.save()
-    }
+    constraint.save()
 }
 
 fn envelope_len(bytes: &[u8]) -> usize {
@@ -105,12 +101,8 @@ fn replace_var(bytes: &[u8], range: Range<usize>, mut value: u32) -> Vec<u8> {
     result
 }
 
-fn load(bytes: Vec<u8>, external: bool) -> glrmask::Result<Constraint> {
-    if external {
-        Constraint::load(bytes, &vocab())
-    } else {
-        Constraint::load(bytes, &vocab())
-    }
+fn load(bytes: Vec<u8>, _external: bool) -> glrmask::Result<Constraint> {
+    Constraint::load(bytes, &vocab())
 }
 
 fn assert_rejected(original: &[u8], parser: &[u8], external: bool, label: &str) {

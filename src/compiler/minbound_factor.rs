@@ -65,15 +65,7 @@ fn mb_factor_residual_max_depth(residual: &DWA) -> usize {
             return depth;
         }
         let row = &residual.states()[state as usize];
-        let mut best = if row
-            .final_weight
-            .as_ref()
-            .is_some_and(|weight| !weight.is_empty())
-        {
-            0
-        } else {
-            0
-        };
+        let mut best = 0;
         for (_, (target, _)) in &row.transitions {
             best = best.max(1 + visit(*target, residual, memo));
         }

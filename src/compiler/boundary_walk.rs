@@ -4309,7 +4309,7 @@ mod tests {
 
     fn require_release_selected10_gate(name: &str) {
         assert!(
-            !cfg!(debug_assertions),
+            std::hint::black_box(!cfg!(debug_assertions)),
             "{name} is a selected10 integration/performance gate and must be run with an optimized test binary; rerun with `cargo test --release ...`"
         );
     }

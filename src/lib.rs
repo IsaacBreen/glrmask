@@ -364,11 +364,6 @@ pub mod __private {
         );
     }
 
-    /// Internal release-only benchmark for exact o21137 subgrammar decomposition.
-    pub fn run_o21137_subgrammar_benchmark(mode: &str) {
-        crate::compiler::o21137_subgrammar_bench::run(mode);
-    }
-
     /// Experimental mandatory template backend. The LR table is dropped and
     /// any accidental runtime table access fails loudly. Composed constraints
     /// are converted recursively without retaining packed compiler tables.

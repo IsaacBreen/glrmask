@@ -43,7 +43,6 @@ pub(super) fn compile(
             });
         }
     }
-    drop(weight_id);
     for q in 0..lexical.states().len() {
         for depth in 0..depths - 1 {
             for link in 0..context.links.len() {

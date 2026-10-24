@@ -481,8 +481,7 @@ fn o35155_bad_family_singletons_for_2_3rep2_and_5len2() {
     for (label, branch) in singleton_branches {
         let direct = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_branch(branch.0, branch.1)), &vocab);
 
-        if direct.is_ok() {
-            let constraint = direct.unwrap();
+        if let Ok(constraint) = direct {
             eprintln!(
                 "o35155 tokenizer states for just branch {label} via direct singleton: current={} minimized={}",
                 constraint.num_tokenizer_states(),

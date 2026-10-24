@@ -7063,20 +7063,15 @@ fn try_commit_multi_state_lexer_only(
         if !source_gss.copy_single_path_stack_into(stack_scratch) {
             return None;
         }
-        let Some(_acc) = source_gss.single_path_acc() else {
-            return None;
-        };
-        let Some(pool_index) = frontier
+        source_gss.single_path_acc()?;
+        let pool_index = frontier
             .gss_pool
             .iter()
             .enumerate()
             .position(|(pool_index, gss)| {
                 !used_pool[pool_index]
                     && gss.can_replace_single_path_state_in_place(stack_scratch)
-            })
-        else {
-            return None;
-        };
+            })?;
         used_pool[pool_index] = true;
         pool_assignment.push(pool_index);
         remaining_for_assignment[source_index] -= 1;
@@ -7296,14 +7291,12 @@ fn try_commit_flat_frontier_in_place_observed<O: CommitObserver>(
                     Some(false) => continue,
                     None => flat_decline!("parser-action-capacity"),
                 }
-                let Some(advanced_acc) = apply_flat_future_disallow(
+                let advanced_acc = apply_flat_future_disallow(
                     constraint,
                     &acc,
                     &tokenizer_scratch.states,
                     matched.terminal_id,
-                ) else {
-                    return None;
-                };
+                )?;
                 for action_index in 0..frontier.action.complete.len() {
                     work.clear();
                     work.extend_from_slice(&frontier.action.complete[action_index]);

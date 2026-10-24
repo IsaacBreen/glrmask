@@ -462,7 +462,7 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
     // inner-loop charges.
     const REAL_GRAMMAR_MAX_UNITS: u64 = 671_896;
     assert!(
-        DEFAULT_LIMIT >= 10 * REAL_GRAMMAR_MAX_UNITS,
+        std::hint::black_box(DEFAULT_LIMIT) >= 10 * REAL_GRAMMAR_MAX_UNITS,
         "default budget {DEFAULT_LIMIT} is below the 10x real-grammar floor {}",
         10 * REAL_GRAMMAR_MAX_UNITS,
     );

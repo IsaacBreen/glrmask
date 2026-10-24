@@ -973,7 +973,7 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
 struct FullWalkSubset16<'a> {
     base_transitions: &'a [u16],
     base_state_count: u32,
-    rows: Vec<Box<[u32; 256]>>,
+    rows: Vec<[u32; 256]>,
     finalizer_code: Vec<u32>,
     single_finalizer_continues: Vec<u8>,
     matched: Vec<BitSet>,
@@ -1050,7 +1050,7 @@ impl<'a> FullWalkSubset16<'a> {
             state_by_subset.insert(states.clone(), id);
             subsets.push(states);
             depths.push(depth);
-            table.rows.push(Box::new([u32::MAX; 256]));
+            table.rows.push([u32::MAX; 256]);
             table.finalizer_code.push(code);
             table.single_finalizer_continues.push(u8::from(continues));
             table.matched.push(matched);
@@ -1110,7 +1110,7 @@ impl<'a> FullWalkSubset16<'a> {
                 };
                 row[byte as usize] = target | if has_finalizer { 0x8000_0000 } else { 0 };
             }
-            *table.rows[build_index] = row;
+            table.rows[build_index] = row;
             build_index += 1;
         }
         Some((table, root, subsets))
@@ -4767,7 +4767,6 @@ fn dynamic_token_marker_materialization_cost(vocab: &DynamicMaskVocab, marker: u
 /// certificates, segment-effect caches, recognizer-state interning, or any
 /// speculative admission rule. Unsupported lexer or composition shapes return
 /// `false` and use the existing exact fallback.
-
 fn residual_regex_slice_prefix_contained(
     tokenizer: &Tokenizer,
     source: u32,
@@ -9461,8 +9460,7 @@ mod wide_scalar_dispatch_tests {
     fn lazy_scalar_dispatch_soft_reset_reinitializes_physical_rows() {
         let tokenizer =
             crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
-        let mut seeded = DynamicLazyUnionCache::default();
-        seeded.base_state_count = tokenizer.num_states();
+        let mut seeded = DynamicLazyUnionCache { base_state_count: tokenizer.num_states(), ..Default::default() };
         seeded.state_by_union_pair = Some(Box::new(FxHashMap::from_iter([(17, u32::MAX)])));
         seeded
             .base_rows

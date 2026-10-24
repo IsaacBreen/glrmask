@@ -202,7 +202,7 @@ mod tests {
     fn static_mask_query_obeys_the_same_deeper_default_scope_and_empty_stack_rule() {
         let view = view();
         let (mut queries, classes) = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
-            &[view.clone()], 104, &std::collections::BTreeSet::from([0])).unwrap();
+            std::slice::from_ref(&view), 104, &std::collections::BTreeSet::from([0])).unwrap();
         let mut query = queries.remove(&0).unwrap();
         glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa_with_pop_classes(
             &mut query, &classes).unwrap();

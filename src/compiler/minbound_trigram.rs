@@ -41,8 +41,7 @@ fn mb_term(t: u32) -> MbTriSummary {
     }
 }
 fn mb_concat(a: &MbTriSummary, b: &MbTriSummary) -> MbTriSummary {
-    let mut o = MbTriSummary::default();
-    o.nullable = a.nullable && b.nullable;
+    let mut o = MbTriSummary { nullable: a.nullable && b.nullable, ..Default::default() };
     if b.nullable { o.complete1.extend(a.complete1.iter().copied()); o.complete2.extend(a.complete2.iter().copied()); }
     if a.nullable { o.complete1.extend(b.complete1.iter().copied()); o.complete2.extend(b.complete2.iter().copied()); }
     for &x in &a.complete1 { for &y in &b.complete1 { o.complete2.insert(mb_pair(x,y)); } }

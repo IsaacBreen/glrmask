@@ -7542,9 +7542,6 @@ impl InterchangeabilityDfa {
                             queued[new_class] = true;
                             queue.push_back(new_class);
                         }
-                    } else if class == dead_class {
-                        queued[new_class] = true;
-                        queue.push_back(new_class);
                     } else {
                         queued[new_class] = true;
                         queue.push_back(new_class);

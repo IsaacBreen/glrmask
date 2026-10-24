@@ -185,8 +185,7 @@ fn certify_caps(
         // every larger power. Build one additional power as a defensive check
         // against mistakes in the effect construction or equivalence routine.
         let max_exponent = usize::from(max_run)
-            .min(MAX_CERTIFIED_CAP + 2)
-            .max(3);
+            .clamp(3, MAX_CERTIFIED_CAP + 2);
         let mut previous = parser_effect_for_power(
             terminal, 1, table, grammar, templates, vocab, id_map,
         );

@@ -791,9 +791,9 @@ fn compute_summary(
         stats.candidate_tokens = ids.len();
         stats.widened_subtrees = usize::from(probe.fixed_point_widened);
         let precision = if probe.fixed_point_widened {
-            SummaryPrecision::BudgetWidenedUpperBound
+            SummaryPrecision::BudgetWidened
         } else {
-            SummaryPrecision::RegularUpperBound
+            SummaryPrecision::Regular
         };
         return (
             BoundaryCandidateSummary::Known {
@@ -871,7 +871,7 @@ fn compute_summary(
                 BoundaryCandidateSummary::Known {
                     fingerprint: fp,
                     tokens: OriginalTokenSet::AllByteTokensAtLeastTwo,
-                    precision: SummaryPrecision::BudgetWidenedUpperBound,
+                    precision: SummaryPrecision::BudgetWidened,
                 },
                 stats,
             );
@@ -904,9 +904,9 @@ fn compute_summary(
     stats.peak_frontier_pairs = machine.peak_frontier_pairs;
     stats.widened_subtrees = widened_subtrees;
     let precision = if widened_subtrees == 0 {
-        SummaryPrecision::RegularUpperBound
+        SummaryPrecision::Regular
     } else {
-        SummaryPrecision::BudgetWidenedUpperBound
+        SummaryPrecision::BudgetWidened
     };
     (
         BoundaryCandidateSummary::Known {
@@ -981,8 +981,8 @@ impl DeferredBoundaryRecipe for NativeCompositionBoundaryRecipe {
         Some(BoundaryCandidateSummary::Known {
             fingerprint: self.fingerprint,
             tokens: OriginalTokenSet::from_sorted_unique(ids, self.vocab.max_token_id()),
-            precision: if proof.1 { SummaryPrecision::BudgetWidenedUpperBound }
-                else { SummaryPrecision::RegularUpperBound },
+            precision: if proof.1 { SummaryPrecision::BudgetWidened }
+                else { SummaryPrecision::Regular },
         })
     }
 }
@@ -1035,9 +1035,9 @@ pub(crate) fn install_precomputed_boundary_candidate_ids(
         fingerprint: fp,
         tokens: OriginalTokenSet::from_sorted_unique(ids, vocab.max_token_id()),
         precision: if widened {
-            SummaryPrecision::BudgetWidenedUpperBound
+            SummaryPrecision::BudgetWidened
         } else {
-            SummaryPrecision::RegularUpperBound
+            SummaryPrecision::Regular
         },
     };
     constraint
@@ -1460,7 +1460,7 @@ mod tests {
                     vocabulary: [0; 32],
                 },
                 tokens: OriginalTokenSet::Empty,
-                precision: SummaryPrecision::RegularUpperBound,
+                precision: SummaryPrecision::Regular,
             })
             .unwrap();
 

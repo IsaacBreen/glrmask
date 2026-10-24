@@ -103,7 +103,7 @@ fn requirement_coordinates_survive_preparation_and_save_load() {
     assert_eq!(&source[span.start..span.end],"MARK");
     assert_eq!((span.line,span.column),(2,14));
     let v=vocab();let p=g.prepare(&v).unwrap();
-    assert_eq!(p.requirements().unwrap(),[r.clone()]);
+    assert_eq!(p.requirements().unwrap(),std::slice::from_ref(&r));
     let loaded=PreparedGrammar::load(p.save(),&v).unwrap();
     assert_eq!(loaded.requirements().unwrap(),[r]);
     let child=Grammar::from_glrm("start root nt root=\"x\"").unwrap();

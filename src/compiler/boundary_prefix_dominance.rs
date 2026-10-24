@@ -14,7 +14,7 @@ pub fn reduce(input:&DWA)->Option<(DWA,Stats)> {
  let mut diff=FxHashMap::<(usize,usize),(Weight,Weight,Weight)>::default();
  let mut states=Vec::with_capacity(n);
  for source in input.states() {
-  let mut out=DWAState::default();out.final_weight=source.final_weight.clone();
+  let mut out=DWAState{final_weight:source.final_weight.clone(),..Default::default()};
   for (label,target,weight) in source.transitions.entries() {
    if label<0 || label==i32::MAX-1 || target as usize>=n{return None;}
    stats.before_edges+=1;if stats.before_edges>2_000_000{return None;}

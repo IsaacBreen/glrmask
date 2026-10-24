@@ -2409,8 +2409,8 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
         assert_eq!(tokens.canonical_ids(vocab.iter()), expected_ids);
         assert_eq!(*fingerprint, crate::compiler::boundary_candidates::fingerprint_for_constraint(
             &constraint, &vocab).unwrap());
-        assert_eq!(*precision, if widened { crate::runtime::SummaryPrecision::BudgetWidenedUpperBound }
-            else { crate::runtime::SummaryPrecision::RegularUpperBound });
+        assert_eq!(*precision, if widened { crate::runtime::SummaryPrecision::BudgetWidened }
+            else { crate::runtime::SummaryPrecision::Regular });
         let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
         assert_eq!(loaded.composition_start_nullable().unwrap(), nullable);
         let loaded_summary = loaded.retained_boundary_candidate_summary_for_compilation().unwrap().unwrap();

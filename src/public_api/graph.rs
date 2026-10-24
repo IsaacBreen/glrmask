@@ -110,7 +110,7 @@ impl<T:InstanceNode> Index<'_, T> {
     }
 }
 
-fn source_index<'a, 's>(root: &'a Grammar) -> Result<Index<'a, Grammar>> {
+fn source_index<'a>(root: &'a Grammar) -> Result<Index<'a, Grammar>> {
     analyze(root, |grammar| {
         // One descriptor lookup per actual instance, never one per output path.
         let declared = grammar.declarations()?;

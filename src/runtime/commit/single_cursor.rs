@@ -155,7 +155,6 @@ impl PreparedInputCursor {
             let Some(&top) = stack.top() else { break; };
             let Some(&next) = state.transitions.get(&(top as i32)).or_else(|| state.transitions.get(&DEFAULT_LABEL)) else { break; };
             if !self.productive[0][next as usize] { break; }
-            drop(base);
             // A known visible top guarantees one available POP. No later
             // failure is allowed to discard the output seeds already emitted.
             let unpopped = stack.pop(1);

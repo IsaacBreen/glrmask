@@ -1288,9 +1288,7 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
     if virtual_candidates.len() == 1
         && let Some((virtual_terminal, body, min, max)) = unit_candidates.into_iter().next()
     {
-        let Some(physical_state_count) = u32::try_from(tokenizer.num_states())
-            .ok()
-            .and_then(|states| states.checked_add(1))
+        let Some(physical_state_count) = tokenizer.num_states().checked_add(1)
         else {
             return build_general_residual();
         };
@@ -4898,7 +4896,6 @@ fn compile_prepared_with_profile_and_table_construction(
             let partition_local_synthesis_plan_ref = partition_local_synthesis_plan.as_ref();
             let analysis_started_for_tokenizer = analysis_started_at;
             let compile_started_for_tokenizer = compile_started_at;
-            let lexer_adaptive_override = lexer_adaptive_override;
 
             macro_scope_spawn(scope, move |scope| {
                 let tok_started = Instant::now();

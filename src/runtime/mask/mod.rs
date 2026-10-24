@@ -1,4 +1,4 @@
-﻿pub(crate) mod profile;
+pub(crate) mod profile;
 pub(crate) mod queue;
 mod static_dwa_walk;
 use static_dwa_walk::{StackWalkEvent, walk_single_stack};
@@ -57,7 +57,7 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 #[cfg(test)]
 struct RecursiveMaskTransitions {
     states: Vec<ParserStateMap>,
-    rows: Vec<Box<[u32; 256]>>,
+    rows: Vec<[u32; 256]>,
     buckets: FxHashMap<u64, SmallVec<[u32; 2]>>,
     max_states: usize,
     byte_representatives: [u8; 256],
@@ -154,7 +154,7 @@ impl RecursiveMaskTransitions {
         }
         let id = self.states.len() as u32;
         self.states.push(state.clone());
-        self.rows.push(Box::new([Self::UNKNOWN; 256]));
+        self.rows.push([Self::UNKNOWN; 256]);
         self.buckets.entry(hash).or_default().push(id);
         Some(id)
     }
@@ -3605,11 +3605,8 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 next,
                 ..
             } => {
-                let Some(&parser_state) =
-                    values.get(values.len().saturating_sub(1 + offset))
-                else {
-                    return None;
-                };
+                let &parser_state =
+                    values.get(values.len().saturating_sub(1 + offset))?;
                 (parser_state, *next, offset + 1 < values.len())
             }
             _ => unreachable!(),
@@ -4873,14 +4870,10 @@ impl<'a> ConstraintState<'a> {
                     0,
                 );
                 component_buf = Some(reusable);
-            } else if component_buf
-                .as_ref()
-                .is_some_and(|buffer| buffer.len() < component.constraint.body_mask_len())
+            } else if let Some(buffer) = component_buf.as_mut()
+                && buffer.len() < component.constraint.body_mask_len()
             {
-                component_buf
-                    .as_mut()
-                    .expect("segmented component mask buffer exists")
-                    .resize(component.constraint.body_mask_len(), 0);
+                buffer.resize(component.constraint.body_mask_len(), 0);
             }
             let component_buf = component_buf
                 .as_mut()
@@ -7416,20 +7409,17 @@ impl<'a> ConstraintState<'a> {
                     (direct_buf.as_deref_mut(), token_set)
                 {
                     let token_set_key = Arc::as_ptr(token_set) as usize;
-                    if self
+                    if (self
                         .constraint
                         .direct_sparse_weight_token_sets
                         .contains(&token_set_key)
                         && self
                             .constraint
                             .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
-                            .is_some()
-                    {
-                        *direct_buf_dirty = true;
-                        true
-                    } else if self
-                        .constraint
-                        .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
+                            .is_some())
+                        || self
+                            .constraint
+                            .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
                     {
                         *direct_buf_dirty = true;
                         true
@@ -8205,7 +8195,6 @@ impl<'a> ConstraintState<'a> {
             emit_mask_queue_debug_line(&line);
         }
 
-        drop(direct_buf);
         let finalize_start = profile.as_ref().map(|_| Instant::now());
 
         let merged_has_leftovers = merged.iter().any(|&word| word != 0);
@@ -8578,11 +8567,10 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    /// Fill `buf` with the allowed-token mask.
-    ///
-    /// `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
-    /// words are cleared.
-
+    // Fill `buf` with the allowed-token mask.
+    //
+    // `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
+    // words are cleared.
     fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {
         let reset_state = self.constraint.runtime_commit_initial_state();
         let mut shadow = self.clone();

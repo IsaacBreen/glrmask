@@ -17,7 +17,8 @@ fn initial_closure(nwa:&NWA)->Option<Vec<usize>>{
     let n=nwa.states().len();let mut seen=vec![false;n];let mut queue=VecDeque::new();
     for &q in nwa.start_states(){if q as usize>=n{return None;}queue.push_back(q as usize);}
     while let Some(q)=queue.pop_front(){if seen[q]{continue;}seen[q]=true;
-        for &(target,ref w) in &nwa.states()[q].epsilons{if target as usize>=n{return None;}if !w.is_empty(){queue.push_back(target as usize);}}
+        for &(target,ref w) in &nwa.states()[q].epsilons{if target as usize>=n{return None;}
+            if !w.is_empty(){queue.push_back(target as usize);}}
     }
     Some(seen.into_iter().enumerate().filter_map(|(q,yes)|yes.then_some(q)).collect())
 }
@@ -106,7 +107,8 @@ pub(super) fn restrict_first(nwa:&NWA,input:&BTreeSet<u32>,alphabet:u32)->Option
             for &(target,ref w) in branches{if !w.is_empty(){queue.push_back(target as usize);}}
         }
     }}
-    while let Some(q)=queue.pop_front(){if q>=n{return None;}if forward[q]{continue;}forward[q]=true;
+    while let Some(q)=queue.pop_front(){if q>=n{return None;}
+        if forward[q]{continue;}forward[q]=true;
         queue.extend(nwa.states()[q].epsilons.iter().chain(nwa.states()[q].transitions.values().flatten()).filter_map(|(t,w)|(!w.is_empty()).then_some(*t as usize)));
     }
     let mut out=NWA::new(0,0);let mut first_map=vec![u32::MAX;n];let mut after_map=vec![u32::MAX;n];

@@ -287,7 +287,7 @@ fn non_whitespace_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
     assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
-    let allows_prefix = mask[0 / 32] & 1 != 0;
+    let allows_prefix = mask[0] & 1 != 0;
     let allows_escape = (mask[1 / 32] >> 1) & 1 != 0;
 
     assert!(allows_prefix, "glrmask should allow bare \\u when some non-whitespace BMP escapes remain valid");
@@ -318,7 +318,7 @@ fn mixed_word_whitespace_class_accepts_bmp_unicode_escape_for_nbsp() {
     assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
-    let allows_prefix = mask[0 / 32] & 1 != 0;
+    let allows_prefix = mask[0] & 1 != 0;
     let allows_escape = (mask[1 / 32] >> 1) & 1 != 0;
 
     assert!(allows_prefix, "glrmask should allow bare \\u when some whitespace BMP escapes remain valid");
@@ -349,7 +349,7 @@ fn negated_ascii_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
     assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
-    let allows_prefix = mask[0 / 32] & 1 != 0;
+    let allows_prefix = mask[0] & 1 != 0;
     let allows_escape = (mask[1 / 32] >> 1) & 1 != 0;
 
     assert!(allows_prefix, "glrmask should allow bare \\u when some negated-class BMP escapes remain valid");
@@ -377,7 +377,7 @@ fn literal_prefix_pattern_accepts_unicode_escape_for_printable_bmp_character() {
     assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
-    let allows_prefix = mask[0 / 32] & 1 != 0;
+    let allows_prefix = mask[0] & 1 != 0;
     let allows_escape = (mask[1 / 32] >> 1) & 1 != 0;
 
     assert!(allows_prefix, "glrmask should allow bare \\u when a printable literal can be spelled via unicode escape");

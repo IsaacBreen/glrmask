@@ -239,6 +239,6 @@ mod tests {
         assert!(WeightObservationQuotient::new(&Weight::all(), &[]).is_none());
         assert!(WeightObservationQuotient::new(&Weight::empty(), &[]).is_none());
         let huge = Weight::from_uniform(0..=u32::MAX, [0].into_iter().collect());
-        assert!(WeightObservationQuotient::new(&huge, &[huge.clone()]).is_none());
+        assert!(WeightObservationQuotient::new(&huge, std::slice::from_ref(&huge)).is_none());
     }
 }

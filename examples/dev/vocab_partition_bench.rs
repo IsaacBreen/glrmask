@@ -121,10 +121,6 @@ fn main() {
         let schema = fs::read_to_string(schema_path).expect("read normalized schema");
         let mut static_ms = Vec::with_capacity(reps);
         let mut partition_ms = Vec::with_capacity(reps);
-        let mut fast_classes = 0usize;
-        let mut final_classes = 0usize;
-        let mut refining_classes = 0usize;
-        let mut split_by_final = 0usize;
 
         for rep in 0..reps {
             let static_first = rep % 2 == 0;
@@ -136,7 +132,6 @@ fn main() {
                         .expect("static compile");
                     let elapsed = started.elapsed().as_secs_f64() * 1000.0;
                     static_ms.push(elapsed);
-                    final_classes = constraint.final_internal_token_count();
                     black_box(constraint);
                 } else {
                     let started = Instant::now();
@@ -147,7 +142,6 @@ fn main() {
                     .expect("vocab partition compile");
                     let elapsed = started.elapsed().as_secs_f64() * 1000.0;
                     partition_ms.push(elapsed);
-                    fast_classes = partition.num_classes();
                     black_box(partition);
                 }
             }
@@ -159,12 +153,12 @@ fn main() {
         let constraint = Constraint::compile(Grammar::json_schema(&schema), &static_vocab)
             .expect("static compile for relation check");
         let final_map = constraint.final_original_token_map();
-        final_classes = constraint.final_internal_token_count();
+        let final_classes = constraint.final_internal_token_count();
         reset_global_compile_caches();
         let fast = VocabPartition::compile(Grammar::json_schema(&schema), &partition_vocab)
             .expect("partition compile for relation check");
-        fast_classes = fast.num_classes();
-        (refining_classes, split_by_final) = final_partition_relation(&fast, &final_map);
+        let fast_classes = fast.num_classes();
+        let (refining_classes, split_by_final) = final_partition_relation(&fast, &final_map);
         black_box((constraint, fast));
 
         let static_median = median(static_ms.clone());

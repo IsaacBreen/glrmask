@@ -154,7 +154,7 @@ fn measure_max_stack_and_path_counts(constraint: &Constraint, text: &str) -> (us
     let mut max_stacks = stack_count(&state);
     let mut max_paths = state.parser_path_count(1_000_000);
 
-    for (_index, &byte) in text.as_bytes().iter().enumerate() {
+    for &byte in text.as_bytes() {
         assert!(state.commit_bytes(&[byte]));
         max_stacks = max_stacks.max(stack_count(&state));
         max_paths = max_paths.max(state.parser_path_count(1_000_000));
@@ -167,7 +167,7 @@ fn measure_max_unique_stack_count(constraint: &Constraint, text: &str) -> usize 
     let mut state = constraint.start();
     let mut max_unique_stacks = unique_stack_count(&state);
 
-    for (_index, &byte) in text.as_bytes().iter().enumerate() {
+    for &byte in text.as_bytes() {
         assert!(state.commit_bytes(&[byte]));
         max_unique_stacks = max_unique_stacks.max(unique_stack_count(&state));
     }
@@ -190,7 +190,7 @@ fn stack_depth_before_closing_suffix(constraint: &Constraint, text: &str) -> usi
         .strip_suffix(r#""]}"#)
         .expect("example should end with closing \"]}\" suffix");
 
-    for (_index, &byte) in prefix.as_bytes().iter().enumerate() {
+    for &byte in prefix.as_bytes() {
         assert!(state.commit_bytes(&[byte]));
     }
 

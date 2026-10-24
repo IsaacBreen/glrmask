@@ -206,7 +206,8 @@ fn query_impl(nt:usize,parts:&[Part<'_>],start:ImmediateComponentId,local_initia
  let foreign=(0..nt).map(|t|ownership.owner_of_terminal(t as u32)!=Some(start)).collect::<Vec<_>>();
  let mut foreign_bits=vec![0u64;width];let mut transparent_bits=vec![0u64;width];
  let is_transparent=|t:usize|Some(t as u32)==ignore||transparent.is_some_and(|m|m.get(t));
- for t in 0..nt{if foreign[t]{foreign_bits[t/64]|=1u64<<(t%64)}if is_transparent(t){transparent_bits[t/64]|=1u64<<(t%64)}}
+ for t in 0..nt{if foreign[t]{foreign_bits[t/64]|=1u64<<(t%64)}
+   if is_transparent(t){transparent_bits[t/64]|=1u64<<(t%64)}}
  let mut pool=Masks::new(all.clone());let mut transfers=Transfers{rows:FxHashMap::default()};
  let mut follows=Follows{all:all.clone(),transparent_bits,transparent:(0..nt).map(is_transparent).collect(),disallowed,adjacency,rows:vec![None;nt],built:0};
  let mut products=Products::new(parts,&mut observations,width)?;profile.setup_ms=clock.elapsed().as_secs_f64()*1000.0;let solve=Instant::now();let mut tokens=Vec::new();

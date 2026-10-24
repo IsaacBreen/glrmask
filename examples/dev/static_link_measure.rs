@@ -1166,7 +1166,7 @@ fn cmd_prefix_diff(
     // grammar progress directly. ASCII byte values are NOT vocab token IDs —
     // no token-domain admission applies; a partial byte prefix needs no
     // singleton vocab token. Only full masks at byte boundaries are compared.)
-    let mut retained_static_mask: Option<Vec<u32>> = None;
+    let mut retained_static_mask: Option<Vec<u32>>;
     // ---- Phase PREFIX: root (byte-count 0) + one full-compare position per
     // prefix byte (byte-count 1..=len). ----
     {

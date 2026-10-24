@@ -889,11 +889,7 @@ impl TokenMaskCachePrebuild {
             .len()
             .saturating_sub(heavy_token_indices.len());
         let light_total = total_internal_buf_cost.saturating_sub(heavy_total_cost);
-        let light_avg_cost_x256 = if n_light > 0 {
-            (light_total * 256) / n_light
-        } else {
-            0
-        };
+        let light_avg_cost_x256 = (light_total * 256).checked_div(n_light).unwrap_or(0);
 
         Self {
             mask_words,
@@ -5095,7 +5091,6 @@ impl Constraint {
             }
 
             fn visit(
-                constraint: &Constraint,
                 tokenizer: &Tokenizer,
                 vocab: &DynamicMaskVocab,
                 fast_transitions: &FastTokenizerTransitions,
@@ -5141,7 +5136,6 @@ impl Constraint {
                     )
                     .is_some_and(|end_state| {
                         visit(
-                            constraint,
                             tokenizer,
                             vocab,
                             fast_transitions,
@@ -5231,7 +5225,6 @@ impl Constraint {
 
             let source_loop_bytes = tokenizer.self_loop_bytes(source_state);
             visit(
-                constraint,
                 tokenizer,
                 vocab,
                 fast_transitions,
@@ -6971,7 +6964,7 @@ impl Constraint {
                         .into_iter()
                         .map(|(pairs, count)| (count, pairs))
                         .collect::<Vec<_>>();
-                    second_pair_summary.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                    second_pair_summary.sort_unstable_by_key(|pair| std::cmp::Reverse(pair.0));
                     second_pair_summary.truncate(20);
                     let row_summary = projection
                         .first_match_step_post_rows
@@ -7932,7 +7925,7 @@ impl Constraint {
             observation_tokenizer.precompute_bounded_observation_safe_byte_sets();
         self.dynamic_mask_vocab
             .set_bounded_observation_sets(DynamicBoundedObservationSets::from_raw(
-                bounded16, bounded64,
+                &bounded16, &bounded64,
             ));
     }
 
@@ -8148,9 +8141,9 @@ impl Constraint {
         let terminal_observation_started_at = profile.then(std::time::Instant::now);
         let terminal_observation_classes = if !terminal_observation_enabled {
             Vec::new()
-        } else if has_dense_mask_projection {
-            dynamic_mask_vocab.terminal_observation_classes_cloned()
-        } else if dynamic_mask_vocab.has_terminal_observation_classes() {
+        } else if has_dense_mask_projection
+            || dynamic_mask_vocab.has_terminal_observation_classes()
+        {
             dynamic_mask_vocab.terminal_observation_classes_cloned()
         } else {
             self.build_dynamic_terminal_observation_classes()
@@ -9640,7 +9633,7 @@ impl Constraint {
         let costs_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
-        self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
+        self.light_avg_cost_x256 = (light_total * 256).checked_div(n_light).unwrap_or(0);
         let derived_ms = derived_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -10588,7 +10581,7 @@ impl Constraint {
         let has_compressed =
             (0..num_states).any(|state| tokenizer.has_compressed_transition_state(state));
         if !has_compressed {
-            let build = |state| tokenizer.transition_row(state);
+            let build = |state| *tokenizer.transition_row(state);
             let rows = if rayon::current_num_threads() == 1 {
                 (0..num_states).map(build).collect()
             } else {
@@ -10603,12 +10596,12 @@ impl Constraint {
         let dense_rows = if rayon::current_num_threads() == 1 {
             dense_states
                 .iter()
-                .map(|&state| tokenizer.transition_row(state))
+                .map(|&state| *tokenizer.transition_row(state))
                 .collect::<Vec<_>>()
         } else {
             dense_states
                 .par_iter()
-                .map(|&state| tokenizer.transition_row(state))
+                .map(|&state| *tokenizer.transition_row(state))
                 .collect::<Vec<_>>()
         };
         let mut state_to_dense_row = vec![u32::MAX; num_states as usize];
@@ -11856,11 +11849,7 @@ impl Constraint {
         let n_internal = self.internal_token_buf_offsets.len().saturating_sub(1);
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
-        self.light_avg_cost_x256 = if n_light > 0 {
-            (light_total * 256) / n_light
-        } else {
-            0
-        };
+        self.light_avg_cost_x256 = (light_total * 256).checked_div(n_light).unwrap_or(0);
     }
 
     /// Flatten all per-token sparse entries into a single contiguous array

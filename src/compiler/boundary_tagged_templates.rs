@@ -140,7 +140,7 @@ mod tests {
             }
             let index=TaggedTemplates::build(&templates).unwrap();
             for variant in 0..4{
-                let weights=(0..5).filter_map(|terminal|(next()%3!=0).then(||(terminal,w(next()%256)))).collect::<BTreeMap<_,_>>();
+                let weights=(0..5).filter_map(|terminal|if next()%3!=0{Some((terminal,w(next()%256)))}else{None}).collect::<BTreeMap<_,_>>();
                 let instantiated=index.instantiate(&weights).unwrap();
                 let a=determinize(&reference(&templates,&weights)).unwrap();let b=determinize(&instantiated).unwrap();
                 assert_eq!(find_difference(&a,&b).unwrap(),None,"case {case} variant {variant}");

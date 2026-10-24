@@ -688,17 +688,17 @@ fn summary_unavailable_from_code(code: u8) -> Result<crate::runtime::SummaryUnav
 
 fn summary_precision_code(precision: crate::runtime::SummaryPrecision) -> u8 {
     match precision {
-        crate::runtime::SummaryPrecision::RegularUpperBound => 0,
-        crate::runtime::SummaryPrecision::ContextRefinedUpperBound => 1,
-        crate::runtime::SummaryPrecision::BudgetWidenedUpperBound => 2,
+        crate::runtime::SummaryPrecision::Regular => 0,
+        crate::runtime::SummaryPrecision::ContextRefined => 1,
+        crate::runtime::SummaryPrecision::BudgetWidened => 2,
     }
 }
 
 fn summary_precision_from_code(code: u8) -> Result<crate::runtime::SummaryPrecision, String> {
     Ok(match code {
-        0 => crate::runtime::SummaryPrecision::RegularUpperBound,
-        1 => crate::runtime::SummaryPrecision::ContextRefinedUpperBound,
-        2 => crate::runtime::SummaryPrecision::BudgetWidenedUpperBound,
+        0 => crate::runtime::SummaryPrecision::Regular,
+        1 => crate::runtime::SummaryPrecision::ContextRefined,
+        2 => crate::runtime::SummaryPrecision::BudgetWidened,
         other => return Err(format!("invalid boundary summary precision code {other}")),
     })
 }
@@ -6814,14 +6814,7 @@ impl Constraint {
                 debug_assert_eq!(dwa_bytes.len(), dwa_wire_len);
             }
             let total_len = CONSTRAINT_HEADER_LEN + payload_len;
-            let mut bytes = Vec::<u8>::with_capacity(total_len);
-            // SAFETY: every byte in the allocation is initialized below before
-            // the Vec is observed or returned. The section destinations are
-            // disjoint slices split from this one allocation and are each
-            // written exactly once.
-            unsafe {
-                bytes.set_len(total_len);
-            }
+            let mut bytes = vec![0u8; total_len];
             let header_len = CONSTRAINT_HEADER_LEN + V30_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
@@ -9998,7 +9991,7 @@ mod tests {
                 tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
                     vec![0u32, 2u32].into_boxed_slice(),
                 )),
-                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+                precision: crate::runtime::SummaryPrecision::Regular,
             })
             .unwrap();
         let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
@@ -10021,7 +10014,7 @@ mod tests {
                 assert_eq!(fingerprint.public_interface, [2; 32]);
                 assert_eq!(fingerprint.vocabulary, [3; 32]);
                 assert_eq!(tokens.canonical_ids(loaded.token_bytes_iter()), vec![0, 2]);
-                assert_eq!(*precision, crate::runtime::SummaryPrecision::RegularUpperBound);
+                assert_eq!(*precision, crate::runtime::SummaryPrecision::Regular);
             }
             other => panic!("unexpected materialized summary: {other:?}"),
         }
@@ -10036,17 +10029,17 @@ mod tests {
             crate::runtime::BoundaryCandidateSummary::Known {
                 fingerprint: sample_boundary_fingerprint(),
                 tokens: crate::runtime::OriginalTokenSet::Empty,
-                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+                precision: crate::runtime::SummaryPrecision::Regular,
             },
             crate::runtime::BoundaryCandidateSummary::Known {
                 fingerprint: sample_boundary_fingerprint(),
                 tokens: crate::runtime::OriginalTokenSet::Dense(Arc::new(dense)),
-                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+                precision: crate::runtime::SummaryPrecision::Regular,
             },
             crate::runtime::BoundaryCandidateSummary::Known {
                 fingerprint: sample_boundary_fingerprint(),
                 tokens: crate::runtime::OriginalTokenSet::AllByteTokensAtLeastTwo,
-                precision: crate::runtime::SummaryPrecision::BudgetWidenedUpperBound,
+                precision: crate::runtime::SummaryPrecision::BudgetWidened,
             },
             crate::runtime::BoundaryCandidateSummary::Unknown {
                 reason: crate::runtime::SummaryUnavailable::Deferred,
@@ -10101,7 +10094,7 @@ mod tests {
                 tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
                     vec![10u32, 11u32].into_boxed_slice(),
                 )),
-                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+                precision: crate::runtime::SummaryPrecision::Regular,
             })
             .unwrap();
         let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();

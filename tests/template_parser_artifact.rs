@@ -153,7 +153,7 @@ fn cyclic_or_out_of_domain_completion_program_is_rejected() {
         read_var(parser,&mut cursor);
         for source in 0..states {
             let edges=read_var(parser,&mut cursor)>>1;
-            for _ in 0..edges {
+            if edges > 0 {
                 let label=cursor; read_var(parser,&mut cursor); let label_end=cursor;
                 let target=cursor; read_var(parser,&mut cursor); let target_end=cursor;
                 let cycle=mutate_range(parser,target..target_end,&var_bytes(source));
@@ -351,7 +351,7 @@ fn compact_template_edges_reject_cycles_missing_targets_and_bad_labels() {
             read_var(parser,&mut cursor); // start state
             for source in 0..states {
                 let flags=read_var(parser,&mut cursor);
-                for _ in 0..flags>>1 {
+                if flags >> 1 > 0 {
                     let label_start=cursor;read_var(parser,&mut cursor);let label_end=cursor;
                     let target_start=cursor;read_var(parser,&mut cursor);let target_end=cursor;
                     let bad=mutate_range(parser,target_start..target_end,&var_bytes(source));
@@ -426,7 +426,7 @@ fn malformed_embedding_flags_slots_and_finish_graphs_are_rejected() {
         read_var(parser, &mut cursor);
         for source in 0..states {
             let edges = read_var(parser, &mut cursor) >> 1;
-            for _ in 0..edges {
+            if edges > 0 {
                 let label = cursor; read_var(parser, &mut cursor); let label_end = cursor;
                 let target = cursor; read_var(parser, &mut cursor); let target_end = cursor;
                 let cycle = mutate_range(parser, target..target_end, &var_bytes(source));

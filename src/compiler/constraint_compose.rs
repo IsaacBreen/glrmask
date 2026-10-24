@@ -3194,9 +3194,7 @@ impl PositiveBoundaryParser {
         }
         for internal in &mut id_map.tokenizer_states.original_to_internal {
             if *internal != u32::MAX {
-                let Some(&class) = old_to_new.get(*internal as usize) else {
-                    return None;
-                };
+                let &class = old_to_new.get(*internal as usize)?;
                 *internal = class;
             }
         }
@@ -7792,7 +7790,7 @@ fn direct_boundary_terminal_automaton(
                 .enumerate()
                 .filter_map(|(local, node)| witness.good[local].then_some((local, node.key.offset)))
                 .collect::<Vec<_>>();
-            good_nodes.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+            good_nodes.sort_unstable_by_key(|node| std::cmp::Reverse(node.1));
             for (local, _) in good_nodes {
                 let mut transitions = Vec::new();
                 let mut epsilons = Vec::new();
@@ -12299,13 +12297,12 @@ fn try_rebuild_cached_transported_component_templates(
         let terminal_offset = composed_table.terminal_offsets[component_index];
         let relation = &composed_table.state_relations[component_index];
         let selected = (0..component.table.num_terminals as usize)
-            .filter_map(|local_terminal| {
+            .filter(|&local_terminal| {
                 let global_terminal = terminal_offset as usize + local_terminal;
                 active_terminals
                     .get(global_terminal)
                     .copied()
                     .unwrap_or(false)
-                    .then_some(local_terminal)
             })
             .collect::<Vec<_>>();
         let transport = |&local_terminal: &usize| {
@@ -15987,7 +15984,7 @@ fn build_full_boundary_lazy_direct_parser(
             .enumerate()
             .filter_map(|(local, node)| witness.good[local].then_some((local, node.key.offset)))
             .collect::<Vec<_>>();
-        good_nodes.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+        good_nodes.sort_unstable_by_key(|node| std::cmp::Reverse(node.1));
         for (local, _) in good_nodes {
             let mut transitions = Vec::new();
             let mut epsilons = Vec::new();
@@ -17379,11 +17376,13 @@ fn build_boundary_repair(
                     None
                 };
                 let early_ms = early_started_at.elapsed().as_secs_f64() * 1000.0;
-                if compose_profile_enabled() && early_terminal.is_some() {
+                if compose_profile_enabled()
+                    && let Some(early_terminal) = early_terminal.as_ref()
+                {
                     eprintln!(
                         "[glrmask/profile][constraint_boundary_posttable_terminal_overlap] states={} transitions={} ms={early_ms:.3}",
-                        early_terminal.as_ref().unwrap().artifact().num_states(),
-                        early_terminal.as_ref().unwrap().artifact().stats().transitions,
+                        early_terminal.artifact().num_states(),
+                        early_terminal.artifact().stats().transitions,
                     );
                 }
                 (boundary_result, seed_result, (early_terminal, early_ms))
@@ -26197,12 +26196,12 @@ table: &child_table,
         let composed_dynamic = scoped_oracle_test_link(&parent, "SUB", &child, &vocab, true);
         let loaded = scoped_oracle_test_reload(&composed);
         let make_states = || {
-            let mut states = Vec::with_capacity(4);
-            states.push(composed.start());
-            states.push(composed_dynamic.start());
-            states.push(loaded.start());
-            states.push(monolithic.start());
-            states
+            vec![
+                composed.start(),
+                composed_dynamic.start(),
+                loaded.start(),
+                monolithic.start(),
+            ]
         };
 
         // Exhaust the small reachable token-prefix graph.  We compare masks
@@ -26441,12 +26440,12 @@ table: &child_table,
             .unwrap();
         let loaded = Constraint::load(composed.save(), &vocab).unwrap();
         let make_states = || {
-            let mut states = Vec::with_capacity(4);
-            states.push(composed.start());
-            states.push(composed_dynamic.start());
-            states.push(loaded.start());
-            states.push(monolithic.start());
-            states
+            vec![
+                composed.start(),
+                composed_dynamic.start(),
+                loaded.start(),
+                monolithic.start(),
+            ]
         };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
@@ -26628,12 +26627,12 @@ table: &child_table,
         // default Rust test-thread stack on macOS before the first statement
         // executed, despite the runtime code itself being fine.
         let make_states = || {
-            let mut states = Vec::with_capacity(4);
-            states.push(composed.start());
-            states.push(composed_dynamic.start());
-            states.push(loaded.start());
-            states.push(monolithic.start());
-            states
+            vec![
+                composed.start(),
+                composed_dynamic.start(),
+                loaded.start(),
+                monolithic.start(),
+            ]
         };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
@@ -33061,7 +33060,7 @@ table: &child_table,
             fn dfs(state: u32, dwa: &DWA, memo: &mut [Option<(usize, u128)>]) -> (usize, u128) {
                 if let Some(value) = memo[state as usize] { return value; }
                 let row = &dwa.states()[state as usize];
-                let mut max_len = if row.final_weight.as_ref().is_some_and(|w| !w.is_empty()) { 0 } else { 0 };
+                let mut max_len = 0;
                 let mut paths = if row.final_weight.as_ref().is_some_and(|w| !w.is_empty()) { 1u128 } else { 0 };
                 for (_label, (target, _weight)) in &row.transitions {
                     let (tail_len, tail_paths) = dfs(*target, dwa, memo);
@@ -34457,9 +34456,8 @@ table: &dispatch.table,
                 core_augmented_start,
             );
             let mut core_selected = vec![false; core.table.num_terminals as usize];
-            for terminal in 0..parent_terminal_end as usize {
-                core_selected[terminal] = tight_selected[terminal];
-            }
+            core_selected[..parent_terminal_end as usize]
+                .copy_from_slice(&tight_selected[..parent_terminal_end as usize]);
             let core_characterize_started = Instant::now();
             let core_characterizations = characterize_selected_terminals(
                 &core.table,

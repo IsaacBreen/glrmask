@@ -169,7 +169,6 @@ fn compile_shared_classed_prepared(
             }
         }
     }
-    drop(weight_id);
     for q in 0..lexical.states().len() {
         if max_controls.is_none() {
             for &control in controls {add(*ids.get(&(false,control))?,0,(q*depths+1) as u32,
@@ -179,7 +178,6 @@ fn compile_shared_classed_prepared(
             add(*ids.get(&(false,control))?,0,source+1,source..source+1)?;
         }}}
     }
-    drop(add);
     let profiling=crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     if profiling {eprintln!("[glrmask/profile][native_compact_template_program_contract] templates={} instances={} logical_states={estimated_states} logical_edges={estimated_edges} coefficients={} lexical_states={} depth={max_controls:?} domain_full={} domain_points={}",dense_templates.len(),instances.len(),coefficients.len(),lexical.states().len(),domain.is_full(),domain.range_entries().map(|(lo,hi,tokens)|(u128::from(hi)-u128::from(lo)+1)*tokens.len() as u128).sum::<u128>());}
     if !(1..=200_000).contains(&estimated_states) || coefficients.len()>2048 {

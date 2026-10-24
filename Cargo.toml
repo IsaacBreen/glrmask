@@ -164,11 +164,6 @@ name = "marker_bench"
 path = "examples/dev/marker_bench.rs"
 
 [[example]]
-name = "o21137_subgrammar_bench"
-path = "examples/dev/o21137_subgrammar_bench.rs"
-required-features = ["internal-api"]
-
-[[example]]
 name = "parser_grammar_constructor"
 path = "examples/dev/parser_grammar_constructor.rs"
 
@@ -362,6 +357,10 @@ name = "snowplow_hostname_replay_mre"
 path = "tests/regressions/replay/snowplow_hostname.rs"
 
 [workspace.lints.clippy]
+# Arc<DFA> and OnceLock caches hash by identity; clippy's interior-mutability check is a false positive here.
+mutable_key_type = "allow"
+# Index loops over parallel arrays read more clearly than zipped iterators.
+needless_range_loop = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
 large_enum_variant = "allow"

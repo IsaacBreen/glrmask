@@ -1124,7 +1124,7 @@ struct FullWalkConfigTransitions<'a, 'b> {
     raw_target_cells: Vec<u64>,
     virtual_dense_row_by_raw_state: Vec<u32>,
     virtual_dense_row_ids: FxHashMap<(u32, u32), u32>,
-    virtual_dense_rows: Vec<Box<[u64; 256]>>,
+    virtual_dense_rows: Vec<[u64; 256]>,
     virtual_dense_cell_cache_enabled: bool,
     profile: bool,
     cell_calls: usize,
@@ -1311,7 +1311,7 @@ impl FullWalkConfigTransitions<'_, '_> {
             let row = u32::try_from(self.virtual_dense_rows.len()).ok()?;
             self.virtual_dense_row_ids.insert(key, row);
             self.virtual_dense_rows
-                .push(Box::new([u64::MAX; 256]));
+                .push([u64::MAX; 256]);
             row
         };
         self.virtual_dense_row_by_raw_state[raw_index] = row;
@@ -2225,7 +2225,7 @@ struct FullWalkManyTransitionCache {
     // but encode cached row targets compactly. Capacity is clamped to the
     // representable exact range; hitting that cache bound only falls back to
     // the existing owned-state path and never drops a branch.
-    rows: Vec<Box<[u16; 256]>>,
+    rows: Vec<[u16; 256]>,
     boundary_allowed: Vec<Option<bool>>,
     // Exact byte classifications for each retained product: (self-loop,
     // non-self-loop). Unknown bytes can be evaluated through step_handle.
@@ -2302,7 +2302,7 @@ impl FullWalkManyTransitionCache {
         let id = self.states.len() as u32;
         let owned = state.clone();
         self.states.push(owned.clone());
-        self.rows.push(Box::new([Self::ROW_UNKNOWN; 256]));
+        self.rows.push([Self::ROW_UNKNOWN; 256]);
         self.boundary_allowed.push(None);
         self.loop_alphabets.push(([0; 4], [0; 4]));
         self.has_self_loop.push(false);
@@ -7750,9 +7750,7 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     #[inline]
     fn config_len(&self, config: u32) -> usize {
-        if self.deterministic {
-            1
-        } else if self.raw_state_for_config(config).is_some() {
+        if self.deterministic || self.raw_state_for_config(config).is_some() {
             1
         } else {
             self.configs[self.config_index(config).expect("known config")].len()

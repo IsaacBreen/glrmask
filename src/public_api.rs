@@ -6878,12 +6878,10 @@ mod final_boundary_option_tests {
                     continue;
                 }
                 let constraint = result.unwrap();
-                assert!(match (&constraint.boundary_trigger, detail) {
+                assert!(matches!((&constraint.boundary_trigger, detail),
                     (crate::runtime::BoundaryTrigger::None, BoundaryTriggerDetail::None) |
                     (crate::runtime::BoundaryTrigger::TokenSet(_), BoundaryTriggerDetail::TokenSet) |
-                    (crate::runtime::BoundaryTrigger::Exact(_), BoundaryTriggerDetail::Exact) => true,
-                    _ => false,
-                });
+                    (crate::runtime::BoundaryTrigger::Exact(_), BoundaryTriggerDetail::Exact)));
             }
         }
     }

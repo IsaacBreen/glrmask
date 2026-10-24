@@ -10,7 +10,7 @@ fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {
     for bytes in [
         " double", "Quote", "X \ta!", "X\t a!", "Xa\t !", "Xa \t!",
         "Xa!", "a!", "X!", "@ doubleQuote", " x=0", "%=0", "=0",
-        "{\"x\":\"ab\"}", "{\"x\":", "\"ab\"}", "\"}", "a", "X",
+        "{\"x\": \"ab\"}", "{\"x\": ", "\"ab\"}", "\"}", "a", "X",
         "dead-special", "dead-special", "X[a]!", "a]!", "[]!", "X[]!",
     ] {
         entries.push((entries.len() as u32, bytes.as_bytes().to_vec()));
@@ -98,9 +98,9 @@ fn main() {
         ), &vocab).unwrap();
         let prefixes = [
             ("root", byte_tokens("")), ("object", byte_tokens("{")),
-            ("property", byte_tokens("{\"x\":")), ("string", byte_tokens("{\"x\":\"ab")),
-            ("limit", byte_tokens("{\"x\":\"abcdefgh")), ("return", byte_tokens("{\"x\":\"ab\"")),
-            ("done", byte_tokens("{\"x\":\"ab\"}")),
+            ("property", byte_tokens("{\"x\": ")), ("string", byte_tokens("{\"x\": \"ab")),
+            ("limit", byte_tokens("{\"x\": \"abcdefgh")), ("return", byte_tokens("{\"x\": \"ab\"")),
+            ("done", byte_tokens("{\"x\": \"ab\"}")),
         ];
         probe("ordinary_json", &c, &c, &prefixes, &ids, repeats);
     }

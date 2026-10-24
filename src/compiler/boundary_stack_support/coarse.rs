@@ -143,7 +143,7 @@ fn ordered_set_reference(initial:&[u32],effects:&[Effect],alphabet:u32)->Result<
     let mut classes=vec![0u32;n];
     for (q,row) in pred.iter().enumerate(){
         if row.all{stats.all_rows+=1;continue;}
-        let next=rows.len() as u32+1;classes[q]=*rows.entry(row.finite.clone()).or_insert(next);
+        let next=rows.len() as u32+1;classes[q] = *rows.entry(row.finite.clone()).or_insert(next);
         stats.finite_edges+=row.finite.iter().filter(|&&p|p!=alphabet).count();
     }
     let mut nodes=vec![Node::default();rows.len()+1];nodes[0].accepting=true;

@@ -499,11 +499,7 @@ fn dynamic_envelope_contains_exactly_the_native_constraint_bodies() {
         };
         let mut payload = 2u32.to_le_bytes().to_vec();
         for constraint in [&a, &b] {
-            let body = if external {
-                constraint.save()
-            } else {
-                constraint.save()
-            };
+            let body = constraint.save();
             payload.extend_from_slice(&(body.len() as u64).to_le_bytes());
             payload.extend_from_slice(&body);
         }

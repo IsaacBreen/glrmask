@@ -60,7 +60,7 @@ pub fn scoped_ignore_follow_relation(g:&AnalyzedGrammar,counts:&[usize],ignores:
  for c in 0..counts.len(){add_small(&mut local[c*words..(c+1)*words],&d.local[c*w..(c+1)*w],&d.ids);stars[c*words..(c+1)*words].copy_from_slice(&local[c*words..(c+1)*words]);}
  let mut suffix=vec![0u64;words];
  for r in &g.rules{let a=r.lhs as usize;let c=d.owner[a];let ignored_here=&local[c*words..(c+1)*words];let star=&mut stars[c*words..(c+1)*words];
-  suffix.fill(0);for (x,y)in suffix.iter_mut().zip(g.follow[a].words()){*x=*y;}add_small(&mut suffix,&d.follow[a*w..(a+1)*w],&d.ids);
+  suffix.fill(0);for (x,y)in suffix.iter_mut().zip(g.follow[a].words()){*x = *y;}add_small(&mut suffix,&d.follow[a*w..(a+1)*w],&d.ids);
   for x in 0..words{suffix[x]|=ignored_here[x];star[x]|=suffix[x];}
   for s in r.rhs.iter().rev(){match s{
    Symbol::Terminal(t)=>{if let Some(row)=blocked.get_mut(*t as usize){for (x,y)in row.words_mut().iter_mut().zip(&suffix){*x&=!*y;}}

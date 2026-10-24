@@ -125,8 +125,8 @@ fn range_construction_normalizes_and_validates_membership_at_compile() {
         TokenSet::from_ranges(std::iter::empty::<std::ops::RangeInclusive<u32>>()),
         TokenSet::new([]),
     );
-    assert_eq!(TokenSet::from_ranges([20..=10]).range_pairs(), &[]);
-    assert_eq!(TokenSet::from_ranges([5..5]).range_pairs(), &[]);
+    assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(20, 10))).range_pairs(), &[]);
+    assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
     assert_eq!(TokenSet::new([5, 5]), TokenSet::from(5));
     let crossing_hole = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges([39..=48])).unwrap();
     assert!(crossing_hole.compile(&vocab).is_err(), "a range may not span undefined IDs");

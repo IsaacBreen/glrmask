@@ -1140,8 +1140,7 @@ mod tests {
     fn batched_final_union_matches_one_shot_domain() {
         let mut states=Vec::new();
         for i in 0..200u32 {
-            let mut state=DWAState::default();
-            state.final_weight=Some(Weight::from_token_set_for_tsid(11,[i].into_iter().collect()));
+            let state=DWAState{final_weight:Some(Weight::from_token_set_for_tsid(11,[i].into_iter().collect())),..DWAState::default()};
             states.push(state);
         }
         let original=DWA::from_parts(states,0);

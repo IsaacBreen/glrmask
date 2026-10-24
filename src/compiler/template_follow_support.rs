@@ -114,6 +114,7 @@ pub(crate) fn disallowed(programs: &[Option<Arc<CommitTemplateDfas>>], terminal_
     Ok(rows)
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) trait ScopedFollowProgram {
     fn source(&self) -> &CommitTemplateDfas;
     fn offset(&self) -> u32;
@@ -123,6 +124,7 @@ pub(crate) trait ScopedFollowProgram {
 
 /// The same conservative proof using component-local domains and translated
 /// output tops. No owned relocated terminal graph is constructed.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn disallowed_scoped<P: ScopedFollowProgram>(
     programs: &[P],
     terminal_count: usize,
@@ -141,8 +143,7 @@ pub(crate) fn disallowed_scoped<P: ScopedFollowProgram>(
     }
     for first in 0..terminal_count {
         let mut tops = output[first].clone();
-        loop {
-            let Tops::Known(values) = &mut tops else { break; };
+        while let Tops::Known(values) = &mut tops {
             let before = values.len();
             for control in terminal_count..programs.len() {
                 if !spend(&mut work, values.len() + 1) { tops = Tops::Any; break; }

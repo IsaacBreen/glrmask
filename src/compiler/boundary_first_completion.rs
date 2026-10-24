@@ -45,7 +45,8 @@ pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,f
       let target=flat[q as usize*256+b as usize];if target==u32::MAX{continue;}
       if tok.state_has_epsilon_transitions(target){Frontier::Many(tok.singleton_epsilon_closure(target).into_vec())}else{Frontier::One(target)}
      },
-     _=>{let v=tok.step_all(states,b).into_vec();if v.is_empty(){continue;}if v.len()==1{Frontier::One(v[0])}else{Frontier::Many(v)}}
+     _=>{let v=tok.step_all(states,b).into_vec();if v.is_empty(){continue;}
+       if v.len()==1{Frontier::One(v[0])}else{Frontier::Many(v)}}
     };stack.push((child,next));
    }
   }

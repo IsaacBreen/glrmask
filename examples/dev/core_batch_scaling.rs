@@ -58,7 +58,7 @@ where F: Fn() -> glrmask::Result<()> + Send + Sync {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    assert!(!cfg!(debug_assertions), "use canonical release for performance measurements");
+    assert!(std::hint::black_box(!cfg!(debug_assertions)), "use canonical release for performance measurements");
     let mut args = std::env::args().skip(1);
     let largest: usize = args.next().unwrap_or_else(|| "16".into()).parse()?;
     let jobs: usize = args.next().unwrap_or_else(|| "64".into()).parse()?;

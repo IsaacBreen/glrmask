@@ -155,7 +155,7 @@ pub(crate) fn expand_nullable_terminals(
     // Compute the next available nonterminal ID from both the rule graph and
     // the declared start symbol. A sparse GrammarDef may have a start ID above
     // every nonterminal currently mentioned by a rule.
-    let mut next_nt = rules
+    let next_nt = rules
         .iter()
         .flat_map(|rule| {
             std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|sym| match sym {
@@ -172,9 +172,8 @@ pub(crate) fn expand_nullable_terminals(
     let mut nt_for_terminal = BTreeMap::<TerminalID, NonterminalID>::new();
     let mut extra_rules = Vec::new();
 
-    for &tid in nullable_terminals {
-        let fresh_nt = next_nt;
-        next_nt += 1;
+    for (offset, &tid) in nullable_terminals.iter().enumerate() {
+        let fresh_nt = next_nt + offset as NonterminalID;
         nt_for_terminal.insert(tid, fresh_nt);
 
         // NT → ε
@@ -2144,7 +2143,7 @@ mod tests {
             *seed
         }
 
-        let mut seed = 0x1a11_c7c1_e55_u64;
+        let mut seed = 0x01a1_1c7c_1e55_u64;
         for case_index in 0..512 {
             let nonterminals = (next(&mut seed) % 9 + 1) as u32;
             let mut candidates = BTreeMap::new();

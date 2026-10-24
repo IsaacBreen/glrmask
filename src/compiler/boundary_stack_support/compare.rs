@@ -89,7 +89,7 @@ fn evaluate(dwa:&DWA,stack:&[u32])->Weight {
         if let Some(weight)=row.final_weight.as_ref(){accepted=accepted.union(&path.intersection(weight));}
         if position==stack.len(){break;}
         let Some((target,weight))=row.transitions.get(&(stack[position] as i32)).or_else(||row.transitions.get(&DEFAULT)) else{break;};
-        path=path.intersection(weight);if path.is_empty(){break;}state=*target;
+        path=path.intersection(weight);if path.is_empty(){break;}state = *target;
     }
     accepted
 }

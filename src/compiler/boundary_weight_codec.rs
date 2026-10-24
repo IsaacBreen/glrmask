@@ -33,81 +33,6 @@ pub struct FaithfulQuotientStats {
     pub ghost_atoms:usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn membership(weight:&Weight,row:u32,token:u32)->bool {
-        weight.is_full()||weight.token_set_for_tsid_ref(row).is_some_and(|set|set.contains(token))
-    }
-
-    #[test]
-    fn symbolic_partition_matches_all_small_grid_membership_classes() {
-        let mut random=51143u64;
-        let mut next=||{random=random.wrapping_mul(6364136223846793005).wrapping_add(1);(random>>32) as usize};
-        for case in 0..256 {
-            let mut sources=vec![Weight::empty(),Weight::all()];
-            for _ in 0..2+next()%8 {
-                sources.push(Weight::from_per_tsid_token_sets((0..6u32).map(|row|
-                    (row,(0..10u32).filter(|_|next()%4==0).collect()))));
-            }
-            let domain=Weight::from_per_tsid_token_sets((0..3).map(|row|(row,[0,1,2,3].into_iter().collect())));
-            let quotient=FaithfulWeightQuotient::new(&domain,&sources).unwrap();
-            let mut expected=FxHashSet::default();
-            for row in 0..8 {for token in 0..12 {
-                expected.insert(sources.iter().map(|source|membership(source,row,token)).collect::<Vec<_>>());
-            }}
-            let encoded=sources.iter().map(|source|quotient.encode(source).unwrap()).collect::<Vec<_>>();
-            let actual=(0..quotient.atom_count()).map(|atom|encoded.iter().map(|weight|
-                membership(weight,(atom/64) as u32,(atom%64) as u32)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
-            assert_eq!(expected,actual,"case={case}");
-            for (source,encoded) in sources.iter().zip(&encoded) {
-                assert_eq!(quotient.decode(encoded),source.intersection(&domain),"case={case}");
-            }
-            for (i,left) in encoded.iter().enumerate(){for (j,right) in encoded.iter().enumerate(){
-                assert_eq!(quotient.decode(&left.intersection(right)),sources[i].intersection(&sources[j]).intersection(&domain));
-                assert_eq!(quotient.decode(&left.union(right)),sources[i].union(&sources[j]).intersection(&domain));
-            }}
-        }
-    }
-
-    #[test]
-    fn symbolic_ranges_handle_large_sparse_ids_and_endpoint_overflow() {
-        let x=u32::MAX-3;
-        let sources=vec![
-            Weight::all(), Weight::empty(),
-            Weight::from_uniform(4..=x,[2..=7, x-2..=x].into_iter().collect()),
-            Weight::from_uniform(9..=x-1,[5..=11].into_iter().collect()),
-            Weight::from_uniform(x..=x,[x..=x].into_iter().collect()),
-        ];
-        let domain=Weight::from_per_tsid_token_sets([(4,[2,5].into_iter().collect()),(x,[x].into_iter().collect())]);
-        let quotient=FaithfulWeightQuotient::new(&domain,&sources).unwrap();
-        let mut rows=vec![0,1,u32::MAX];let mut tokens=rows.clone();
-        for source in &sources {if !source.is_full(){for (lo,hi,set) in source.range_entries(){
-            rows.extend([lo,hi,lo.saturating_sub(1),hi.saturating_add(1)]);
-            for range in set.ranges(){tokens.extend([*range.start(),*range.end(),range.start().saturating_sub(1),range.end().saturating_add(1)]);}
-        }}}
-        rows.sort();rows.dedup();tokens.sort();tokens.dedup();
-        let expected=rows.iter().flat_map(|&row|tokens.iter().map(move|&token|(row,token)))
-            .map(|(row,token)|sources.iter().map(|source|membership(source,row,token)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
-        let encoded=sources.iter().map(|source|quotient.encode(source).unwrap()).collect::<Vec<_>>();
-        let actual=(0..quotient.atom_count()).map(|atom|encoded.iter().map(|weight|
-            membership(weight,(atom/64) as u32,(atom%64) as u32)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
-        assert_eq!(expected,actual);
-        for (source,encoded) in sources.iter().zip(&encoded){assert_eq!(quotient.decode(encoded),source.intersection(&domain));}
-    }
-
-    #[test]
-    fn outside_final_domain_classes_are_not_erased() {
-        let a=Weight::from_token_set_for_tsid(0,[1].into_iter().collect());
-        let b=Weight::from_token_set_for_tsid(0,[2].into_iter().collect());
-        let q=FaithfulWeightQuotient::new(&a,&[a.clone(),b.clone(),Weight::all()]).unwrap();
-        let encoded=q.encode(&b).unwrap();
-        assert!(!encoded.is_empty(),"ghost support must survive compilation");
-        assert!(q.decode(&encoded).is_empty(),"ghost may not publish a token mask");
-        assert!(q.stats.ghost_atoms>=2);
-    }
-}
 
 pub struct FaithfulWeightQuotient {
     domain:Weight,
@@ -261,5 +186,81 @@ impl FaithfulWeightQuotient {
             }}
         }
         Weight::union_all(selected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn membership(weight:&Weight,row:u32,token:u32)->bool {
+        weight.is_full()||weight.token_set_for_tsid_ref(row).is_some_and(|set|set.contains(token))
+    }
+
+    #[test]
+    fn symbolic_partition_matches_all_small_grid_membership_classes() {
+        let mut random=51143u64;
+        let mut next=||{random=random.wrapping_mul(6364136223846793005).wrapping_add(1);(random>>32) as usize};
+        for case in 0..256 {
+            let mut sources=vec![Weight::empty(),Weight::all()];
+            for _ in 0..2+next()%8 {
+                sources.push(Weight::from_per_tsid_token_sets((0..6u32).map(|row|
+                    (row,(0..10u32).filter(|_|next()%4==0).collect()))));
+            }
+            let domain=Weight::from_per_tsid_token_sets((0..3).map(|row|(row,[0,1,2,3].into_iter().collect())));
+            let quotient=FaithfulWeightQuotient::new(&domain,&sources).unwrap();
+            let mut expected=FxHashSet::default();
+            for row in 0..8 {for token in 0..12 {
+                expected.insert(sources.iter().map(|source|membership(source,row,token)).collect::<Vec<_>>());
+            }}
+            let encoded=sources.iter().map(|source|quotient.encode(source).unwrap()).collect::<Vec<_>>();
+            let actual=(0..quotient.atom_count()).map(|atom|encoded.iter().map(|weight|
+                membership(weight,(atom/64) as u32,(atom%64) as u32)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
+            assert_eq!(expected,actual,"case={case}");
+            for (source,encoded) in sources.iter().zip(&encoded) {
+                assert_eq!(quotient.decode(encoded),source.intersection(&domain),"case={case}");
+            }
+            for (i,left) in encoded.iter().enumerate(){for (j,right) in encoded.iter().enumerate(){
+                assert_eq!(quotient.decode(&left.intersection(right)),sources[i].intersection(&sources[j]).intersection(&domain));
+                assert_eq!(quotient.decode(&left.union(right)),sources[i].union(&sources[j]).intersection(&domain));
+            }}
+        }
+    }
+
+    #[test]
+    fn symbolic_ranges_handle_large_sparse_ids_and_endpoint_overflow() {
+        let x=u32::MAX-3;
+        let sources=vec![
+            Weight::all(), Weight::empty(),
+            Weight::from_uniform(4..=x,[2..=7, x-2..=x].into_iter().collect()),
+            Weight::from_uniform(9..=x-1,[5..=11].into_iter().collect()),
+            Weight::from_uniform(x..=x,[x..=x].into_iter().collect()),
+        ];
+        let domain=Weight::from_per_tsid_token_sets([(4,[2,5].into_iter().collect()),(x,[x].into_iter().collect())]);
+        let quotient=FaithfulWeightQuotient::new(&domain,&sources).unwrap();
+        let mut rows=vec![0,1,u32::MAX];let mut tokens=rows.clone();
+        for source in &sources {if !source.is_full(){for (lo,hi,set) in source.range_entries(){
+            rows.extend([lo,hi,lo.saturating_sub(1),hi.saturating_add(1)]);
+            for range in set.ranges(){tokens.extend([*range.start(),*range.end(),range.start().saturating_sub(1),range.end().saturating_add(1)]);}
+        }}}
+        rows.sort();rows.dedup();tokens.sort();tokens.dedup();
+        let expected=rows.iter().flat_map(|&row|tokens.iter().map(move|&token|(row,token)))
+            .map(|(row,token)|sources.iter().map(|source|membership(source,row,token)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
+        let encoded=sources.iter().map(|source|quotient.encode(source).unwrap()).collect::<Vec<_>>();
+        let actual=(0..quotient.atom_count()).map(|atom|encoded.iter().map(|weight|
+            membership(weight,(atom/64) as u32,(atom%64) as u32)).collect::<Vec<_>>()).collect::<FxHashSet<_>>();
+        assert_eq!(expected,actual);
+        for (source,encoded) in sources.iter().zip(&encoded){assert_eq!(quotient.decode(encoded),source.intersection(&domain));}
+    }
+
+    #[test]
+    fn outside_final_domain_classes_are_not_erased() {
+        let a=Weight::from_token_set_for_tsid(0,[1].into_iter().collect());
+        let b=Weight::from_token_set_for_tsid(0,[2].into_iter().collect());
+        let q=FaithfulWeightQuotient::new(&a,&[a.clone(),b.clone(),Weight::all()]).unwrap();
+        let encoded=q.encode(&b).unwrap();
+        assert!(!encoded.is_empty(),"ghost support must survive compilation");
+        assert!(q.decode(&encoded).is_empty(),"ghost may not publish a token mask");
+        assert!(q.stats.ghost_atoms>=2);
     }
 }

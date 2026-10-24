@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
         assert_eq!(TokenSet::new([]).range_pairs(), &[]);
         assert_eq!(TokenSet::from_ranges([3..=5]).range_pairs(), &[(3, 5)]);
-        assert_eq!(TokenSet::from_ranges([3..6]).range_pairs(), &[(3, 5)]);
+        assert_eq!(TokenSet::from_ranges(std::iter::once(3..6)).range_pairs(), &[(3, 5)]);
         assert_eq!(
             TokenSet::from_ranges([0..10, 5..13, 20..30]).range_pairs(),
             &[(0, 12), (20, 29)],
@@ -464,12 +464,12 @@ mod tests {
         // Overlapping and adjacent input round-trips to the same merged set.
         assert_eq!(
             TokenSet::from_ranges([0..10, 5..20, 20..30]),
-            TokenSet::from_ranges([0..30]),
+            TokenSet::from_ranges(std::iter::once(0..30)),
         );
         assert_eq!(format!("{:?}", TokenSet::from_ranges([0..10, 20..30])),
             "TokenSet[0..=9, 20..=29]");
-        assert_eq!(TokenSet::from_ranges([5..=3]).range_pairs(), &[]);
-        assert_eq!(TokenSet::from_ranges([5..5]).range_pairs(), &[]);
+        assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(5, 3))).range_pairs(), &[]);
+        assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
         // An excluded start bound starts after that ID, not at it.
         assert_eq!(
             TokenSet::from_ranges([(Bound::Excluded(1), Bound::Included(3))]),
@@ -507,7 +507,7 @@ mod compact_token_range_tests {
     #[test]
     fn full_domain_ranges_do_not_materialize_ids_until_requested() {
         let vocab = Vocab::new(Vec::new()).with_special_tokens(0..131_072);
-        let tokens = TokenSet::from_ranges([0..131_072]);
+        let tokens = TokenSet::from_ranges(std::iter::once(0..131_072));
         let shared = tokens.clone();
         assert_eq!(tokens.range_pairs(), &[(0, 131_071)]);
         assert!(Arc::ptr_eq(&tokens.ranges, &shared.ranges));
