@@ -272,18 +272,16 @@ void artifacts(const std::filesystem::path& directory, bool check) {
     for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
         auto c = m.compile(v, strategy_options(i));
-        for (bool external : {false, true}) {
-            const auto path = directory/((check?"node-":"cpp-")+std::string(external?"external-":"mode-")+std::to_string(i)+".glr");
-            if (check) {
-                auto loaded = Constraint::load(read_bytes(path), v);
-                CHECK(loaded.start().mask()==c.start().mask());
-                auto s = loaded.start(); CHECK(s.commit_token(31)); CHECK(s.is_accepting());
-            }
-            else {
-                const auto bytes = c.save(); std::ofstream out(path, std::ios::binary);
-                out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                CHECK(out.good());
-            }
+        const auto path = directory/((check?"node-mode-":"cpp-mode-")+std::to_string(i)+".glr");
+        if (check) {
+            auto loaded = Constraint::load(read_bytes(path), v);
+            CHECK(loaded.start().mask()==c.start().mask());
+            auto s = loaded.start(); CHECK(s.commit_token(31)); CHECK(s.is_accepting());
+        }
+        else {
+            const auto bytes = c.save(); std::ofstream out(path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            CHECK(out.good());
         }
     }
 }

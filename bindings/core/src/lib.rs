@@ -175,6 +175,8 @@ mod tests {
             let options = compile_options(
                 mask_strategy(mode).unwrap(),
                 glrmask::BoundaryMaskStrategy::Auto,
+                false,
+                false,
             );
             let c = Arc::new(module.compile_with(&vocab, options).unwrap());
             let expected = c.start().mask();

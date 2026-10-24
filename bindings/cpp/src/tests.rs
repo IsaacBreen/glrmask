@@ -17,6 +17,8 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             let rust_options = core::compile_options(
                 core::mask_strategy(strategy).unwrap(),
                 g::BoundaryMaskStrategy::Auto,
+                false,
+                false,
             );
             let rust = rust_m.compile_with(&rust_vocab, rust_options).unwrap();
             let mut reference = rust.start();
