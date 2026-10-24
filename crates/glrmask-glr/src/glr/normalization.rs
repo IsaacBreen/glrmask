@@ -830,11 +830,10 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
             }
             // Only unit edges inside the component are redundant. A unit rule
             // that leaves the component contributes its target's language.
-            if let [Symbol::Nonterminal(target)] = rule.rhs.as_slice() {
-                if component_of[*target as usize] == index {
+            if let [Symbol::Nonterminal(target)] = rule.rhs.as_slice()
+                && component_of[*target as usize] == index {
                     continue;
                 }
-            }
             let rhs = rule.rhs.iter().map(|symbol| match symbol {
                 Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(map(*nonterminal)),
                 Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
@@ -1094,19 +1093,18 @@ fn eliminate_hidden_left_recursion(edit: &mut Edit, nullable: &Nullable) -> bool
 
                 for skip in 1..=prefix_end {
                     let suffix = &rule.rhs[skip..];
-                    if let Some(Symbol::Nonterminal(nonterminal)) = suffix.first() {
-                        if membership[*nonterminal as usize] == component {
+                    if let Some(Symbol::Nonterminal(nonterminal)) = suffix.first()
+                        && membership[*nonterminal as usize] == component {
                             charge_rule(suffix.len());
                             additions.push(Rule {
                                 lhs: rule.lhs,
                                 rhs: suffix.to_vec(),
                             });
                         }
-                    }
                 }
 
-                if let Some(Symbol::Nonterminal(next)) = rule.rhs.get(prefix_end) {
-                    if *next != rule.lhs
+                if let Some(Symbol::Nonterminal(next)) = rule.rhs.get(prefix_end)
+                    && *next != rule.lhs
                         && membership[*next as usize] == component
                     {
                         replaced[position] = expand_cycle_head_paths(
@@ -1120,7 +1118,6 @@ fn eliminate_hidden_left_recursion(edit: &mut Edit, nullable: &Nullable) -> bool
                             &mut additions,
                         );
                     }
-                }
             }
 
             // Compare against the complete old inventory BEFORE removal.
@@ -1435,11 +1432,10 @@ fn remove_unreachable_owned(rules: &mut Vec<Rule>, start: NonterminalID) {
         reachable[nonterminal] = true;
         for &rule_index in &by_lhs[nonterminal] {
             for symbol in &rules[rule_index].rhs {
-                if let Symbol::Nonterminal(child) = symbol {
-                    if !reachable[*child as usize] {
+                if let Symbol::Nonterminal(child) = symbol
+                    && !reachable[*child as usize] {
                         todo.push(*child as usize);
                     }
-                }
             }
         }
     }

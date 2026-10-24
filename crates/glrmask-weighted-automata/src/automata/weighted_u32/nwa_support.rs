@@ -70,9 +70,8 @@ pub fn restrict_acyclic_nwa_support(
         for &source in topo.iter().rev() {
             let state = &mut states[source];
             let mut parts = Vec::new();
-            if let Some(final_weight) = &state.final_weight {
-                if !final_weight.is_empty() { parts.push(final_weight.clone()); }
-            }
+            if let Some(final_weight) = &state.final_weight
+                && !final_weight.is_empty() { parts.push(final_weight.clone()); }
             for (target, weight) in state.epsilons.iter_mut().chain(state.transitions.values_mut().flatten()) {
                 *weight = ops.intersection(weight, &backward[*target as usize]);
                 if !weight.is_empty() { parts.push(weight.clone()); }

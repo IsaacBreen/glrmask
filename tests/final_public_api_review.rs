@@ -241,7 +241,7 @@ fn review_end_tokens_are_root_only_and_survive_root_roundtrip() {
         assert!(state.commit_token(127));
         assert!(state.mask().iter().all(|w| *w == 0));
     }
-    let actual = Grammar::from_glrm(OUTER).unwrap().prepare(&v).unwrap().bind_snapshot("middle", &PreparedGrammar::load(prepared.save(), &vocab()).unwrap()).unwrap()
+    let actual = Grammar::from_glrm(OUTER).unwrap().prepare(&v).unwrap().bind_snapshot("middle", PreparedGrammar::load(prepared.save(), &vocab()).unwrap()).unwrap()
         .link_with(BuildOptions::default().end_tokens([63])).unwrap();
     let mut state = actual.start();
     assert!(allowed(&state.mask(), 4), "embedding imports body, not the child's EOS language");

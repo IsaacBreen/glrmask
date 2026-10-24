@@ -67,8 +67,8 @@ fn collect_plain_integer_range_cuts(
     representable: &mut bool,
 ) {
     let SchemaKind::Assertions(assertions) = &schema.kind else { return; };
-    if plain_integer_assertions(assertions) {
-        if let Some(number) = &assertions.number
+    if plain_integer_assertions(assertions)
+        && let Some(number) = &assertions.number
             && integer_multiple_is_vacuous(number.multiple_of)
         {
             let lower = integer_lower_bound(number);
@@ -80,7 +80,6 @@ fn collect_plain_integer_range_cuts(
                 if let Some(upper) = upper { cuts.insert(upper + 1); }
             }
         }
-    }
     if let Some(object) = &assertions.object {
         for property in &object.properties {
             collect_plain_integer_range_cuts(&property.schema, cuts, representable);
@@ -314,7 +313,7 @@ fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
         if multiple >= u64::MAX as f64 {
             return value == 0;
         }
-        return value.unsigned_abs() % (multiple as u64) == 0;
+        return value.unsigned_abs().is_multiple_of(multiple as u64);
     }
     let quotient = (value as f64) / multiple;
     (quotient - quotient.round()).abs() < 1e-9
@@ -439,7 +438,7 @@ fn power_of_ten_multiple_regex(multiple: f64, allow_sign: bool) -> Option<String
     }
 
     let mut zeros = 0usize;
-    while value > 1 && value % 10 == 0 {
+    while value > 1 && value.is_multiple_of(10) {
         zeros += 1;
         value /= 10;
     }
@@ -499,7 +498,7 @@ fn parse_decimal_step(multiple: f64) -> Option<DecimalStep> {
 }
 
 fn decimal_fraction_regex(step: &DecimalStep) -> Option<String> {
-    if step.scale % step.numerator != 0 {
+    if !step.scale.is_multiple_of(step.numerator) {
         return None;
     }
 

@@ -48,7 +48,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
 
 fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load(&bytes, &vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load(&bytes, vocab).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {

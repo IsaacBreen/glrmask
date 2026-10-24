@@ -538,7 +538,7 @@ impl<'de> Deserialize<'de> for DFA {
             .collect::<Vec<_>>();
         if let Some(epsilon_transitions) = epsilon_transitions {
             for (state, epsilon_transitions) in
-                states.iter_mut().zip(epsilon_transitions.into_iter())
+                states.iter_mut().zip(epsilon_transitions)
             {
                 state.epsilon_transitions = epsilon_transitions;
             }
@@ -874,11 +874,10 @@ impl DFA {
 
     pub(super) fn add_epsilon_transition(&mut self, from: u32, to: u32) {
         self.invalidate_structural_caches();
-        if let Some(state) = self.states.get_mut(from as usize) {
-            if !state.epsilon_transitions.contains(&to) {
+        if let Some(state) = self.states.get_mut(from as usize)
+            && !state.epsilon_transitions.contains(&to) {
                 state.epsilon_transitions.push(to);
             }
-        }
     }
 
     /// Move an independently compiled component into this DFA, rebasing its
@@ -1462,7 +1461,7 @@ impl DFA {
                 state.possible_future_group_ids.set(canonical);
             }
         }
-        let mut bytes = self.group_id_to_u8set(canonical as u32).clone();
+        let mut bytes = *self.group_id_to_u8set(canonical as u32);
         for &alias in aliases {
             bytes |= *self.group_id_to_u8set(alias as u32);
         }

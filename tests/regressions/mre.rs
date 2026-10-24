@@ -226,7 +226,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 
@@ -239,7 +239,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 
@@ -252,7 +252,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
     // Regression: after `a `, the optional body may finish before `\`, allowing the
     // suffix NON_WS to consume `\"`. The regex-suffix optimizer used to greedily
@@ -268,7 +268,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 }

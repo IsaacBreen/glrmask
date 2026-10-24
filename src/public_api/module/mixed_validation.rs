@@ -551,7 +551,7 @@ fn json_schema_child_mixed_compile_has_no_fallback() {
         spec.name,
     );
 
-    compare_against_parser_dwa(&reference, &candidate, &spec.name);
+    compare_against_parser_dwa(&reference, &candidate, spec.name);
 }
 
 fn json_vocab() -> Vocab {

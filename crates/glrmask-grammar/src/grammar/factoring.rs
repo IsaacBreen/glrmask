@@ -334,11 +334,10 @@ impl ChoiceFactorer {
         let mut groups = HashMap::<GrammarExpr, Vec<GrammarExpr>>::new();
 
         for alternative in alternatives {
-            if let Some((head, tail)) = Self::extract_tail_pattern(alternative) {
-                if self.is_safe_alternative(&head) {
+            if let Some((head, tail)) = Self::extract_tail_pattern(alternative)
+                && self.is_safe_alternative(&head) {
                     groups.entry(tail).or_default().push(head);
                 }
-            }
         }
 
         groups

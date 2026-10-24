@@ -122,13 +122,12 @@ fn debug_validate_template_output(
             if state.is_accepting { outputs.push((stack.clone(), accumulator.clone())); }
             match phase {
                 Phase::Pop => {
-                    if let Some(&top) = stack.last() {
-                        if let Some(&next) = state.transitions.get(&(top as i32))
+                    if let Some(&top) = stack.last()
+                        && let Some(&next) = state.transitions.get(&(top as i32))
                             .or_else(|| state.transitions.get(&DEFAULT_LABEL)) {
                             let mut popped = stack.clone(); popped.pop();
                             work.push((Phase::Pop, next, popped));
                         }
-                    }
                     if let Some(next) = template.pop_to_read.get(id as usize).copied().flatten() {
                         work.push((Phase::Read, next, stack.clone()));
                     }
@@ -137,11 +136,10 @@ fn debug_validate_template_output(
                     }
                 }
                 Phase::Read => {
-                    if let Some(top) = stack.last() {
-                        if let Some(&next) = state.transitions.get(&(*top as i32)) {
+                    if let Some(top) = stack.last()
+                        && let Some(&next) = state.transitions.get(&(*top as i32)) {
                             work.push((Phase::Read, next, stack.clone()));
                         }
-                    }
                     if let Some(next) = template.read_to_push.get(id as usize).copied().flatten() {
                         work.push((Phase::Push, next, stack));
                     }
@@ -1066,11 +1064,9 @@ mod tests {
                 pop_to_read:link(), pop_to_push:link(), read_to_push:link() };
             let clean = TerminalsDisallowed::new();
             let guarded = clean.with_insert(0, 5);
-            let paths = vec![
-                (vec![], clean.clone()), (vec![0], clean.clone()),
+            let paths = [(vec![], clean.clone()), (vec![0], clean.clone()),
                 (vec![0,1,4], clean.clone()), (vec![0,2,4], guarded.clone()),
-                (vec![0,6,5], guarded.clone()), (vec![3,1], clean.clone()),
-            ];
+                (vec![0,6,5], guarded.clone()), (vec![3,1], clean.clone())];
             for group in [&paths[..1], &paths[1..2], &paths[2..4], &paths[1..], &paths[..]] {
                 let source = ParserGSS::from_stacks(group);
                 let expected = super::advance_with_template_reference(&template, source.clone());

@@ -121,7 +121,7 @@ mod tests {
             let n = 1 + random(&mut seed) as usize % 20;
             let mut rows=vec![DWAState::default();n];
             for (q,row) in rows.iter_mut().enumerate() {
-                if random(&mut seed)%3 != 0 { row.final_weight=Some(palette[random(&mut seed)as usize%palette.len()].clone()); }
+                if !random(&mut seed).is_multiple_of(3) { row.final_weight=Some(palette[random(&mut seed)as usize%palette.len()].clone()); }
                 if q+1<n { for label in 0..(random(&mut seed)%8) as i32 {
                     let target = q+1+random(&mut seed)as usize%(n-q-1);
                     row.transitions.insert(label,(target as u32,palette[random(&mut seed)as usize%palette.len()].clone()));

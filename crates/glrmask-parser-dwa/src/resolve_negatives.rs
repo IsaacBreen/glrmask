@@ -1941,8 +1941,8 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree);
     let topo_ms = topo_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let acyclic = reverse_topo_order.is_some();
-    if profile_enabled {
-        if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
+    if profile_enabled
+        && let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
             let mut layer_by_state = vec![0usize; n];
             let mut max_layer = 0usize;
             for &state_id in reverse_topo_order {
@@ -1967,7 +1967,6 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
                 &counts[..counts.len().min(16)],
             );
         }
-    }
     let initial_started_at = profile_enabled.then(std::time::Instant::now);
     let mut reachable_final_weights = collect_initial_final_weights(nwa);
     let initial_ms = initial_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
@@ -2498,7 +2497,7 @@ mod terminal_default_tests {
                         .clone(),
                 );
             }
-            if (state + seed) % 2 == 0 {
+            if (state + seed).is_multiple_of(2) {
                 nwa.add_transition(
                     state,
                     DEFAULT_LABEL,
@@ -2506,7 +2505,7 @@ mod terminal_default_tests {
                     weights[((state + seed + 2) as usize) % weights.len()].clone(),
                 );
             }
-            if (state + seed) % 3 != 0 {
+            if !(state + seed).is_multiple_of(3) {
                 nwa.add_epsilon(
                     state,
                     (state + 1) % state_count,
@@ -2560,7 +2559,7 @@ mod terminal_default_tests {
                 );
                 continue;
             }
-            if (state + seed) % 3 == 0 {
+            if (state + seed).is_multiple_of(3) {
                 nwa.set_final_weight(
                     state,
                     weights[((state + seed + 1) as usize) % weights.len()].clone(),
@@ -2582,7 +2581,7 @@ mod terminal_default_tests {
                 positive_target,
                 weights[((state + seed + 2) as usize) % weights.len()].clone(),
             );
-            if (state + seed) % 2 == 0 {
+            if (state + seed).is_multiple_of(2) {
                 let default_target = state + 1 + ((state * 3 + seed + 2) % remaining);
                 nwa.add_transition(
                     state,
@@ -2591,7 +2590,7 @@ mod terminal_default_tests {
                     weights[((state + seed + 3) as usize) % weights.len()].clone(),
                 );
             }
-            if (state + seed) % 4 != 0 {
+            if !(state + seed).is_multiple_of(4) {
                 let epsilon_target = state + 1 + ((state * 11 + seed + 3) % remaining);
                 nwa.add_epsilon(
                     state,

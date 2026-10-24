@@ -2458,10 +2458,12 @@ mod early_rule_pruning_tests {
     fn lower(value: &Value, early: bool, provenance: bool) -> NamedGrammar {
         let features = super::super::load::scan_document_features(value);
         let document = super::super::load::load_document_with_features(value, &features).unwrap();
-        let mut config = JsonSchemaConfig::default();
-        config.lazy_ordinary_bounded_strings = true;
-        config.split_pattern_property_prefix = true;
-        config.sparse_large_optional_objects = true;
+        let config = JsonSchemaConfig {
+            lazy_ordinary_bounded_strings: true,
+            split_pattern_property_prefix: true,
+            sparse_large_optional_objects: true,
+            ..Default::default()
+        };
         Lowerer::new_with_name_provenance(&document, config, provenance)
             .finish_with_early_rule_pruning(early).unwrap().grammar
     }
@@ -3036,8 +3038,10 @@ mod structural_schema_memo_tests {
     #[test]
     fn dynamic_pattern_prefix_split_applies_only_to_selected_family() {
         let document = repeated_pattern_document();
-        let mut config = JsonSchemaConfig::default();
-        config.split_pattern_property_prefix = true;
+        let config = JsonSchemaConfig {
+            split_pattern_property_prefix: true,
+            ..Default::default()
+        };
         let mut lowerer = Lowerer::new(&document, config);
         let repeated = StringSchema {
             min_length: 1,

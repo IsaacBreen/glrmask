@@ -663,8 +663,6 @@ impl ResidualArena {
                 }
                 if !unknown {
                     Some(any_nonempty)
-                } else if !any_nonempty {
-                    None
                 } else {
                     None
                 }
@@ -1402,7 +1400,7 @@ fn bounded_code_byte_classes(
         let b = byte as u8;
         // Literal bytes must remain individually distinguishable because a
         // prefix/suffix coordinate tests equality with that exact byte.
-        let literal_tag = literal[byte as usize].then_some(byte + 1).unwrap_or(0);
+        let literal_tag = if literal[byte as usize] { byte + 1 } else { 0 };
         grouped
             .entry((
                 pattern_class[byte as usize],
@@ -2399,8 +2397,8 @@ impl BoundedCodeIntersectionOracle {
             }
             BoundedCodeEnvelopeState::Body {
                 completed,
-                body_state,
-            } if body_state == 0 => {
+                body_state: 0,
+            } => {
                 let mut starts = BitSet::new(self.pattern.num_states());
                 starts.set(coordinate.pattern_state as usize);
                 self.range_reaches_suffix(starts, completed)
@@ -3411,7 +3409,6 @@ impl BoundedCodeIntersectionOracle {
                 })?;
             }
         }
-        drop(add_seed);
         let seeds_ms = seeds_started.elapsed().as_secs_f64() * 1000.0;
 
         let expand_started = std::time::Instant::now();
@@ -3547,10 +3544,14 @@ impl BoundedCodeIntersectionOracle {
                         }
                     });
 
-                for row_offset in 0..batch_len {
+                for (row_offset, &accepting) in accepting_rows
+                    .iter()
+                    .enumerate()
+                    .take(batch_len)
+                {
                     let source_state = (source + row_offset) as u32;
                     let mut finalizers = BitSet::new(1);
-                    if accepting_rows[row_offset] != 0 {
+                    if accepting != 0 {
                         finalizers.set(0);
                     }
                     dfa.overwrite_state_metadata(source_state, finalizers, BitSet::new(1));
@@ -3768,7 +3769,6 @@ impl BoundedCodeIntersectionOracle {
                 })?;
             }
         }
-        drop(add_seed);
         let seeds_ms = seeds_started.elapsed().as_secs_f64() * 1000.0;
 
         let expand_started = std::time::Instant::now();
@@ -3819,10 +3819,14 @@ impl BoundedCodeIntersectionOracle {
                     }
                 });
 
-            for row_offset in 0..batch_len {
+            for (row_offset, &accepting) in accepting_rows
+                .iter()
+                .enumerate()
+                .take(batch_len)
+            {
                 let source_state = (source + row_offset) as u32;
                 let mut finalizers = BitSet::new(1);
-                if accepting_rows[row_offset] != 0 {
+                if accepting != 0 {
                     finalizers.set(0);
                 }
                 dfa.overwrite_state_metadata(source_state, finalizers, BitSet::new(1));

@@ -74,8 +74,10 @@ struct Pool {
 }
 impl Pool {
     fn new() -> Self {
-        let mut p = Self::default();
-        p.bulk=crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA");
+        let mut p = Self {
+            bulk: crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA"),
+            ..Self::default()
+        };
         p.intern_bits([0; WORDS]);
         p.values.push(Runs::new());
         p.values.push(Runs::new());
@@ -120,12 +122,11 @@ impl Pool {
         if b == 0 || lo > hi {
             return;
         }
-        if let Some(last) = out.last_mut() {
-            if last.hi.checked_add(1) == Some(lo) && last.b == b {
+        if let Some(last) = out.last_mut()
+            && last.hi.checked_add(1) == Some(lo) && last.b == b {
                 last.hi = hi;
                 return;
             }
-        }
         out.push(Run { lo, hi, b })
     }
     fn import(&mut self, w: &Weight) -> Option<u32> {
@@ -165,14 +166,14 @@ impl Pool {
         Some(id)
     }
     fn token_meet(&mut self,a:u32,b:u32)->u32 {
-        if a==0||b==0{return 0}if a==b{return a}
+        if a==0||b==0{return 0}else if a==b{return a}
         let key=if a<b{(a,b)}else{(b,a)};
         if let Some(&id)=self.token_and.get(&key){return id}
         let mut bits=[0;WORDS];for k in 0..WORDS{bits[k]=self.bits[a as usize][k]&self.bits[b as usize][k]}
         let id=self.intern_bits(bits);if self.token_and.len()<100_000{self.token_and.insert(key,id);}id
     }
     fn token_join(&mut self,a:u32,b:u32)->u32 {
-        if a==0{return b}if a==b||b==0{return a}
+        if a==0{return b}else if a==b||b==0{return a}
         let key=if a<b{(a,b)}else{(b,a)};
         if let Some(&id)=self.token_or.get(&key){return id}
         let mut bits=[0;WORDS];for k in 0..WORDS{bits[k]=self.bits[a as usize][k]|self.bits[b as usize][k]}
@@ -310,10 +311,10 @@ impl Pool {
     fn join_terms(&mut self, terms:impl IntoIterator<Item=u32>)->u32 {
         if !self.bulk{return self.join_all_reference(terms.into_iter().collect())}
         let mut ids:SmallVec<[u32;8]>=SmallVec::new();
-        for id in terms {if id==1{return 1}if id!=0{ids.push(id)}}
-        if ids.is_empty(){return 0}if ids.len()==1{return ids[0]}
+        for id in terms {if id==1{return 1}else if id!=0{ids.push(id)}}
+        if ids.is_empty(){return 0}else if ids.len()==1{return ids[0]}
         ids.sort_unstable();ids.dedup();
-        if ids.len()==1{return ids[0]}if ids.len()==2{return self.join(ids[0],ids[1])}
+        if ids.len()==1{return ids[0]}else if ids.len()==2{return self.join(ids[0],ids[1])}
         let mut low=u32::MAX;let mut high=0u32;let mut work=0u64;
         for &id in &ids{for r in &self.values[id as usize]{low=low.min(r.lo);high=high.max(r.hi);work+=u64::from(r.hi)-u64::from(r.lo)+1;}}
         let span=u64::from(high).saturating_sub(u64::from(low))+1;
@@ -1021,7 +1022,7 @@ fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,
         .max()
         .filter(|&hi| hi < 8192)
         .map(|hi| hi as usize + 1);
-    let target_slots=graph.iter().flat_map(|(_,edges)|edges.iter().map(|&(l,_,_)|l)).max().filter(|&l|l>=0&&l<4096).map(|l|l as usize+1);
+    let target_slots=graph.iter().flat_map(|(_,edges)|edges.iter().map(|&(l,_,_)|l)).max().filter(|&l|(0..4096).contains(&l)).map(|l|l as usize+1);
     for (h, candidates) in levels.iter().enumerate() {
         if candidates.is_empty() {
             continue;
@@ -1355,7 +1356,7 @@ mod tests {
         Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
             let t = toks
                 .into_iter()
-                .filter(|_| next(seed) % 3 == 0)
+                .filter(|_| next(seed).is_multiple_of(3))
                 .collect::<range_set_blaze::RangeSetBlaze<_>>();
             (!t.is_empty()).then_some((r, t))
         }))
@@ -1390,7 +1391,7 @@ mod tests {
             let mut pool=Pool::new();pool.bulk=true;
             let inputs=(0..count).map(|i|Weight::from_uniform(
                 base+(i%64)as u32..=base+(i%64)as u32+64,
-                [0u32,63,64,127,255,256,511].into_iter().filter(|t|(*t as usize+i)%3!=0).collect()
+                [0u32,63,64,127,255,256,511].into_iter().filter(|t|!(*t as usize + i).is_multiple_of(3)).collect()
             )).collect::<Vec<_>>();
             let ids=inputs.iter().map(|w|pool.import(w).unwrap()).collect::<Vec<_>>();
             let merged=pool.join_terms(ids.clone());assert_eq!(pool.export(merged),Weight::union_all(&inputs));
@@ -1464,22 +1465,22 @@ mod tests {
             }
             nwa.set_start_states(vec![0]);
             for dst in 1..n {
-                if next(&mut seed) % 3 == 0 {
+                if next(&mut seed).is_multiple_of(3) {
                     let w = weight(&mut seed);
                     nwa.add_epsilon(0, dst as u32, w);
                 }
             }
             for s in 0..n {
-                if next(&mut seed) % 2 == 0 {
+                if next(&mut seed).is_multiple_of(2) {
                     let w = weight(&mut seed);
                     nwa.set_final_weight(s as u32, w)
                 }
                 for d in s + 1..n {
-                    if next(&mut seed) % 3 != 0 {
+                    if !next(&mut seed).is_multiple_of(3) {
                         continue;
                     }
                     for label in 0..3 {
-                        if next(&mut seed) % 2 == 0 {
+                        if next(&mut seed).is_multiple_of(2) {
                             nwa.add_transition(s as u32, label, d as u32, weight(&mut seed));
                         }
                     }
@@ -1543,10 +1544,10 @@ mod tests {
             for k in 0..width {
                 let rows = [0u32, 1, 2, 3, 4, 5, 6, 7];
                 let ts = Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
-                    if next(&mut seed) % 3 == 0 {
+                    if next(&mut seed).is_multiple_of(3) {
                         return None;
                     }
-                    Some((r, (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect()))
+                    Some((r, (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect()))
                 }));
                 nwa.add_epsilon(0, 1 + k as u32, ts);
             }
@@ -1555,9 +1556,9 @@ mod tests {
                     let st = 1 + level * width + k;
                     let finalw = Weight::from_uniform(
                         0..=7,
-                        (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect(),
+                        (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
                     );
-                    if level == layers - 1 || next(&mut seed) % 3 == 0 {
+                    if level == layers - 1 || next(&mut seed).is_multiple_of(3) {
                         nwa.set_final_weight(st as u32, finalw);
                     }
                     if level + 1 == layers {
@@ -1568,7 +1569,7 @@ mod tests {
                             let dst = 1 + (level + 1) * width + next(&mut seed) % width;
                             let ew = Weight::from_uniform(
                                 0..=7,
-                                (0..8u32).filter(|_| next(&mut seed) % 3 != 0).collect(),
+                                (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
                             );
                             nwa.add_transition(st as u32, label, dst as u32, ew);
                         }

@@ -1,0 +1,41 @@
+> Design notes from development. Type and option names may be out of date; [GUIDE.md](../../GUIDE.md) describes the current API.
+
+# Ordinary Dynamic LR runtime
+
+Ordinary Dynamic (O1) retains an executable LR table by default. O2/vocabulary
+partition and public Balanced explicitly use native templates; Static is
+unchanged.
+
+The shared compiler uses a narrow normalization choice and one runtime assembly
+boundary. LR skips `PreparedTemplateParser::from_compiler_parts` entirely;
+native derives immutable template programs and drops its temporary table before
+Constraint materialization. Import/lowering, tokenizer/vocabulary work, masks
+and commits remain shared. A direct-regular frontend retains its automaton for
+exact LR table construction, then omits the runtime automaton bypass on LR.
+
+Current nullable correctness is preserved using existing table source-nullability
+metadata and an exact singleton initial-root completion guard. No EOF action or
+pre-lowering admission row is rewritten; complex EOF actions retain their exact
+semantics. Normal completion still follows the predecessor-feasible EOF closure.
+An ordinary zero-byte model ID is not a byte transition; mask and commit reject
+it, while a live exact special-token action remains valid. Known invalid tokens
+enter the documented fail state; unknown IDs error without mutating it.
+
+Self-contained retained-LR Constraints use v30; external-vocabulary LR uses v39
+with a canonical exact-vocabulary digest. Native v37/v38 are unchanged. Dynamic
+self-contained LR remains v20; native Dynamic remains v21/v14. Retained-LR
+Dynamic external transfer is v15: the existing six sections and v13 metadata
+follow a 40-byte payload header containing the canonical 32-byte vocabulary
+digest. Transfer v1-v13 had no mandatory exact identity and are explicitly
+unsupported; recompile those pre-release artifacts. The public save/load API
+is unchanged. Load validates the digest before decoding runtime sections and
+independently of compiler validation settings. Load preserves the
+built backend; mislabeled/mixed representations and mismatched vocabularies are
+rejected. Native components/providers remain table-free, and native table access
+cannot become a fallback.
+
+Qualification: focused behavior/storage/persistence tests and native API checks
+are required before the private commit. Production BUILD/TTFM/TBM measurements,
+the first 1,000 then full 9,558-case framework corpus, preserved OLD LR binary
+comparison, Windows candidate integration and public-package qualification are
+separate gates. Do not infer measured build gains from skipping native stages.

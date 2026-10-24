@@ -26,7 +26,7 @@ pub(crate) fn report_macro_item_timings(label: &str, timings_ms: &[f64]) {
     let total_work_ms = sorted.iter().sum::<f64>();
     let max_item_ms = sorted[count - 1];
     let mean_ms = total_work_ms / count as f64;
-    let p50_ms = if count % 2 == 0 {
+    let p50_ms = if count.is_multiple_of(2) {
         (sorted[count / 2 - 1] + sorted[count / 2]) * 0.5
     } else {
         sorted[count / 2]

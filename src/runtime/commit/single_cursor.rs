@@ -125,11 +125,10 @@ impl PreparedInputCursor {
                 output = if output.is_empty() { unchanged } else { output.merge(&unchanged) };
                 kept = true;
             }
-            if let Some(target) = template.pop_to_push.get(id as usize).copied().flatten() {
-                if self.productive[2][target as usize] { residual.push((2, target, base())); }
-            }
-            if let Some(mut read_id) = template.pop_to_read.get(id as usize).copied().flatten() {
-                if self.productive[1][read_id as usize] {
+            if let Some(target) = template.pop_to_push.get(id as usize).copied().flatten()
+                && self.productive[2][target as usize] { residual.push((2, target, base())); }
+            if let Some(mut read_id) = template.pop_to_read.get(id as usize).copied().flatten()
+                && self.productive[1][read_id as usize] {
                     loop {
                         if remaining == 0 {
                             residual.push((1, read_id, base()));
@@ -142,9 +141,8 @@ impl PreparedInputCursor {
                             output = if output.is_empty() { unchanged } else { output.merge(&unchanged) };
                             kept = true;
                         }
-                        if let Some(target) = template.read_to_push.get(read_id as usize).copied().flatten() {
-                            if self.productive[2][target as usize] { residual.push((2, target, base())); }
-                        }
+                        if let Some(target) = template.read_to_push.get(read_id as usize).copied().flatten()
+                            && self.productive[2][target as usize] { residual.push((2, target, base())); }
                         // READ edges inspect the SAME top at every state.
                         let Some(&top) = stack.top() else { break; };
                         let Some(&next) = read.transitions.get(&(top as i32)) else { break; };
@@ -152,7 +150,6 @@ impl PreparedInputCursor {
                         read_id = next;
                     }
                 }
-            }
             // Select explicit edges before testing productivity; an explicit
             // rejecting edge still shadows a productive DEFAULT alternative.
             let Some(&top) = stack.top() else { break; };
@@ -192,11 +189,10 @@ mod tests {
                         pending.push((2,target,next));
                     }
                 } else {
-                    if let Some(&top)=stack.last() {
-                        if let Some(&target)=state.transitions.get(&(top as i32)).or_else(||if phase==0{state.transitions.get(&DEFAULT_LABEL)}else{None}) {
+                    if let Some(&top)=stack.last()
+                        && let Some(&target)=state.transitions.get(&(top as i32)).or_else(||if phase==0{state.transitions.get(&DEFAULT_LABEL)}else{None}) {
                             let mut next=stack.clone();if phase==0{next.pop();}pending.push((phase,target,next));
                         }
-                    }
                     if phase==0 {
                         if let Some(Some(target))=template.pop_to_read.get(id as usize){pending.push((1,*target,stack.clone()));}
                         if let Some(Some(target))=template.pop_to_push.get(id as usize){pending.push((2,*target,stack));}

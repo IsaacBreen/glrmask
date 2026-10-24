@@ -867,12 +867,12 @@ const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
 /// - 2: ASCII word token with ≥1 alpha or `_`, optionally with leading space
 /// - 3: pure digit, optionally with leading space
 /// - 4: Unicode-only alpha (non-ASCII alphanumeric, e.g. CJK, Cyrillic,
-///       Arabic, Hangul), optionally with leading space
+///   Arabic, Hangul), optionally with leading space
 /// - 5: non-alnum auxiliary short (no JSON structural, or single-char repeated,
-///       or length 1; ≤ 8 bytes)
+///   or length 1; ≤ 8 bytes)
 /// - 6: non-alnum auxiliary long (same criteria as 5, but > 8 bytes)
 /// - 7: JSON literal-boundary tokens requiring structural treatment (leading-
-///       space collisions, bracketed forms, and the special ` -` token)
+///   space collisions, bracketed forms, and the special ` -` token)
 /// - 8: quoted ASCII identifier-start tokens
 ///
 /// Uses Unicode-aware classification so that non-Latin scripts are separated
@@ -950,14 +950,13 @@ pub(crate) fn fast_eval_char_type_regular_partition(bytes: &[u8]) -> u8 {
             return 3; // Pure digit
         }
         // Check non-alphanumeric.
-        if let Ok(full) = std::str::from_utf8(bytes) {
-            if !full
+        if let Ok(full) = std::str::from_utf8(bytes)
+            && !full
                 .chars()
                 .any(|c| c.is_alphanumeric() || c == '_')
             {
                 return classify_nonalnum(bytes);
             }
-        }
         return 1; // Mixed
     }
     // Fallback: byte-level ASCII checks for invalid UTF-8.
@@ -1993,7 +1992,7 @@ fn token_l2p_terminals(
     for terminal_1 in last_set.iter() {
         let disallowed = disallowed_follows.get(&(terminal_1 as u32));
         for terminal_2 in first_set.iter() {
-            if !disallowed.map_or(false, |blocked| blocked.contains(terminal_2)) {
+            if !disallowed.is_some_and(|blocked| blocked.contains(terminal_2)) {
                 l2p_set.set(terminal_1);
                 l2p_set.set(terminal_2);
             }
@@ -2735,7 +2734,10 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
             }
             if source_stamp.is_some() && sparse_transitions.len() < current_states.len() {
             *states_scanned += sparse_transitions.len();
-            let source_stamp = source_stamp.unwrap();
+            let source_stamp = match source_stamp {
+                Some(stamp) => stamp,
+                None => unreachable!("source stamp checked above"),
+            };
             let source_seen = &source_seen_by_depth[depth];
             for &(source, next) in sparse_transitions {
                 if source_seen[source as usize] != source_stamp {
@@ -2793,12 +2795,11 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
                 }
                 terminal_seen[terminal] = *terminal_stamp;
                 nodes[child].matched_terminals.push(terminal);
-                if let Some(class) = allowed_class_by_terminal[terminal] {
-                    if class_seen[class] != *class_stamp {
+                if let Some(class) = allowed_class_by_terminal[terminal]
+                    && class_seen[class] != *class_stamp {
                         class_seen[class] = *class_stamp;
                         matched_classes.push(class);
                     }
-                }
             });
         }
         let mut allowed_follow_terminals = None;
@@ -3160,8 +3161,7 @@ fn finite_follower_suffix_empty_certificate(
 
     let mut checked_splits = 0usize;
     let mut checked_literal_pairs = 0usize;
-    for pair in 0..(1 << 16) {
-        let followers = follower_masks_by_pair[pair];
+    for (pair, &followers) in follower_masks_by_pair.iter().enumerate().take(1 << 16) {
         if followers == 0 {
             continue;
         }
@@ -3488,9 +3488,9 @@ fn exact_terminal_path_two_plus_finite_literals(
     }
 
     let mut two_plus = BitSet::new(candidates.len());
-    for local in 0..candidate_ids.len() {
+    for (local, &candidate) in candidate_ids.iter().enumerate() {
         if found & (1u64 << local) != 0 {
-            two_plus.set(candidate_ids[local]);
+            two_plus.set(candidate);
         }
     }
     if super::types::compile_profile_enabled() {
@@ -4211,8 +4211,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     });
     let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
     let trie_ms = 0.0;
-    if super::types::compile_profile_enabled() {
-        if let (Some(trie), Some(_)) = (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref()) {
+    if super::types::compile_profile_enabled()
+        && let (Some(trie), Some(_)) = (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref()) {
             eprintln!(
                 "[glrmask/profile][terminal_path_prefix_trie] nodes={} splits={} execute_ms={:.3}",
                 trie.parents.len(),
@@ -4220,7 +4220,6 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 prefix_ms,
             );
         }
-    }
 
     let suffix_started_at = std::time::Instant::now();
     let mut dense_flat_trans = Vec::new();
@@ -5297,7 +5296,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 };
                 let split_end = split_start + last_candidate_split + 1;
                 let mut prefix_state = prefix_start;
-                for (_split_after, split_index) in (split_start..split_end).enumerate() {
+                for split_index in split_start..split_end {
                     let byte = bytes[split_index - split_start];
                     prefix_state = if let (Some(trie), Some(states)) =
                         (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
@@ -6545,7 +6544,7 @@ pub fn split_vocab_for_active_l2p_terminals(
     for (adjacent_index, &(token_id, bytes)) in adjacent_entries.iter().enumerate() {
         let exact_match = exact_boundary_matches
             .as_ref()
-            .map_or(true, |matches| matches[adjacent_index]);
+            .is_none_or(|matches| matches[adjacent_index]);
         if exact_match {
             boundary_token_ids.push(token_id);
         } else if bytes
@@ -6840,7 +6839,7 @@ fn partition_token_l2p_map_by_cost(
         current_costs[best_idx] = best_cost;
     }
 
-    buckets.sort_by(|left, right| right.size().cmp(&left.size()));
+    buckets.sort_by_key(|bucket| std::cmp::Reverse(bucket.size()));
 
     let estimated_partition_costs = buckets
         .iter()

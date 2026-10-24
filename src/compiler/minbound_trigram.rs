@@ -101,7 +101,7 @@ fn mb_reachable_nt(grammar:&AnalyzedGrammar,start:u32)->Vec<bool>{
     while let Some(n)=q.pop_front(){
         if n as usize>=seen.len() || std::mem::replace(&mut seen[n as usize],true){continue}
         for &ri in grammar.rules_by_lhs.get(n as usize).into_iter().flatten(){
-            for sym in &grammar.rules[ri as usize].rhs { if let Symbol::Nonterminal(c)=sym { if !seen[*c as usize]{q.push_back(*c);} } }
+            for sym in &grammar.rules[ri as usize].rhs { if let Symbol::Nonterminal(c)=sym && !seen[*c as usize]{q.push_back(*c);} }
         }
     }
     seen

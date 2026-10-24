@@ -66,7 +66,7 @@ fn can_pop_the_bottom_marker_and_continue_from_an_empty_concrete_stack() {
     let (restored, accepting) = mask(&c, &[0, 1]);
     assert!(accepting);
     assert!(has(&restored, 0));
-    let d = Constraint::load(&c.save(), &vocab()).unwrap();
+    let d = Constraint::load(c.save(), &vocab()).unwrap();
     assert_eq!(mask(&d, &[0]), mask(&c, &[0]));
 }
 
@@ -90,7 +90,7 @@ fn epsilon_read_link_is_available_without_a_top_symbol() {
     let c = p.compile_static(&lexer(2), &vocab()).unwrap();
     let (m, _) = mask(&c, &[0]);
     assert!(has(&m, 1));
-    assert!(has(&m, 2) == false);
+    assert!(!has(&m, 2));
     assert!(has(&mask(&c, &[0, 1]).0, 0));
 }
 
@@ -168,11 +168,10 @@ fn apply(t: &StackTemplate, stack: &[u32]) -> BTreeSet<Vec<u32>> {
                     todo.push((next_phase, *target, word.clone()));
                 }
             }
-        } else if phase == 1 {
-            if let Some(Some(target)) = t.read_to_push.get(id as usize) {
+        } else if phase == 1
+            && let Some(Some(target)) = t.read_to_push.get(id as usize) {
                 todo.push((2, *target, word.clone()));
             }
-        }
         if phase == 2 {
             for edge in &state.transitions {
                 let StackLabel::Symbol(symbol) = edge.label else {
@@ -227,12 +226,12 @@ fn random_template(seed: &mut u64) -> StackTemplate {
         };
         g.states = vec![StackState::default(); 4];
         for i in 0..4 {
-            g.states[i].accepting = next(seed) % 5 == 0;
+            g.states[i].accepting = next(seed).is_multiple_of(5);
             if i == 3 {
                 continue;
             }
             for symbol in 0..3u32 {
-                if next(seed) % 3 == 0 {
+                if next(seed).is_multiple_of(3) {
                     let target = i + 1 + (next(seed) as usize % (3 - i));
                     g.states[i].transitions.push(StackTransition {
                         label: StackLabel::Symbol(symbol),
@@ -240,7 +239,7 @@ fn random_template(seed: &mut u64) -> StackTemplate {
                     });
                 }
             }
-            if phase == 0 && next(seed) % 2 == 0 {
+            if phase == 0 && next(seed).is_multiple_of(2) {
                 let target = i + 1 + (next(seed) as usize % (3 - i));
                 g.states[i].transitions.push(StackTransition {
                     label: StackLabel::Default,
@@ -252,7 +251,7 @@ fn random_template(seed: &mut u64) -> StackTemplate {
     for links in [&mut t.pop_to_read, &mut t.pop_to_push, &mut t.read_to_push] {
         *links = (0..4)
             .map(|_| {
-                if next(seed) % 3 == 0 {
+                if next(seed).is_multiple_of(3) {
                     Some((next(seed) % 4) as u32)
                 } else {
                     None
@@ -276,7 +275,7 @@ fn arbitrary_phase_programs_match_an_independent_full_token_mask_oracle() {
             StackTemplate::identity(),
         );
         let c = p.compile_static(&lexer(2), &vocab()).unwrap();
-        let loaded = Constraint::load(&c.save(), &vocab()).unwrap();
+        let loaded = Constraint::load(c.save(), &vocab()).unwrap();
         let external = c.save();
         let external_loaded = Constraint::load(&external, &vocab()).unwrap();
         let mut pending = vec![(Vec::<u32>::new(), BTreeSet::from([vec![0]]))];
@@ -380,9 +379,9 @@ fn overlapping_terminal_lexer_and_ignored_whitespace_match_byte_language() {
         .unwrap()
         .compile_static(&lex, &vocab)
         .unwrap();
-    let loaded = Constraint::load(&fresh.save(), &vocab).unwrap();
+    let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
     let external =
-        Constraint::load(&fresh.save(), &vocab).unwrap();
+        Constraint::load(fresh.save(), &vocab).unwrap();
     let mut prefixes = vec![(Vec::<u32>::new(), Vec::<u8>::new())];
     while let Some((prefix, bytes)) = prefixes.pop() {
         for c in [&fresh, &loaded, &external] {

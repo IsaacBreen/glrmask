@@ -360,17 +360,18 @@ fn build_char_type_regular_rules(structural_boundary_enabled: bool) -> Vec<Regul
     let profile = std::env::var_os("GLRMASK_PROFILE_REGULAR_PARTITION_BUILD").is_some();
     let started = Instant::now();
     let raw = build_char_type_raw_languages(structural_boundary_enabled);
-    let mut rules = Vec::<RegularPartitionRule>::new();
-    rules.push(RegularPartitionRule { target_partition: 8, expression: raw.p8 });
-    rules.push(RegularPartitionRule { target_partition: 7, expression: raw.p7 });
-    rules.push(RegularPartitionRule { target_partition: 1, expression: raw.p1_sign });
-    rules.push(RegularPartitionRule { target_partition: 2, expression: raw.p2 });
-    rules.push(RegularPartitionRule { target_partition: 4, expression: raw.p4 });
-    rules.push(RegularPartitionRule { target_partition: 3, expression: raw.p3 });
-    rules.push(RegularPartitionRule { target_partition: 5, expression: raw.p5 });
-    rules.push(RegularPartitionRule { target_partition: 6, expression: raw.p6 });
-    rules.push(RegularPartitionRule { target_partition: 0, expression: raw.p0 });
-    rules.push(RegularPartitionRule { target_partition: 1, expression: raw.any });
+    let rules = vec![
+        RegularPartitionRule { target_partition: 8, expression: raw.p8 },
+        RegularPartitionRule { target_partition: 7, expression: raw.p7 },
+        RegularPartitionRule { target_partition: 1, expression: raw.p1_sign },
+        RegularPartitionRule { target_partition: 2, expression: raw.p2 },
+        RegularPartitionRule { target_partition: 4, expression: raw.p4 },
+        RegularPartitionRule { target_partition: 3, expression: raw.p3 },
+        RegularPartitionRule { target_partition: 5, expression: raw.p5 },
+        RegularPartitionRule { target_partition: 6, expression: raw.p6 },
+        RegularPartitionRule { target_partition: 0, expression: raw.p0 },
+        RegularPartitionRule { target_partition: 1, expression: raw.any },
+    ];
     if profile {
         eprintln!(
             "[glrmask/profile][regular_partition_rules] spec=char_type_regular rules={} total_ms={:.3}",

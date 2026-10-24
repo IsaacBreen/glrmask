@@ -160,7 +160,7 @@ impl ManyToOneIdMap {
     /// states that had no active-terminal future: they get a class that
     /// contributes no allowed tokens.
     pub fn fill_unmapped_with_new_class(mut self) -> Self {
-        if !self.original_to_internal.iter().any(|&id| id == u32::MAX) {
+        if !self.original_to_internal.contains(&u32::MAX) {
             return self;
         }
         let new_internal = self.internal_to_originals.len() as u32;

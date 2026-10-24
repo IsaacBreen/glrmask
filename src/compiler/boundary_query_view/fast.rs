@@ -71,7 +71,7 @@ pub(super) fn footprint(
     tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &[u32],
 ) -> Option<Footprint> {
     let n = tokenizer.num_states() as usize;
-    if n < 256 || n > 200_000 || tokenizer.has_virtual_residual_runtime()
+    if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime()
         || !scope.require_crossing() || flat.len() != n.checked_mul(256)?
         || scope.initial_states().keep_raw().len() != n
     { return None; }

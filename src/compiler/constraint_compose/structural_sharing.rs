@@ -35,7 +35,7 @@ use crate::grammar::flat::{NonterminalID, Symbol};
 // local-state -> composed-state relation is just post-composed with the LR
 // quotient map.
 //
-// A full proof is kept in docs/subgrammar-structural-sharing-proof.md.  Keep
+// A full proof is kept in docs/design/subgrammar-structural-sharing-proof.md.  Keep
 // the implementation conservative when adding new table metadata: if a field
 // can observe LR-state identity, it must either be transported through the
 // quotient or included as an observation in the refinement.
@@ -1333,7 +1333,7 @@ pub(super) fn quotient_composed_table_structurally(
     let nonterminal_identity = (0..nonterminals_before as u32).collect::<Vec<_>>();
     let state_classes_started_at = compose_profile_enabled().then(Instant::now);
     let state_classes =
-        structural_state_classes(&composed.table, &terminal_classes, &nonterminal_identity);
+        structural_state_classes(&composed.table, terminal_classes, &nonterminal_identity);
     let state_classes_ms = state_classes_started_at.map_or(0.0, |started_at| {
         started_at.elapsed().as_secs_f64() * 1000.0
     });
@@ -1373,9 +1373,7 @@ pub(super) fn quotient_composed_table_structurally(
     let has_advance = old_advance.len() == states_before;
     let mut new_action = Vec::<ActionRow>::with_capacity(state_class_count);
     let mut new_goto = Vec::<GotoRow>::with_capacity(state_class_count);
-    let mut new_advance = has_advance
-        .then(|| Vec::<BitSet>::with_capacity(state_class_count))
-        .unwrap_or_default();
+    let mut new_advance = if has_advance { Vec::<BitSet>::with_capacity(state_class_count) } else { Default::default() };
 
     for class_members in &members {
         let mut action_row = ActionRow::default();

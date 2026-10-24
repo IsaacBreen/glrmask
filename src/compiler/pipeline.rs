@@ -362,10 +362,10 @@ pub(crate) fn compile_thread_count() -> Option<usize> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        return std::thread::available_parallelism()
+        std::thread::available_parallelism()
             .ok()
             .map(|parallelism| parallelism.get().min(DEFAULT_COMPILE_THREAD_CAP))
-            .filter(|&value| value > 1);
+            .filter(|&value| value > 1)
     }
 }
 
@@ -1078,7 +1078,7 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
     }
     if !prefer_general_bounded
         && !giant_terminals.is_empty()
-        && let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions)
+        && let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(expressions)
     {
         if compile_profile_enabled() {
             eprintln!(
@@ -1518,7 +1518,6 @@ fn build_vocab_partition_direct_mask_tokenizer(
         .par_iter()
         .map(|&terminal| {
             prepare_bounded_code_mask_component(&expressions[terminal as usize])
-                .map(|prepared| prepared)
         })
         .collect::<Option<Vec<_>>>();
     let prepare_components_ms = prepare_started.map_or(0.0, elapsed_ms);
@@ -1716,7 +1715,7 @@ fn build_dynamic_tokenizer(
                 singleton_nonliterals,
             );
             let tokenizer = build_exact_partitioned_runtime_tokenizer(
-                &expressions,
+                expressions,
                 Some(&labels),
                 &partition_ids,
                 &residual_isolation_classes,
@@ -3296,8 +3295,8 @@ pub(crate) fn build_vocab_partition_compile_context(
         );
     }
 
-    if structural_pair_preflight_ok && let Some(plan) = plan.as_ref() {
-        if let Some((synthesized, deferred_full, certified)) = select_pair(plan) {
+    if structural_pair_preflight_ok && let Some(plan) = plan.as_ref()
+        && let Some((synthesized, deferred_full, certified)) = select_pair(plan) {
             let direct_token_quotient_compile =
                 env_flag_enabled_by_default("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE");
             if direct_token_quotient_compile {
@@ -3329,7 +3328,6 @@ pub(crate) fn build_vocab_partition_compile_context(
                 false,
             );
         }
-    }
 
     // VocabPartition consumes only the finite one-token observation coordinate.
     // If the certified synthetic route above did not apply, try the specialized
@@ -3963,7 +3961,7 @@ fn build_and_merge_parser_dwa_families(
     let direct_l1_parts = grammar
         .direct_regular_automaton
         .as_ref()
-        .and_then(|_| terminal_dwas.l1.as_ref())
+        .and(terminal_dwas.l1.as_ref())
         .and_then(|family| {
             try_build_immediate_terminal_completion_weights(
                 family.artifact(),
@@ -3984,7 +3982,7 @@ fn build_and_merge_parser_dwa_families(
     let direct_l2p_parts = grammar
         .direct_regular_automaton
         .as_ref()
-        .and_then(|_| terminal_dwas.l2p.as_ref())
+        .and(terminal_dwas.l2p.as_ref())
         .and_then(|family| {
             try_build_direct_regular_parser_top_accept_parts(
                 family.artifact(),
@@ -4005,7 +4003,7 @@ fn build_and_merge_parser_dwa_families(
     let direct_special_parts = grammar
         .direct_regular_automaton
         .as_ref()
-        .and_then(|_| terminal_dwas.special.as_ref())
+        .and(terminal_dwas.special.as_ref())
         .and_then(|family| {
             try_build_direct_regular_parser_top_accept_parts(
                 family.artifact(),
@@ -4054,7 +4052,7 @@ fn build_and_merge_parser_dwa_families(
                         terminal_dwas.l1.as_ref(),
                         table,
                         grammar,
-                        &templates,
+                        templates,
                         vocab,
                         collapse_immediate_acceptance,
                     )
@@ -4069,7 +4067,7 @@ fn build_and_merge_parser_dwa_families(
                         terminal_dwas.l2p.as_ref(),
                         table,
                         grammar,
-                        &templates,
+                        templates,
                         vocab,
                         collapse_immediate_acceptance,
                     )
@@ -4084,7 +4082,7 @@ fn build_and_merge_parser_dwa_families(
                 terminal_dwas.special.as_ref(),
                 table,
                 grammar,
-                &templates,
+                templates,
                 vocab,
                 collapse_immediate_acceptance,
             )
@@ -4485,7 +4483,7 @@ fn launch_parser_dag_if_ready<'scope>(
                 (Some(templates), None, None)
             } else {
                 let parser_dwa_started_at = Instant::now();
-                let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
+                let parser_dwa_started_ms = elapsed_ms(compile_started_at);
                 let early_cache_enabled = env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD");
                 let parser_final_id_map = std::sync::OnceLock::new();
                 let parser_final_coordinate_merge_max_states = crate::env::var(
@@ -4648,7 +4646,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 terminal_coloring_ms: 0.0,
             }
         });
-        let terminal_dwa_started_ms = elapsed_ms(compile_started_at.clone());
+        let terminal_dwa_started_ms = elapsed_ms(compile_started_at);
         let (mut terminal_dwas, mut terminal_phase_profile) =
             crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_families_with_precomputed_global_max_length(
                 &tokenizer.tokenizer,
@@ -4674,7 +4672,7 @@ fn launch_terminal_dag_if_ready<'scope>(
             &special_token_terminals,
         );
         terminal_phase_profile.terminal_dwa_ms += elapsed_ms(special_started_at);
-        let terminal_dwa_finished_ms = elapsed_ms(compile_started_at.clone());
+        let terminal_dwa_finished_ms = elapsed_ms(compile_started_at);
 
         parser_state
             .lock()
@@ -4742,7 +4740,7 @@ fn launch_classify_dag_if_ready<'scope>(
             prepared_grammar.ignore_terminal,
         );
         let shared_classify_cache = SharedClassifyCache::new();
-        let classify_started_ms = elapsed_ms(compile_started_at.clone());
+        let classify_started_ms = elapsed_ms(compile_started_at);
         let classify_started_at = Instant::now();
         if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
             eprintln!(
@@ -4764,7 +4762,7 @@ fn launch_classify_dag_if_ready<'scope>(
                 classify_ms,
             );
         }
-        let classify_finished_ms = elapsed_ms(compile_started_at.clone());
+        let classify_finished_ms = elapsed_ms(compile_started_at);
 
         terminal_state
             .lock()
@@ -4898,8 +4896,8 @@ fn compile_prepared_with_profile_and_table_construction(
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_ref = synthetic_tokenizer_plan.as_ref();
             let partition_local_synthesis_plan_ref = partition_local_synthesis_plan.as_ref();
-            let analysis_started_for_tokenizer = analysis_started_at.clone();
-            let compile_started_for_tokenizer = compile_started_at.clone();
+            let analysis_started_for_tokenizer = analysis_started_at;
+            let compile_started_for_tokenizer = compile_started_at;
             let lexer_adaptive_override = lexer_adaptive_override;
 
             macro_scope_spawn(scope, move |scope| {
@@ -5177,9 +5175,9 @@ fn compile_prepared_with_profile_and_table_construction(
                         && !derive_single_use_terminal_possible_matches;
                 if !eager_possible_matches {
                     let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
-                    let compile_started_for_cpm = compile_started_for_tokenizer.clone();
+                    let compile_started_for_cpm = compile_started_for_tokenizer;
                     macro_scope_spawn(scope, move |_| {
-                        let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
+                        let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm);
                         let result = cpm::compute_constraint_possible_matches_for_vocab(
                             &possible_matches_tokenizer,
                             vocab,
@@ -5205,9 +5203,9 @@ fn compile_prepared_with_profile_and_table_construction(
 
                 let flat_global_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                 let flat_global_initial_state_map = tokenizer_lane.initial_state_map.clone();
-                let compile_started_for_terminal = compile_started_for_tokenizer.clone();
+                let compile_started_for_terminal = compile_started_for_tokenizer;
                 macro_scope_spawn(scope, move |scope| {
-                    let flat_global_started_ms = elapsed_ms(compile_started_for_terminal.clone());
+                    let flat_global_started_ms = elapsed_ms(compile_started_for_terminal);
                     let flat_trans_started_at = Instant::now();
                     if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
                         eprintln!(
@@ -5233,10 +5231,10 @@ fn compile_prepared_with_profile_and_table_construction(
                         let possible_matches_tokenizer = Arc::clone(&flat_global_tokenizer);
                         let possible_matches_flat_trans = Arc::clone(&flat_trans);
                         let possible_matches_transition_cache = Arc::clone(&shared_transition_cache);
-                        let compile_started_for_cpm = compile_started_for_terminal.clone();
+                        let compile_started_for_cpm = compile_started_for_terminal;
                         macro_scope_spawn(scope, move |_| {
                             let possible_matches_started_ms =
-                                elapsed_ms(compile_started_for_cpm.clone());
+                                elapsed_ms(compile_started_for_cpm);
                             let raw_byte_to_class = possible_matches_transition_cache
                                 .get_or_init(|| {
                                     crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::derive_flat_transition_cache(
@@ -5288,7 +5286,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             global_max_length_ms,
                         );
                     }
-                    let flat_global_finished_ms = elapsed_ms(compile_started_for_terminal.clone());
+                    let flat_global_finished_ms = elapsed_ms(compile_started_for_terminal);
                     terminal_state_ref
                         .lock()
                         .expect("terminal DAG join state poisoned")
@@ -5327,7 +5325,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     vocab,
                     dwa_pm_mode,
                     use_terminal_coloring,
-                    compile_started_for_tokenizer.clone(),
+                    compile_started_for_tokenizer,
                 );
                 launch_terminal_dag_if_ready(
                     scope,
@@ -5347,9 +5345,9 @@ fn compile_prepared_with_profile_and_table_construction(
             let compile_dag_result_ref = &compile_dag_result;
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_for_analysis = synthetic_tokenizer_plan.as_ref();
-            let analysis_started_for_analysis = analysis_started_at.clone();
-            let compile_started_for_analysis = compile_started_at.clone();
-            let table_construction = default_table_construction.clone();
+            let analysis_started_for_analysis = analysis_started_at;
+            let compile_started_for_analysis = compile_started_at;
+            let table_construction = default_table_construction;
 
             macro_scope_spawn(scope, move |scope| {
                 let analyze_grammar_started_at = Instant::now();
@@ -5380,8 +5378,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
 
                 let glr_analyzed_grammar = Arc::clone(&analyzed_grammar);
-                let analysis_started_for_glr = analysis_started_for_analysis.clone();
-                let compile_started_for_glr = compile_started_for_analysis.clone();
+                let analysis_started_for_glr = analysis_started_for_analysis;
+                let compile_started_for_glr = compile_started_for_analysis;
                 let table_policy = policy;
                 macro_scope_spawn(scope, move |scope| {
                     let table_started_at = Instant::now();
@@ -5434,7 +5432,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             protected_terminal_ids.sort_unstable();
                             protected_terminal_ids.dedup();
                         }
-                        let compile_started_for_coloring = compile_started_for_glr.clone();
+                        let compile_started_for_coloring = compile_started_for_glr;
                         macro_scope_spawn(scope, move |scope| {
                             let terminal_coloring_started_at = Instant::now();
                             let mut terminal_coloring = compute_terminal_coloring(&coloring_table);
@@ -5466,7 +5464,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     let templates_analyzed_grammar = Arc::clone(&glr_analyzed_grammar);
                     let compile_started_for_templates = compile_started_for_glr;
                     macro_scope_spawn(scope, move |scope| {
-                        let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
+                        let templates_started_ms = elapsed_ms(compile_started_for_templates);
                         let (
                             templates,
                             template_dfas_by_terminal,
@@ -5486,7 +5484,7 @@ fn compile_prepared_with_profile_and_table_construction(
                                 return;
                             }
                         };
-                        let templates_finished_ms = elapsed_ms(compile_started_for_templates.clone());
+                        let templates_finished_ms = elapsed_ms(compile_started_for_templates);
                         parser_state_ref
                             .lock()
                             .expect("parser DAG join state poisoned")
@@ -5540,7 +5538,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     vocab,
                     dwa_pm_mode,
                     use_terminal_coloring,
-                    compile_started_for_analysis.clone(),
+                    compile_started_for_analysis,
                 );
                 launch_terminal_dag_if_ready(
                     scope,
@@ -5645,13 +5643,13 @@ fn compile_prepared_with_profile_and_table_construction(
                     // example, a projected terminal can disappear). Fail
                     // closed by running the ordinary eager computation rather
                     // than leaving an incomplete runtime fallback table.
-                    possible_matches_started_ms = elapsed_ms(compile_started_at.clone());
+                    possible_matches_started_ms = elapsed_ms(compile_started_at);
                     cpm_result = cpm::compute_constraint_possible_matches_for_vocab(
                         tokenizer.as_ref(),
                         vocab,
                         cpm::ConstraintPossibleMatchesConfig::EAGER,
                     );
-                    possible_matches_finished_ms = elapsed_ms(compile_started_at.clone());
+                    possible_matches_finished_ms = elapsed_ms(compile_started_at);
                 }
             }
         }
@@ -5824,8 +5822,8 @@ fn compile_prepared_with_profile_and_table_construction(
             };
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
         };
-        if compile_profile_enabled() || compile_top_profile_enabled() {
-            if let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
+        if (compile_profile_enabled() || compile_top_profile_enabled())
+            && let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
                 let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
                     - possible_matches_started_ms.max(parser_dwa_started_ms);
                 eprintln!(
@@ -5849,7 +5847,6 @@ fn compile_prepared_with_profile_and_table_construction(
                     use_terminal_coloring,
                 );
             }
-        }
 
         let terminal_pm_joint_interned_ranges = if collect_expensive_profile_stats {
             terminal_family_joint_interned_range_count(

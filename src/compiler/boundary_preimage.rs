@@ -173,7 +173,7 @@ mod tests {
     fn original(lex:&DWA,templates:&BTreeMap<u32,NWA>,controls:&[u32],depth:usize,stack:&[u32])->Weight{
         let mut todo=vec![(lex.start_state(),0,stack.to_vec(),Weight::all())];let mut accepted=Weight::empty();
         while let Some((q,d,stack,weight))=todo.pop(){let state=&lex.states()[q as usize];
-            if d==0{if let Some(final_weight)=&state.final_weight{accepted=accepted.union(&weight.intersection(final_weight));}}
+            if d==0&& let Some(final_weight)=&state.final_weight{accepted=accepted.union(&weight.intersection(final_weight));}
             for (t,target,w) in state.transitions.entries(){let support=weight.intersection(w);if support.is_empty(){continue;}
                 for output in run_transfer(&templates[&(t as u32)],&stack){todo.push((target,0,output,support.clone()));}
             }

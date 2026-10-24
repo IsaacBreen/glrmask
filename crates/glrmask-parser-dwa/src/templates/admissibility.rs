@@ -101,7 +101,7 @@ fn topological_order(dfa: &DFA, phase: Phase) -> Result<(Vec<usize>, Option<u32>
     let mut order = Vec::with_capacity(dfa.states.len());
     while let Some(source) = pending.pop_front() {
         order.push(source);
-        for &target in dfa.states[source as usize].transitions.values() {
+        for &target in dfa.states[source].transitions.values() {
             indegree[target as usize] -= 1;
             if indegree[target as usize] == 0 { pending.push_back(target as usize); }
         }
@@ -208,8 +208,8 @@ impl TemplateDomain {
 
         let mut push_good = vec![false; template.push.states.len()];
         for &id in push_order.iter().rev() {
-            let state = &template.push.states[id as usize];
-            push_good[id as usize] = state.is_accepting
+            let state = &template.push.states[id];
+            push_good[id] = state.is_accepting
                 || state.transitions.values().any(|&target| push_good[target as usize]);
         }
         let mut read_without_input = vec![false; template.read.states.len()];
@@ -218,7 +218,7 @@ impl TemplateDomain {
         // for the derived READ certificate set.
         let mut read_labels = vec![Vec::<u32>::new(); template.read.states.len()];
         for &id in read_order.iter().rev() {
-            let i = id as usize;
+            let i = id;
             let state = &template.read.states[i];
             read_without_input[i] = state.is_accepting
                 || linked_productive(&template.read_to_push, i, &push_good);
@@ -243,7 +243,7 @@ impl TemplateDomain {
         // by the fixed topological traversal, never by hash-map iteration.
         let mut row_ids: FxHashMap<(u32, Vec<(u32, u32)>), u32> = FxHashMap::default();
         for &id in pop_order.iter().rev() {
-            let i = id as usize;
+            let i = id;
             let state = &template.pop.states[i];
             let read = template.pop_to_read.get(i).copied().flatten().map(|v| v as usize);
             if state.is_accepting || linked_productive(&template.pop_to_push, i, &push_good)
@@ -527,12 +527,11 @@ impl TemplateDomain {
                 if label>=symbols {return Err("admission literal outside its component".into());}
                 states[q].transitions.insert((offset+label) as i32,vec![(target(next),Weight::all())]);
             }
-            if row.default_target!=REJECT {
-                if let Some(label)=classes.intern_scoped_complement(offset..end,
+            if row.default_target!=REJECT
+                && let Some(label)=classes.intern_scoped_complement(offset..end,
                     edges.iter().map(|&(label,_)|offset+label))? {
                     states[q].transitions.insert(label,vec![(target(row.default_target),Weight::all())]);
                 }
-            }
         }
         let mut graph=NWA::from_parts(states,vec![target(self.start)]);
         if guard_owner && self.start()==DomainProbe::Accept {
@@ -649,11 +648,10 @@ mod tests {
             if state.is_accepting { return true; }
             match phase {
                 0 => {
-                    if let Some(&top) = stack.last() {
-                        if let Some(&target) = state.transitions.get(&(top as i32)).or_else(|| state.transitions.get(&DEFAULT_LABEL)) {
+                    if let Some(&top) = stack.last()
+                        && let Some(&target) = state.transitions.get(&(top as i32)).or_else(|| state.transitions.get(&DEFAULT_LABEL)) {
                             let mut next = stack.clone(); next.pop(); work.push((0, target, next));
                         }
-                    }
                     if let Some(Some(target)) = t.pop_to_read.get(id as usize) { work.push((1, *target, stack.clone())); }
                     if let Some(Some(target)) = t.pop_to_push.get(id as usize) { work.push((2, *target, stack)); }
                 }

@@ -41,3 +41,6 @@ thiserror = "1"
 [[example]]
 name = "l1_reference"
 required-features = ["internal-api"]
+
+[lints]
+workspace = true

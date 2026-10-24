@@ -194,7 +194,7 @@ fn serialize_constraint<S>(constraint: &&Constraint, serializer: S) -> Result<S:
 where
     S: serde::Serializer,
 {
-    ConstraintSerde::serialize(*constraint, serializer)
+    ConstraintSerde::serialize(constraint, serializer)
 }
 
 fn deserialize_constraint<'de, D>(deserializer: D) -> Result<Constraint, D::Error>
@@ -3648,7 +3648,7 @@ fn segmented_runtime_artifact_ref(
     let runtime = RecursiveSegmentedRuntimeArtifactV27Ref {
             components,
             segmented_parser_links,
-            recursive_compiler_table: recursive_compiler_table.as_ref(),
+            recursive_compiler_table,
             recursive_tokenizer_internal_tsids:
                 recursive_tokenizer_internal_tsids.as_slice(),
             segmented_mask_authoritative: overlay.segmented_mask_authoritative,
@@ -4228,7 +4228,7 @@ fn restore_segmented_runtime_v23(
                 }
                 seen_components[component_index] = true;
                 if start_parser_states.len() != global_state_count
-                    && !(allow_empty_component_start_states && start_parser_states.len() == 0)
+                    && !(allow_empty_component_start_states && start_parser_states.is_empty())
                 {
                     return Err(crate::GlrMaskError::Serialization(format!(
                         "boundary shard {index} start-state set has length {} for {global_state_count} outer states",
@@ -4406,7 +4406,7 @@ fn restore_segmented_runtime_v24(
             let Some(shard) = component.boundary.as_mut() else {
                 continue;
             };
-            if shard.start_parser_states.len() != 0 {
+            if !shard.start_parser_states.is_empty() {
                 continue;
             }
             let mut starts = crate::ds::bitset::BitSet::new(global_state_count);
@@ -6650,11 +6650,9 @@ impl Constraint {
                                     // supplied Vocab on load.
                                     self.dynamic_mask_vocab.to_template_external_vocab_artifact()
                                 }).flatten(),
-                                virtual_runtimes: self
+                                virtual_runtimes: if self
                                     .tokenizer
-                                    .has_any_virtual_runtime()
-                                    .then(|| self.tokenizer.virtual_runtime_metadata())
-                                    .unwrap_or_default(),
+                                    .has_any_virtual_runtime() { self.tokenizer.virtual_runtime_metadata() } else { Default::default() },
                                 static_virtual_residual_mask: None,
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
                                 packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
@@ -6730,7 +6728,7 @@ impl Constraint {
             .as_ref()
             .and_then(|packed| packed.backed_fast_wire_bytes());
         let parallel_dwa = backed_packed_dwa
-            .or_else(|| packed_dwa_for_parallel.as_deref())
+            .or(packed_dwa_for_parallel.as_deref())
             .or_else(|| (!dwa.is_empty()).then_some(dwa.as_slice()))
             .or_else(|| self.packed_parser_dwa.is_none().then_some(dwa.as_slice()));
         let dwa_wire_len = parallel_dwa
@@ -8470,12 +8468,11 @@ impl Constraint {
             let token_mask_cache = decoded.token_mask_cache;
             let terminal_exprs = decoded.terminal_exprs;
             let [token_bytes_ms, attach_weights_ms, attach_dwa_ms, invert_ms] = decoded.post_decode_ms;
-            if !deferred {
-                if let Some(cache) = token_mask_cache {
+            if !deferred
+                && let Some(cache) = token_mask_cache {
                     install_token_mask_cache(&mut constraint, cache)
                         .map_err(crate::GlrMaskError::Serialization)?;
                 }
-            }
             let mut virtual_runtimes = Vec::new();
             let mut static_virtual_residual_mask = None;
             let mut template_dynamic_proofs = None;
@@ -8487,8 +8484,8 @@ impl Constraint {
                 virtual_runtimes = runtime.virtual_runtimes;
                 static_virtual_residual_mask = runtime.static_virtual_residual_mask;
                 constraint.terminal_live_states = runtime.terminal_live_states;
-                if !deferred {
-                if let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
+                if !deferred
+                && let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
                     let token_set_count = constraint
                         .packed_parser_dwa
@@ -8503,7 +8500,6 @@ impl Constraint {
                     .map_err(crate::GlrMaskError::Serialization)?;
                     constraint.packed_dwa_token_dense_masks = cache;
                     loaded_packed_dwa_dense_masks = true;
-                }
                 }
                 if let Some(dynamic_mask_vocab) = runtime.dynamic_mask_vocab {
                     constraint.dynamic_mask_vocab = if let Some(vocab) = external_vocab {
@@ -8556,16 +8552,14 @@ impl Constraint {
                         )?;
                     }
                 }
-                if let Some(segmented_runtime) = runtime.segmented_runtime_v24 {
-                    if !deferred {
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v24
+                    && !deferred {
                         restore_segmented_runtime_v24(&mut constraint, segmented_runtime, external_vocab.expect("segmented runtime requires its Vocab"))?;
                     }
-                }
-                if let Some(segmented_runtime) = runtime.segmented_runtime_v27 {
-                    if !deferred {
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v27
+                    && !deferred {
                         restore_segmented_runtime_v27(&mut constraint, segmented_runtime, external_vocab.expect("segmented runtime requires its Vocab"))?;
                     }
-                }
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
             if virtual_runtimes.is_empty() {
@@ -9303,9 +9297,7 @@ mod tests {
         let projection = (0..current.table.num_states).collect::<Vec<_>>();
         let max_internal_token = current
             .internal_token_to_tokens
-            .len()
-            .checked_sub(1)
-            .unwrap_or(0) as u32;
+            .len().saturating_sub(1) as u32;
         let empty_static_b = SegmentedBoundaryParserV23 {
             parser_dwa: crate::automata::weighted_u32::dwa::DWA::new(
                 current.internal_tsid_count() as u32,
@@ -9512,7 +9504,7 @@ mod tests {
     fn constraint_envelope_roundtrips_and_rejects_previous_formats() {
         let constraint = tiny_constraint();
         let saved = constraint.save();
-        assert!(&saved[CONSTRAINT_ARTIFACT_HEADER_LEN..CONSTRAINT_ARTIFACT_HEADER_LEN + CONSTRAINT_MAGIC.len()] == &CONSTRAINT_MAGIC);
+        assert!(saved[CONSTRAINT_ARTIFACT_HEADER_LEN..CONSTRAINT_ARTIFACT_HEADER_LEN + CONSTRAINT_MAGIC.len()] == CONSTRAINT_MAGIC);
         assert!(bincode::deserialize::<DeserializedConstraint>(&saved).is_err());
         let loaded = Constraint::load(&saved, &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -9709,7 +9701,7 @@ mod tests {
         );
         let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
 
-        let loaded = Constraint::load(&envelope(LEGACY_CONSTRAINT_VERSION, &raw), &crate::public_api::constraint_vocab(&constraint))
+        let loaded = Constraint::load(envelope(LEGACY_CONSTRAINT_VERSION, &raw), &crate::public_api::constraint_vocab(&constraint))
             .expect("legacy artifact should remain loadable");
 
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -9726,7 +9718,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(
+        let loaded = Constraint::load(envelope(
             PREVIOUS_COMPRESSED_CONSTRAINT_VERSION,
             &payload,
         ), &crate::public_api::constraint_vocab(&constraint))
@@ -9750,7 +9742,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(PREVIOUS_EXPRLESS_CONSTRAINT_VERSION, &payload), &crate::public_api::constraint_vocab(&constraint))
+        let loaded = Constraint::load(envelope(PREVIOUS_EXPRLESS_CONSTRAINT_VERSION, &payload), &crate::public_api::constraint_vocab(&constraint))
             .expect("v10 exprless artifact should remain loadable");
 
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
@@ -9773,7 +9765,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(
+        let loaded = Constraint::load(envelope(
             PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION,
             &payload,
         ), &crate::public_api::constraint_vocab(&constraint))
@@ -9789,7 +9781,7 @@ mod tests {
     fn current_constraint_artifact_rejects_invalid_parser_state_domain_map() {
         let mut constraint = ignored_constraint();
         constraint.parser_state_domain_labels = vec![0];
-        let error = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap_err().to_string();
+        let error = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap_err().to_string();
         assert!(error.contains("parser-state domain map") || error.contains("domain label"));
     }
 
@@ -9802,7 +9794,7 @@ mod tests {
         if let Some(first) = constraint.parser_state_domain_labels.first_mut() {
             *first = symbol_count as i32;
         }
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert_eq!(
             loaded.parser_state_domain_labels,
             constraint.parser_state_domain_labels,
@@ -9816,7 +9808,7 @@ mod tests {
             "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let expected = constraint.static_dynamic_overlay.as_ref().unwrap();
         let actual = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert_eq!(actual.terminal_offsets, expected.terminal_offsets);
@@ -9980,7 +9972,7 @@ mod tests {
         constraint.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(Arc::from(
             vec![1u32, 3u32].into_boxed_slice(),
         ));
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(matches!(
             loaded.boundary_trigger,
             crate::runtime::BoundaryTrigger::None
@@ -10009,7 +10001,7 @@ mod tests {
                 precision: crate::runtime::SummaryPrecision::RegularUpperBound,
             })
             .unwrap();
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded.boundary_candidate_summary.get().is_none());
         loaded
             .materialize_composition_link_metadata_for_compilation()
@@ -10062,7 +10054,7 @@ mod tests {
         ] {
             let constraint = tiny_constraint();
             constraint.boundary_candidate_summary.set(summary.clone()).unwrap();
-            let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+            let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
             loaded
                 .materialize_composition_link_metadata_for_compilation()
                 .unwrap();
@@ -10112,7 +10104,7 @@ mod tests {
                 precision: crate::runtime::SummaryPrecision::RegularUpperBound,
             })
             .unwrap();
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         loaded
             .materialize_composition_link_metadata_for_compilation()
             .unwrap();
@@ -10147,7 +10139,7 @@ mod tests {
             .iter()
             .any(|row| !row.is_empty()));
         let expected = constraint.composition_reset_tokens_by_terminal.clone();
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded.composition_reset_tokens_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10197,7 +10189,7 @@ mod tests {
             .composition_parser_templates_by_terminal
             .iter()
             .any(Option::is_some));
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded.composition_parser_templates_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10233,7 +10225,7 @@ mod tests {
             .composition_parser_characterizations_by_terminal
             .iter()
             .any(Option::is_some));
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded
             .composition_parser_characterizations_by_terminal
             .is_empty());
@@ -10265,7 +10257,7 @@ mod tests {
             .composition_grammar_summary
             .clone()
             .expect("fresh static constraint should retain composition grammar summary");
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded.composition_grammar_summary.is_none());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10286,7 +10278,7 @@ mod tests {
         assert!(expected_summary.is_some());
         assert!(expected_templates.iter().any(Option::is_some));
 
-        let mut loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let deferred = loaded
             .deferred_composition_metadata_blob
             .as_ref()
@@ -10323,7 +10315,7 @@ mod tests {
     #[test]
     fn current_constraint_artifact_preserves_global_ignore_descriptor() {
         let constraint = ignored_constraint();
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(constraint.ignore_expr.is_some());
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
         assert!(
@@ -10403,7 +10395,7 @@ mod tests {
         let template = constraint.template_dfas_by_terminal[1].as_deref().unwrap();
         let accepted = *template.pop.states[template.pop.start_state as usize].transitions.get(&7).unwrap();
 
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("template artifact should load");
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("template artifact should load");
         let loaded_template = loaded.template_dfas_by_terminal[1]
             .as_deref()
             .expect("serialized template should survive load");

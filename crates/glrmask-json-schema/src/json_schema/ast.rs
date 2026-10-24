@@ -203,11 +203,10 @@ impl Schema {
     fn normalize_locations_relative_to(&mut self, root: &str) {
         if self.location == root {
             self.location = "#".to_string();
-        } else if let Some(suffix) = self.location.strip_prefix(root) {
-            if suffix.starts_with('/') {
+        } else if let Some(suffix) = self.location.strip_prefix(root)
+            && suffix.starts_with('/') {
                 self.location = format!("#{suffix}");
             }
-        }
         let SchemaKind::Assertions(assertions) = &mut self.kind else {
             return;
         };

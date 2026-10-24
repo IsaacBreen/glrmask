@@ -149,11 +149,10 @@ impl PreparedPhaseDag {
                 if let Some(Some(target)) = template.pop_to_push.get(id as usize) {
                     enqueue(&mut incoming, &mut queue, 2, *target, stacks);
                 }
-            } else if phase == 1 {
-                if let Some(Some(target)) = template.read_to_push.get(id as usize) {
+            } else if phase == 1
+                && let Some(Some(target)) = template.read_to_push.get(id as usize) {
                     enqueue(&mut incoming, &mut queue, 2, *target, stacks);
                 }
-            }
         }
         output
     }
@@ -177,16 +176,15 @@ mod tests {
                     if state.is_accepting {complete.push((stack.clone(),acc.clone()));}
                     match phase {
                         Phase::Pop => {
-                            if let Some(top)=stack.last() {
-                                if let Some(&target)=state.transitions.get(&(*top as i32)).or_else(||state.transitions.get(&DEFAULT_LABEL)) {
+                            if let Some(top)=stack.last()
+                                && let Some(&target)=state.transitions.get(&(*top as i32)).or_else(||state.transitions.get(&DEFAULT_LABEL)) {
                                     let mut next=stack.clone();next.pop();pending.push((Phase::Pop,target,next));
                                 }
-                            }
                             if let Some(Some(target))=template.pop_to_read.get(id as usize){pending.push((Phase::Read,*target,stack.clone()));}
                             if let Some(Some(target))=template.pop_to_push.get(id as usize){pending.push((Phase::Push,*target,stack));}
                         }
                         Phase::Read => {
-                            if let Some(top)=stack.last(){if let Some(&target)=state.transitions.get(&(*top as i32)){pending.push((Phase::Read,target,stack.clone()));}}
+                            if let Some(top)=stack.last()&& let Some(&target)=state.transitions.get(&(*top as i32)){pending.push((Phase::Read,target,stack.clone()));}
                             if let Some(Some(target))=template.read_to_push.get(id as usize){pending.push((Phase::Push,*target,stack));}
                         }
                         Phase::Push => {

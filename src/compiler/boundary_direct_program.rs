@@ -30,9 +30,8 @@ pub(super) fn compile(
     let mut instances = Vec::new();
     let mut estimated_states = ports;
     for (q, row) in lexical.states().iter().enumerate() {
-        if let Some(weight) = &row.final_weight {
-            if !weight.is_empty() { finals[q * depths] = Some(weight_id(weight)); }
-        }
+        if let Some(weight) = &row.final_weight
+            && !weight.is_empty() { finals[q * depths] = Some(weight_id(weight)); }
         for (label, target, weight) in row.transitions.entries() {
             if label < 0 || target as usize >= lexical.states().len() { return None; }
             if weight.is_empty() { continue; }

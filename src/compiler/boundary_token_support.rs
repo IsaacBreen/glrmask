@@ -131,7 +131,7 @@ impl FollowMasks {
     fn new(terminals: usize) -> Self {
         let words=terminals.div_ceil(64);
         let mut all=vec![u64::MAX;words];
-        if terminals%64!=0 { *all.last_mut().unwrap()=(1u64<<(terminals%64))-1; }
+        if !terminals.is_multiple_of(64) { *all.last_mut().unwrap()=(1u64<<(terminals%64))-1; }
         let rows=vec![vec![0;words],all];
         let ids=rows.iter().cloned().enumerate().map(|(i,row)|(row,i as u32)).collect();
         Self { rows,ids,joins:FxHashMap::default() }

@@ -1288,14 +1288,10 @@ fn try_find_common_atom_preclasses_impl<S: AsRef<[u8]> + Sync>(
     let active_exprs = active_groups
         .iter()
         .enumerate()
-        .filter_map(|(terminal, &active)| {
-            active.then(|| {
-                tokenizer
+        .filter(|&(terminal, &active)| active).map(|(terminal, &active)| tokenizer
                     .terminal_expr(terminal as u32)
                     .cloned()
-                    .map(|expr| (terminal as u32, expr))
-            })
-        })
+                    .map(|expr| (terminal as u32, expr)))
         .collect::<Option<Vec<_>>>()?;
     let build_started_at = Instant::now();
     let (atom, shapes) = find_common_atom_family(&active_exprs)?;

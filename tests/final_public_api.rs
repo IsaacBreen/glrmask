@@ -55,7 +55,7 @@ fn module_reuse_load_and_closed_link() {
     let mut b = Module::new(&Grammar::from_ebnf(r#"start ::= "b""#).unwrap());
     b.precompile(&v).unwrap();
 
-    for parent in [&host, &Module::load(&host.save()).unwrap()] {
+    for parent in [&host, &Module::load(host.save()).unwrap()] {
         assert!(parent.compile(&v).is_err());
         let mut bound_a = parent.clone();
         bound_a.bind("child", &a).unwrap();
@@ -115,7 +115,7 @@ fn unbound_exact_token_survives_save_load() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_glrm(TOKEN_HOST).unwrap());
     m.precompile(&v).unwrap();
-    let mut loaded = Module::load(&m.save()).unwrap();
+    let mut loaded = Module::load(m.save()).unwrap();
     assert!(loaded.compile(&v).is_err(), "loading must not silently close unresolved token slots");
     loaded.bind("MARK", TokenSet::from(7)).unwrap();
     let c = loaded.compile(&v).unwrap();
@@ -165,7 +165,7 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     assert!(bytes.starts_with(b"GLRASM03"));
 
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&v).unwrap();
-    assert!(Module::load(&constraint.save()).is_err());
+    assert!(Module::load(constraint.save()).is_err());
     for length in [0, 1, 8, 15, 16, bytes.len() - 1] {
         assert!(Module::load(&bytes[..length]).is_err(), "accepted truncation to {length}");
     }
@@ -255,7 +255,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ).unwrap());
     open.precompile(&vocab).unwrap();
-    let mut loaded_open = Module::load(&open.save()).unwrap();
+    let mut loaded_open = Module::load(open.save()).unwrap();
     loaded_open.bind("CONTROL", TokenSet::from(2)).unwrap();
     let constraint = loaded_open.compile(&vocab).unwrap();
 
@@ -276,7 +276,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.is_accepting());
 
     let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
-    assert!(Module::load(&open.save()).is_ok());
+    assert!(Module::load(open.save()).is_ok());
     assert!(Constraint::load(constraint.save(), &missing_domain).is_err());
 }
 

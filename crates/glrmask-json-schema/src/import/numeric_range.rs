@@ -121,7 +121,7 @@ pub fn rx_int_range(left: Option<i64>, right: Option<i64>) -> Result<String> {
             } else {
                 let break_point = 10_i64
                     .checked_pow(num_digits(left) as u32)
-                    .ok_or_else(|| format!("Overflow when calculating break point"))?
+                    .ok_or_else(|| "Overflow when calculating break point".to_string())?
                     - 1;
                 Ok(mk_or(vec![
                     rx_int_range(Some(left), Some(break_point))?,
@@ -175,7 +175,7 @@ fn lexi_0_to_x(x: &str, incl: bool) -> Result<String> {
         if incl {
             Ok("".to_string())
         } else {
-            Err(format!("Inclusive flag must be true for an empty string"))
+            Err("Inclusive flag must be true for an empty string".to_string())
         }
     } else {
         let x0 = x.chars().next().unwrap().to_digit(10).unwrap();
@@ -183,9 +183,7 @@ fn lexi_0_to_x(x: &str, incl: bool) -> Result<String> {
 
         if !incl && x.len() == 1 {
             if x0 == 0 {
-                return Err(format!(
-                    "x0 must be greater than 0 for non-inclusive single character"
-                ));
+                return Err("x0 must be greater than 0 for non-inclusive single character".to_string());
             }
             return Ok(format!("[0-{}][0-9]*", x0 - 1));
         }
@@ -204,15 +202,13 @@ fn lexi_0_to_x(x: &str, incl: bool) -> Result<String> {
 
 fn lexi_range(ld: &str, rd: &str, ld_incl: bool, rd_incl: bool) -> Result<String> {
     if ld.len() != rd.len() {
-        return Err(format!("ld and rd must have the same length"));
+        return Err("ld and rd must have the same length".to_string());
     }
     if ld == rd {
         if ld_incl && rd_incl {
             Ok(ld.to_string())
         } else {
-            Err(format!(
-                "Empty range when ld equals rd and not both inclusive"
-            ))
+            Err("Empty range when ld equals rd and not both inclusive".to_string())
         }
     } else {
         let l0 = ld.chars().next().unwrap().to_digit(10).unwrap();
@@ -495,9 +491,7 @@ pub fn rx_float_range(
                 if left_inclusive && right_inclusive {
                     Ok(exact_float_regex(left))
                 } else {
-                    Err(format!(
-                        "Empty range when left equals right and not both inclusive"
-                    ))
+                    Err("Empty range when left equals right and not both inclusive".to_string())
                 }
             } else if left < 0.0 {
                 if right < 0.0 {
@@ -618,13 +612,12 @@ pub fn rx_noninteger_float_range(
                         parts.push(format!("(-{part})"));
                     }
 
-                    if right > 0.0 || right_inclusive {
-                        if let Some(part) =
+                    if (right > 0.0 || right_inclusive)
+                        && let Some(part) =
                             rx_noninteger_float_range(Some(0.0), Some(right), true, right_inclusive)?
                         {
                             parts.push(part);
                         }
-                    }
                     Ok(mk_or_opt(parts))
                 }
             } else {

@@ -1357,7 +1357,7 @@ fn build_direct_component_state_coordinates_from_constraints(
         }
         local_to_global_tsids.push(local_map);
     }
-    if state_to_global.iter().any(|&tsid| tsid == u32::MAX) {
+    if state_to_global.contains(&u32::MAX) {
         return Err("direct component state map does not cover the merged tokenizer".into());
     }
     Ok(DirectComponentStateCoordinates {
@@ -2717,7 +2717,7 @@ fn finish_walk_shard_publication(
         }
     }
     profile.parser_states = parser_dwa.num_states() as usize;
-    profile.parser_trans = parser_dwa.num_transitions() as usize;
+    profile.parser_trans = parser_dwa.num_transitions();
     Ok((
         PublishedStaticBoundaryShard {
             start_component,
@@ -3132,9 +3132,7 @@ impl PositiveBoundaryParser {
         &mut self,
         id_map: &mut InternalIdMap,
     ) -> Option<Vec<u32>> {
-        if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TSID_QUOTIENT").is_none() {
-            return None;
-        }
+        crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TSID_QUOTIENT")?;
         let Self::Nwa(nwa) = self else {
             return None;
         };
@@ -4817,11 +4815,10 @@ fn visible_boundary_interface_pairs(
                         }
                     }
                 }
-                if prefix_nullable {
-                    if let Some(lhs_precede) = precede.get(rule.lhs as usize) {
+                if prefix_nullable
+                    && let Some(lhs_precede) = precede.get(rule.lhs as usize) {
                         additions.union_with(lhs_precede);
                     }
-                }
                 let target = &mut precede[*nonterminal as usize];
                 let before = target.count_ones();
                 target.union_with(&additions);
@@ -5538,10 +5535,9 @@ fn boundary_candidate_state_ranges_by_token(
         // `(component,start_tsid,end_tsid)` relation is identical.
         let mut candidates_by_internal = BTreeMap::<u32, Vec<u32>>::new();
         for &original in candidate_tokens {
-            if !vocab
+            if vocab
                 .entries_map()
-                .get(&original)
-                .is_some_and(|bytes| bytes.len() >= 2)
+                .get(&original).is_none_or(|bytes| bytes.len() < 2)
             {
                 continue;
             }
@@ -7363,7 +7359,7 @@ fn component_state_coordinate_map(
             global_to_states.push(merged_states);
         }
     }
-    if state_to_global.iter().any(|&tsid| tsid == u32::MAX) {
+    if state_to_global.contains(&u32::MAX) {
         return Err("component TSID map does not cover merged tokenizer".into());
     }
     Ok(ManyToOneIdMap {
@@ -8539,8 +8535,7 @@ fn boundary_discovery_good_signature(
                 .nodes
                 .iter()
                 .enumerate()
-                .filter_map(|(node_id, node)| {
-                    witness.good[node_id].then(|| {
+                .filter(|&(node_id, node)| witness.good[node_id]).map(|(node_id, node)| {
                         let mut outgoing = node
                             .outgoing
                             .iter()
@@ -8551,7 +8546,6 @@ fn boundary_discovery_good_signature(
                         outgoing.dedup();
                         (node.key, witness.accepting[node_id], outgoing)
                     })
-                })
                 .collect::<Vec<_>>();
             rows.sort_unstable();
             (
@@ -13277,11 +13271,9 @@ fn profile_current_boundary_template_delta(
                 eprintln!(
                     "[glrmask/profile][current_boundary_template_removed] terminal={} name={} old_states={} new_states={} witness={:?}",
                     terminal,
-                    composed_templates
+                    if composed_templates
                         .by_terminal
-                        .contains_key(&terminal)
-                        .then(|| terminal.to_string())
-                        .unwrap_or_default(),
+                        .contains_key(&terminal) { terminal.to_string() } else { Default::default() },
                     old.states.len(),
                     new.states.len(),
                     unweighted_dfa_shortest_word(&removed),
@@ -14749,12 +14741,10 @@ fn combine_weighted_shared_parser_roots(
     let mut weight_ops = ScopedWeightOpCache::default();
     let keep_final_lanes =
         crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_DOMAIN_KEEP_FINAL_LANES").is_some();
-    let initial = canonicalize_lanes(roots.iter().filter_map(|(root, weight)| {
-        (!weight.is_empty() && !arena.is_empty_root(*root)).then(|| Lane {
+    let initial = canonicalize_lanes(roots.iter().filter(|&(root, weight)| !weight.is_empty() && !arena.is_empty_root(*root)).map(|(root, weight)| Lane {
             root: *root,
             weight: weight.clone(),
-        })
-    }), &mut weight_ops);
+        }), &mut weight_ops);
     if initial.is_empty() {
         return DWA::new(0, 0);
     }
@@ -15546,9 +15536,7 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
     templates: &Templates,
     terminal_dwa: &DWA,
 ) -> Option<DWA> {
-    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_DWA_DOMAIN_DP").is_none() {
-        return None;
-    }
+    crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_DWA_DOMAIN_DP")?;
     if !terminal_dwa.is_acyclic() {
         if compose_profile_enabled() {
             eprintln!(
@@ -15971,9 +15959,7 @@ fn build_full_boundary_lazy_direct_parser(
     id_map: &InternalIdMap,
     seed_relations: &BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
 ) -> Option<DWA> {
-    if crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER").is_none() {
-        return None;
-    }
+    crate::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER")?;
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct CanonicalKey {
@@ -17483,9 +17469,7 @@ fn build_boundary_repair(
             let selected = active_terminals
                 .iter()
                 .enumerate()
-                .filter_map(|(terminal, &active)| {
-                    active.then(|| format!("{}:{}", terminal, analyzed.terminal_display_name(terminal as u32)))
-                })
+                .filter(|&(terminal, &active)| active).map(|(terminal, &active)| format!("{}:{}", terminal, analyzed.terminal_display_name(terminal as u32)))
                 .collect::<Vec<_>>();
             eprintln!("[glrmask/profile][constraint_boundary_terminal_names] selected={selected:?}");
         }
@@ -18189,8 +18173,8 @@ fn build_boundary_repair(
     } else {
         None
     };
-    if validate_direct_parser {
-        if let Some(candidate) = direct_parser_candidate.as_ref() {
+    if validate_direct_parser
+        && let Some(candidate) = direct_parser_candidate.as_ref() {
             let generic = generic_parser_dwa
                 .as_ref()
                 .expect("direct-parser validation requires generic reference");
@@ -18251,7 +18235,6 @@ fn build_boundary_repair(
                 generic.num_states(),
             );
         }
-    }
     let parser_dwa = if use_direct_parser {
         direct_parser_candidate
             .or_else(|| generic_parser_dwa.take())
@@ -22680,7 +22663,7 @@ fn compose_constraints_owned_parent_legacy_impl(
                     published
                         .iter()
                         .filter_map(|shard| shard.boundary.recursive_parser_dwa.as_ref())
-                        .map(|dwa| dwa.num_transitions() as usize)
+                        .map(|dwa| dwa.num_transitions())
                         .sum::<usize>(),
                 );
             }
@@ -22743,8 +22726,8 @@ fn compose_constraints_owned_parent_legacy_impl(
         // hold a StaticParser shard (or no shard when nothing crosses from
         // it). A requested-static component silently installed as dynamic
         // is a loud error, never a green link.
-        if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
-            if !walk.all_dynamic {
+        if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get()
+            && !walk.all_dynamic {
                 let overlay = result
                     .constraint
                     .static_dynamic_overlay
@@ -22776,7 +22759,6 @@ fn compose_constraints_owned_parent_legacy_impl(
                     }
                 }
             }
-        }
 
         if result.constraint.uses_compact_segmented_parser_runtime() {
             // Derive and cache the authoritative recursive leaf layout before
@@ -22794,8 +22776,8 @@ fn compose_constraints_owned_parent_legacy_impl(
             // decline loudly rather than misrouting queries or silently
             // succeeding as dynamic. This must never fire; if it does, it is
             // LOUD on purpose.
-            if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
-                if !walk.all_dynamic && !walk.published_shards.is_empty() {
+            if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get()
+                && !walk.all_dynamic && !walk.published_shards.is_empty() {
                     let layout = result
                         .constraint
                         .recursive_parser_layout()?
@@ -22833,7 +22815,6 @@ fn compose_constraints_owned_parent_legacy_impl(
                         ));
                     }
                 }
-            }
             let recursive_tokenizer_tsids = build_recursive_tokenizer_internal_tsid_relation(
                 &result.constraint,
                 &automata_maps,
@@ -24110,7 +24091,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
+        let loaded_child = Constraint::load(child.save(), &vocab).unwrap();
         let children = [
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "LEFT"),
@@ -24440,7 +24421,7 @@ table: &child_tables[index],
         let outer = outer_parent
             .compose_linked_children_for_test_flattened(&[("CALL", &middle)], &vocab)
             .unwrap();
-        let loaded_middle = Constraint::load(&middle.save(), &vocab).unwrap();
+        let loaded_middle = Constraint::load(middle.save(), &vocab).unwrap();
         let outer_loaded = Constraint::from_glrm_grammar(
             r#"
                 start document;
@@ -24600,7 +24581,7 @@ table: &child_tables[index],
                     nwa.add_epsilon(left, left_target, full.clone());
                     nwa.add_epsilon(right, right_target, full.clone());
                 }
-                if (left + seed) % 3 == 0 {
+                if (left + seed).is_multiple_of(3) {
                     nwa.set_final_weight(left, full.clone());
                     nwa.set_final_weight(right, full.clone());
                 }
@@ -24660,7 +24641,7 @@ table: &child_tables[index],
                 dwa.add_state();
             }
             for state in 0..4u32 {
-                if next_u32(random) % 3 != 0 {
+                if !next_u32(random).is_multiple_of(3) {
                     let start = (next_u32(random) + salt) % 48;
                     let end = (start + 3 + next_u32(random) % 12).min(63);
                     dwa.set_final_weight(
@@ -24676,17 +24657,17 @@ table: &child_tables[index],
                 }
                 let mut labels = BTreeSet::<i32>::new();
                 for concrete in 0..6u32 {
-                    if next_u32(random) % 3 != 0 {
+                    if !next_u32(random).is_multiple_of(3) {
                         labels.insert(encode_positive_label(concrete));
                     }
                 }
-                if next_u32(random) % 2 == 0 {
+                if next_u32(random).is_multiple_of(2) {
                     labels.insert(encode_negative_label(next_u32(random) % 6));
                 }
-                if next_u32(random) % 2 == 0 {
+                if next_u32(random).is_multiple_of(2) {
                     labels.insert(20 + (next_u32(random) % 3) as i32);
                 }
-                if next_u32(random) % 3 == 0 {
+                if next_u32(random).is_multiple_of(3) {
                     labels.insert(DEFAULT_LABEL);
                 }
                 for label in labels {
@@ -25306,8 +25287,8 @@ table: &child_table,
             .compose_linked_children_for_test_owned(&[("SUB", &child)], &vocab)
             .unwrap();
 
-        let mut loaded_parent = Constraint::load(&parent.save(), &vocab).unwrap();
-        let mut loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
+        let mut loaded_parent = Constraint::load(parent.save(), &vocab).unwrap();
+        let mut loaded_child = Constraint::load(child.save(), &vocab).unwrap();
         loaded_parent.prepare_for_composition_internal(&vocab).unwrap();
         loaded_child.prepare_for_composition_internal(&vocab).unwrap();
         assert!(loaded_parent.packed_parser_dwa.is_some());
@@ -25583,7 +25564,7 @@ table: &child_table,
         let composed = parent
             .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save(), &vocab)
+        let loaded = Constraint::load(composed.save(), &vocab)
             .expect("composed exact-special-token constraint must survive serialization");
 
         assert!(composed
@@ -25725,8 +25706,8 @@ table: &child_table,
         let mut prepared_child = child.clone();
         prepared_parent.ensure_composition_reset_tokens_by_terminal();
         prepared_child.ensure_composition_reset_tokens_by_terminal();
-        let mut prepared_parent = Constraint::load(&prepared_parent.save(), &vocab).unwrap();
-        let mut prepared_child = Constraint::load(&prepared_child.save(), &vocab).unwrap();
+        let mut prepared_parent = Constraint::load(prepared_parent.save(), &vocab).unwrap();
+        let mut prepared_child = Constraint::load(prepared_child.save(), &vocab).unwrap();
         prepared_parent
             .materialize_composition_metadata_for_compilation()
             .unwrap();
@@ -26061,7 +26042,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed_static.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed_static.save(), &vocab).unwrap();
 
         for constraint in [&composed_static, &loaded] {
             assert!(constraint.ignore_terminal.is_none());
@@ -26138,7 +26119,7 @@ table: &child_table,
 
     #[inline(never)]
     fn scoped_oracle_test_reload(source: &Constraint) -> Box<Constraint> {
-        Box::new(Constraint::load(&source.save(), &crate::public_api::constraint_vocab(source)).unwrap())
+        Box::new(Constraint::load(source.save(), &crate::public_api::constraint_vocab(source)).unwrap())
     }
 
     #[inline(never)]
@@ -26458,7 +26439,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
         let make_states = || {
             let mut states = Vec::with_capacity(4);
             states.push(composed.start());
@@ -26641,7 +26622,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
         // Keep the large ConstraintState objects off this test function's
         // stack. Several four-state inline arrays were enough to exceed the
         // default Rust test-thread stack on macOS before the first statement
@@ -27021,7 +27002,7 @@ table: &child_table,
         let composed_dynamic = parent
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
 
         for constraint in [&composed, &loaded] {
             assert!(!constraint.table.is_present());
@@ -27399,7 +27380,7 @@ table: &child_table,
             assert!(expected.is_accepting());
         }
 
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
         let mut loaded_state = loaded.start();
         assert!(loaded_state.commit_token(0));
@@ -27601,7 +27582,7 @@ table: &child_table,
             .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         assert_eq!(composed.embedded_end_token_ids(), vec![END_TOKEN]);
-        let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
+        let loaded = Constraint::load(composed.save(), &vocab).unwrap();
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
 
         for sequence in [vec![3, END_TOKEN, 2], vec![0, 1, END_TOKEN, 2]] {
@@ -27670,7 +27651,7 @@ table: &child_table,
             .compose_linked_children_for_test_dynamic(&[("CHILD", &nullable_child)], &vocab)
             .unwrap();
         assert!(middle.composition_start_nullable().unwrap());
-        let middle = Constraint::load(&middle.save(), &vocab).unwrap();
+        let middle = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
         let outer_parent = Constraint::from_glrm_grammar(
@@ -27885,7 +27866,7 @@ table: &child_table,
             segmented.uses_compact_segmented_parser_runtime(),
             "source-built dynamic composition should use compact parser coordinates",
         );
-        let loaded_segmented = Constraint::load(&segmented.save(), &vocab).unwrap();
+        let loaded_segmented = Constraint::load(segmented.save(), &vocab).unwrap();
         assert!(
             loaded_segmented.uses_compact_segmented_parser_runtime(),
             "v24 dynamic composition should restore compact parser coordinates",
@@ -27990,7 +27971,7 @@ table: &child_table,
                 }
             };
             assert_policy(&hybrid);
-            let loaded = Constraint::load(&hybrid.save(), &vocab).unwrap();
+            let loaded = Constraint::load(hybrid.save(), &vocab).unwrap();
             assert_policy(&loaded);
 
             for constraint in [&hybrid, &loaded] {
@@ -28399,7 +28380,7 @@ table: &child_table,
         )
         .unwrap();
         assert!(child.composition_start_nullable().unwrap());
-        let loaded_child = Constraint::load(&child.save(), &vocab).unwrap();
+        let loaded_child = Constraint::load(child.save(), &vocab).unwrap();
         assert!(loaded_child.composition_start_nullable().unwrap());
 
         // Nullable bound children are outside the signed-transfer static
@@ -28515,7 +28496,7 @@ table: &child_table,
             .clone()
             .compose_linked_children_for_test_dynamic(&[("CALL", &dispatch_dynamic)], &vocab)
             .unwrap();
-        let loaded_dispatch = Constraint::load(&dispatch.save(), &vocab).unwrap();
+        let loaded_dispatch = Constraint::load(dispatch.save(), &vocab).unwrap();
         let composed_from_loaded = outer_parent
             .compose_linked_children_for_test(&[("CALL", &loaded_dispatch)], &vocab)
             .unwrap();
@@ -28672,7 +28653,7 @@ table: &child_table,
             .compose_linked_children_for_test(&[("LEAF", &leaf)], &vocab)
             .unwrap();
         assert!(middle.composition_start_nullable().unwrap());
-        let middle = Constraint::load(&middle.save(), &vocab).unwrap();
+        let middle = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
         let outer_parent = Constraint::from_glrm_grammar(
@@ -32215,7 +32196,7 @@ table: &child_table,
         let composed = parent
             .compose_linked_children_for_test(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save(), &vocab)
+        let loaded = Constraint::load(composed.save(), &vocab)
             .expect("composed constraints must survive serialization");
 
         for sequence in [[0, 1], [2, 3]] {
@@ -33500,12 +33481,11 @@ table: &child_table,
                 .collect::<Vec<_>>();
             nwa.set_start_states(starts);
             for (state, lanes) in domains.iter().enumerate() {
-                if let Some(final_weight) = residual.states()[state].final_weight.as_ref() {
-                    if lanes.contains_key(&SharedBooleanParserDomains::UNIVERSAL) {
+                if let Some(final_weight) = residual.states()[state].final_weight.as_ref()
+                    && lanes.contains_key(&SharedBooleanParserDomains::UNIVERSAL) {
                         let id = lane_id[&(state as u32, SharedBooleanParserDomains::UNIVERSAL)];
                         nwa.set_final_weight(id, final_weight.clone());
                     }
-                }
                 for edge in &edges_by_state[state] {
                     let from = lane_id[&(state as u32, edge.source_root)];
                     let to = lane_id[&(edge.target_state, edge.target_root)];
@@ -33558,7 +33538,7 @@ table: &child_table,
                 eprintln!("MINBOUND filtered_vocab tokens={}", vocab.entries_map().len());
             }
             let load = |name: &str| -> Constraint {
-                Constraint::load(&fs::read(std::path::Path::new(&root).join(name)).unwrap(), &vocab).unwrap()
+                Constraint::load(fs::read(std::path::Path::new(&root).join(name)).unwrap(), &vocab).unwrap()
             };
             let mut core = load("core.bin");
             let dispatch_name = crate::env::var("GLRMASK_MINBOUND_DISPATCH")
@@ -33647,8 +33627,8 @@ table: &dispatch.table,
             let outer_tokenizer_started = Instant::now();
             let (mut merged_tokenizer, tokenizer_offsets) =
                 Tokenizer::disjoint_union_with_terminal_offsets(&tokenizer_inputs);
-            if merged_tokenizer.terminal_exprs().is_none() {
-                if let Some(exprs) = merged_retained_terminal_exprs(
+            if merged_tokenizer.terminal_exprs().is_none()
+                && let Some(exprs) = merged_retained_terminal_exprs(
                     &[&core, &dispatch],
                     &composed_table.terminal_offsets,
                     composed_table.table.num_terminals,
@@ -33657,7 +33637,6 @@ table: &dispatch.table,
                         .restore_terminal_exprs(Some(exprs))
                         .expect("restore merged terminal exprs for minbound oracle");
                 }
-            }
             let outer_tokenizer_ms = outer_tokenizer_started.elapsed().as_secs_f64() * 1000.0;
             eprintln!(
                 "MINBOUND outer_expr_restore merged_exprs={}",
@@ -35343,7 +35322,7 @@ table: &dispatch.table,
         let vocab_path = crate::env::var("GLRMASK_MINBOUND_VOCAB").expect("GLRMASK_MINBOUND_VOCAB");
         let vocab = load_vocab(&vocab_path);
         let load = |name: &str| -> Constraint {
-            Constraint::load(&fs::read(format!("{root}\\{name}")).unwrap(), &vocab).unwrap()
+            Constraint::load(fs::read(format!("{root}\\{name}")).unwrap(), &vocab).unwrap()
         };
         // All terminal DWAs are now captured. The subtraction phase itself does
         // not invoke the terminal compiler at all.
@@ -36458,12 +36437,12 @@ table: &dispatch.table,
             let core_solo_ok = core_solo_state.commit_bytes(core_prefix)
                 && !(core_solo_state.mask().iter().all(|word| *word == 0));
             let core_solo_mask =
-                core_solo_ok.then(|| core_solo_state.mask()).unwrap_or_default();
+                if core_solo_ok { core_solo_state.mask() } else { Default::default() };
             let mut disp_solo_state = dispatch.start();
             let disp_solo_ok = disp_solo_state.commit_bytes(disp_prefix)
                 && !(disp_solo_state.mask().iter().all(|word| *word == 0));
             let disp_solo_mask =
-                disp_solo_ok.then(|| disp_solo_state.mask()).unwrap_or_default();
+                if disp_solo_ok { disp_solo_state.mask() } else { Default::default() };
             let solo_admits = |mask: &[u32], token: u32| -> bool {
                 mask.get((token / 32) as usize)
                     .is_some_and(|word| word & (1 << (token % 32)) != 0)
@@ -37202,8 +37181,8 @@ table: &dispatch.table,
                 ti_cross_outer = tb;
                 // TI determinization anatomy: same inputs through the replica to
                 // expose the determinized (pre-minimize) size.
-                if crate::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true) {
-                    if let Some((dwa_tib2, id_tib2)) = phase1_run_walk_replica(
+                if crate::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true)
+                    && let Some((dwa_tib2, id_tib2)) = phase1_run_walk_replica(
                         "outer_dispatch_ti_b2reuse",
                         &composed.tokenizer,
                         &ti_vocab_dispatch,
@@ -37227,7 +37206,6 @@ table: &dispatch.table,
                             &vocab,
                         );
                     }
-                }
             }
             if let Some(restricted) = oracle_dispatch.as_ref() {
                 phase1_token_diff_report(

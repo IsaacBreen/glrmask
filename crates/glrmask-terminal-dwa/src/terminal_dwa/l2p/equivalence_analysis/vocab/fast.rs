@@ -599,7 +599,7 @@ fn pack_active_groups(active_groups: Option<&[bool]>, default_len: usize) -> (us
     let active_len = active_groups.map_or(default_len, <[bool]>::len);
     let mut words = vec![0u64; active_len.div_ceil(64)];
     for group in 0..active_len {
-        if active_groups.map_or(true, |groups| groups[group]) {
+        if active_groups.is_none_or(|groups| groups[group]) {
             words[group / 64] |= 1u64 << (group % 64);
         }
     }
@@ -1336,7 +1336,7 @@ fn build_dfa_with_group_filter(
     let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
-    for (_state_idx, state) in dfa.states.iter().enumerate() {
+    for state in dfa.states.iter() {
         let filtered_finalizers: SmallVec<[usize; 4]> = if let Some(ag) = active_groups {
             state.finalizers.iter().copied().filter(|&gid| ag.get(gid).copied().unwrap_or(false)).collect()
         } else {
@@ -1462,7 +1462,7 @@ fn ensure_position_slot<T>(slots: &mut Vec<Option<T>>, pos: usize) {
 
 impl Scratch {
     fn new(num_states: usize, num_groups: usize) -> Self {
-        let dirty_words = (num_groups + 63) / 64;
+        let dirty_words = num_groups.div_ceil(64);
         Scratch {
             current_states: vec![0; num_states],
             active_indices: Vec::new(),
@@ -1499,7 +1499,7 @@ impl Scratch {
     /// Reuse the allocation for a later state batch with the same vocabulary
     /// group axis. Token-signature cleanup leaves the active prefix clean.
     fn ensure_capacity(&mut self, num_states: usize, num_groups: usize) {
-        let dirty_words = (num_groups + 63) / 64;
+        let dirty_words = num_groups.div_ceil(64);
         if self.dirty_words != dirty_words || self.single_target_seen.len() != num_groups {
             *self = Self::new(num_states, num_groups);
             return;
@@ -2289,8 +2289,8 @@ fn hash_trie_suffixes_dense_impl(
     }
 
     let mut precomputed_root_pos = None;
-    if let Some(root) = precomputed_root {
-        if root.pos < len {
+    if let Some(root) = precomputed_root
+        && root.pos < len {
             precomputed_root_pos = Some(root.pos);
             if reuse_disallowed_slots {
                 let slot = &mut scratch.dense_dag_disallowed[root.pos];
@@ -2306,7 +2306,6 @@ fn hash_trie_suffixes_dense_impl(
                 end_state: root.end_state,
             });
         }
-    }
 
     for &pos in &scratch.targets {
         if pos >= len {
@@ -2520,7 +2519,7 @@ fn hash_single_target_suffix_dense_impl(
     let mut h = new_hasher();
     h.write_u64(dfa.completion_with_disallowed(
         end_state.unwrap_or(STATE_NONE),
-        Some(&root_disallowed),
+        Some(root_disallowed),
     ));
     for &(gid, _target) in &edges {
         if root_disallowed.contains(gid) {
@@ -5398,7 +5397,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         && first_transition_factor_final_single_batch_enabled()
         && analysis_token_count.saturating_mul(num_authority_states)
             <= vocab_sequential_trie_work_max();
-    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
+    let batch_size = vocab_batch_size_override().unwrap_or({
         if factor_final_single_batch {
             num_authority_states
         } else {
@@ -5482,7 +5481,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                 trie_walk_chunk_signatures(
                     dfa_ref,
                     strings,
-                    &sorted_indices,
+                    sorted_indices,
                     batch,
                     state_group_size,
                     &mut scratch,
@@ -6119,7 +6118,7 @@ mod shared_base_tests {
         // are exactly equal. States 0 and 1 also share their first successor.
         for state in 0..state_count {
             let target = match state {
-                0 | 1 | 2 | 3 => Some(2),
+                0..=3 => Some(2),
                 4 => Some(4),
                 5 => Some(5),
                 _ => None,
@@ -6131,7 +6130,7 @@ mod shared_base_tests {
         }
         for state in 0..=5 {
             let target = match state {
-                0 | 1 | 2 | 3 => 3,
+                0..=3 => 3,
                 4 => 4,
                 5 => 5,
                 _ => unreachable!(),
@@ -6510,9 +6509,9 @@ mod shared_base_tests {
             let group_count = 1 + (next(&mut random) as usize % 4);
             let mut transitions = vec![u32::MAX; state_count * 256];
             for state in 0..state_count {
-                for &byte in &[b'a', b'b', b'p', b'q', b'x', b'y'] {
+                for &byte in b"abpqxy" {
                     let draw = next(&mut random);
-                    if draw % 5 != 0 {
+                    if !draw.is_multiple_of(5) {
                         transitions[state * 256 + byte as usize] =
                             (draw as usize % state_count) as u32;
                     }
@@ -6524,10 +6523,10 @@ mod shared_base_tests {
             let states = (0..state_count)
                 .map(|_| {
                     let mut finalizers = (0..group_count)
-                        .filter(|_| next(&mut random) % 4 == 0)
+                        .filter(|_| next(&mut random).is_multiple_of(4))
                         .collect::<Vec<_>>();
                     let mut future = (0..group_count)
-                        .filter(|_| next(&mut random) % 3 != 0)
+                        .filter(|_| !next(&mut random).is_multiple_of(3))
                         .collect::<Vec<_>>();
                     finalizers.sort_unstable();
                     future.sort_unstable();
@@ -6567,7 +6566,7 @@ mod shared_base_tests {
             for gid in 0..group_count {
                 let mut row = BitSet::new(group_count);
                 for blocked in 0..group_count {
-                    if next(&mut random) % 4 == 0 {
+                    if next(&mut random).is_multiple_of(4) {
                         row.set(blocked);
                     }
                 }
@@ -7037,7 +7036,7 @@ mod shared_base_tests {
         let view = TokenizerView {
             flat_dfa: sample_dfa(),
         };
-        assert!(view.dfa().transitions.iter().any(|&target| target == u32::MAX));
+        assert!(view.dfa().transitions.contains(&u32::MAX));
 
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
         let disallowed = BTreeMap::<u32, BitSet>::new();

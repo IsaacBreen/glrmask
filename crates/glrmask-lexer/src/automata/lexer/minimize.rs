@@ -108,7 +108,7 @@ fn acyclic_single_group_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> 
             let other = &dfa.states()[representative as usize];
             // The immutable representative graph IS the exact signature. The
             // hash is never a certificate, even when every hash collides.
-            if accepting == !other.finalizers.is_empty()
+            if accepting != other.finalizers.is_empty()
                 && transitions.len() == other.transitions.len()
                 && transitions.iter().zip(other.transitions.iter()).all(
                     |((byte, &target), (other_byte, &other_target))| {
@@ -871,9 +871,9 @@ fn can_reach_accepting_from_inverse(dfa: &DFA, inverse: &InverseTransitions) -> 
     let n = dfa.states().len();
     let mut can_reach_accepting = vec![false; n];
     let mut queue = VecDeque::new();
-    for state in 0..n {
+    for (state, can_reach) in can_reach_accepting.iter_mut().enumerate() {
         if !dfa.finalizers(state as u32).is_empty() {
-            can_reach_accepting[state] = true;
+            *can_reach = true;
             queue.push_back(state as u32);
         }
     }
@@ -1177,8 +1177,8 @@ impl DFA {
         let mut state_mapping = vec![u32::MAX; n];
         if reachable.iter().all(|&is_reachable| is_reachable) {
             // All reachable — identity mapping.
-            for i in 0..n {
-                state_mapping[i] = i as u32;
+            for (i, mapping) in state_mapping.iter_mut().enumerate() {
+                *mapping = i as u32;
             }
             return state_mapping;
         }
@@ -1249,9 +1249,9 @@ impl DFA {
 
         let mut can_reach_accepting = vec![false; n];
         let mut queue = VecDeque::new();
-        for state in 0..n {
+        for (state, can_reach) in can_reach_accepting.iter_mut().enumerate() {
             if !self.finalizers(state as u32).is_empty() {
-                can_reach_accepting[state] = true;
+                *can_reach = true;
                 queue.push_back(state as u32);
             }
         }
@@ -1391,8 +1391,8 @@ impl DFA {
         }
 
         // Assign futures to states
-        for state_idx in 0..n {
-            let sid = scc_id[state_idx] as usize;
+        for (state_idx, &state_scc) in scc_id.iter().enumerate().take(n) {
+            let sid = state_scc as usize;
             self.set_possible_future_group_ids(state_idx as u32, scc_futures[sid].clone());
         }
     }
@@ -1507,7 +1507,7 @@ impl DFA {
         partition_blocks.retain(|block| !block.is_empty());
         if let Some(start_part_idx) = partition_blocks
             .iter()
-            .position(|block| block.iter().any(|&state| state == 0))
+            .position(|block| block.contains(&0))
         {
             partition_blocks.swap(0, start_part_idx);
         }
@@ -1575,7 +1575,7 @@ impl DFA {
         // Ensure the block containing start state (0) is first.
         if let Some(start_part_idx) = partition_blocks
             .iter()
-            .position(|block| block.iter().any(|&state| state == 0))
+            .position(|block| block.contains(&0))
         {
             partition_blocks.swap(0, start_part_idx);
         }
@@ -1590,7 +1590,7 @@ impl DFA {
         let mut result = DFA::new(0);
         result.ensure_group_capacity(num_groups);
         for gid in 0..num_groups {
-            result.set_group_u8set(gid as u32, self.group_id_to_u8set(gid as u32).clone());
+            result.set_group_u8set(gid as u32, *self.group_id_to_u8set(gid as u32));
         }
 
         for block in &partition_blocks {
@@ -1619,7 +1619,7 @@ impl DFA {
 
 }
 
-fn canonicalize_partition_blocks(blocks: &mut Vec<Vec<u32>>) {
+fn canonicalize_partition_blocks(blocks: &mut [Vec<u32>]) {
     for block in blocks.iter_mut() {
         block.sort_unstable();
     }
@@ -1699,7 +1699,7 @@ mod tests {
     fn acyclic_preserve_matches_original_on_shuffled_generated_dags() {
         use rand::{Rng, SeedableRng};
         use rand::seq::SliceRandom;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x109174_da6);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x0001_0917_4da6);
         for _case in 0..256 {
             let n = rng.gen_range(2..85);
             let mut order = (0..n as u32).collect::<Vec<_>>();

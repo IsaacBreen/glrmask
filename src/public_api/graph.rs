@@ -34,7 +34,7 @@ fn key<T:InstanceNode>(node:&T)->usize { node.identity() }
 pub(super) fn source_identity(node:&Grammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 pub(super) fn prepared_identity(node:&PreparedGrammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 fn limit(message: &str) -> Error {
-    Error::Compilation(format!("{message}"))
+    Error::Compilation(message.to_string())
 }
 fn prepend(prefix: &str, child: &Requirement) -> Requirement {
     let mut path = prefix.split("::").map(str::to_owned).collect::<Vec<_>>();

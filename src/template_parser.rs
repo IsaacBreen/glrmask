@@ -313,9 +313,8 @@ impl ParserProgram {
     pub fn compile_with(&self, lexer: &LexerDefinition, vocab: &Vocab,
         options: TemplateBuildOptions) -> Result<Constraint> {
         if lexer.terminals.len() != self.templates.len() { return Err(fail("lexer and parser terminal counts must agree exactly")); }
-        if let Some(ignore) = lexer.ignore_terminal {
-            if !self.identity_terminals.contains(&ignore) { return Err(fail("ignored terminal must exist and use StackTemplate::identity()")); }
-        }
+        if let Some(ignore) = lexer.ignore_terminal
+            && !self.identity_terminals.contains(&ignore) { return Err(fail("ignored terminal must exist and use StackTemplate::identity()")); }
         let mut expressions = Vec::with_capacity(lexer.terminals.len());
         for (i, pattern) in lexer.terminals.iter().enumerate() {
             let expr = match pattern {

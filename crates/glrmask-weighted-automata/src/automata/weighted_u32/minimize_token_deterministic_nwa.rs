@@ -166,11 +166,10 @@ fn push_weights(nwa: &mut NWA, topo: &[usize]) -> (Vec<Weight>, PushProfile) {
         let mut parts = Vec::with_capacity(
             state.transitions.values().map(Vec::len).sum::<usize>() + usize::from(state.final_weight.is_some()),
         );
-        if let Some(final_weight) = &state.final_weight {
-            if !final_weight.is_empty() {
+        if let Some(final_weight) = &state.final_weight
+            && !final_weight.is_empty() {
                 parts.push(final_weight.clone());
             }
-        }
         for branches in state.transitions.values_mut() {
             for (target, weight) in branches.iter_mut() {
                 let pushed = cached_intersection(
@@ -398,11 +397,10 @@ pub fn eliminate_acyclic_epsilons(nwa: &NWA) -> Result<NWA, GlrMaskError> {
     for &state_id in topo.iter().rev() {
         let source = &nwa.states()[state_id];
         let mut final_parts = SmallVec::<[Weight; 4]>::new();
-        if let Some(final_weight) = &source.final_weight {
-            if !final_weight.is_empty() {
+        if let Some(final_weight) = &source.final_weight
+            && !final_weight.is_empty() {
                 final_parts.push(final_weight.clone());
             }
-        }
         let mut branch_parts =
             BTreeMap::<(Label, u32), SmallVec<[Weight; 2]>>::new();
         for (&label, branches) in &source.transitions {
@@ -655,76 +653,6 @@ pub fn minimize_token_deterministic_nwa_owned(mut nwa: NWA) -> Result<NWA, GlrMa
     Ok(output)
 }
 
-#[cfg(test)]
-mod tests {
-    use range_set_blaze::RangeSetBlaze;
-
-    use super::*;
-    use crate::weighted_u32::determinize::determinize;
-    use crate::weighted_u32::equivalence::find_difference;
-
-    fn tokens(values: &[u32]) -> Weight {
-        Weight::from_per_tsid_token_sets(std::iter::once((
-            0,
-            RangeSetBlaze::from_iter(values.iter().copied().map(|value| value..=value)),
-        )))
-    }
-
-    #[test]
-    fn acyclic_epsilon_elimination_preserves_weighted_language() {
-        let mut nwa = NWA::new(0, 0);
-        let start = nwa.add_state();
-        let mid = nwa.add_state();
-        let tail = nwa.add_state();
-        let direct = nwa.add_state();
-        nwa.set_start_states(vec![start]);
-
-        // Token 1 reaches label 7 through an epsilon prefix. Token 2 uses a
-        // direct labelled branch. The epsilon branch itself has a wider domain
-        // than the labelled suffix so composition must intersect the weights.
-        nwa.add_epsilon(start, mid, tokens(&[0, 1]));
-        nwa.add_transition(mid, 7, tail, tokens(&[1, 3]));
-        nwa.set_final_weight(tail, tokens(&[1, 3]));
-        nwa.add_transition(start, 7, direct, tokens(&[2]));
-        nwa.set_final_weight(direct, tokens(&[2]));
-
-        // Add a second epsilon path to the same labelled residual so epsilon
-        // path weights must union before/while materializing the transition.
-        let alt = nwa.add_state();
-        nwa.add_epsilon(start, alt, tokens(&[3]));
-        nwa.add_transition(alt, 7, tail, tokens(&[3]));
-
-        let reference = determinize(&nwa).unwrap();
-        let eliminated = eliminate_acyclic_epsilons(&nwa).unwrap();
-        assert!(eliminated
-            .states()
-            .iter()
-            .all(|state| state.epsilons.is_empty()));
-        let candidate = determinize(&eliminated).unwrap();
-        assert_eq!(find_difference(&reference, &candidate).unwrap(), None);
-    }
-
-    #[test]
-    fn merges_equal_token_deterministic_leaves_exactly() {
-        let mut nwa = NWA::new(0, 0);
-        let start = nwa.add_state();
-        let left = nwa.add_state();
-        let right = nwa.add_state();
-        nwa.set_start_states(vec![start]);
-        nwa.add_transition(start, 7, left, tokens(&[0]));
-        nwa.add_transition(start, 7, right, tokens(&[1]));
-        nwa.set_final_weight(left, tokens(&[0]));
-        nwa.set_final_weight(right, tokens(&[1]));
-
-        let original = determinize(&nwa).unwrap();
-        let minimized = minimize_token_deterministic_nwa_owned(nwa).unwrap();
-        let minimized_determinized = determinize(&minimized).unwrap();
-
-        assert_eq!(minimized.num_states(), 2);
-        assert_eq!(find_difference(&original, &minimized_determinized).unwrap(), None);
-    }
-}
-
 /// Exact quotient for a token-deterministic NWA whose state weights are
 /// confined to pairwise-disjoint source token domains.
 ///
@@ -818,11 +746,10 @@ pub fn quotient_disjoint_source_nwa_owned(
             let new_state = old_to_new[members[0]];
             if members.len() == 1 {
                 let state = &nwa.states()[members[0]];
-                if let Some(final_weight) = &state.final_weight {
-                    if !final_weight.is_empty() {
+                if let Some(final_weight) = &state.final_weight
+                    && !final_weight.is_empty() {
                         output.set_final_weight(new_state, final_weight.clone());
                     }
-                }
                 for (&label, source_branches) in &state.transitions {
                     branch_part_count += source_branches.len();
                     if source_branches.len() == 1 {
@@ -961,4 +888,74 @@ pub fn quotient_disjoint_source_nwa_owned(
         );
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use range_set_blaze::RangeSetBlaze;
+
+    use super::*;
+    use crate::weighted_u32::determinize::determinize;
+    use crate::weighted_u32::equivalence::find_difference;
+
+    fn tokens(values: &[u32]) -> Weight {
+        Weight::from_per_tsid_token_sets(std::iter::once((
+            0,
+            RangeSetBlaze::from_iter(values.iter().copied().map(|value| value..=value)),
+        )))
+    }
+
+    #[test]
+    fn acyclic_epsilon_elimination_preserves_weighted_language() {
+        let mut nwa = NWA::new(0, 0);
+        let start = nwa.add_state();
+        let mid = nwa.add_state();
+        let tail = nwa.add_state();
+        let direct = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        // Token 1 reaches label 7 through an epsilon prefix. Token 2 uses a
+        // direct labelled branch. The epsilon branch itself has a wider domain
+        // than the labelled suffix so composition must intersect the weights.
+        nwa.add_epsilon(start, mid, tokens(&[0, 1]));
+        nwa.add_transition(mid, 7, tail, tokens(&[1, 3]));
+        nwa.set_final_weight(tail, tokens(&[1, 3]));
+        nwa.add_transition(start, 7, direct, tokens(&[2]));
+        nwa.set_final_weight(direct, tokens(&[2]));
+
+        // Add a second epsilon path to the same labelled residual so epsilon
+        // path weights must union before/while materializing the transition.
+        let alt = nwa.add_state();
+        nwa.add_epsilon(start, alt, tokens(&[3]));
+        nwa.add_transition(alt, 7, tail, tokens(&[3]));
+
+        let reference = determinize(&nwa).unwrap();
+        let eliminated = eliminate_acyclic_epsilons(&nwa).unwrap();
+        assert!(eliminated
+            .states()
+            .iter()
+            .all(|state| state.epsilons.is_empty()));
+        let candidate = determinize(&eliminated).unwrap();
+        assert_eq!(find_difference(&reference, &candidate).unwrap(), None);
+    }
+
+    #[test]
+    fn merges_equal_token_deterministic_leaves_exactly() {
+        let mut nwa = NWA::new(0, 0);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, left, tokens(&[0]));
+        nwa.add_transition(start, 7, right, tokens(&[1]));
+        nwa.set_final_weight(left, tokens(&[0]));
+        nwa.set_final_weight(right, tokens(&[1]));
+
+        let original = determinize(&nwa).unwrap();
+        let minimized = minimize_token_deterministic_nwa_owned(nwa).unwrap();
+        let minimized_determinized = determinize(&minimized).unwrap();
+
+        assert_eq!(minimized.num_states(), 2);
+        assert_eq!(find_difference(&original, &minimized_determinized).unwrap(), None);
+    }
 }

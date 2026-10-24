@@ -410,8 +410,8 @@ fn build_boundary_terminal_dwa_query(
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
-    if identity && query_view && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_BORROWED_QUERY"){
-        if let Some(candidate)=build_boundary_terminal_dwa_borrowed_query(inputs){
+    if identity && query_view && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_BORROWED_QUERY")
+        && let Some(candidate)=build_boundary_terminal_dwa_borrowed_query(inputs){
             if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BORROWED_QUERY").is_some(){
                 let reference=build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)?;
                 assert_eq!(candidate.dwa.start_state(),reference.dwa.start_state());assert_eq!(candidate.dwa.states(),reference.dwa.states());
@@ -422,7 +422,6 @@ fn build_boundary_terminal_dwa_query(
             }
             return Some(candidate);
         }
-    }
     build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)
 }
 
@@ -498,7 +497,7 @@ fn build_boundary_terminal_dwa_query_jobs(
         let support=terminal_support.then(||super::boundary_query_terminals::query_support(
             inputs.merged_tokenizer,inputs.vocab,inputs.scope.initial_states().keep_raw(),
         )).flatten().map(|(mut keep,work)|{
-            if let Some(t)=inputs.ignore_terminal{if let Some(k)=keep.get_mut(t as usize){*k=true;}}
+            if let Some(t)=inputs.ignore_terminal&& let Some(k)=keep.get_mut(t as usize){*k=true;}
             if let Some(ts)=inputs.scope.follow_transparent(){for t in ts.iter(){if let Some(k)=keep.get_mut(t){*k=true;}}}
             if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_terminals] component={} tokens={} terminals={} kept={} work={} ms={:.3}",
                 inputs.scope.start_component().0,inputs.vocab.len(),keep.len(),keep.iter().filter(|&&x|x).count(),work,began.elapsed().as_secs_f64()*1000.0);}
@@ -716,14 +715,12 @@ fn proves_fresh_dead_class(dwa: &DWA, dead_class: u32, use_root_bound: bool) -> 
     let below = |weight: &crate::ds::weight::Weight| {
         !weight.is_full() && weight.range_entries().all(|(_, hi, _)| hi < dead_class)
     };
-    if use_root_bound {
-        if let Some(root) = dwa.states().get(dwa.start_state() as usize) {
-            if root.final_weight.as_ref().is_none_or(&below)
+    if use_root_bound
+        && let Some(root) = dwa.states().get(dwa.start_state() as usize)
+            && root.final_weight.as_ref().is_none_or(&below)
                 && root.transitions.values().all(|(_, weight)| below(weight)) {
                 return true;
             }
-        }
-    }
     let support = crate::compiler::constraint_compose::accepted_weight_support(dwa);
     below(&support)
 }
@@ -1317,13 +1314,12 @@ where
                         &ownership,plan.crossing_owner,inputs.disallowed_follows,
                         inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,support_transitions.as_ref(),
                     );
-                    if let Some(candidate)=prepared.as_ref(){
-                        if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
+                    if let Some(candidate)=prepared.as_ref()
+                        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
                             let reference=ordinary().expect("ordinary necessary-cut reference must finish");
                             assert_eq!(candidate.tokens,reference.tokens,"prepared cut changed original token IDs");
                             eprintln!("[glrmask/validate][boundary_prepared_cut] component={} exact_ids=true",plan.start_component);
                         }
-                    }
                     prepared.or_else(ordinary)
                 }).flatten();
             let used_cut = cut.is_some();
@@ -2533,8 +2529,8 @@ pub(crate) fn build_walk_static_boundary_link(
         .chain(children.iter().map(|child| child.constraint))
         .all(|component| component.ignore_terminal.is_none()
             && component.table.skip_terminals.is_empty());
-    if (!global_ignores || no_ignores) && !retain_parent_non_crossing_paths {
-        if let Some(existing) = candidate_tokens_by_component[0].as_mut() {
+    if (!global_ignores || no_ignores) && !retain_parent_non_crossing_paths
+        && let Some(existing) = candidate_tokens_by_component[0].as_mut() {
             let entered = children.iter().map(|child| child.constraint).collect::<Vec<_>>();
             let calls = children.iter().flat_map(|child| {
                 std::iter::once(child.placeholder_terminal)
@@ -2554,7 +2550,6 @@ pub(crate) fn build_walk_static_boundary_link(
                 }
             }
         }
-    }
     let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
     let scoped_adjacent = if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY")
         && !global_ignores
@@ -3279,7 +3274,7 @@ fn build_walk_static_boundary_link_nested(
         expansion.num_terminals,
         global_ignores,
         unbound.into_iter().collect(),
-    )?.with_component_template_sources(&leaves)?;
+    )?.with_component_template_sources(leaves)?;
     let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
     let post_context_setup_started = Instant::now();
 
@@ -3337,15 +3332,14 @@ fn build_walk_static_boundary_link_nested(
             "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
         );
     }
-    if merged.terminal_exprs().is_none() {
-        if let Some(exprs) = merged_retained_terminal_exprs(
+    if merged.terminal_exprs().is_none()
+        && let Some(exprs) = merged_retained_terminal_exprs(
             leaves,
             &expansion.leaf_terminal_offsets,
             expansion.num_terminals,
         ) {
             merged.restore_terminal_exprs(Some(exprs))?;
         }
-    }
     let ignores =
         merged_leaf_ignore_terminals(leaves, &expansion.leaf_terminal_offsets, global_ignores);
     let tokenizer_merge_ms = tokenizer_merge_started.elapsed().as_secs_f64() * 1000.0;
@@ -4293,12 +4287,12 @@ mod tests {
             "selected10 expects the CFA Llama-3.1 vocabulary",
         );
         let mut core =
-            Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
+            Constraint::load(std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
                 .expect("load core");
         let dispatch_name = crate::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
-            Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
+            Constraint::load(std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
                 .expect("load dispatch");
         restore_component(&mut core, "core");
         restore_component(&mut dispatch, "dispatch");
@@ -4399,7 +4393,7 @@ mod tests {
 
     fn selected10_module(tools: usize, _vocab: &Vocab) -> crate::Result<crate::Module> {
         let mut dispatch =
-            crate::Module::new(&crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?);
+            crate::Module::new(&crate::Grammar::from_glrm(selected10_dispatcher_source(tools))?);
         for (index, (_, file)) in SELECTED10_TOOLS.iter().take(tools).enumerate() {
             dispatch.bind(
                 &format!("TOOL_ARGS_SLOT_{index}"),
@@ -4420,7 +4414,7 @@ mod tests {
             })
             .collect::<crate::Result<Vec<_>>>()?;
         let mut dispatch =
-            crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?.prepare(vocab)?;
+            crate::Grammar::from_glrm(selected10_dispatcher_source(tools))?.prepare(vocab)?;
         for (index, leaf) in leaves.iter().enumerate() {
             dispatch = dispatch.bind_snapshot(format!("TOOL_ARGS_SLOT_{index}"), leaf)?;
         }
@@ -5477,18 +5471,18 @@ mod tests {
         let mut schemas = Vec::with_capacity(10);
         for name in &schema_paths {
             let mut schema =
-                Constraint::load(&std::fs::read(root.join(name)).expect("read schema"), &vocab)
+                Constraint::load(std::fs::read(root.join(name)).expect("read schema"), &vocab)
                     .expect("load schema");
             restore_component(&mut schema, name);
             schemas.push(schema);
         }
         let mut core =
-            Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
+            Constraint::load(std::fs::read(root.join("core.bin")).expect("read core.bin"), &vocab)
                 .expect("load core");
         let dispatch_name = crate::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
-            Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
+            Constraint::load(std::fs::read(root.join(&dispatch_name)).expect("read dispatch"), &vocab)
                 .expect("load dispatch");
         restore_component(&mut core, "core");
         restore_component(&mut dispatch, "dispatch");
@@ -6125,7 +6119,7 @@ mod tests {
         let inline = Constraint::from_glrm_grammar(r#"
             start document; nt document ::= "L" "a"? "x";
         "#, &vocab).unwrap();
-        let reloaded = Constraint::load(&static_link.save(), &vocab).unwrap();
+        let reloaded = Constraint::load(static_link.save(), &vocab).unwrap();
         let mut prefixes = vec![Vec::<u32>::new()];
         while let Some(prefix) = prefixes.pop() {
             let mut expected = inline.start();
@@ -6270,10 +6264,7 @@ mod tests {
         install_published_static_boundary_shards(
             installed.static_dynamic_overlay.as_mut().expect("overlay"),
             link_output
-                .published_shards
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+                .published_shards.to_vec(),
         )
         .expect("install");
         // No DynamicDirect backend anywhere in the installed overlay.

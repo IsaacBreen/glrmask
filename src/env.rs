@@ -44,11 +44,10 @@ fn resolve(
     snapshot: &HashMap<OsString, OsString>,
     overrides: Option<&HashMap<OsString, Option<OsString>>>,
 ) -> Option<OsString> {
-    if let Some(overrides) = overrides {
-        if let Some(value) = overrides.get(key) {
+    if let Some(overrides) = overrides
+        && let Some(value) = overrides.get(key) {
             return value.clone();
         }
-    }
     snapshot.get(key).cloned()
 }
 

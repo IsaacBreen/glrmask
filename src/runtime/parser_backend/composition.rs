@@ -158,6 +158,113 @@ impl ParserActionProvider for TemplateCompositionProvider<'_> {
     }
 }
 
+fn compile_table_relations(table: &GLRTable) -> crate::Result<TemplateDfasByTerminal> {
+    use glrmask_parser_dwa::__private::templates::characterize::try_characterize_selected_terminals_for_terminal_count;
+    use glrmask_parser_dwa::__private::templates::compile_dfa::{Templates,
+        specialize_template_dfa_defaults_for_commit_split_input, try_split_commit_template_dfas};
+    let characterizations = try_characterize_selected_terminals_for_terminal_count(
+        table, table.num_terminals, &vec![true; table.num_terminals as usize])
+        .map_err(|error| crate::Error::Compilation(error.to_string()))?;
+    let mut programs = vec![None; table.num_terminals as usize];
+    for (terminal, raw) in Templates::try_from_characterizations(&characterizations)
+        .map_err(crate::Error::Compilation)?.by_terminal {
+        let raw = specialize_template_dfa_defaults_for_commit_split_input(&raw);
+        let split = try_split_commit_template_dfas(&raw).ok_or_else(|| crate::Error::Compilation(
+            format!("composition relation {terminal} is not a finite POP/READ/PUSH program")))?;
+        programs[terminal as usize] = Some(Arc::new(split));
+    }
+    Ok(programs)
+}
+
+impl TemplateParser {
+    pub(crate) fn composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
+        let composition = self.composition.as_deref()?;
+        Some(TemplateCompositionProvider { parser: self, composition })
+    }
+}
+
+impl Constraint {
+    /// Validate serialized namespace metadata using template dimensions alone.
+    /// Every child is fully loaded before its containing core reaches this check.
+    pub(crate) fn validate_template_composition_layout(&self) -> Result<(), String> {
+        let parser = self.template_parser.as_ref().ok_or("missing template parser")?;
+        let Some(composition) = &parser.composition else {
+            if self.static_dynamic_overlay.is_some() {
+                return Err("standalone template parser has unsupported composition machinery".into());
+            }
+            return Ok(());
+        };
+        let layout = self.recursive_parser_layout()?.ok_or("missing template composition layout")?;
+        if layout.total_states != parser.state_count
+            || layout.outer_terminal_count != parser.terminal_count
+            || layout.total_leaf_terminals != composition.control_start
+        {
+            return Err("template composition programs use a different parser coordinate".into());
+        }
+        let overlay = self.static_dynamic_overlay.as_ref().ok_or("missing composition overlay")?;
+        if overlay.recursive_compiler_table.get().is_some() {
+            return Err("template composition must not retain a packed LR compiler table".into());
+        }
+        for component in &overlay.segmented_parser_components {
+            if component.constraint.table.is_present() || !component.constraint.has_template_parser() {
+                return Err("template composition contains an LR-backed component".into());
+            }
+            component.constraint.validate_template_composition_layout()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn template_composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
+        self.template_parser.as_deref()?.composition_provider()
+    }
+
+    pub(crate) fn install_composition_template_parser(&mut self) -> crate::Result<()> {
+        let layout = self.recursive_parser_layout().map_err(crate::Error::Compilation)?
+            .ok_or_else(|| crate::Error::Compilation("missing recursive composition layout".into()))?;
+        let outer_count = self.parser_terminal_count();
+        let mut table = self.recursive_explicit_control_parser_table()
+            .map_err(crate::Error::Compilation)?;
+        let ordinary_count = outer_count.checked_add(layout.total_leaf_terminals)
+            .ok_or_else(|| crate::Error::Compilation("composition terminal coordinate overflow".into()))?;
+        if table.num_states != layout.total_states || table.num_terminals < ordinary_count {
+            return Err(crate::Error::Compilation("composition projection changed the runtime coordinate".into()));
+        }
+        // Controls are ordinary labels for this one-step compilation. Runtime
+        // closure, not control elimination, supplies their zero-width meaning.
+        table.control_terminals.clear();
+        let mut programs = compile_table_relations(&table)?;
+        let extra = programs.split_off(outer_count as usize);
+        let completion = glrmask_parser_dwa::__private::templates::completion::compile_completion_template(&table)
+            .map_err(crate::Error::Compilation)?;
+        let mut parser = TemplateParser::compile(layout.total_states, outer_count,
+            table.skip_terminals.iter().copied().filter(|terminal| *terminal < outer_count).collect(),
+            &programs, completion)?;
+        parser.embedding = super::embedding::TemplateEmbedding::from_table(&table,
+            self.composition_start_nullable().map_err(crate::Error::Compilation)?,
+            self.composition_child_return_pop().map_err(crate::Error::Compilation)?,
+            self.late_grammar_slots.iter().map(|slot| slot.terminal_id)).ok().map(Arc::new);
+        parser.composition = Some(Arc::new(TemplateComposition::compile(
+            layout.total_states, layout.total_leaf_terminals, &programs, extra)?));
+
+        let overlay = self.static_dynamic_overlay.as_mut().expect("validated composition overlay");
+        for component in &mut overlay.segmented_parser_components {
+            let constraint = Arc::make_mut(&mut component.constraint);
+            constraint.install_template_parser_in_coordinate(true)?;
+        }
+        // The packed flattened LR copy was only used for the old relinker. A
+        // template artifact must not retain executable LR data in a side field.
+        overlay.recursive_compiler_table = Default::default();
+        self.template_dfas_by_terminal = programs;
+        self.fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
+        self.template_parser = Some(Arc::new(parser));
+        self.table = ParserTableStorage::absent();
+        self.deferred_table_rules_blob = None;
+        self.deferred_table_rules = Default::default();
+        self.serialized_artifact_cache = None;
+        self.validate_template_composition_layout().map_err(crate::Error::Compilation)
+    }
+}
+
 #[cfg(test)]
 mod prepared_relation_tests {
     use super::*;
@@ -290,112 +397,5 @@ mod prepared_relation_tests {
             }
             assert!(!composition.admits(&input, u32::MAX));
         }
-    }
-}
-
-fn compile_table_relations(table: &GLRTable) -> crate::Result<TemplateDfasByTerminal> {
-    use glrmask_parser_dwa::__private::templates::characterize::try_characterize_selected_terminals_for_terminal_count;
-    use glrmask_parser_dwa::__private::templates::compile_dfa::{Templates,
-        specialize_template_dfa_defaults_for_commit_split_input, try_split_commit_template_dfas};
-    let characterizations = try_characterize_selected_terminals_for_terminal_count(
-        table, table.num_terminals, &vec![true; table.num_terminals as usize])
-        .map_err(|error| crate::Error::Compilation(error.to_string()))?;
-    let mut programs = vec![None; table.num_terminals as usize];
-    for (terminal, raw) in Templates::try_from_characterizations(&characterizations)
-        .map_err(crate::Error::Compilation)?.by_terminal {
-        let raw = specialize_template_dfa_defaults_for_commit_split_input(&raw);
-        let split = try_split_commit_template_dfas(&raw).ok_or_else(|| crate::Error::Compilation(
-            format!("composition relation {terminal} is not a finite POP/READ/PUSH program")))?;
-        programs[terminal as usize] = Some(Arc::new(split));
-    }
-    Ok(programs)
-}
-
-impl TemplateParser {
-    pub(crate) fn composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
-        let composition = self.composition.as_deref()?;
-        Some(TemplateCompositionProvider { parser: self, composition })
-    }
-}
-
-impl Constraint {
-    /// Validate serialized namespace metadata using template dimensions alone.
-    /// Every child is fully loaded before its containing core reaches this check.
-    pub(crate) fn validate_template_composition_layout(&self) -> Result<(), String> {
-        let parser = self.template_parser.as_ref().ok_or("missing template parser")?;
-        let Some(composition) = &parser.composition else {
-            if self.static_dynamic_overlay.is_some() {
-                return Err("standalone template parser has unsupported composition machinery".into());
-            }
-            return Ok(());
-        };
-        let layout = self.recursive_parser_layout()?.ok_or("missing template composition layout")?;
-        if layout.total_states != parser.state_count
-            || layout.outer_terminal_count != parser.terminal_count
-            || layout.total_leaf_terminals != composition.control_start
-        {
-            return Err("template composition programs use a different parser coordinate".into());
-        }
-        let overlay = self.static_dynamic_overlay.as_ref().ok_or("missing composition overlay")?;
-        if overlay.recursive_compiler_table.get().is_some() {
-            return Err("template composition must not retain a packed LR compiler table".into());
-        }
-        for component in &overlay.segmented_parser_components {
-            if component.constraint.table.is_present() || !component.constraint.has_template_parser() {
-                return Err("template composition contains an LR-backed component".into());
-            }
-            component.constraint.validate_template_composition_layout()?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn template_composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
-        self.template_parser.as_deref()?.composition_provider()
-    }
-
-    pub(crate) fn install_composition_template_parser(&mut self) -> crate::Result<()> {
-        let layout = self.recursive_parser_layout().map_err(crate::Error::Compilation)?
-            .ok_or_else(|| crate::Error::Compilation("missing recursive composition layout".into()))?;
-        let outer_count = self.parser_terminal_count();
-        let mut table = self.recursive_explicit_control_parser_table()
-            .map_err(crate::Error::Compilation)?;
-        let ordinary_count = outer_count.checked_add(layout.total_leaf_terminals)
-            .ok_or_else(|| crate::Error::Compilation("composition terminal coordinate overflow".into()))?;
-        if table.num_states != layout.total_states || table.num_terminals < ordinary_count {
-            return Err(crate::Error::Compilation("composition projection changed the runtime coordinate".into()));
-        }
-        // Controls are ordinary labels for this one-step compilation. Runtime
-        // closure, not control elimination, supplies their zero-width meaning.
-        table.control_terminals.clear();
-        let mut programs = compile_table_relations(&table)?;
-        let extra = programs.split_off(outer_count as usize);
-        let completion = glrmask_parser_dwa::__private::templates::completion::compile_completion_template(&table)
-            .map_err(crate::Error::Compilation)?;
-        let mut parser = TemplateParser::compile(layout.total_states, outer_count,
-            table.skip_terminals.iter().copied().filter(|terminal| *terminal < outer_count).collect(),
-            &programs, completion)?;
-        parser.embedding = super::embedding::TemplateEmbedding::from_table(&table,
-            self.composition_start_nullable().map_err(crate::Error::Compilation)?,
-            self.composition_child_return_pop().map_err(crate::Error::Compilation)?,
-            self.late_grammar_slots.iter().map(|slot| slot.terminal_id)).ok().map(Arc::new);
-        parser.composition = Some(Arc::new(TemplateComposition::compile(
-            layout.total_states, layout.total_leaf_terminals, &programs, extra)?));
-
-        let overlay = self.static_dynamic_overlay.as_mut().expect("validated composition overlay");
-        for component in &mut overlay.segmented_parser_components {
-            let constraint = Arc::make_mut(&mut component.constraint);
-            constraint.install_template_parser_in_coordinate(true)?;
-        }
-        // The packed flattened LR copy was only used for the old relinker. A
-        // template artifact must not retain executable LR data in a side field.
-        overlay.recursive_compiler_table = Default::default();
-        self.template_dfas_by_terminal = programs;
-        self.fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
-        self.template_parser = Some(Arc::new(parser));
-        self.table = ParserTableStorage::absent();
-        self.deferred_table_rules_blob = None;
-        self.deferred_table_rules = Default::default();
-        self.serialized_artifact_cache = None;
-        self.validate_template_composition_layout().map_err(crate::Error::Compilation)
     }
 }

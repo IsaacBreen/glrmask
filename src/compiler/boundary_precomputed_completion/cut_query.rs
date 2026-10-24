@@ -202,7 +202,7 @@ fn query_impl(nt:usize,parts:&[Part<'_>],start:ImmediateComponentId,local_initia
  let mut observations=Observations::new(width);let mut columns=Vec::with_capacity(first.columns.len());
  for row in &first.columns{let mut obs=Observation::empty(width);for &t in row{let global=t.checked_add(first_part.terminal_offset)?as usize;*obs.matched.get_mut(global/64)?|=1u64<<(global%64);}columns.push(observations.intern(obs)?);}
  let mut paths=vec![Vec::new();entries.len()];for ((i,_),path)in active.iter().zip(&first.word_columns){paths[*i]=path.iter().map(|&c|columns[c]).collect();}
- let mut all=vec![u64::MAX;width];if nt%64!=0{*all.last_mut()?=(1u64<<(nt%64))-1;}
+ let mut all=vec![u64::MAX;width];if !nt.is_multiple_of(64){*all.last_mut()?=(1u64<<(nt%64))-1;}
  let foreign=(0..nt).map(|t|ownership.owner_of_terminal(t as u32)!=Some(start)).collect::<Vec<_>>();
  let mut foreign_bits=vec![0u64;width];let mut transparent_bits=vec![0u64;width];
  let is_transparent=|t:usize|Some(t as u32)==ignore||transparent.is_some_and(|m|m.get(t));

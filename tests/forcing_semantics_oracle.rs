@@ -18,11 +18,10 @@ fn advance(words: &Residuals, entry: &Entry) -> Residuals {
         if word.first() == Some(&E(entry.id)) {
             next.insert(word[1..].to_vec());
         }
-        if let Some(bytes) = entry.bytes.as_ref().filter(|b| !b.is_empty()) {
-            if word.len() >= bytes.len() && word.iter().zip(bytes).all(|(c,b)| *c == B(*b)) {
+        if let Some(bytes) = entry.bytes.as_ref().filter(|b| !b.is_empty())
+            && word.len() >= bytes.len() && word.iter().zip(bytes).all(|(c,b)| *c == B(*b)) {
                 next.insert(word[bytes.len()..].to_vec());
             }
-        }
     }
     next
 }
@@ -167,7 +166,7 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
             let label=format!("case={case},mode={mode:?}");
             count+=check_states(&compiled,words,&entries,&label);
             if case%7==0 {
-                let loaded=Constraint::load(&compiled.save(), &vocab).unwrap();
+                let loaded=Constraint::load(compiled.save(), &vocab).unwrap();
                 count+=check_states(&loaded,words,&entries,&format!("loaded:{label}"));
             }
         }
@@ -223,7 +222,7 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
             let source=source_assembly.compile_with_build_options(&vocab,opts).unwrap();
             count+=check_states(&prepared,&expected,&entries,&format!("prepared:{case}:{mode:?}"));
             count+=check_states(&source,&expected,&entries,&format!("source:{case}:{mode:?}"));
-            let loaded=Constraint::load(&prepared.save(), &vocab).unwrap();
+            let loaded=Constraint::load(prepared.save(), &vocab).unwrap();
             count+=check_states(&loaded,&expected,&entries,&format!("loaded:{case}:{mode:?}"));
         }
     }
@@ -240,7 +239,7 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
             .bind_snapshot("MARK",TokenSet::new([3])).unwrap();
         for mode in MaskMode::ALL {
             let c=g.compile_with_build_options(&vocab,mode.build_options()).unwrap();
-            for c in [c.clone(),Constraint::load(&c.save(), &vocab).unwrap()] {
+            for c in [c.clone(),Constraint::load(c.save(), &vocab).unwrap()] {
                 let mut s=c.start();
                 assert!(s.mask().len() >= (highest as usize + 1).div_ceil(32));
                 assert!(!bit(&s.mask(),highest)); assert!(!bit(&s.mask(),highest-1));

@@ -11,3 +11,6 @@ repository = "https://github.com/IsaacBreen/glrmask"
 glrmask-invariant = { version = "=0.1.2", path = "../glrmask-invariant", features = ["internal-api"] }
 rustc-hash = "1"
 serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

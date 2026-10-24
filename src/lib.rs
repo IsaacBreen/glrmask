@@ -837,7 +837,7 @@ pub mod __private {
             }
             let mut selected = BitSet::new(children.len() + 1);
             for &component in static_components {
-                if component >= children.len() + 1 {
+                if component > children.len() {
                     return Err(Error::Compilation(format!(
                         "hybrid static component {component} out of range 0..{}",
                         children.len() + 1,

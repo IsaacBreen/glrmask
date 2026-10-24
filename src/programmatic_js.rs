@@ -915,8 +915,7 @@ mod tests {
             &vocab,
             None,
         )
-        .err()
-        .expect("legacy None schema composition must be unsupported");
+        .expect_err("legacy None schema composition must be unsupported");
         match legacy_error.kind() {
             crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("legacy owned-parent composition is unsupported"),

@@ -1738,7 +1738,7 @@ fn build_possible_outgoing_ids_by_state(
 
 fn local_epsilon_closure(
     nwa: &NWA,
-    weight_by_state: &mut Vec<Option<Weight>>,
+    weight_by_state: &mut [Option<Weight>],
     closure_queue: &mut VecDeque<u32>,
     seed: &mut FxHashMap<u32, Weight>,
 ) {
@@ -1750,15 +1750,14 @@ fn local_epsilon_closure(
     }
     if seed.len() == 1 {
         let state_id = seed_states[0];
-        if let Some(state) = nwa.states().get(state_id as usize) {
-            if state.epsilons.is_empty() {
+        if let Some(state) = nwa.states().get(state_id as usize)
+            && state.epsilons.is_empty() {
                 closure_queue.clear();
                 for &s in &seed_states {
                     weight_by_state[s as usize] = None;
                 }
                 return;
             }
-        }
     }
     while let Some(state_id) = closure_queue.pop_front() {
         let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
@@ -1946,9 +1945,9 @@ fn determinize_with_supports_mode(
                     && (std::env::var_os("GLRMASK_PARSER_SUPPORT_DIRECT_UNION").is_some()
                         || meaningful.len() >= 5);
             let weight = if direct_union {
-                Weight::union_all_direct(meaningful.into_iter())
+                Weight::union_all_direct(meaningful)
             } else {
-                Weight::union_all(meaningful.into_iter())
+                Weight::union_all(meaningful)
             };
             self.entries.insert(key, weight.clone());
             self.record_elapsed(started);
@@ -1998,8 +1997,8 @@ fn determinize_with_supports_mode(
         // Fast path: single seed with no epsilons.
         if seed.len() == 1 {
             let state_id = seed_states[0];
-            if let Some(state) = nwa.states().get(state_id as usize) {
-                if state.epsilons.is_empty() {
+            if let Some(state) = nwa.states().get(state_id as usize)
+                && state.epsilons.is_empty() {
                     // Clean up and return early — seed is already populated.
                     closure_queue.clear();
                     for &s in &seed_states {
@@ -2007,7 +2006,6 @@ fn determinize_with_supports_mode(
                     }
                     return;
                 }
-            }
         }
 
         while let Some(state_id) = closure_queue.pop_front() {
@@ -3475,13 +3473,12 @@ impl FastBoundaryWeightInterner {
         if let Some(&id) = self.ids.get(&value) {
             return id;
         }
-        if let Some(limits) = self.limits {
-            if self.failed || self.values.len() >= limits.weights
-                || (self.values.len() + 1).saturating_mul(self.tsid_count) > limits.words {
+        if let Some(limits) = self.limits
+            && (self.failed || self.values.len() >= limits.weights
+                || (self.values.len() + 1).saturating_mul(self.tsid_count) > limits.words) {
                 self.failed = true;
                 return 0;
             }
-        }
         let id = self.values.len() as u32;
         self.values.push(value.clone());
         self.ids.insert(value, id);
@@ -3493,12 +3490,11 @@ impl FastBoundaryWeightInterner {
     // the original intern() path.
     fn intern_slice(&mut self, value:&[u64])->FastBoundaryWeightId {
         if let Some(&id)=self.ids.get(value){return id;}
-        if let Some(limits)=self.limits{
-            if self.failed || self.values.len()>=limits.weights
-                ||(self.values.len()+1).saturating_mul(self.tsid_count)>limits.words{
+        if let Some(limits)=self.limits
+            && (self.failed || self.values.len()>=limits.weights
+                ||(self.values.len()+1).saturating_mul(self.tsid_count)>limits.words){
                 self.failed=true;return 0;
             }
-        }
         let id=self.values.len()as u32;
         let owned=FastBoundaryWeightValue::from_slice(value);
         self.values.push(owned.clone());self.ids.insert(owned,id);id
@@ -3852,7 +3848,7 @@ impl FastBoundaryQueryRow {
     fn get(&self, key: &(u32, i32)) -> FastBoundaryWeightId {
         match self {
             Self::Empty => 0,
-            Self::One(existing_key, weight) => (*existing_key == *key).then_some(*weight).unwrap_or(0),
+            Self::One(existing_key, weight) => if *existing_key == *key { *weight } else { 0 },
             Self::Many(entries) => entries.get(key).copied().unwrap_or(0),
         }
     }
@@ -3941,7 +3937,7 @@ impl FastBoundaryDerivedRow {
     fn get(&self, target: u32) -> FastBoundaryWeightId {
         match self {
             Self::Empty => 0,
-            Self::One(existing_target, weight) => (*existing_target == target).then_some(*weight).unwrap_or(0),
+            Self::One(existing_target, weight) => if *existing_target == target { *weight } else { 0 },
             Self::Many(entries) => entries.get(&target).copied().unwrap_or(0),
         }
     }
@@ -5168,17 +5164,17 @@ fn optimize_fast_boundary_defaults(
             states[state_id].transitions.retain(|(_, _, weight)| *weight != 0);
         }
 
-        for state_id in 0..states.len() {
-            let Some((_, default_target, default_weight)) = states[state_id]
+        for state in states.iter_mut() {
+            let Some((_, default_target, default_weight)) = state
                 .transitions.iter().find(|(label, _, _)| *label == DEFAULT_LABEL).copied()
             else { continue; };
-            for (label, target, weight) in &mut states[state_id].transitions {
+            for (label, target, weight) in &mut state.transitions {
                 if *label == DEFAULT_LABEL || *target != default_target { continue; }
                 let updated = interner.difference(*weight, default_weight);
                 changed |= updated != *weight;
                 *weight = updated;
             }
-            states[state_id].transitions.retain(|(_, _, weight)| *weight != 0);
+            state.transitions.retain(|(_, _, weight)| *weight != 0);
         }
         if !changed { break; }
     }
@@ -5518,8 +5514,10 @@ mod packed_fallback_tests {
             let mut input = Vec::new();
             let mut possible = Vec::new();
             for q in 0..n {
-                let mut state = FastBoundaryDwaState::default();
-                state.final_weight = weights[next() % 16];
+                let mut state = FastBoundaryDwaState {
+                    final_weight: weights[next() % 16],
+                    ..Default::default()
+                };
                 if q + 1 < n {
                     for label in [0, 1, 2, DEFAULT_LABEL, 10000] {
                         if next() % 3 != 0 {
@@ -5653,8 +5651,8 @@ impl FiniteBoundaryDwa {
                 if id == 0 { return Weight::empty(); }
                 if id == 1 { return Weight::all(); }
                 Weight::from_per_tsid_token_sets(self.weights[id as usize].iter().enumerate()
-                    .filter_map(|(row, &bits)| (bits != 0).then(|| (row as u32,
-                        (0..self.token_count as u32).filter(|&bit| bits & (1u64 << bit) != 0).collect()))))
+                    .filter(|&(row, &bits)| bits != 0).map(|(row, &bits)| (row as u32,
+                        (0..self.token_count as u32).filter(|&bit| bits & (1u64 << bit) != 0).collect())))
             }).clone()
         };
         let states = self.states.iter().map(|state| {
@@ -5889,7 +5887,7 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
             for (label, mut contribs) in sparse_rows {
                 if let Some((to_state, edge_weight)) = fast_boundary_process_contribs(
                     &mut contribs,
-                    &fast_nwa,
+                    fast_nwa,
                     interner,
                     &mut weight_by_state,
                     &mut closure_queue,
@@ -7441,14 +7439,17 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
             let mut maybe_key = None;
             let mut keepalive = None;
             if is_concrete_dense && pop_classes.is_some() && !class_raw_targets.is_empty() {
-                let classes = pop_classes.unwrap();
+                let classes = match pop_classes {
+                    Some(classes) => classes,
+                    None => unreachable!("pop classes checked above"),
+                };
                 let num_classes = class_raw_targets.len();
                 let membership = if let Some(by_symbol) = class_membership_by_symbol.as_ref() {
                     let global_membership = by_symbol[label as usize];
                     let (membership, work) = if let Some(cached) = row_memberships.get(&global_membership) {
                         cached.clone()
                     } else {
-                        let mut membership: RowClassMembershipBits = smallvec::smallvec![0u64; (num_classes + 63) / 64];
+                        let mut membership: RowClassMembershipBits = smallvec::smallvec![0u64; num_classes.div_ceil(64)];
                         let mut work = num_classes;
                         for (class_idx, (&class_label, contributions)) in class_raw_targets.iter().enumerate() {
                             let index = (DEFAULT_LABEL - 1 - class_label) as usize;
@@ -7466,7 +7467,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                     if global_empty.is_some() { global_work = Some(work); }
                     membership
                 } else {
-                    let mut membership: RowClassMembershipBits = smallvec::smallvec![0u64; (num_classes + 63) / 64];
+                    let mut membership: RowClassMembershipBits = smallvec::smallvec![0u64; num_classes.div_ceil(64)];
                     for (class_idx, (&class_label, contributions)) in class_raw_targets.iter().enumerate() {
                         class_work = class_work.checked_sub(1).ok_or("class derivative work budget exceeded")?;
                         if classes.matches(class_label, label as u32) {
@@ -7482,8 +7483,8 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                     .collect();
                 let key: RowClassDerivativeKey = (membership.clone(), explicit_sig);
 
-                if let Some(cache) = row_class_cache.as_ref() {
-                    if let Some(cached) = cache.get(&key) {
+                if let Some(cache) = row_class_cache.as_ref()
+                    && let Some(cached) = cache.get(&key) {
                         row_group_hits += 1;
                         row_group_symbols += 1;
                         class_work = class_work.checked_sub(cached.merged_len).ok_or("class derivative work budget exceeded")?;
@@ -7498,7 +7499,6 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                         emit_transition(&mut result, &mut row_edges, from_state, label, cached.to_state, cached.edge_weight.clone());
                         return Ok(());
                     }
-                }
 
                 row_group_misses += 1;
                 row_group_symbols += 1;
@@ -7654,7 +7654,6 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
         for (label, contribs) in sparse_raw_targets.drain() {
             process_label(label, contribs, false)?;
         }
-        drop(process_label);
         if let Some(edges) = row_edges {
             if row_publication_profile {
                 staged_rows += 1;
@@ -7899,7 +7898,6 @@ fn optimize_parser_dwa_defaults_mode(
             else {
                 continue;
             };
-            let default_target = default_target;
             let default_weight = default_weight.clone();
 
             let state = &mut dwa.states_mut()[state_id];
@@ -9007,7 +9005,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                 let Some(body) = append_branch_fragment(
                     &mut arena,
                     &summaries,
-                    &templates,
+                    templates,
                     &mut built_bundle_cache,
                     branch.bundle_id,
                     target_continuation,
@@ -9345,7 +9343,6 @@ pub fn normalize_parser_stack_domain_nwa_preserving_explicit(
 /// that have composed parser-stack effects directly can reuse the exact same
 /// support-aware DEFAULT/finality semantics without first reconstructing a
 /// terminal automaton.
-
 fn normalize_weighted_parser_stack_nwa_impl(
     num_parser_states: u32,
     parser_nwa: &NWA,
@@ -11828,10 +11825,10 @@ mod checked_topology_reuse_tests {
                 labels.sort_unstable();
                 for label in labels {
                     let mut branches=SmallVec::new();
-                    for target in q+1..n { if next()%5==0 { branches.push((permutation[target],(next()%8)as u32)); } }
+                    for &target in &permutation[q+1..n] { if next()%5==0 { branches.push((target,(next()%8)as u32)); } }
                     if !branches.is_empty() || next()%3==0 { row.transitions.push((label,branches)); }
                 }
-                for target in q+1..n { if next()%5==0 {row.epsilons.push((permutation[target],(next()%8)as u32));} }
+                for &target in &permutation[q+1..n] { if next()%5==0 {row.epsilons.push((target,(next()%8)as u32));} }
             }
             let order=CheckedNativeTopology::from_order(fast_boundary_topological_order(&original).unwrap()).unwrap();
             assert!(order.certifies(&original));

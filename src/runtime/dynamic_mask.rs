@@ -844,11 +844,9 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         let target = self.leaves[leaf_index].lexer_offset + local_target;
         RecursiveFullWalkCell {
             target,
-            has_finalizer: leaf
+            has_finalizer: !leaf
                 .tokenizer
-                .matched_terminals_slice(local_target)
-                .first()
-                .is_some(),
+                .matched_terminals_slice(local_target).is_empty(),
         }
     }
 
@@ -990,7 +988,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
     #[inline(always)]
     fn product_transition_cache_capacity(&self) -> usize {
         #[cfg(test)]
-        { return TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()); }
+        { TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get())}
         #[cfg(not(test))]
         { 256 }
     }
@@ -1222,7 +1220,7 @@ impl<'a, 'b> FullWalkConfigTransitions<'a, 'b> {
         FullWalkHotScalarCache::new()
     };
     Self {
-        cache: cache,
+        cache,
         error: None,
         raw_cell_rows: Vec::new(),
         bounded_high_raw: {
@@ -5583,8 +5581,8 @@ fn try_full_walk_mask_with_table<
         if let (Some(source), Some(terminal)) = (
             root.exact_tokenizer_state,
             root.residual_continuation_terminal,
-        ) {
-            if transitions.exact_raw_state(stack_lexer[0]) == Some(source)
+        )
+            && transitions.exact_raw_state(stack_lexer[0]) == Some(source)
                 && let Some(coordinate) = state
                     .constraint
                     .tokenizer
@@ -5606,7 +5604,6 @@ fn try_full_walk_mask_with_table<
                     bytes = Some(residual);
                 }
             }
-        }
         if bytes.is_none() && root.parser_filtered_root {
             bytes = transitions.exact_next_bytes(stack_lexer[0]);
         }
@@ -6502,7 +6499,7 @@ fn try_full_walk_mask_with_table<
                                         transitions,
                                         &mut pair_union_cache,
                                         &mut triple_union_cache,
-                                        &next,
+                                        next,
                                     )
                                 {
                                     scalar_lexer = lexer_state;
@@ -8702,8 +8699,8 @@ pub(crate) fn dynamic_mask_cache_enabled() -> bool {
 fn recursive_persistent_mask_cache_enabled() -> bool {
     #[cfg(test)]
     {
-        return TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.get())
-            && dynamic_mask_cache_enabled();
+        TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.get())
+            && dynamic_mask_cache_enabled()
     }
     #[cfg(not(test))]
     {
@@ -9590,7 +9587,7 @@ impl PreparedMaskVocabulary {
     fn or_mask_with_pre_admission(&self, state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
         if !state.constraint.uses_compact_segmented_parser_runtime() { return Ok(false); }
         let pending = self.original_ids.iter().copied().filter(|&id| {
-            !buf.get(id as usize / 32).is_some_and(|&w| w & (1 << (id % 32)) != 0)
+            buf.get(id as usize / 32).is_none_or(|&w| w & (1 << (id % 32)) == 0)
         }).collect::<Vec<_>>();
         if pending.is_empty() { return Ok(true); }
         let mut scratch = vec![0u32; state.constraint.mask_len()];
@@ -9628,7 +9625,7 @@ impl PreparedMaskVocabulary {
     fn or_mask_filtered(&self, state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
         if !state.constraint.uses_compact_segmented_parser_runtime() { return Ok(false); }
         let key = self.original_ids.iter().copied().filter(|&id| {
-            !buf.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
+            buf.get(id as usize / 32).is_none_or(|w| w & (1 << (id % 32)) == 0)
         }).collect::<Vec<_>>();
         if key.is_empty() { return Ok(true); }
         let mut mask = vec![0u32; state.constraint.mask_len()];
@@ -10471,9 +10468,8 @@ mod tests {
                 let mut owners = BTreeSet::new();
                 for gss in state.state.values() {
                     for top in gss.peek_values() {
-                        if let Some((owner, _)) = constraint.compact_segmented_parser_component(top) {
-                            if owner != 0 { owners.insert(owner); }
-                        }
+                        if let Some((owner, _)) = constraint.compact_segmented_parser_component(top)
+                            && owner != 0 { owners.insert(owner); }
                     }
                 }
                 saw_simultaneous_siblings |= owners.len() >= 2;
@@ -11666,11 +11662,10 @@ mod tests {
 
         // Perturb path to verify exact matching on multi-path / complex states
         let mut perturbed = owned_key.clone();
-        if let Some((_, paths)) = perturbed.first_mut() {
-            if let Some(first_path) = paths.first_mut() {
+        if let Some((_, paths)) = perturbed.first_mut()
+            && let Some(first_path) = paths.first_mut() {
                 first_path.0.push(9999);
             }
-        }
         assert!(!query.matches_state(&perturbed));
     }
 
@@ -12107,7 +12102,7 @@ t B ::= 'b';
 nt start ::= A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
+        let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         assert_dynamic_parity(&loaded.start());
     }
 
@@ -12282,9 +12277,7 @@ nt start ::= item item? item?;
             let rhs = WORDS
                 .iter()
                 .enumerate()
-                .filter_map(|(index, word)| {
-                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
-                })
+                .filter(|&(index, word)| mask & (1 << index) != 0).map(|(index, word)| format!("\"{word}\""))
                 .collect::<Vec<_>>()
                 .join(" | ");
             format!("t {name} ::= {rhs};\n")

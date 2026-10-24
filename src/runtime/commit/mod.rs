@@ -1452,7 +1452,7 @@ fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStat
                 group.len(),
             );
         }
-        for (_, gss) in group.iter().cloned() {
+        for (_, gss) in group {
             for &source_state in source_states {
                 state.insert_flat_alternative(source_offset + source_state, gss.clone());
             }
@@ -1662,11 +1662,11 @@ pub(crate) fn advance_bytes_from_state_exact(
 /// tokens with special-token semantics on `token_admissible_from_state_exact`,
 /// because those tokens additionally fork parser paths that are not represented
 /// by their byte spelling.
-pub(crate) fn admissible_byte_token_candidates_from_state_exact<'a>(
+pub(crate) fn admissible_byte_token_candidates_from_state_exact(
     constraint: &Constraint,
     source: &ParserStateMap,
     buffers: &mut CommitBuffers,
-    candidates: &mut Vec<(u32, &'a [u8])>,
+    candidates: &mut Vec<(u32, &[u8])>,
     admitted: &mut Vec<u32>,
 ) {
     if candidates.is_empty() || source.is_empty() {
@@ -1676,11 +1676,11 @@ pub(crate) fn admissible_byte_token_candidates_from_state_exact<'a>(
         left.cmp(right).then_with(|| left_id.cmp(right_id))
     });
 
-    fn walk<'a>(
+    fn walk(
         constraint: &Constraint,
         source: &ParserStateMap,
         buffers: &mut CommitBuffers,
-        entries: &[(u32, &'a [u8])],
+        entries: &[(u32, &[u8])],
         consumed: usize,
         admitted: &mut Vec<u32>,
     ) {
@@ -2387,8 +2387,7 @@ fn is_actionable_terminal(
     constraint: &Constraint,
     terminal: u32,
 ) -> bool {
-    !actionable_terminals
-        .is_some_and(|actionable| !actionable.contains(constraint, terminal))
+    actionable_terminals.is_none_or(|actionable| actionable.contains(constraint, terminal))
 }
 
 
@@ -2793,21 +2792,19 @@ fn prune_single_initial_state_for_terminal(
         if terminals_disallowed.is_empty() {
             return Some(TerminalsDisallowed::new());
         }
-        if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
-            if disallowed.contains(&terminal) {
+        if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state)
+            && disallowed.contains(&terminal) {
                 return None;
             }
-        }
 
         let mut remapped = BTreeMap::new();
-        if let Some(end_state) = end_state {
-            if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
+        if let Some(end_state) = end_state
+            && let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
                 remapped
                     .entry(end_state)
                     .or_insert_with(BTreeSet::new)
                     .extend(disallowed.iter().copied());
             }
-        }
         Some(TerminalsDisallowed::from_map(remapped))
     })
 }
@@ -3014,7 +3011,7 @@ fn apply_single_top_action_fast(
                     return Some(gss.popn(1).push(*target));
                 }
                 stack.push(*target);
-                return Some(stack.into_gss());
+                Some(stack.into_gss())
             } else {
                 Some(if *is_replace {
                     gss.popn(1).push(*target)
@@ -3403,8 +3400,8 @@ fn commit_bytes_fast_path_observed<O: CommitObserver>(
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
     if !has_linker_controls && all_accs_empty && !template_advance_selected(constraint) {
         let top_state = gss.single_exclusive_top_value();
-        if let Some(top_state) = top_state {
-            if let Some(action) = constraint.table.action(top_state, terminal) {
+        if let Some(top_state) = top_state
+            && let Some(action) = constraint.table.action(top_state, terminal) {
                 if let Some(gss) = state.values_mut().next()
                     && try_apply_single_top_action_in_place(gss, action)
                 {
@@ -3419,7 +3416,6 @@ fn commit_bytes_fast_path_observed<O: CommitObserver>(
                     return Some(Ok(()));
                 }
             }
-        }
     }
 
     // Take ownership of the GSS for the standard fast path.
@@ -3474,7 +3470,7 @@ fn commit_bytes_fast_path_observed<O: CommitObserver>(
     let mut produced_state = false;
     if !advanced.is_empty() {
         let advanced =
-            apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
+            apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
         if !advanced.is_empty() {
             let fused = advanced.fuse(Some(1));
             if !fused.is_empty() {
@@ -5082,17 +5078,15 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
         } else {
             false
         };
-        if step.end_state.is_some() {
-            if !keep_carried {
-                if let Some(stack) = carried_stack.take() {
+        if step.end_state.is_some()
+            && !keep_carried
+                && let Some(stack) = carried_stack.take() {
                     let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
                     gss = stack.into_gss();
                     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
                         profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
                     }
                 }
-            }
-        }
 
         if let Some(end_state) = step.end_state {
             let carried_gate_start = profile.as_ref().map(|_| std::time::Instant::now());
@@ -5118,8 +5112,8 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
         }
 
         if !step.ignored {
-            if offset == 0 {
-                if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+            if offset == 0
+                && !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
                     // Delayed exclusions are keyed by continuation tokenizer states,
                     // not necessarily by the current tokenizer state. The
                     // general/flat paths execute every continuation state over
@@ -5128,7 +5122,6 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
                     // old current-state-only pruning rule.
                     return None;
                 }
-            }
 
             let mut shifted_carried_stack = false;
             let mut carried_apply_elapsed_ns = 0u64;
@@ -5288,7 +5281,7 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
     } else {
         gss.fuse(Some(1))
     };
-    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), fuse_start) {
+    if let (Some(profile), Some(start)) = (profile, fuse_start) {
         let elapsed = start.elapsed().as_nanos() as u64;
         profile.linear_fast_path_fuse_ns += elapsed;
         profile.fuse_ns += elapsed;
@@ -5394,8 +5387,8 @@ fn commit_bytes_fast_path_profiled(
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
 
-    if all_accs_empty && !template_advance_selected(constraint) {
-        if let Some(top_state) = gss.single_exclusive_top_value() {
+    if all_accs_empty && !template_advance_selected(constraint)
+        && let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
                 let advance_start = Instant::now();
                 let shifted = if *is_replace {
@@ -5477,7 +5470,6 @@ fn commit_bytes_fast_path_profiled(
                 return Some(Ok(()));
             }
         }
-    }
 
     let (_, gss_owned) = state.pop_first().unwrap();
 
@@ -6295,15 +6287,14 @@ fn commit_bytes_linear_fast_path_observed<O: CommitObserver>(
             }
         }
 
-        if let Some(end_state) = exec_result.end_state.first().copied() {
-            if end_state_may_advance(constraint, &gss, end_state) {
+        if let Some(end_state) = exec_result.end_state.first().copied()
+            && end_state_may_advance(constraint, &gss, end_state) {
                 return if offset > 0 {
                     LinearFastPathResult::Continue { gss, offset }
                 } else {
                     LinearFastPathResult::Restart
                 };
             }
-        }
 
         if !ignored {
             let mut shifted_carried_stack = false;
@@ -6510,8 +6501,8 @@ fn commit_bytes_linear_fast_path_profiled(
                 LinearFastPathResult::Restart
             };
         }
-        if let Some(end_state) = exec_result.end_state.first().copied() {
-            if end_state_may_advance(constraint, &gss, end_state) {
+        if let Some(end_state) = exec_result.end_state.first().copied()
+            && end_state_may_advance(constraint, &gss, end_state) {
                 profile.linear_fast_path_end_state_check_ns +=
                     end_state_start.elapsed().as_nanos() as u64;
                 let result = if offset > 0 {
@@ -6522,7 +6513,6 @@ fn commit_bytes_linear_fast_path_profiled(
                 profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
                 return result;
             }
-        }
         profile.linear_fast_path_end_state_check_ns +=
             end_state_start.elapsed().as_nanos() as u64;
 
@@ -7132,10 +7122,8 @@ fn try_commit_multi_state_lexer_only(
         .gss_pool
         .extend(available_pool.into_iter().flatten());
     let mut unused_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
-    for gss in old_gss {
-        if let Some(gss) = gss {
-            unused_entries.push((0, gss));
-        }
+    for gss in old_gss.into_iter().flatten() {
+        unused_entries.push((0, gss));
     }
     frontier.recycle_old_entries(unused_entries);
     state.entries = new_entries;
@@ -8156,8 +8144,8 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
     if !has_linker_controls && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
-        if parser_gss.single_exclusive_top_value().is_some() {
-            if let Some(result) = commit_bytes_direct_linear_fast_path_observed(
+        if parser_gss.single_exclusive_top_value().is_some()
+            && let Some(result) = commit_bytes_direct_linear_fast_path_observed(
                 constraint,
                 parser_gss.clone(),
                 bytes,
@@ -8181,7 +8169,6 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                     LinearFastPathResult::Restart => {}
                 }
             }
-        }
     }
 
     if !has_linker_controls {
@@ -10260,8 +10247,8 @@ mod tests {
         let fast_path = crate::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
             &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
-        let core = Constraint::load(&std::fs::read(core_path).unwrap(), &vocab).unwrap();
-        let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
+        let core = Constraint::load(std::fs::read(core_path).unwrap(), &vocab).unwrap();
+        let fast = Constraint::load(std::fs::read(fast_path).unwrap(), &vocab).unwrap();
         dump("core", &core, 38, 443);
         dump("fast", &fast, 39, 443);
     }
@@ -10318,7 +10305,7 @@ mod tests {
         let full_path = crate::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
             &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
-        let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
+        let full = Constraint::load(std::fs::read(full_path).unwrap(), &vocab).unwrap();
         dump_case(&full, "tools_reset_a", 0, &[0,22,198,18], &[739,2446,7255,21966]);
         dump_case(&full, "tools_reset_b", 0, &[0,22,198,167], &[739,2446,7255,21966]);
         dump_case(&full, "tools_residual", 444, &[0,22,198], &[739,2446,7255,21966]);
@@ -10336,8 +10323,8 @@ mod tests {
         let full_path = crate::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
         let vocab = crate::compiler::constraint_compose::load_vocab(
             &crate::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
-        let fast = Constraint::load(&std::fs::read(fast_path).unwrap(), &vocab).unwrap();
-        let full = Constraint::load(&std::fs::read(full_path).unwrap(), &vocab).unwrap();
+        let fast = Constraint::load(std::fs::read(fast_path).unwrap(), &vocab).unwrap();
+        let full = Constraint::load(std::fs::read(full_path).unwrap(), &vocab).unwrap();
         unsafe {
             crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", Some("1"));
             crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", Some("2"));
@@ -10533,7 +10520,7 @@ mod tests {
         assert!(state.commit_token(2));
         assert!(state.is_accepting());
 
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let mut loaded_state = loaded.start();
         assert!(loaded_state.commit_token(1));
         assert!(loaded_state.is_accepting());
@@ -10977,9 +10964,7 @@ nt start ::= item item? item?;
             let rhs = WORDS
                 .iter()
                 .enumerate()
-                .filter_map(|(index, word)| {
-                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
-                })
+                .filter(|&(index, word)| mask & (1 << index) != 0).map(|(index, word)| format!("\"{word}\""))
                 .collect::<Vec<_>>()
                 .join(" | ");
             format!("t {name} ::= {rhs};\n")
@@ -11283,9 +11268,7 @@ nt start ::= item item? item?;
             let rhs = WORDS
                 .iter()
                 .enumerate()
-                .filter_map(|(index, word)| {
-                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
-                })
+                .filter(|&(index, word)| mask & (1 << index) != 0).map(|(index, word)| format!("\"{word}\""))
                 .collect::<Vec<_>>()
                 .join(" | ");
             format!("t {name} ::= {rhs};\n")

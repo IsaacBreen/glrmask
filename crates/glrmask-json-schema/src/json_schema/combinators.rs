@@ -81,11 +81,10 @@ impl OneOfValueBounds {
 
     fn disjoint(&self, other: &Self) -> bool {
         if self.types & other.types == 0 { return true; }
-        if let (Some(left), Some(right)) = (&self.finite, &other.finite) {
-            if !left.iter().any(|value| right.iter().any(|candidate| {
+        if let (Some(left), Some(right)) = (&self.finite, &other.finite)
+            && !left.iter().any(|value| right.iter().any(|candidate| {
                 one_of_values_may_equal(value, candidate)
             })) { return true; }
-        }
         // Required-property conflicts separate objects only. Both branches must
         // exclude every non-object value, where object keywords are inapplicable.
         self.types == one_of_type_mask(SchemaType::Object)
@@ -1003,8 +1002,7 @@ impl<'a> Lowerer<'a> {
                         self.try_lower_closed_object_any_of_variants(&distributed, true)?
                     {
                         Ok(expr)
-                    } else
-                    if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
+                    } else if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
                         Ok(expr)
                     } else {
                         let alternatives = distributed
@@ -1189,11 +1187,10 @@ impl<'a> Lowerer<'a> {
                         return Ok(true);
                     }
                 }
-                if let Some(schema) = &assertions.not {
-                    if self.schema_transitively_refs_pointer(schema, wanted, seen_refs)? {
+                if let Some(schema) = &assertions.not
+                    && self.schema_transitively_refs_pointer(schema, wanted, seen_refs)? {
                         return Ok(true);
                     }
-                }
 
                 Ok(false)
             }
@@ -1545,8 +1542,6 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<bool> {
         if !matches!(superset.additional_properties, AdditionalProperties::AllowAny)
             || !superset.pattern_properties.is_empty()
-            || (!subset.pattern_properties.is_empty()
-                && !matches!(superset.additional_properties, AdditionalProperties::AllowAny))
         {
             return Ok(false);
         }
@@ -1754,13 +1749,13 @@ fn prune_assertion_families_to_types(assertions: &mut SchemaAssertions) {
     let Some(types) = &assertions.types else {
         return;
     };
-    if !types.iter().any(|schema_type| *schema_type == SchemaType::Object) {
+    if !types.contains(&SchemaType::Object) {
         assertions.object = None;
     }
-    if !types.iter().any(|schema_type| *schema_type == SchemaType::Array) {
+    if !types.contains(&SchemaType::Array) {
         assertions.array = None;
     }
-    if !types.iter().any(|schema_type| *schema_type == SchemaType::String) {
+    if !types.contains(&SchemaType::String) {
         assertions.string = None;
     }
     if !types
@@ -1823,7 +1818,7 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
                     None => format = Some(branch_format.clone()),
                 }
             }
-        } else if assertions.types.as_ref()?.iter().any(|schema_type| *schema_type == SchemaType::String) {
+        } else if assertions.types.as_ref()?.contains(&SchemaType::String) {
             saw_string_family = true;
         }
     }
@@ -2289,11 +2284,10 @@ fn try_factor_required_property_any_of(
     {
         return None;
     }
-    if let Some(types) = &siblings.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &siblings.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let object = siblings.object.clone()?;
     if !object.pattern_properties.is_empty() || object.properties.is_empty() {
@@ -2354,11 +2348,10 @@ fn try_factor_closed_object_variant_any_of(
     {
         return None;
     }
-    if let Some(types) = &siblings.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &siblings.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let branch_objects = assertions
         .any_of
@@ -2384,7 +2377,7 @@ fn try_factor_closed_object_variant_any_of(
     }
 
     for common_name in &common_names {
-        let expected = property_schema_by_name(&branch_objects[0], common_name)?;
+        let expected = property_schema_by_name(branch_objects[0], common_name)?;
         if !branch_objects.iter().skip(1).all(|object| {
             property_schema_by_name(object, common_name)
                 .is_some_and(|actual| schemas_shape_equivalent(expected, actual))
@@ -2515,11 +2508,10 @@ fn mutually_exclusive_property_not_branch(schema: &Schema) -> Option<(&PropertyS
     {
         return None;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let object = assertions.object.as_ref()?;
     if object.properties.len() != 1
@@ -2553,11 +2545,10 @@ fn single_required_object_not_name(schema: &Schema) -> Option<&str> {
     {
         return None;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let object = assertions.object.as_ref()?;
     if object.required.len() != 1
@@ -2584,11 +2575,10 @@ fn single_required_object_branch_name(schema: &Schema) -> Option<&str> {
     {
         return None;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let object = assertions.object.as_ref()?;
     if !object.properties.is_empty()
@@ -2617,11 +2607,10 @@ fn closed_object_variant_branch(schema: &Schema) -> Option<&ObjectSchema> {
     {
         return None;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
 
     let object = assertions.object.as_ref()?;
     if !matches!(object.additional_properties, AdditionalProperties::Deny)
@@ -2940,21 +2929,18 @@ fn try_merge_required_singleton_property_one_of_objects(branches: &[Schema]) -> 
             .iter()
             .map(|object| &object.properties[property_idx].schema)
             .collect::<Vec<_>>();
-        if first.required.contains(property_name) {
-            if let Some(literals) = property_schemas
+        if first.required.contains(property_name)
+            && let Some(literals) = property_schemas
                 .iter()
                 .map(|schema| extract_unconstrained_singleton_string_literal(schema))
                 .collect::<Option<Vec<_>>>()
-            {
-                if singleton_string_literals_are_distinct(&literals) {
+                && singleton_string_literals_are_distinct(&literals) {
                     if discriminator_idx.replace(property_idx).is_some() {
                         return None;
                     }
                     discriminator_literals = literals;
                     continue;
                 }
-            }
-        }
         let first_schema = property_schemas.first()?;
         if !property_schemas
             .iter()
@@ -3497,11 +3483,10 @@ fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
     {
         return None;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return None;
         }
-    }
     assertions.object.as_ref()
 }
 
@@ -4193,7 +4178,7 @@ fn schema_has_string_family(schema: &Schema) -> bool {
         || assertions
             .types
             .as_ref()
-            .is_some_and(|types| types.iter().any(|schema_type| *schema_type == SchemaType::String))
+            .is_some_and(|types| types.contains(&SchemaType::String))
 }
 
 fn merge_additional_properties(
@@ -4332,8 +4317,10 @@ mod exact_one_of_policy_tests {
 
     fn compile(value: Value) -> ImportResult<crate::import::ast::NamedGrammar> {
         let document = load_document(&value)?;
-        let mut config = JsonSchemaConfig::default();
-        config.coerce_one_of_to_any_of = false;
+        let config = JsonSchemaConfig {
+            coerce_one_of_to_any_of: false,
+            ..Default::default()
+        };
         lower_document(&document, config)
     }
 

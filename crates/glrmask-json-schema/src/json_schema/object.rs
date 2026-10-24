@@ -131,7 +131,7 @@ fn is_obviously_object_valued_property(schema: &Schema) -> bool {
         || assertions
             .types
             .as_ref()
-            .is_some_and(|types| types.iter().any(|schema_type| *schema_type == SchemaType::Object))
+            .is_some_and(|types| types.contains(&SchemaType::Object))
 }
 
 fn obvious_object_valued_property_count(schema: &ObjectSchema) -> usize {
@@ -816,27 +816,20 @@ impl<'a> Lowerer<'a> {
                         ));
                     }
                 }
-            } else if !fixed_closed_redundant && !pattern_map_candidate && !open_dynamic_map_candidate {
-                if !max_properties_filled_by_required {
+            } else if !fixed_closed_redundant && !pattern_map_candidate && !open_dynamic_map_candidate
+                && !max_properties_filled_by_required {
                     return Err(SchemaImportError::new(
                         "unsupported maxProperties combined with fixed properties or patternProperties",
                     ));
                 }
-            }
         }
         let extra_min_properties =
             normalized.min_properties.saturating_sub(normalized.required.len());
-        let min_property_group_required = if extra_min_properties == 0 {
-            false
-        } else if normalized.properties.is_empty()
-            && normalized.required.is_empty()
-            && !matches!(normalized.additional_properties, AdditionalProperties::Deny)
-        {
-            false
-        } else if normalized.properties.is_empty()
-            && normalized.required.is_empty()
-            && matches!(normalized.additional_properties, AdditionalProperties::Deny)
-            && normalized.pattern_properties.len() == 1
+        let min_property_group_required = if extra_min_properties == 0
+            || (normalized.properties.is_empty()
+                && normalized.required.is_empty()
+                && (!matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                    || normalized.pattern_properties.len() == 1))
         {
             false
         } else if extra_min_properties == 1
@@ -970,11 +963,10 @@ impl<'a> Lowerer<'a> {
                     &normalized.property_dependencies,
                 );
             }
-            if use_large_optional_open_object_prefix_chain {
-                if let Some(tail_pair_expr) = tail_pair {
+            if use_large_optional_open_object_prefix_chain
+                && let Some(tail_pair_expr) = tail_pair {
                     return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
                 }
-            }
             if use_closed_object_prefix_chain {
                 return Ok(self.lower_large_closed_object_prefix_chain(&items));
             }
@@ -1274,8 +1266,8 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         }
 
-        if open_object_any_of_covers_json_object(&assertions.any_of) {
-            if super::string::json_string_compat_mode()
+        if open_object_any_of_covers_json_object(&assertions.any_of)
+            && super::string::json_string_compat_mode()
                 == super::string::JsonStringCompatMode::JsonSchema
             {
                 return Ok(Some(r(JSON_OBJECT_RULE)));
@@ -1283,7 +1275,6 @@ impl<'a> Lowerer<'a> {
 
             // In llguidance mode, preserve open anyOf lowering so unknown keys
             // use additional-key semantics instead of strict JSON_OBJECT keys.
-        }
 
         self.try_lower_open_object_any_of_variants(&assertions.any_of)
     }
@@ -1302,10 +1293,10 @@ impl<'a> Lowerer<'a> {
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[[[0u32; 2]; 2]; 2]; items.len() + 1];
         for state_set in &mut states {
-            for separator_seen in 0..=1 {
-                for any_group_seen in 0..=1 {
-                    for exclusive_seen in 0..=1 {
-                        state_set[separator_seen][any_group_seen][exclusive_seen] = builder.add_state();
+            for separator in state_set.iter_mut() {
+                for group in separator.iter_mut() {
+                    for slot in group.iter_mut() {
+                        *slot = builder.add_state();
                     }
                 }
             }
@@ -1345,23 +1336,25 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        for separator_seen in 0..=1 {
-            for any_group_seen in 0..=1 {
+        let final_state_set = states[items.len()];
+        for (separator_seen, separator) in final_state_set.iter().enumerate() {
+            for (any_group_seen, group) in separator.iter().enumerate() {
                 if any_group_required && any_group_seen == 0 {
                     continue;
                 }
-                for exclusive_seen in 0..=1 {
+                for (exclusive_seen, &state_id) in group.iter().enumerate() {
                     if exclusive_require_one && exclusive_seen == 0 {
                         continue;
                     }
-                    builder.set_accepting(states[items.len()][separator_seen][any_group_seen][exclusive_seen]);
+                    builder.set_accepting(state_id);
                 }
             }
         }
 
         if let Some(tail_pair_expr) = tail_pair {
-            for any_group_seen in 0..=1 {
-                for exclusive_seen in 0..=1 {
+            let tail_state_set = states[items.len()];
+            for (any_group_seen, group) in tail_state_set[0].iter().enumerate() {
+                for (exclusive_seen, &tail_source) in group.iter().enumerate() {
                     let tail_state = builder.add_state();
                     if (!any_group_required || any_group_seen == 1)
                         && (!exclusive_require_one || exclusive_seen == 1)
@@ -1369,12 +1362,12 @@ impl<'a> Lowerer<'a> {
                         builder.set_accepting(tail_state);
                     }
                     builder.add_transition(
-                        states[items.len()][0][any_group_seen][exclusive_seen],
+                        tail_source,
                         tail_pair_expr.clone(),
                         tail_state,
                     );
                     builder.add_transition(
-                        states[items.len()][1][any_group_seen][exclusive_seen],
+                        tail_state_set[1][any_group_seen][exclusive_seen],
                         seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
                         tail_state,
                     );
@@ -1495,10 +1488,14 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        for seen_mask in 0..(1usize << items.len()) {
+        for (seen_mask, state_pair) in states[items.len()]
+            .iter()
+            .enumerate()
+            .take(1usize << items.len())
+        {
             if accepts(seen_mask as u64) {
-                builder.set_accepting(states[items.len()][seen_mask][0]);
-                builder.set_accepting(states[items.len()][seen_mask][1]);
+                builder.set_accepting(state_pair[0]);
+                builder.set_accepting(state_pair[1]);
             }
         }
 
@@ -1553,11 +1550,10 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(None);
         }
-        if let Some(types) = &assertions.types {
-            if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+        if let Some(types) = &assertions.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
                 return Ok(None);
             }
-        }
         let merged_object;
         let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
             if assertions.object.as_ref().is_some_and(|object| {
@@ -1716,11 +1712,10 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(None);
         }
-        if let Some(types) = &assertions.types {
-            if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+        if let Some(types) = &assertions.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
                 return Ok(None);
             }
-        }
         let merged_object;
         let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
             if assertions.object.as_ref().is_some_and(|object| {
@@ -2359,11 +2354,10 @@ impl<'a> Lowerer<'a> {
                     break;
                 }
             }
-            if all_singleton {
-                if discriminator_index.replace(index).is_some() {
+            if all_singleton
+                && discriminator_index.replace(index).is_some() {
                     return Ok(None);
                 }
-            }
         }
         let Some(discriminator_index) = discriminator_index else {
             return Ok(None);
@@ -2417,14 +2411,13 @@ impl<'a> Lowerer<'a> {
         if variants.is_empty() {
             return Ok(None);
         }
-        if !discriminator_anyof_fastpath_disabled() {
-            if let Some(expr) = self.try_lower_discriminator_value_open_any_of_object(
+        if !discriminator_anyof_fastpath_disabled()
+            && let Some(expr) = self.try_lower_discriminator_value_open_any_of_object(
                 variants,
                 include_untyped_non_object_alts,
             )? {
                 return Ok(Some(expr));
             }
-        }
 
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
@@ -3940,7 +3933,7 @@ impl<'a> Lowerer<'a> {
         }
         let untyped = assertions.types.is_none();
         let explicitly_allows_string = assertions.types.as_ref().is_some_and(|types| {
-            types.iter().any(|schema_type| *schema_type == SchemaType::String)
+            types.contains(&SchemaType::String)
         });
         if !explicitly_allows_string && !untyped {
             return Ok(None);
@@ -4572,16 +4565,15 @@ fn is_ref_string_open_object_branch(schema: &Schema) -> bool {
     {
         return false;
     }
-    if let Some(types) = &assertions.types {
-        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
             return false;
         }
-    }
 
     let Some(object) = &assertions.object else {
         return false;
     };
-    if object.pattern_properties.len() != 0 || object.properties.len() != 1 {
+    if !object.pattern_properties.is_empty() || object.properties.len() != 1 {
         return false;
     }
     if object.properties[0].name != "$ref" {

@@ -396,12 +396,8 @@ impl VirtualBinaryRepeatIntersectionRuntime {
                         );
                     }
                     for &(left_cost, right_cost) in &snapshot[edge.target as usize] {
-                        let Some(left_cost) = left_cost.checked_add(edge.left_completed) else {
-                            return None;
-                        };
-                        let Some(right_cost) = right_cost.checked_add(edge.right_completed) else {
-                            return None;
-                        };
+                        let left_cost = left_cost.checked_add(edge.left_completed)?;
+                        let right_cost = right_cost.checked_add(edge.right_completed)?;
                         changed |= Self::insert_pareto(
                             &mut requirements[source],
                             (left_cost, right_cost),

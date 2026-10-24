@@ -153,20 +153,20 @@ fn general_stack_normalization_matches_literal_weighted_prefix_oracle() {
     let mut seed = 608894;
     for case in 0..64 {
         let mut states = vec![State::default(); 8];
-        for i in 0..8 {
-            states[i].final_bits = next(&mut seed) as u32 & ALL;
+        for (i, state) in states.iter_mut().enumerate() {
+            state.final_bits = next(&mut seed) as u32 & ALL;
             for target in i + 1..8 {
                 for label in 0..3 {
-                    if next(&mut seed) % 3 == 0 {
-                        states[i]
+                    if next(&mut seed).is_multiple_of(3) {
+                        state
                             .edges
                             .entry(label)
                             .or_default()
                             .push((target, next(&mut seed) as u32 & ALL));
                     }
                 }
-                if next(&mut seed) % 4 == 0 {
-                    states[i].eps.push((target, next(&mut seed) as u32 & ALL));
+                if next(&mut seed).is_multiple_of(4) {
+                    state.eps.push((target, next(&mut seed) as u32 & ALL));
                 }
             }
         }

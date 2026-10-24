@@ -19,7 +19,7 @@ impl Weight {
   result
  }
  fn union(&self,other:&Self)->Self {
-  if self.is_empty(){return *other}if other.is_empty(){return *self}
+  if self.is_empty(){return *other} else if other.is_empty(){return *self}
   let mut result=Self{bits:[0;8],end:self.end,valid:self.valid&&other.valid&&self.end==other.end};
   for k in 0..8{result.bits[k]=self.bits[k]|other.bits[k]}result
  }
@@ -215,7 +215,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn terminal_is_active(&self, terminal: TerminalID) -> bool {
-        self.active_terminals.as_ref().map_or(true, |active| {
+        self.active_terminals.as_ref().is_none_or(|active| {
             active.get(terminal as usize).copied().unwrap_or(false)
         })
     }
@@ -229,7 +229,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .or_insert_with(|| {
                 self.tokenizer
                     .possible_future_terminals_iter(original)
-                    .filter(|&terminal| active.as_ref().map_or(true, |mask| {
+                    .filter(|&terminal| active.as_ref().is_none_or(|mask| {
                         mask.get(terminal as usize).copied().unwrap_or(false)
                     }))
                     .collect()
@@ -359,12 +359,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return;
         }
 
-        if let Some(ignore_terminal) = self.ignore_terminal {
-            if self.ignore_terminal_possible_for_state(tokenizer_state) {
+        if let Some(ignore_terminal) = self.ignore_terminal
+            && self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_leaf_token_from_sources(sources, ignore_terminal, internal_token_id);
             }
-        }
 
         let colors = self.future_terminal_colors_for_state(tokenizer_state);
         for color in colors {
@@ -390,12 +389,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return;
         }
 
-        if let Some(ignore_terminal) = self.ignore_terminal {
-            if self.ignore_terminal_possible_for_state(tokenizer_state) {
+        if let Some(ignore_terminal) = self.ignore_terminal
+            && self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_match_from_sources(sources, ignore_terminal, self.leaf_state, weight);
             }
-        }
 
         let colors = self.future_terminal_colors_for_state(tokenizer_state);
         for color in colors {
@@ -410,7 +408,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if let Some(existing) = &mut entry.weight {
                     *existing = existing.union(weight);
                 } else {
-                    entry.weight = Some(weight.clone());
+                    entry.weight = Some(*weight);
                 }
             }
         }
@@ -419,11 +417,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
         let cache_key = token_ids as *const RangeSetBlaze<usize> as usize;
         if let Some(weight) = self.reachable_weight_cache.get(&cache_key) {
-            return weight.clone();
+            return *weight;
         }
 
         let weight = self.token_set_weight_fast(token_ids);
-        self.reachable_weight_cache.insert(cache_key, weight.clone());
+        self.reachable_weight_cache.insert(cache_key, weight);
         weight
     }
 
@@ -515,7 +513,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             terminal_id,
         );
         if let Some(weight) = self.pruned_weight_cache.get(&cache_key) {
-            return Some(weight.clone());
+            return Some(*weight);
         }
 
         let mut remaining = child_node.reachable_token_ids().clone();
@@ -531,7 +529,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         let weight = self.token_set_weight_fast(&remaining);
-        self.pruned_weight_cache.insert(cache_key, weight.clone());
+        self.pruned_weight_cache.insert(cache_key, weight);
         Some(weight)
     }
 
@@ -602,7 +600,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         let mut accessible = node.reachable_token_ids().clone();
         if node.has_token() {
-            accessible.remove(node.token_id() as usize);
+            accessible.remove(node.token_id());
         }
         if accessible.is_empty() {
             return;
@@ -636,13 +634,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 self.epsilon_buffer
                     .entry((source, target))
                     .and_modify(|existing| *existing = existing.union(weight))
-                    .or_insert_with(|| weight.clone());
+                    .or_insert_with(|| *weight);
             } else {
                 if let Some(buffer)=&mut self.compact_buffer{buffer.add((source,label as i32,target),weight);continue}
                 self.transition_buffer
                     .entry((source, label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
-                    .or_insert_with(|| weight.clone());
+                    .or_insert_with(|| *weight);
             }
         }
     }
@@ -725,7 +723,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for ((source, tokenizer_state, color), buffered) in buffer {
-            if buffered.token_ids.is_empty() && buffered.weight.as_ref().map_or(true, |w| w.is_empty()) {
+            if buffered.token_ids.is_empty() && buffered.weight.as_ref().is_none_or(|w| w.is_empty()) {
                 continue;
             }
             let terminals = &terminal_cache[&(tokenizer_state, color)];
@@ -740,7 +738,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(existing) = &mut entry.weight {
                         *existing = existing.union(w);
                     } else {
-                        entry.weight = Some(w.clone());
+                        entry.weight = Some(*w);
                     }
                 }
             }
@@ -1043,7 +1041,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for &end_state in &end_states {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
-                            &source_nodes,
+                            source_nodes,
                             end_state,
                             leaf_token_id,
                         );
@@ -1074,7 +1072,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
-                            &source_nodes,
+                            source_nodes,
                             matched.id,
                             leaf_token_id,
                         );
@@ -1083,11 +1081,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     // L1 terminals never appear in multi-terminal paths, so
                     // skip continuation processing (no second terminal will
                     // follow within the same token).
-                    if let Some(ref lengths) = self.terminal_path_lengths {
-                        if let Some(&TerminalPathLength::One) = lengths.get(matched.id as usize) {
+                    if let Some(ref lengths) = self.terminal_path_lengths
+                        && let Some(&TerminalPathLength::One) = lengths.get(matched.id as usize) {
                             continue;
                         }
-                    }
 
                     let continuation_weight_started_at =
                         self.profile_timing.then(std::time::Instant::now);
@@ -1127,7 +1124,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     self.profile.match_transition_additions += source_nodes.len() as u64;
                     self.add_match_from_sources(
-                        &source_nodes,
+                        source_nodes,
                         matched.id,
                         destination,
                         &continuation_weight,
@@ -1200,7 +1197,7 @@ impl<'a> BorrowedObservation<'a> {
                 let q=*original_to_logical.get(raw as usize)?;if q==u32::MAX{return None;}
                 if std::mem::replace(&mut seen[q as usize],true){continue;}
                 if source.state_has_epsilon_transitions(raw){scalar=false;break;}
-                for (_,target) in source.transitions_from(raw){work+=1;if work>2_000_000{return None;}if original_to_logical[target as usize]!=u32::MAX{todo.push(target);}}
+                for (_,target) in source.transitions_from(raw){work+=1;if work>2_000_000{return None;}else if original_to_logical[target as usize]!=u32::MAX{todo.push(target);}}
             }
             scalar
         }else{false};

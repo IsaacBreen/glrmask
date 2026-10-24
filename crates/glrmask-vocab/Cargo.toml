@@ -14,3 +14,6 @@ internal-api = []
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 range-set-blaze = "0.3.0"
+
+[lints]
+workspace = true

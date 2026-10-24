@@ -913,8 +913,8 @@ impl Grammar {
             )?;
             return constraint.with_end_tokens(options.end_token_ids());
         }
-        if options.parser_backend == ParserBackend::TemplateDfa {
-            if engine == Engine::MergedTokenTrie && self.bindings.is_empty() {
+        if options.parser_backend == ParserBackend::TemplateDfa
+            && engine == Engine::MergedTokenTrie && self.bindings.is_empty() {
                 return self.finish_template_attempt(vocab, &options, || {
                     let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                     // A partial template build must not leave prepared caches on
@@ -944,7 +944,6 @@ impl Grammar {
                     })
                 });
             }
-        }
         if !self.bindings.is_empty() {
             return self.finish_template_attempt(vocab, &options, || {
                 let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
@@ -2352,13 +2351,12 @@ impl GrammarBinding<'_> {
         match self {
             Self::Source(grammar) => match mode {
                 ChildCompileMode::Static => {
-                    if !allow_open_source_tokens {
-                        if let Some(name) = grammar.unresolved_external_names()?.first() {
+                    if !allow_open_source_tokens
+                        && let Some(name) = grammar.unresolved_external_names()?.first() {
                             return Err(Error::Compilation(format!(
                                 "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                             )));
                         }
-                    }
                     let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
                     Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(Engine::Auto)?)))
                 }
@@ -3009,7 +3007,7 @@ impl PreparedGrammar {
                 }
                 ModuleBinding::Module(_) => {} // Validated once by the graph traversal.
                 ModuleBinding::Constraint(child) => {
-                    if !static_constraint_targets(child.as_ref(), &vocab) {
+                    if !static_constraint_targets(child.as_ref(), vocab) {
                         return Err(Error::Serialization(format!(
                             "unlinked-constraint grammar binding {name:?} has incompatible vocabulary",
                         )));
@@ -3056,8 +3054,8 @@ impl PreparedGrammar {
 
     fn bind_value(&self, name: &str, value: UnlinkedValue<'_>) -> Result<Self> {
         let previous=graph::prepared_summary(self)?;
-        if !self.slot_kinds.contains_key(name) {
-            if let Some((head,tail))=attached_path(name,&self.bindings) {
+        if !self.slot_kinds.contains_key(name)
+            && let Some((head,tail))=attached_path(name,&self.bindings) {
                 let Some(ModuleBinding::Module(child))=self.bindings.get(head) else {
                     return Err(Error::Compilation(format!("external grammar {head:?} is not a prepared component")));
                 };
@@ -3067,7 +3065,6 @@ impl PreparedGrammar {
                 next.analysis=graph::filled_cache(previous.changed(head,Some(summary)));
                 graph::check_prepared_limits(&next)?;return Ok(next);
             }
-        }
         self.require_direct_slot(name)?;
         check_binding_kind(name,self.slot_kinds[name],matches!(value,UnlinkedValue::Prepared(_)|UnlinkedValue::StaticBorrowed(_)|UnlinkedValue::StaticOwned(_)))
             .map_err(|e|e.with_source_span(self.slot_spans.get(name).copied()))?;
@@ -5100,7 +5097,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert_recursive_compiler_views_detached(&bound);
         assert_recursive_compiler_views_detached(&loaded);
         let mut no_trigger = bound.clone();
@@ -5242,7 +5239,7 @@ mod tests {
         )
         .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save(), &vocab).unwrap()] {
             for tokens in [
                 &[7][..],
                 &[0, 6][..],
@@ -5280,7 +5277,7 @@ mod tests {
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
 
-        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         let mut no_outer_table = loaded.clone();
         assert_no_materialized_outer_table(&mut no_outer_table);
         for constraint in [&bound, &loaded, &no_outer_table] {
@@ -5291,7 +5288,7 @@ mod tests {
 
             assert!(state.commit_token(100));
             let mask = state.mask();
-            assert_ne!(mask[1 / 32] & (1u32 << (1 % 32)), 0);
+            assert_ne!(mask[1 / 32] & (1u32 << 1), 0);
 
             assert!(state.commit_token(1));
             assert!(state.is_accepting());
@@ -5334,11 +5331,11 @@ mod tests {
         assert!(static_bound.static_dynamic_overlay.as_ref().unwrap()
             .segmented_boundary_shards.iter().all(|shard| !matches!(
                 shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)));
-        let static_loaded = RuntimeConstraint::load(&static_bound.save(), &vocab).unwrap();
+        let static_loaded = RuntimeConstraint::load(static_bound.save(), &vocab).unwrap();
         let bound = parent
             .bind_grammar_dynamic_boundary("payload", child)
             .unwrap();
-        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         // Keep the schema's exact internal regular nodes; source serialization
         // is not the composition protocol and may intentionally have a narrower
         // syntax than the JSON frontend's already constructed representation.
@@ -5442,18 +5439,18 @@ mod tests {
         );
         let bound_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
         assert!(bound_overlay.segmented_boundary_shards.iter().all(|shard| {
-            shard.start_parser_states.len() == 0
+            shard.start_parser_states.is_empty()
         }));
         assert!(bound_overlay.segmented_parser_components.iter().all(|component| {
             component
                 .boundary
                 .as_ref()
-                .is_none_or(|shard| shard.start_parser_states.len() == 0)
+                .is_none_or(|shard| shard.start_parser_states.is_empty())
         }));
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
-        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         assert!(
             loaded
@@ -5473,13 +5470,13 @@ mod tests {
         );
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(loaded_overlay.segmented_boundary_shards.iter().all(|shard| {
-            shard.start_parser_states.len() == 0
+            shard.start_parser_states.is_empty()
         }));
         assert!(loaded_overlay.segmented_parser_components.iter().all(|component| {
             component
                 .boundary
                 .as_ref()
-                .is_none_or(|shard| shard.start_parser_states.len() == 0)
+                .is_none_or(|shard| shard.start_parser_states.is_empty())
         }));
         assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
 
@@ -5586,7 +5583,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        let loaded = RuntimeConstraint::load(&bound.save(), &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let monolithic = RuntimeConstraint::compile(
             Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\"? \"!\";"),
@@ -5655,7 +5652,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save(), &vocab).unwrap()] {
             let layout = constraint
                 .recursive_parser_layout()
                 .unwrap()
@@ -5857,7 +5854,7 @@ mod tests {
                 + terminal(&outer_parent, "BANG"),
         ];
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save(), &vocab).unwrap()] {
             let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
                 vec![0],
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
@@ -5949,7 +5946,7 @@ mod tests {
             half_offset + original_parent_offset + terminal(&parent, "GT"),
         ];
 
-        for constraint in [&full, &RuntimeConstraint::load(&full.save(), &vocab).unwrap()] {
+        for constraint in [&full, &RuntimeConstraint::load(full.save(), &vocab).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             assert_eq!(
                 layout
@@ -6166,7 +6163,7 @@ mod tests {
         let bang = outer_overlay.segmented_parser_components[0].terminal_offset
             + terminal(&outer_parent, "BANG");
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save(), &vocab).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save(), &vocab).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             let outer_link = layout
                 .links

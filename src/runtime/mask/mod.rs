@@ -714,8 +714,8 @@ impl DenseMaskAcc {
         token_set: RuntimeTokenSetRef<'_>,
         precomputed: &DenseTokenMaskCache,
     ) -> Option<Arc<[u64]>> {
-        if let Some(key) = token_set.materialized_key() {
-            if let Some(mask) = precomputed.get(&key) {
+        if let Some(key) = token_set.materialized_key()
+            && let Some(mask) = precomputed.get(&key) {
                 let mut out = vec![0u64; dense.len()];
                 let mut any = false;
                 for i in 0..dense.len() {
@@ -725,7 +725,6 @@ impl DenseMaskAcc {
                 }
                 return any.then(|| out.into());
             }
-        }
         let mut out = vec![0u64; dense.len()];
         let mut any = false;
         Self::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
@@ -744,15 +743,14 @@ impl DenseMaskAcc {
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
     ) {
-        if let Some(key) = token_set.materialized_key() {
-            if let Some(mask) = precomputed.get(&key) {
+        if let Some(key) = token_set.materialized_key()
+            && let Some(mask) = precomputed.get(&key) {
                 let n = dense.len().min(mask.len()).min(merged.len());
                 for i in 0..n {
                     merged[i] |= dense[i] & mask[i];
                 }
                 return;
             }
-        }
         let word_limit = dense.len().min(merged.len());
         Self::for_each_runtime_token_range_word(token_set, word_limit, |word_idx, token_mask| {
             merged[word_idx] |= dense[word_idx] & token_mask;
@@ -988,8 +986,8 @@ impl DenseMaskAcc {
         if let Some(cached) = cache.get(&key) {
             return cached.clone();
         }
-        if let RuntimeTokenSetKey::Materialized(token_set_key) = key.token_set {
-            if let Some(mask) = precomputed.get(&token_set_key) {
+        if let RuntimeTokenSetKey::Materialized(token_set_key) = key.token_set
+            && let Some(mask) = precomputed.get(&token_set_key) {
             let mut any = false;
             let mut out: Option<Vec<u64>> = None;
             for i in 0..dense.len() {
@@ -1014,7 +1012,6 @@ impl DenseMaskAcc {
             cache.insert(key, result.clone());
             return result;
             }
-        }
         let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
         cache.insert(key, result.clone());
         result
@@ -2576,7 +2573,7 @@ mod tests {
         state.fill_mask(&mut actual);
         assert_eq!(actual, expected);
 
-        let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("empty-PM constraint should roundtrip");
+        let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("empty-PM constraint should roundtrip");
         assert!(loaded.possible_matches.is_empty());
         let mut loaded_state = loaded.start_dynamic();
         let loaded_tokenizer_state = loaded.tokenizer.initial_state();
@@ -3815,8 +3812,8 @@ fn enqueue_weighted_transition(
     };
     let mut intersect_ns = 0u64;
     let cache_key = None;
-    if let Some(key) = cache_key.as_ref() {
-        if let Some(cached) = transition_gss_cache.get(key) {
+    if let Some(key) = cache_key.as_ref()
+        && let Some(cached) = transition_gss_cache.get(key) {
             if let (Some(profile), Some(start)) = (profile.as_mut(), apply_start) {
                 let apply_ns = elapsed_ns(start);
                 profile.transition_apply_ns += apply_ns;
@@ -3825,7 +3822,6 @@ fn enqueue_weighted_transition(
             enqueue_gss(queue, target, cached.clone());
             return;
         }
-    }
 
     let pruned = popped.apply_and_prune_no_promote(|allowed| {
         let intersect_start = if profile_enabled {
@@ -3982,7 +3978,7 @@ fn boundary_weight_mask_via_shared_queue(
 ) -> Option<DenseMaskAcc> {
     if token_count == 0 || tsids.is_empty() { return None; }
     let mut full = vec![u64::MAX; token_count.div_ceil(64)];
-    if token_count % 64 != 0 { *full.last_mut().unwrap() = (1u64 << (token_count % 64)) - 1; }
+    if !token_count.is_multiple_of(64) { *full.last_mut().unwrap() = (1u64 << (token_count % 64)) - 1; }
     let seed = DenseMaskAcc::from_dense_arc_for_tsids(tsids, Arc::from(full))?;
     let mut queue = MaskQueue::new();
     queue.enqueue(dwa.start_state(), boundary_queue_seed(stacks, &seed, top_live));
@@ -4225,15 +4221,14 @@ impl<'a> ConstraintState<'a> {
             );
             for local_tokenizer_state in local_tokenizer_states {
                 for &terminal in terminals.iter() {
-                    if self.constraint.uses_compact_segmented_parser_runtime() {
-                        if let Some(local_terminal) = self
+                    if self.constraint.uses_compact_segmented_parser_runtime()
+                        && let Some(local_terminal) = self
                             .constraint
                             .recursive_terminal_for_component(component_index, terminal)
                         {
                             result = result.with_insert(local_tokenizer_state, local_terminal);
                             continue;
                         }
-                    }
                     if terminal_start <= terminal && terminal < terminal_end {
                         result = result.with_insert(
                             local_tokenizer_state,
@@ -4334,7 +4329,7 @@ impl<'a> ConstraintState<'a> {
             }
             let source = component.constraint.as_ref();
             let blocked = root_disallow
-                .then(|| component.root_disallowed_terminal)
+                .then_some(component.root_disallowed_terminal)
                 .flatten()
                 .and_then(|terminal| source.possible_matches.get(&terminal));
             for local_tokenizer_state in local_tokenizer_states {
@@ -4645,9 +4640,7 @@ impl<'a> ConstraintState<'a> {
             .segmented_parser_components
             .iter()
             .zip(projected_states.iter())
-            .filter_map(|(component, state)| {
-                (!state.is_empty()).then(|| component.constraint.body_mask_len())
-            })
+            .filter(|&(component, state)| !state.is_empty() ).map(|(component, state)| component.constraint.body_mask_len())
             .max()
             .unwrap_or(0)
             .max(buf.len());
@@ -4700,7 +4693,7 @@ impl<'a> ConstraintState<'a> {
             // artifacts, while dynamic sources keep their parser/lexer walker.
             // A nested hybrid component recursively retains the same split.
             shadow.fill_mask(component_buf);
-            self.or_segmented_component_mask(buf, &component_buf);
+            self.or_segmented_component_mask(buf, component_buf);
             #[cfg(test)]
             segmented_mask_stage_trace(&format!("component-{component_index}"), buf);
             component_times.push(component_started_at.map_or(0, elapsed_ns));
@@ -5068,7 +5061,7 @@ impl<'a> ConstraintState<'a> {
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
-                            &boundary,
+                            boundary,
                             Some(&shard.start_parser_states),
                             Some(shard.start_component),
                             shard.accepts_empty_stack,
@@ -5077,7 +5070,7 @@ impl<'a> ConstraintState<'a> {
                     }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
                         self.or_segmented_boundary_terminal_trie_mask(
-                            &boundary,
+                            boundary,
                             Some(&shard.start_parser_states),
                             shard.accepts_empty_stack,
                             buf,
@@ -5733,10 +5726,9 @@ impl<'a> ConstraintState<'a> {
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
                 match top_first.first().copied() {
                     Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
-                        if !self
+                        if self
                             .constraint
-                            .compact_segmented_parser_component(top)
-                            .is_some_and(|(owner, _)| owner == shard.start_component as usize)
+                            .compact_segmented_parser_component(top).is_none_or(|(owner, _)| owner != shard.start_component as usize)
                         {
                             return;
                         }
@@ -6017,7 +6009,7 @@ impl<'a> ConstraintState<'a> {
             top_first: &[u32],
         ) -> Vec<u64> {
             let mut path = vec![u64::MAX; token_count.div_ceil(64)];
-            if token_count % 64 != 0 {
+            if !token_count.is_multiple_of(64) {
                 *path.last_mut().expect("nonempty token universe") =
                     (1u64 << (token_count % 64)) - 1;
             }
@@ -6197,10 +6189,9 @@ impl<'a> ConstraintState<'a> {
                     if let Some(start_component) = start_component {
                         match top_first.first().copied() {
                             Some(top)
-                                if !self
+                                if self
                                     .constraint
-                                    .compact_segmented_parser_component(top)
-                                    .is_some_and(|(owner, _)| owner == start_component as usize) =>
+                                    .compact_segmented_parser_component(top).is_none_or(|(owner, _)| owner != start_component as usize) =>
                             {
                                 return;
                             }
@@ -7349,7 +7340,7 @@ impl<'a> ConstraintState<'a> {
         }
 
         if let (Some(buf), RuntimeTokenSetRef::PackedPool(tokens)) =
-            (direct_buf.as_deref_mut(), token_set)
+            (direct_buf, token_set)
             && self.constraint.or_packed_final_tokens_to_buf(dense, tokens, buf)
         {
             *direct_buf_dirty = true;
@@ -7967,9 +7958,9 @@ impl<'a> ConstraintState<'a> {
             for (((root, target), transition_weight), _) in roots
                 .iter()
                 .copied()
-                .zip(seed_targets.into_iter())
-                .zip(seed_weights.into_iter())
-                .zip(seed_gsses.into_iter())
+                .zip(seed_targets)
+                .zip(seed_weights)
+                .zip(seed_gsses)
             {
                 let result = evaluator.eval_upper(target, root);
                 let result = result.and_then(|result| {
@@ -8224,8 +8215,8 @@ impl<'a> ConstraintState<'a> {
         let mut reuse_existing_cache_dense = false;
         if !direct_finalized && can_use_merged_cache {
             let cache = self.mask_cache.lock().unwrap();
-            if let Some(cache_data) = cache.as_ref() {
-                if cache_data.mask.len() == buf.len()
+            if let Some(cache_data) = cache.as_ref()
+                && cache_data.mask.len() == buf.len()
                     && cache_data.merged_dense.len() == merged.len()
                     && cache_data.merged_dense == merged
                 {
@@ -8244,9 +8235,8 @@ impl<'a> ConstraintState<'a> {
                     reuse_existing_cache_dense = true;
                     use_delta_seed = true;
                 }
-            }
-            if !use_delta_seed {
-                if let Some(cache_data) = cache.as_ref().filter(|c| c.merged_dense.len() == merged.len()) {
+            if !use_delta_seed
+                && let Some(cache_data) = cache.as_ref().filter(|c| c.merged_dense.len() == merged.len()) {
                     let scratch_cost = self.constraint.estimate_internal_dense_to_buf_cost(&merged);
                     let copy_cost_words = self.constraint.body_mask_len() as u64;
                     let mut added_bits = 0u64;
@@ -8317,8 +8307,8 @@ impl<'a> ConstraintState<'a> {
                     let delta_cost = copy_cost_words + added_cost + removed_cost;
                     let delta_savings = scratch_cost.saturating_sub(delta_cost);
 
-                    if delta_profile_enabled {
-                        if let Some(profile) = profile.as_mut() {
+                    if delta_profile_enabled
+                        && let Some(profile) = profile.as_mut() {
                             profile.delta_prev_available = 1;
                             profile.delta_added_bits = added_bits;
                             profile.delta_removed_bits = removed_bits;
@@ -8331,7 +8321,6 @@ impl<'a> ConstraintState<'a> {
                             profile.delta_estimated_cost = delta_cost;
                             profile.delta_estimated_savings = delta_savings;
                         }
-                    }
                     let delta_wins_decisively =
                         delta_savings > DELTA_SEED_MIN_SAVINGS && delta_cost.saturating_mul(2) < scratch_cost;
                     if delta_wins_decisively && cache_data.mask.len() == buf.len() {
@@ -8360,7 +8349,6 @@ impl<'a> ConstraintState<'a> {
                         use_delta_seed = true;
                     }
                 }
-            }
         }
 
         if !use_delta_seed {
@@ -8530,11 +8518,10 @@ impl<'a> ConstraintState<'a> {
 
         let returned_profile = profile.map(|profile| {
             let mut out = MaskProfile::from_parts(profile, *queue_debug, false, false);
-            if out.total_ns == 0 {
-                if let Some(start) = total_start {
+            if out.total_ns == 0
+                && let Some(start) = total_start {
                     out.total_ns = elapsed_ns(start);
                 }
-            }
             out
         });
 
@@ -8990,8 +8977,7 @@ impl<'a> ConstraintState<'a> {
                 .static_dynamic_overlay
                 .as_ref()
                 .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
-        {
-            if self.try_fill_mask_segmented_single_paths(mask) {
+            && self.try_fill_mask_segmented_single_paths(mask) {
                 self.update_control_special_token_mask(mask);
                 if crate::env::var_os("GLRMASK_VALIDATE_SEGMENTED_PARSER_MASK").is_some() {
                     let mut reference = vec![0u32; mask.len()];
@@ -9025,7 +9011,6 @@ impl<'a> ConstraintState<'a> {
                 self.clear_late_grammar_placeholder_mask(mask);
                 return;
             }
-        }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
             let factor_profile = crate::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
@@ -9648,11 +9633,10 @@ mod empty_byte_range_filter_tests {
                         let mut actual = vec![seed; words];
                         let mut expected = actual.clone();
                         for &id in empty {
-                            if !ranges.iter().any(|&(start, end)| start <= id && id <= end) {
-                                if let Some(word) = expected.get_mut(id as usize / 32) {
+                            if !ranges.iter().any(|&(start, end)| start <= id && id <= end)
+                                && let Some(word) = expected.get_mut(id as usize / 32) {
                                     *word &= !(1u32 << (id % 32));
                                 }
-                            }
                         }
                         retain_live_empty_byte_ranges(&mut actual, empty, &mut ranges.clone());
                         assert_eq!(actual, expected, "domain={empty:?}, ranges={ranges:?}");

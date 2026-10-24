@@ -349,11 +349,10 @@ mod group_reuse_tests {
             let live = reached[&key];
             let (state, cur_stack) = key;
             let row = &graph.states()[state as usize];
-            if prefix || cur_stack.is_empty() {
-                if let Some(final_weight) = &row.final_weight {
+            if (prefix || cur_stack.is_empty())
+                && let Some(final_weight) = &row.final_weight {
                     result |= live & test_bits(final_weight);
                 }
-            }
             let mut add = |target: u32, next_stack: Vec<u32>, coefficient: &Weight| {
                 let value = live & test_bits(coefficient);
                 if value == 0 {
@@ -457,8 +456,10 @@ mod group_reuse_tests {
     fn nwa_to_dwa(graph: &NWA) -> DWA {
         let mut states = Vec::with_capacity(graph.states().len());
         for source in graph.states() {
-            let mut state = DWAState::default();
-            state.final_weight = source.final_weight.clone();
+            let mut state = DWAState {
+                final_weight: source.final_weight.clone(),
+                ..Default::default()
+            };
             for (&label, targets) in &source.transitions {
                 assert!(targets.len() <= 1, "graph row must be deterministic for direct DWA");
                 if let Some((target, weight)) = targets.first() {

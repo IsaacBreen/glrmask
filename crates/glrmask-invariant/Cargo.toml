@@ -10,3 +10,6 @@ repository = "https://github.com/IsaacBreen/glrmask"
 [features]
 default = []
 internal-api = []
+
+[lints]
+workspace = true

@@ -534,7 +534,7 @@ mod proper_prefix_byte_tests {
         fn next(state: &mut u64)->u64 {
             *state ^= *state << 13; *state ^= *state >> 7; *state ^= *state << 17; *state
         }
-        let mut random=0x109174_b0_0d_u64;
+        let mut random=0x0010_9174_b00d_u64;
         for _case in 0..96 {
             let mut words=BTreeSet::new(); words.insert(Vec::new());
             for _ in 0..64 {

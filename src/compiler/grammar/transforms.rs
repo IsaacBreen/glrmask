@@ -62,7 +62,7 @@ pub(crate) fn with_epsfree_prepass_override<T>(
 fn epsfree_prepass_enabled() -> bool {
     epsfree_prepass_override().unwrap_or_else(|| {
         crate::env::var_os("GLRMASK_EPSFREE_PREPASS")
-            .map_or(true, |value| value.to_str() != Some("0"))
+            .is_none_or(|value| value.to_str() != Some("0"))
     })
 }
 
@@ -192,11 +192,10 @@ pub(crate) fn expand_nullable_terminals(
     // Rewrite existing rules in place: replace nullable Terminal(T) with Nonterminal(NT).
     for rule in rules.iter_mut() {
         for sym in rule.rhs.iter_mut() {
-            if let Symbol::Terminal(tid) = sym {
-                if let Some(&nt) = nt_for_terminal.get(tid) {
+            if let Symbol::Terminal(tid) = sym
+                && let Some(&nt) = nt_for_terminal.get(tid) {
                     *sym = Symbol::Nonterminal(nt);
                 }
-            }
         }
     }
 
@@ -648,12 +647,11 @@ pub(crate) fn inline_single_use_nonterminals(
             if has_candidate {
                 let mut new_rhs = Vec::with_capacity(rule.rhs.len());
                 for symbol in &rule.rhs {
-                    if let Symbol::Nonterminal(id) = symbol {
-                        if let Some((_, replacement_rhs)) = inline_candidates.get(id) {
+                    if let Symbol::Nonterminal(id) = symbol
+                        && let Some((_, replacement_rhs)) = inline_candidates.get(id) {
                             new_rhs.extend(replacement_rhs.iter().cloned());
                             continue;
                         }
-                    }
                     new_rhs.push(symbol.clone());
                 }
                 let rewritten_rule = Rule {
@@ -965,14 +963,12 @@ fn expand_inline_candidates_iteratively(
             }) {
                 let mut new_rhs = Vec::with_capacity(rhs.len());
                 for symbol in &rhs {
-                    if let Symbol::Nonterminal(id) = symbol {
-                        if *id != nonterminal {
-                            if let Some((_, replacement_rhs)) = inline_candidates.get(id) {
+                    if let Symbol::Nonterminal(id) = symbol
+                        && *id != nonterminal
+                            && let Some((_, replacement_rhs)) = inline_candidates.get(id) {
                                 new_rhs.extend(replacement_rhs.iter().cloned());
                                 continue;
                             }
-                        }
-                    }
                     new_rhs.push(symbol.clone());
                 }
                 if new_rhs != rhs {
@@ -2114,7 +2110,7 @@ mod tests {
             let nonterminals = (next(&mut seed) % 10 + 1) as u32;
             let mut candidates = BTreeMap::new();
             for nonterminal in 0..nonterminals {
-                if next(&mut seed) % 4 == 0 {
+                if next(&mut seed).is_multiple_of(4) {
                     continue;
                 }
                 let rhs_len = (next(&mut seed) % 5) as usize;
@@ -2153,7 +2149,7 @@ mod tests {
             let nonterminals = (next(&mut seed) % 9 + 1) as u32;
             let mut candidates = BTreeMap::new();
             for nonterminal in 0..nonterminals {
-                if next(&mut seed) % 4 == 0 {
+                if next(&mut seed).is_multiple_of(4) {
                     continue;
                 }
                 let rhs_len = (next(&mut seed) % 5) as usize;

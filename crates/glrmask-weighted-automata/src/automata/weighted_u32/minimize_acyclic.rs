@@ -368,10 +368,10 @@ fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
     }
 }
 
-/// Recover the live path domain of an already path-conditioned DWA from its
-/// incoming edge weights. Determinization emits cumulative path weights on
-/// edges; for such a DWA, all incoming weights to a state describe exactly the
-/// token contexts in which that residual is reachable.
+// Recover the live path domain of an already path-conditioned DWA from its
+// incoming edge weights. Determinization emits cumulative path weights on
+// edges; for such a DWA, all incoming weights to a state describe exactly the
+// token contexts in which that residual is reachable.
 
 /// Exact reverse structural hash-cons for an acyclic weighted DWA.
 ///
@@ -613,15 +613,14 @@ fn weights_equal_on_domain(w_a: &Weight, w_b: &Weight, domain: &Weight) -> bool 
                     }
                 }
                 (Some(at), Some(bt)) => {
-                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref() {
-                        if !token_sets_agree_on_domain(
+                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref()
+                        && !token_sets_agree_on_domain(
                             at.as_ref(),
                             bt.as_ref(),
                             d_tokens.as_ref(),
                         ) {
                             return false;
                         }
-                    }
                 }
             }
 
@@ -851,15 +850,14 @@ fn weight_is_disjoint_from_domain_intersection(
             };
 
             let sub_end = d_hi.min(weight_end);
-            if let Some(weight_tokens) = weight_tokens {
-                if token_sets_intersect_three(
+            if let Some(weight_tokens) = weight_tokens
+                && token_sets_intersect_three(
                     weight_tokens.as_ref(),
                     left_tokens.as_ref(),
                     right_tokens.as_ref(),
                 ) {
                     return false;
                 }
-            }
 
             if sub_end == u32::MAX {
                 break;
@@ -973,8 +971,8 @@ fn weights_equal_on_domain_intersection(
                     }
                 }
                 (Some(at), Some(bt)) => {
-                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref() {
-                        if !token_sets_agree_on_domain_intersection(
+                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref()
+                        && !token_sets_agree_on_domain_intersection(
                             at.as_ref(),
                             bt.as_ref(),
                             left_tokens.as_ref(),
@@ -982,7 +980,6 @@ fn weights_equal_on_domain_intersection(
                         ) {
                             return false;
                         }
-                    }
                 }
             }
 
@@ -1174,8 +1171,8 @@ fn are_compatible(
                 _ => {}
             }
 
-            let u_disjoint = w_u_full.map_or(true, |w| w.is_disjoint(&overlap));
-            let v_disjoint = w_v_full.map_or(true, |w| w.is_disjoint(&overlap));
+            let u_disjoint = w_u_full.is_none_or(|w| w.is_disjoint(&overlap));
+            let v_disjoint = w_v_full.is_none_or(|w| w.is_disjoint(&overlap));
 
             if u_disjoint && v_disjoint {
                 continue;
@@ -1496,15 +1493,14 @@ fn push_pointwise_tsid_range(
     if start > end {
         return;
     }
-    if let Some(previous) = ranges.last_mut() {
-        if Arc::ptr_eq(&previous.region, &region)
+    if let Some(previous) = ranges.last_mut()
+        && Arc::ptr_eq(&previous.region, &region)
             && previous.end != u32::MAX
             && previous.end + 1 == start
         {
             previous.end = end;
             return;
         }
-    }
     ranges.push(PointwiseTsidRange { start, end, region });
 }
 
@@ -1760,15 +1756,14 @@ fn push_token_behavior_range(
     if start > end {
         return;
     }
-    if let Some(previous) = ranges.last_mut() {
-        if previous.behavior == behavior
+    if let Some(previous) = ranges.last_mut()
+        && previous.behavior == behavior
             && previous.end != u32::MAX
             && previous.end + 1 == start
         {
             previous.end = end;
             return;
         }
-    }
     ranges.push(TokenBehaviorRange { start, end, behavior });
 }
 
@@ -1886,7 +1881,7 @@ where
     let start = *range.start();
     let end = *range.end();
     if start <= pos {
-        let shared: &'a Arc<RangeSetBlaze<u32>> = *tokens;
+        let shared: &'a Arc<RangeSetBlaze<u32>> = tokens;
         (
             Some(shared.as_ref()),
             (u64::from(end) + 1).min(window_end_exclusive),
@@ -2126,11 +2121,10 @@ fn build_pointwise_profile(
                 while *cursor < ranges.len() && ranges[*cursor].1 < tsid_start {
                     *cursor += 1;
                 }
-                if let Some((start, _, tokens)) = ranges.get(*cursor) {
-                    if *start <= tsid_start {
+                if let Some((start, _, tokens)) = ranges.get(*cursor)
+                    && *start <= tsid_start {
                         active_transitions.push((*label, *target, *tokens));
                     }
-                }
             }
             let region = build_token_behavior_region(
                 domain_tokens.as_ref(),
@@ -3907,8 +3901,7 @@ fn partition_refine_coloring_raw(
     let mut hash_groups: rustc_hash::FxHashMap<u64, Vec<usize>> =
         rustc_hash::FxHashMap::default();
 
-    for idx in 0..nc {
-        let c = candidates[idx];
+    for (idx, &c) in candidates.iter().enumerate() {
         let mut hasher = FxHasher::default();
         dwa.states()[c].final_weight.hash(&mut hasher);
         // Hash raw transitions (BTreeMap iterates in label order)
@@ -4027,19 +4020,12 @@ fn try_all_compatible_height_0_coloring(
 
 // Merge and reconstruct.
 
+#[derive(Default)]
 struct MergedStateBuilder {
     final_weights_pending: Vec<Weight>,
     transitions_pending: rustc_hash::FxHashMap<Label, (u32, Vec<Weight>)>,
 }
 
-impl Default for MergedStateBuilder {
-    fn default() -> Self {
-        Self {
-            final_weights_pending: Vec::new(),
-            transitions_pending: rustc_hash::FxHashMap::default(),
-        }
-    }
-}
 
 impl MergedStateBuilder {
     fn add_final_weight(&mut self, weight: &Weight) {
@@ -4778,8 +4764,7 @@ fn minimize_acyclic_owned_impl(
     let mut color_ms_total = 0.0;
     let mut merge_ms_total = 0.0;
 
-    for h in 0..=max_height {
-        let candidates = &states_by_height[h];
+    for (h, candidates) in states_by_height.iter().enumerate() {
         if candidates.is_empty() {
             continue;
         }
@@ -5002,8 +4987,10 @@ mod tests {
         }
         states.push(start);
         for _ in 0..leaf_count {
-            let mut leaf = DWAState::default();
-            leaf.final_weight = Some(Weight::all());
+            let leaf = DWAState {
+                final_weight: Some(Weight::all()),
+                ..Default::default()
+            };
             states.push(leaf);
         }
         let dwa = DWA::from_parts(states, 0);
@@ -5288,8 +5275,10 @@ mod tests {
         let mut right = DWAState::default();
         right.transitions.insert(3, (3, right_domain.clone()));
 
-        let mut leaf = DWAState::default();
-        leaf.final_weight = Some(all_domain);
+        let leaf = DWAState {
+            final_weight: Some(all_domain),
+            ..Default::default()
+        };
 
         let original = DWA::from_parts(vec![start, left, right, leaf], 0);
         let minimized = minimize_acyclic_owned_path_conditioned(original.clone());
@@ -5308,8 +5297,10 @@ mod tests {
             42,
             (1, Weight::from_uniform(1..=1, token_set(&[(10, 20)]))),
         );
-        let mut target = DWAState::default();
-        target.final_weight = Some(Weight::from_uniform(1..=1, token_set(&[(12, 14)])));
+        let target = DWAState {
+            final_weight: Some(Weight::from_uniform(1..=1, token_set(&[(12, 14)]))),
+            ..Default::default()
+        };
 
         let mut dwa = DWA::from_parts(vec![source, target], 0);
         let (_, topo, needed) = push_weights(&mut dwa);
@@ -5418,8 +5409,10 @@ mod tests {
             branch.transitions.insert(20, (4, weight.clone()));
             states.push(branch);
         }
-        let mut leaf = DWAState::default();
-        leaf.final_weight = Some(Weight::all());
+        let leaf = DWAState {
+            final_weight: Some(Weight::all()),
+            ..Default::default()
+        };
         states.push(leaf);
         let dwa = DWA::from_parts(states, 0);
 
@@ -5618,7 +5611,7 @@ mod tests {
             &[(0, &[(5, 12)]), (2, &[(1, 4)])],
             &[(1, &[(1, 6)]), (2, &[(7, 15)])],
         ];
-        for i in 0..n_states {
+        for (i, state) in states.iter_mut().enumerate() {
             let mut label = 1i32;
             while label <= 4 {
                 if next() % 4 != 0 && i + 1 < n_states {
@@ -5630,24 +5623,22 @@ mod tests {
                     } else {
                         weight(&[(0, &[(4, 9)]), (1, &[(8, 13)])])
                     };
-                    states[i].transitions.insert(label, (target as u32, w));
+                    state.transitions.insert(label, (target as u32, w));
                 }
                 label += 1;
             }
             if next() % 3 == 0 {
-                states[i].final_weight =
-                    Some(weight(&[(0, &[(2, 5)]), (2, &[(9, 11)])]));
+                state.final_weight = Some(weight(&[(0, &[(2, 5)]), (2, &[(9, 11)])]));
             }
             if next() % 5 == 0 {
-                states[i].final_weight =
-                    Some(weight(&[(1, &[(1, 3)]), (3, &[(20, 25)])]));
+                state.final_weight = Some(weight(&[(1, &[(1, 3)]), (3, &[(20, 25)])]));
             }
         }
         // Accept spine: label-5 chain with uniform weight plus matching final,
         // so every input has nonempty language by construction.
         let spine = weight(&[(0, &[(1, 8)])]);
-        for i in 0..n_states - 1 {
-            states[i].transitions.insert(5, (i as u32 + 1, spine.clone()));
+        for (i, state) in states.iter_mut().enumerate().take(n_states - 1) {
+            state.transitions.insert(5, (i as u32 + 1, spine.clone()));
         }
         states[n_states - 1].final_weight = Some(spine);
         let input = DWA::from_parts(states, 0);

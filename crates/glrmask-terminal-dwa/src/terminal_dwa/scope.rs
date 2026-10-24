@@ -291,7 +291,7 @@ pub struct BoundaryAnalysisScope {
 impl BoundaryAnalysisScope {
     pub fn automatic_prefix_support_enabled(&self) -> bool {
         #[cfg(test)]
-        { return self.automatic_prefix_support; }
+        { self.automatic_prefix_support}
         #[cfg(not(test))]
         { true }
     }
@@ -311,7 +311,7 @@ impl BoundaryAnalysisScope {
         if expected!=actual || expected.iter().any(|&q|q as usize>=state_count){return Err("query view reset relation changed".into());}
         let result=Self::new(InitialStateDomain::from_mask(state_count,keep)?,resets,
             Arc::clone(&self.ownership),self.start_component,self.require_crossing,self.follow_transparent.clone())?;
-        #[cfg(test)] { let mut result=result; result.automatic_prefix_support=self.automatic_prefix_support; return Ok(result); }
+        #[cfg(test)] { let mut result=result; result.automatic_prefix_support=self.automatic_prefix_support; Ok(result)}
         #[cfg(not(test))] { Ok(result) }
     }
 

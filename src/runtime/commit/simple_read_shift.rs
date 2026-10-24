@@ -216,19 +216,18 @@ mod tests {
                     if let Some(Some(to)) = t.pop_to_push.get(id as usize) {
                         todo.push((2, *to, word.clone()));
                     }
-                } else if phase == 1 {
-                    if let Some(Some(to)) = t.read_to_push.get(id as usize) {
+                } else if phase == 1
+                    && let Some(Some(to)) = t.read_to_push.get(id as usize) {
                         todo.push((2, *to, word.clone()));
                     }
-                }
                 if phase == 2 {
                     for (&label, &to) in &row.transitions {
                         let mut next = word.clone();
                         next.push(negative_to_positive_label(label) as u32);
                         todo.push((phase, to, next));
                     }
-                } else if let Some(&top) = word.last() {
-                    if let Some(&to) = row.transitions.get(&(top as i32)).or_else(|| {
+                } else if let Some(&top) = word.last()
+                    && let Some(&to) = row.transitions.get(&(top as i32)).or_else(|| {
                         if phase == 0 {
                             row.transitions.get(&DEFAULT_LABEL)
                         } else {
@@ -241,7 +240,6 @@ mod tests {
                         }
                         todo.push((phase, to, next));
                     }
-                }
             }
         }
         ParserGSS::from_stacks(&result)

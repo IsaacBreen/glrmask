@@ -409,10 +409,10 @@ fn varied_acyclic_and_recursive_grammars_match_ordered_reference() {
             if next(&mut seed) & 1 != 0 {
                 rules.push(rule(lhs, vec![t(3), nt(lhs)]));
             }
-            if next(&mut seed) % 4 == 0 {
+            if next(&mut seed).is_multiple_of(4) {
                 rules.push(rule(lhs, vec![]));
             }
-            if next(&mut seed) % 3 == 0 {
+            if next(&mut seed).is_multiple_of(3) {
                 rules.push(rule(lhs, vec![t(lhs % 3)]));
             }
         }

@@ -868,12 +868,12 @@ pub fn compute_state_map_raw(
     // Hopcroft is the default for the large raw-coordinate case. The
     // signature fixed point remains available as a diagnostic reference.
     if std::env::var_os("GLRMASK_RAW_RESTRICTED_SIGNATURE_REFINE").is_none() {
-        let classes = hopcroft_refine_sparse(&target_labels, &edges);
+        let classes = hopcroft_refine_sparse(target_labels, &edges);
         let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
         let state_map = map_from_raw_classes(&classes);
         debug_assert!(raw_map_is_relevant_byte_congruent(
             &state_map,
-            &target_labels,
+            target_labels,
             transitions,
             &active_bytes,
             &observations.active_language,
@@ -948,7 +948,7 @@ pub fn compute_state_map_raw(
             let state_map = map_from_raw_classes(&next_classes);
             debug_assert!(raw_map_is_relevant_byte_congruent(
                 &state_map,
-                &target_labels,
+                target_labels,
                 transitions,
                 &active_bytes,
                 &observations.active_language,

@@ -272,20 +272,18 @@ fn canonical_terminal_box(terminals: &[TerminalID]) -> Option<Box<[TerminalID]>>
 
 #[inline]
 fn append_range(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], range: TokenRange) {
-    if range.0 <= range.1 {
-        if let Some(terminals) = canonical_terminal_box(terminals) {
+    if range.0 <= range.1
+        && let Some(terminals) = canonical_terminal_box(terminals) {
             map.push(TerminalRangeGroup { terminals, ranges: vec![range] });
         }
-    }
 }
 
 #[inline]
 fn append_ranges(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], ranges: &[TokenRange]) {
-    if !ranges.is_empty() {
-        if let Some(terminals) = canonical_terminal_box(terminals) {
+    if !ranges.is_empty()
+        && let Some(terminals) = canonical_terminal_box(terminals) {
             map.push(TerminalRangeGroup { terminals, ranges: ranges.to_vec() });
         }
-    }
 }
 
 fn merge_interval_maps(into: &mut IntervalPossibleMatchMap, other: &IntervalPossibleMatchMap) {
@@ -316,12 +314,11 @@ fn normalize_interval_map(map: &mut IntervalPossibleMatchMap) {
     map.sort_unstable_by(|left, right| left.terminals.as_ref().cmp(right.terminals.as_ref()));
     let mut merged: IntervalPossibleMatchMap = Vec::with_capacity(map.len());
     for entry in map.drain(..) {
-        if let Some(last) = merged.last_mut() {
-            if last.terminals.as_ref() == entry.terminals.as_ref() {
+        if let Some(last) = merged.last_mut()
+            && last.terminals.as_ref() == entry.terminals.as_ref() {
                 last.ranges.extend_from_slice(&entry.ranges);
                 continue;
             }
-        }
         merged.push(entry);
     }
     for entry in merged.iter_mut() { normalize_ranges(&mut entry.ranges); }
@@ -947,7 +944,7 @@ fn build_node(
                 }
             } else if let Some(&state) = active_states.first() {
                 representative_states.push(state); representative_state_positions.push(0);
-                for class_id in &mut classes { *class_id = 0; }
+                classes.fill(0);
             }
         }
         1 => {
@@ -1374,16 +1371,15 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
     };
     let mut state_classes = vec![u32::MAX; num_states];
     for (state_pos, &state) in entries.iter().enumerate() {
-        if let Some(&class_id) = root_result.classes.get(state_pos) {
-            if let Some(slot) = state_classes.get_mut(state as usize) {
+        if let Some(&class_id) = root_result.classes.get(state_pos)
+            && let Some(slot) = state_classes.get_mut(state as usize) {
                 *slot = class_id;
             }
-        }
     }
     (
         TrieClassBuildResult {
             state_classes,
-            class_maps: root_result.class_maps.iter().cloned().collect(),
+            class_maps: root_result.class_maps.to_vec(),
         },
         profile,
     )

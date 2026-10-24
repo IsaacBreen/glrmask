@@ -30,7 +30,7 @@ fn measure(f: impl FnOnce()) -> (u128,u64,BoundaryCpuReport) {
 
 fn wait_for_coordinator(samples: usize, block: usize) {
     use std::io::{BufRead, Write};
-    if samples % block != 0 { return; }
+    if !samples.is_multiple_of(block) { return; }
     println!("READY {samples}"); std::io::stdout().flush().unwrap();
     let mut command = String::new();
     let n = std::io::stdin().lock().read_line(&mut command).unwrap();
@@ -125,7 +125,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
                 return Ok(());
             }
             wait_for_coordinator(samples, block);
-            let reverse=std::env::var_os("BENCH_REVERSE_ORDER").is_some() ^ (samples % 2 == 0);
+            let reverse=std::env::var_os("BENCH_REVERSE_ORDER").is_some() ^ samples.is_multiple_of(2);
             let ((a_ns,a_cpu,a_boundary),(b_ns,b_cpu,b_boundary)) = if reverse {
                 let b=measure(|| b.fill_mask(&mut b_mask));
                 let a=measure(|| {if dynamic_reference {a_mask=a.fill_mask_dynamic_vec();} else {a.fill_mask(&mut a_mask);}});

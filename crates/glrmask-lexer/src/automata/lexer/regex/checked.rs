@@ -70,15 +70,13 @@ fn validate_syntax(pattern:&str,unicode:Option<bool>)->Result<(),String> {
     use regex_syntax::ast::{Ast,Flag,Flags,FlagsItemKind};
     fn flags(flags:&Flags,unicode:Option<bool>)->Result<(),String> {
         for item in &flags.items {
-            if let FlagsItemKind::Flag(flag)=&item.kind {
-                if matches!(flag,Flag::MultiLine|Flag::SwapGreed|Flag::CRLF){
+            if let FlagsItemKind::Flag(flag)=&item.kind
+                && matches!(flag,Flag::MultiLine|Flag::SwapGreed|Flag::CRLF){
                     return Err("inline m, U, and R regex flags are not supported".into());
                 }
-            }
         }
-        if let (Some(expected),Some(actual))=(unicode,flags.flag_state(Flag::Unicode)) {
-            if actual!=expected{return Err("regex byte/Unicode alphabet cannot be changed by an inline flag; choose b/.../ or /.../ explicitly".into());}
-        }
+        if let (Some(expected),Some(actual))=(unicode,flags.flag_state(Flag::Unicode))
+            && actual!=expected{return Err("regex byte/Unicode alphabet cannot be changed by an inline flag; choose b/.../ or /.../ explicitly".into());}
         Ok(())
     }
     let ast=regex_syntax::ast::parse::Parser::new().parse(pattern).map_err(|e|e.to_string())?;
@@ -175,7 +173,7 @@ fn normalize_scalar_escapes(pattern: &str, unicode: bool, mut extended: bool) ->
                 }
             }
             groups.push(extended);
-        } else if ch==')' {if let Some(previous)=groups.pop(){extended=previous;}}
+        } else if ch==')'&& let Some(previous)=groups.pop(){extended=previous;}
         out.push(ch);pos+=ch.len_utf8();
     }
     Ok(out)

@@ -43,13 +43,11 @@ pub fn prepare_document(root: &Value) -> ImportResult<Value> {
 // has not been normalized as a schema. Fail closed instead of losing its rules.
 fn check_reference_targets(value: &Value, original: &Value, prepared: &Value, path: &str) -> ImportResult<()> {
     if let Some(object) = value.as_object() {
-        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-            if let Some(pointer) = reference.strip_prefix('#') {
-                if !pointer.is_empty() && original.pointer(pointer).is_some() && prepared.pointer(pointer).is_none() {
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+            && let Some(pointer) = reference.strip_prefix('#')
+                && !pointer.is_empty() && original.pointer(pointer).is_some() && prepared.pointer(pointer).is_none() {
                     return Err(unsupported(&pointer_path(path), "reference targets an annotation or ignored keyword payload"));
                 }
-            }
-        }
         for (key, child) in object {
             if !matches!(key.as_str(), "const" | "enum") {
                 check_reference_targets(child, original, prepared, &pointer(path, key))?;
@@ -94,8 +92,8 @@ fn prepare(value: &Value, path: &str, dialect: Dialect, root: bool, draft4_bool:
         }
         return Ok(Value::Object(result));
     }
-    if dialect.modern() {
-        if let Some(vocabulary) = object.get("$vocabulary") {
+    if dialect.modern()
+        && let Some(vocabulary) = object.get("$vocabulary") {
             let entries = vocabulary.as_object().ok_or_else(|| malformed(&pointer(path, "$vocabulary"), "must be an object"))?;
             for (uri, required) in entries {
                 let required = required.as_bool().ok_or_else(|| malformed(&pointer(path, "$vocabulary"), "vocabulary requirements must be booleans"))?;
@@ -105,7 +103,6 @@ fn prepare(value: &Value, path: &str, dialect: Dialect, root: bool, draft4_bool:
                 if !known { return Err(unsupported(&pointer(&pointer(path, "$vocabulary"), uri), "required vocabulary (including format assertion) is not implemented")); }
             }
         }
-    }
     validate_scalar_keywords(object, path, dialect)?;
     let mut out = Map::new();
     for (key, child) in object {
@@ -222,10 +219,10 @@ fn validate_scalar_keywords(object: &Map<String, Value>, path: &str, dialect: Di
                 }
             },
             "enum" => {
-                if !value.as_array().is_some_and(|values| !values.is_empty()) { return Err(malformed(&at, "enum must be a nonempty array")); }
+                if value.as_array().is_none_or(|values| values.is_empty()) { return Err(malformed(&at, "enum must be a nonempty array")); }
             },
             "minProperties" | "maxProperties" | "minItems" | "maxItems" | "minLength" | "maxLength" => {
-                if !value.as_u64().is_some() && !value.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0 && n.fract() == 0.0) {
+                if value.as_u64().is_none() && !value.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0 && n.fract() == 0.0) {
                     return Err(malformed(&at, "count must be a nonnegative integer"));
                 }
             },
@@ -254,11 +251,10 @@ fn validate_scalar_keywords(object: &Map<String, Value>, path: &str, dialect: Di
             },
             "dependentRequired" if dialect.modern() => validate_dependencies(value, &at, false, true)?,
             "dependencies" if !dialect.modern() => validate_dependencies(value, &at, dialect == Dialect::Draft4, false)?,
-            "minContains" | "maxContains" if dialect.modern() => {
-                if !value.as_f64().is_some_and(|v| v >= 0.0 && v.fract() == 0.0) {
+            "minContains" | "maxContains" if dialect.modern()
+                && !value.as_f64().is_some_and(|v| v >= 0.0 && v.fract() == 0.0) => {
                     return Err(malformed(&at, "count must be a nonnegative integer"));
-                }
-            },
+                },
             _ => {},
         }
     }

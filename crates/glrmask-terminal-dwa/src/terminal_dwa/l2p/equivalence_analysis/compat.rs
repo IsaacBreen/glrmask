@@ -193,13 +193,11 @@ pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 /// identical action from every residual of every active terminal language.
 /// Replacing one by the other preserves active-terminal match positions and
 /// residuals; grammar follow constraints only filter terminal labels later.
-
 /// Exact byte congruence read directly from the already-built physical lexer.
 /// This can be finer than recompiling active terminal definitions independently,
 /// but never coarser: two bytes are merged only when every active-language
 /// physical source has the same active-language target for both bytes.  States
 /// and targets carrying no active terminal language are semantically dead.
-
 pub fn compute_active_physical_byte_classes_from_flat_trans(
     tokenizer: &Tokenizer,
     active_groups: &[bool],

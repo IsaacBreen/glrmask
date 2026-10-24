@@ -721,7 +721,7 @@ fn intersect_token_ranges_once(left: &SharedTokenSet, right: &SharedTokenSet) ->
         Arc::clone(&EMPTY_RANGESET)
     } else {
         shared_rangeset(RangeSetBlaze::from_sorted_disjoint(
-            CheckSortedDisjoint::new(ranges.into_iter()),
+            CheckSortedDisjoint::new(ranges),
         ))
     }
 }
@@ -944,13 +944,11 @@ impl PublicWeightIntersectionMemo {
         let cached_result = entry.result.upgrade();
         if let (Some(cached_left), Some(cached_right), Some(cached_result)) =
             (cached_left, cached_right, cached_result)
-        {
-            if Arc::ptr_eq(&cached_left, &ordered_left.0)
+            && Arc::ptr_eq(&cached_left, &ordered_left.0)
                 && Arc::ptr_eq(&cached_right, &ordered_right.0)
             {
                 return Some(Weight(cached_result));
             }
-        }
         self.results.remove(&key);
         None
     }
@@ -1128,13 +1126,11 @@ impl WeightHashMemo {
         }
         self.maybe_cleanup();
         let key = weight.ptr_key();
-        if let Some(entry) = self.results.get(&key) {
-            if let Some(existing) = entry.weight.upgrade() {
-                if Arc::ptr_eq(&existing, &weight.0) {
+        if let Some(entry) = self.results.get(&key)
+            && let Some(existing) = entry.weight.upgrade()
+                && Arc::ptr_eq(&existing, &weight.0) {
                     return entry.result;
                 }
-            }
-        }
 
         let result = structural_weight_hash_uncached(weight);
         self.results.insert(
@@ -2650,11 +2646,10 @@ impl Weight {
                     break;
                 }
             }
-            if let Some((range, tokens)) = ranges.peek() {
-                if *range.start() <= coordinate {
+            if let Some((range, tokens)) = ranges.peek()
+                && *range.start() <= coordinate {
                     builder.push(start, end, (*tokens).clone());
                 }
-            }
         }
         builder.finish()
     }
@@ -2854,17 +2849,14 @@ impl Weight {
         let mut base_iter = self.range_entries();
         let mut current_base = base_iter.next();
         for (override_start, override_end, override_tokens) in overrides {
-            loop {
-                let Some((start, end, tokens)) = current_base.take() else {
-                    break;
-                };
+            while let Some((start, end, tokens)) = current_base.take() {
                 if end < *override_start {
-                    push_overlay(&mut overlay, start, end, &tokens);
+                    push_overlay(&mut overlay, start, end, tokens);
                     current_base = base_iter.next();
                     continue;
                 }
                 if start < *override_start {
-                    push_overlay(&mut overlay, start, *override_start - 1, &tokens);
+                    push_overlay(&mut overlay, start, *override_start - 1, tokens);
                 }
                 current_base = Some((start.max(*override_start), end, tokens));
                 break;
@@ -2877,10 +2869,7 @@ impl Weight {
                 override_tokens,
             );
 
-            loop {
-                let Some((start, end, tokens)) = current_base.take() else {
-                    break;
-                };
+            while let Some((start, end, tokens)) = current_base.take() {
                 if start > *override_end {
                     current_base = Some((start, end, tokens));
                     break;
@@ -2894,7 +2883,7 @@ impl Weight {
             }
         }
         while let Some((start, end, tokens)) = current_base {
-            push_overlay(&mut overlay, start, end, &tokens);
+            push_overlay(&mut overlay, start, end, tokens);
             current_base = base_iter.next();
         }
 
@@ -3046,7 +3035,7 @@ impl Weight {
         let right_single = single_compact_entry(other);
 
         if let (Some(left), Some(right)) = (&left_single, &right_single) {
-            combine_single_entries(&left, &right, union_token_sets)
+            combine_single_entries(left, right, union_token_sets)
         } else {
             union_compact_entries(self, other)
         }
@@ -3064,7 +3053,8 @@ impl Weight {
             meaningful.push(weight);
         }
 
-        let result = match meaningful.len() {
+        
+        match meaningful.len() {
             0 => Self::empty(),
             1 => meaningful[0].clone(),
             _ if meaningful.len() > 4 => {
@@ -3097,8 +3087,7 @@ impl Weight {
                     acc
                 }
             }
-        };
-        result
+        }
     }
 
     /// Exact direct multi-way union. This avoids allocating pairwise
@@ -3292,7 +3281,7 @@ impl Weight {
         self.0
             .get(tsid)
             .map(|tokens| tokens.as_ref().clone())
-            .unwrap_or_else(RangeSetBlaze::new)
+            .unwrap_or_default()
     }
 
     #[cfg(feature = "internal-api")]
@@ -4306,9 +4295,9 @@ thread_local! {
     /// normal serde users and legacy artifact versions retain the historical
     /// representation.
     static POOLED_WEIGHT_SERDE_ENCODE: RefCell<Option<PooledWeightSerdeEncoder>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
     static POOLED_WEIGHT_SERDE_DECODE: RefCell<Option<Vec<Weight>>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
     static POOLED_WEIGHT_SERDE_DEFER_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     static POOLED_WEIGHT_SERDE_DEFERRED_IDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
@@ -4878,7 +4867,7 @@ fn unpack_pooled_weights_v1(input: &[u8]) -> Result<Vec<Weight>, String> {
             previous_end_plus_one = end as u64 + 1;
         }
         let tokens = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(
-            ranges.into_iter(),
+            ranges,
         ));
         token_sets.push(shared_rangeset_artifact_local(tokens));
     }
@@ -4996,7 +4985,7 @@ fn decode_pooled_token_set_v2(body: &[u8]) -> Result<(SharedTokenSet, usize), St
     if pos != body.len() {
         return Err("trailing bytes in packed token set".to_owned());
     }
-    let tokens = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(ranges.into_iter()));
+    let tokens = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(ranges));
     Ok((shared_rangeset_artifact_local(tokens), range_count))
 }
 

@@ -102,9 +102,8 @@ impl<'a> Overlay<'a> {
         if a == 1 { return b; }
         if b == 1 || a == b { return a; }
         let key = if a <= b { (a, b) } else { (b, a) };
-        if b & LOCAL == 0 && a & LOCAL == 0 {
-            if let Some(&id) = self.base.intersections.get(&key) { return id; }
-        }
+        if b & LOCAL == 0 && a & LOCAL == 0
+            && let Some(&id) = self.base.intersections.get(&key) { return id; }
         if let Some(&id) = self.intersections.get(&key) { return id; }
         let mut bits = [0u64; 64];
         for (slot, (&x, &y)) in bits.iter_mut().zip(self.value(a).iter().zip(self.value(b))) {
@@ -121,9 +120,8 @@ impl<'a> Overlay<'a> {
         if b == 0 || a == b { return a; }
         if a == 1 || b == 1 { return 1; }
         let key = if a <= b { (a, b) } else { (b, a) };
-        if b & LOCAL == 0 && a & LOCAL == 0 {
-            if let Some(&id) = self.base.unions.get(&key) { return id; }
-        }
+        if b & LOCAL == 0 && a & LOCAL == 0
+            && let Some(&id) = self.base.unions.get(&key) { return id; }
         if let Some(&id) = self.unions.get(&key) { return id; }
         let mut bits = [0u64; 64];
         for (slot, (&x, &y)) in bits.iter_mut().zip(self.value(a).iter().zip(self.value(b))) {
@@ -292,16 +290,14 @@ impl Worker<'_> {
                 }
                 return Some(Some(Target::Singleton(*q, *weight)));
             }
-            if weight & LOCAL == 0 {
-                if let Some(&(target, coefficient)) = self.singletons.get(&(*q, *weight)) {
+            if weight & LOCAL == 0
+                && let Some(&(target, coefficient)) = self.singletons.get(&(*q, *weight)) {
                     self.base_hits += 1; return Some(Some(Target::Known(target, coefficient)));
                 }
-            }
-        } else if input.iter().all(|&(_, weight)| weight & LOCAL == 0) {
-            if let Some(&(target, coefficient)) = self.closures.get(input.as_slice()) {
+        } else if input.iter().all(|&(_, weight)| weight & LOCAL == 0)
+            && let Some(&(target, coefficient)) = self.closures.get(input.as_slice()) {
                 self.base_hits += 1; return Some(Some(Target::Known(target, coefficient)));
             }
-        }
         if let Some(&id) = self.local_closures.get(input.as_slice()) {
             self.local_hits += 1; return Some(Some(Target::Recipe(id)));
         }

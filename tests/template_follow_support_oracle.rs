@@ -33,17 +33,15 @@ fn execute(p: &CommitTemplateDfas, input: &[u32]) -> BTreeSet<Vec<u32>> {
             0 => {
                 if let Some(next) = p.pop_to_read.get(state as usize).copied().flatten() { todo.push((1, next, stack.clone())); }
                 if let Some(next) = p.pop_to_push.get(state as usize).copied().flatten() { todo.push((2, next, stack.clone())); }
-                if let Some(&top) = stack.last() {
-                    if let Some(&next) = row.transitions.get(&(top as i32)).or_else(|| row.transitions.get(&DEFAULT_LABEL)) {
+                if let Some(&top) = stack.last()
+                    && let Some(&next) = row.transitions.get(&(top as i32)).or_else(|| row.transitions.get(&DEFAULT_LABEL)) {
                         let mut rest = stack; rest.pop(); todo.push((0, next, rest));
                     }
-                }
             }
             1 => {
                 if let Some(next) = p.read_to_push.get(state as usize).copied().flatten() { todo.push((2, next, stack.clone())); }
-                if let Some(&top) = stack.last() {
-                    if let Some(&next) = row.transitions.get(&(top as i32)) { todo.push((1, next, stack)); }
-                }
+                if let Some(&top) = stack.last()
+                    && let Some(&next) = row.transitions.get(&(top as i32)) { todo.push((1, next, stack)); }
             }
             _ => for (&label, &next) in &row.transitions {
                 let mut rest = stack.clone(); rest.push(negative_to_positive_label(label) as u32); todo.push((2, next, rest));
@@ -78,7 +76,7 @@ fn template_follow_upper_bound_never_prunes_literal_control_paths() {
     for case in 0..256 {
         let mut programs = vec![];
         for _ in 0..4 {
-            let pop = (0..random(&mut rng) % 3).map(|_| if random(&mut rng) % 4 == 0 { DEFAULT_LABEL } else { (random(&mut rng) % 3) as i32 }).collect::<Vec<_>>();
+            let pop = (0..random(&mut rng) % 3).map(|_| if random(&mut rng).is_multiple_of(4) { DEFAULT_LABEL } else { (random(&mut rng) % 3) as i32 }).collect::<Vec<_>>();
             let push = (0..random(&mut rng) % 3).map(|_| random(&mut rng) % 3).collect::<Vec<_>>();
             programs.push(Some(Arc::new(rewrite(&pop, &push))));
         }

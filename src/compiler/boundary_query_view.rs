@@ -25,7 +25,7 @@ pub(super) struct QueryView {
 
 pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<QueryView>{
     let n=tokenizer.num_states() as usize;
-    if n<256 || n>200_000 || tokenizer.has_virtual_residual_runtime() || !scope.require_crossing(){return None;}
+    if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime() || !scope.require_crossing(){return None;}
     let started=Instant::now();
     let mut words=vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
     if words.is_empty() || words.iter().any(|w|w.is_empty() || w.len()>1024)
@@ -66,6 +66,50 @@ pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisS
         view.tokenizer.deterministic_reset_states().into_vec()).ok()?;
     let materialize_ms=started.elapsed().as_secs_f64()*1000.0;
     Some(QueryView{view,scope,footprint_ms,materialize_ms,first_states,reset_states,state_steps})
+}
+
+/// Uses only the direct table of this exact immutable source, as built by the
+/// caller at the link's disjoint-union boundary. A declined optimization uses
+/// the original traversal and its original resource/coverage decisions.
+pub(super) fn prepare_with_policy(
+    tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&[u32]>,
+)->Option<QueryView>{
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW")
+        && let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
+            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
+                let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
+                assert_eq!(candidate.view.original_to_view,reference.view.original_to_view);
+                assert_eq!(candidate.scope.initial_states().keep_raw(),reference.scope.initial_states().keep_raw());
+                assert_eq!(candidate.scope.reset_states(),reference.scope.reset_states());
+                assert_eq!((candidate.first_states,candidate.reset_states,candidate.state_steps),
+                    (reference.first_states,reference.reset_states,reference.state_steps));
+                assert_eq!(crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&candidate.view.tokenizer),
+                    crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&reference.view.tokenizer));
+                eprintln!("[glrmask/validate][factored_query_view] exact=true states={}",candidate.view.tokenizer.num_states());
+            }
+            return Some(candidate);
+        }
+    prepare(tokenizer,vocab,scope)
+}
+
+pub(super) struct BorrowedQuery {
+    pub original_to_view:Vec<u32>,pub view_to_original:Vec<u32>,
+    pub scope:BoundaryAnalysisScope,pub footprint_ms:f64,pub materialize_ms:f64,
+    pub first_states:usize,pub reset_states:usize,pub state_steps:usize,
+}
+pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&[u32])->Option<BorrowedQuery>{
+    let footprint=fast::footprint(tokenizer,vocab,scope,flat)?;
+    let began=Instant::now();let n=tokenizer.num_states()as usize;let mut keep=footprint.keep;
+    let closures=tokenizer.all_singleton_epsilon_closures();let start=tokenizer.initial_state_id();
+    keep[start as usize]=true;let mut closure_work=0usize;
+    for q in 0..n{if keep[q]{closure_work=closure_work.checked_add(closures[q].len())?;if closure_work>8_000_000{return None;}for &r in &closures[q]{*keep.get_mut(r as usize)?=true;}}}
+    let mut inverse=vec![start];let mut mapping=vec![u32::MAX;n];mapping[start as usize]=0;
+    for(q,&yes)in keep.iter().enumerate(){if yes&&q!=start as usize{mapping[q]=inverse.len()as u32;inverse.push(q as u32);}}
+    if inverse.len()>=16384{return None;}
+    let reset=scope.reset_states().iter().map(|&q|mapping.get(q as usize).copied().filter(|&q|q!=u32::MAX)).collect::<Option<Vec<_>>>()?;
+    let scoped=scope.relocate_query_view(&mapping,inverse.len(),reset).ok()?;
+    Some(BorrowedQuery{original_to_view:mapping,view_to_original:inverse,scope:scoped,
+        footprint_ms:footprint.footprint_ms,materialize_ms:began.elapsed().as_secs_f64()*1000.,first_states:footprint.first_states,reset_states:footprint.reset_states,state_steps:footprint.state_steps})
 }
 
 #[cfg(test)]
@@ -111,49 +155,4 @@ mod tests {
             let empty=Vocab::new(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope).is_none());
         }
     }
-}
-
-/// Uses only the direct table of this exact immutable source, as built by the
-/// caller at the link's disjoint-union boundary. A declined optimization uses
-/// the original traversal and its original resource/coverage decisions.
-pub(super) fn prepare_with_policy(
-    tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&[u32]>,
-)->Option<QueryView>{
-    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW") {
-        if let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
-            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
-                let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
-                assert_eq!(candidate.view.original_to_view,reference.view.original_to_view);
-                assert_eq!(candidate.scope.initial_states().keep_raw(),reference.scope.initial_states().keep_raw());
-                assert_eq!(candidate.scope.reset_states(),reference.scope.reset_states());
-                assert_eq!((candidate.first_states,candidate.reset_states,candidate.state_steps),
-                    (reference.first_states,reference.reset_states,reference.state_steps));
-                assert_eq!(crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&candidate.view.tokenizer),
-                    crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&reference.view.tokenizer));
-                eprintln!("[glrmask/validate][factored_query_view] exact=true states={}",candidate.view.tokenizer.num_states());
-            }
-            return Some(candidate);
-        }
-    }
-    prepare(tokenizer,vocab,scope)
-}
-
-pub(super) struct BorrowedQuery {
-    pub original_to_view:Vec<u32>,pub view_to_original:Vec<u32>,
-    pub scope:BoundaryAnalysisScope,pub footprint_ms:f64,pub materialize_ms:f64,
-    pub first_states:usize,pub reset_states:usize,pub state_steps:usize,
-}
-pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&[u32])->Option<BorrowedQuery>{
-    let footprint=fast::footprint(tokenizer,vocab,scope,flat)?;
-    let began=Instant::now();let n=tokenizer.num_states()as usize;let mut keep=footprint.keep;
-    let closures=tokenizer.all_singleton_epsilon_closures();let start=tokenizer.initial_state_id();
-    keep[start as usize]=true;let mut closure_work=0usize;
-    for q in 0..n{if keep[q]{closure_work=closure_work.checked_add(closures[q].len())?;if closure_work>8_000_000{return None;}for &r in &closures[q]{*keep.get_mut(r as usize)?=true;}}}
-    let mut inverse=vec![start];let mut mapping=vec![u32::MAX;n];mapping[start as usize]=0;
-    for(q,&yes)in keep.iter().enumerate(){if yes&&q!=start as usize{mapping[q]=inverse.len()as u32;inverse.push(q as u32);}}
-    if inverse.len()>=16384{return None;}
-    let reset=scope.reset_states().iter().map(|&q|mapping.get(q as usize).copied().filter(|&q|q!=u32::MAX)).collect::<Option<Vec<_>>>()?;
-    let scoped=scope.relocate_query_view(&mapping,inverse.len(),reset).ok()?;
-    Some(BorrowedQuery{original_to_view:mapping,view_to_original:inverse,scope:scoped,
-        footprint_ms:footprint.footprint_ms,materialize_ms:began.elapsed().as_secs_f64()*1000.,first_states:footprint.first_states,reset_states:footprint.reset_states,state_steps:footprint.state_steps})
 }

@@ -259,9 +259,9 @@ fn probe_dynamic_trie(view:View<'_>,vocab:&crate::runtime::DynamicMaskVocab,buff
     // continuation per live path is retained; rejected siblings allocate none.
     let mut pending=vec![(0u32,0usize,true,view.state.clone())];
     while let Some((node,mut child_index,endpoint_pending,source))=pending.pop() {
-        if endpoint_pending {
-            if let Some(canonical)=trie.node(node).token_id {
-                if let Some(aliases)=vocab.token_ids(canonical) {
+        if endpoint_pending
+            && let Some(canonical)=trie.node(node).token_id
+                && let Some(aliases)=vocab.token_ids(canonical) {
                     let useful=aliases.iter().copied().find(|&id|ordinary_id(view,id)&&!w.contains(id));
                     if let Some(bytes)=useful.and_then(|id|view.constraint.token_bytes_for_id(id)) {
                         // Prefix liveness alone is not a final token witness.
@@ -270,8 +270,6 @@ fn probe_dynamic_trie(view:View<'_>,vocab:&crate::runtime::DynamicMaskVocab,buff
                         }
                     }
                 }
-            }
-        }
         let children=trie.children(node);
         while let Some(edge)=children.get(child_index) {
             child_index+=1;
@@ -762,7 +760,7 @@ mod differential_tests {
                     let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options().end_tokens(eos.clone())).unwrap();
                     let tag=format!("{source:?}, {mode:?}, end={eos:?}");
                     walk(&c,&tag,2);
-                    let loaded=Constraint::load(&c.save(), &v).unwrap();
+                    let loaded=Constraint::load(c.save(), &v).unwrap();
                     check(&loaded.start(),&format!("{tag}, loaded"));
                 }
             }

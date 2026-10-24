@@ -92,13 +92,13 @@ fn mixed_roundtrip_retains_open_raw_and_prepared_nodes() {
     child.bind("item", a()).unwrap();
     parent.bind("child", child).unwrap();
 
-    let loaded = Module::load(&parent.save()).unwrap();
+    let loaded = Module::load(parent.save()).unwrap();
     assert!(accepts(&loaded.compile(&v).unwrap(), &[4]));
 
-    let raw = Module::load(&Module::new(&a()).save()).unwrap();
+    let raw = Module::load(Module::new(&a()).save()).unwrap();
     assert!(accepts(&raw.compile(&v).unwrap(), &[1]));
 
-    let mut open = Module::load(&Module::new(&Grammar::from_glrm(OPEN).unwrap()).save()).unwrap();
+    let mut open = Module::load(Module::new(&Grammar::from_glrm(OPEN).unwrap()).save()).unwrap();
     open.bind("item", a()).unwrap();
     assert!(accepts(&open.compile(&v).unwrap(), &[1]));
 }
@@ -139,7 +139,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     let mut m = Module::new(&host);
     assert!(m.bind("mark", a()).is_err());
     m.bind("mark", TokenSet::new([7, 99])).unwrap();
-    let loaded = Module::load(&m.save()).unwrap();
+    let loaded = Module::load(m.save()).unwrap();
     let c = loaded.compile(&v).unwrap();
     let mask = c.start().mask();
     assert!(allowed(&mask, 7));
@@ -166,7 +166,7 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
     let mut leaf = Module::new(&a());
     leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap();
-    let leaf = Module::load(&leaf.save()).unwrap();
+    let leaf = Module::load(leaf.save()).unwrap();
     assert!(accepts(&leaf.compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE)).unwrap(), &[1]));
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
@@ -237,7 +237,7 @@ fn raw_module_is_owned_and_can_preserve_deferred_source_errors() {
         let text = String::from("start ::= \"a\"");
         Module::new(&Grammar::from_ebnf(&text).unwrap())
     };
-    assert!(accepts(&Module::load(&module.save()).unwrap().compile(&vocab()).unwrap(), &[1]));
+    assert!(accepts(&Module::load(module.save()).unwrap().compile(&vocab()).unwrap(), &[1]));
     assert!(Grammar::from_glrm("invalid source").is_err());
 }
 
@@ -249,7 +249,7 @@ fn local_modes_retain_actual_native_or_lr_storage_across_load() {
         module
             .precompile_with(&v, mode.compile_options())
             .unwrap();
-        let loaded = Module::load(&module.save()).unwrap();
+        let loaded = Module::load(module.save()).unwrap();
         assert!(accepts(
             &loaded
                 .compile_with(&v, mode.compile_options())
@@ -271,7 +271,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     leaf.precompile_with(&v, trie.clone()).unwrap();
     root.bind("child", &leaf).unwrap();
 
-    for m in [root.clone(), Module::load(&root.save()).unwrap()] {
+    for m in [root.clone(), Module::load(root.save()).unwrap()] {
         let c = m.compile_with(&v, trie.clone()).unwrap();
         assert!(accepts(&c, &[4]));
         assert!(!accepts(&c, &[6]));
@@ -286,7 +286,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
     terminal.precompile_with(&v, trie.clone()).unwrap();
     terminal.bind("mark", TokenSet::from(99)).unwrap();
-    let c = Module::load(&terminal.save()).unwrap().compile_with(&v, trie).unwrap();
+    let c = Module::load(terminal.save()).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[99]));
 }
 
@@ -301,7 +301,7 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
     parent.precompile_with(&v, trie.clone()).unwrap();
     parent.bind("child", expr).unwrap();
-    let c = Module::load(&parent.save()).unwrap().compile_with(&v, trie).unwrap();
+    let c = Module::load(parent.save()).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[0, 5, 3]));
 }
 

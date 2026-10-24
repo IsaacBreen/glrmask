@@ -220,7 +220,7 @@ fn borrowed_source_matches_materialized_logical_event_graph(){
 fn borrowed_view_epsilon_free_packed_sources_are_exact(){
     use crate::automata::lexer::tokenizer::artifact_serde;
     for split in [false,true]{
-        let exprs=vec![choice(vec![bytes(b"abcdef"),bytes(b"ab"),bytes(b"b")]),bytes(b"!"),plus(bytes(b" ")),bytes(&vec![b'q';200])];
+        let exprs=vec![choice(vec![bytes(b"abcdef"),bytes(b"ab"),bytes(b"b")]),bytes(b"!"),plus(bytes(b" ")),bytes(&[b'q'; 200])];
         let fresh=if split{build_regex_partitioned(&exprs,&[0,1,2,3])}else{build_regex(&exprs)}.into_tokenizer(4,Some(Arc::from(exprs.clone())));
         let wire=artifact_serde::to_fast_bytes(&fresh);let packed=artifact_serde::from_fast_bytes(&wire).unwrap();
         for tok in [&fresh,&packed]{

@@ -22,3 +22,6 @@ smallvec = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 bincode = "1"
+
+[lints]
+workspace = true

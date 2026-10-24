@@ -137,18 +137,15 @@ mod tests {
             if phase == 0 {
                 if let Some(r) = t.pop_to_read.get(id as usize).copied().flatten() { pending.push((1, r, stack.clone())); }
                 if let Some(p) = t.pop_to_push.get(id as usize).copied().flatten() { pending.push((2, p, stack.clone())); }
-            } else if phase == 1 {
-                if let Some(p) = t.read_to_push.get(id as usize).copied().flatten() { pending.push((2, p, stack.clone())); }
-            }
+            } else if phase == 1
+                && let Some(p) = t.read_to_push.get(id as usize).copied().flatten() { pending.push((2, p, stack.clone())); }
             match phase {
-                0 => if let Some(&top) = stack.last() {
-                    if let Some(&next) = row.transitions.get(&(top as i32)).or_else(||row.transitions.get(&DEFAULT_LABEL)) {
+                0 => if let Some(&top) = stack.last()
+                    && let Some(&next) = row.transitions.get(&(top as i32)).or_else(||row.transitions.get(&DEFAULT_LABEL)) {
                         let mut s = stack; s.pop(); pending.push((0, next, s));
-                    }
-                },
-                1 => if let Some(&top) = stack.last() {
-                    if let Some(&next) = row.transitions.get(&(top as i32)) { pending.push((1, next, stack)); }
-                },
+                    },
+                1 => if let Some(&top) = stack.last()
+                    && let Some(&next) = row.transitions.get(&(top as i32)) { pending.push((1, next, stack)); },
                 _ => for (&label, &next) in &row.transitions {
                     let mut s = stack.clone(); s.push(u32::try_from(negative_to_positive_label(label)).expect("valid PUSH label")); pending.push((2, next, s));
                 },
@@ -176,23 +173,23 @@ mod tests {
             let mut t = blank(4);
             for (phase, g) in [&mut t.pop, &mut t.read, &mut t.push].into_iter().enumerate() {
                 for i in 0..4 {
-                    g.states[i].is_accepting = next(&mut seed) % 3 == 0;
+                    g.states[i].is_accepting = next(&mut seed).is_multiple_of(3);
                     if i == 3 { continue; }
                     for label in 0..3 {
-                        if next(&mut seed) % 2 == 0 {
+                        if next(&mut seed).is_multiple_of(2) {
                             let target = (i + 1 + next(&mut seed) as usize % (3-i)) as u32;
                             let l = if phase == 2 { encode_negative_label(label) } else { label as i32 };
                             g.states[i].transitions.insert(l, target);
                         }
                     }
-                    if phase == 0 && next(&mut seed) % 2 == 0 {
+                    if phase == 0 && next(&mut seed).is_multiple_of(2) {
                         g.states[i].transitions.insert(DEFAULT_LABEL, (i+1) as u32);
                     }
                 }
             }
             for links in [&mut t.pop_to_read, &mut t.pop_to_push, &mut t.read_to_push] {
                 for _ in 0..(next(&mut seed)%5) {
-                    links.push((next(&mut seed)%2 == 0).then(|| next(&mut seed)%4));
+                    links.push(next(&mut seed).is_multiple_of(2).then(|| next(&mut seed)%4));
                 }
             }
             let fast = FastCommitTemplateDfas::from_template(&t);

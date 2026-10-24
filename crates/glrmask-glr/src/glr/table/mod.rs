@@ -55,31 +55,21 @@ pub struct GuardedShiftCellIndex {
     pub unguarded_indices: Box<[u32]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AdmissionPolicy {
     /// Cheap row-presence admission is exact for this table.
+    #[default]
     RowPresenceExact,
     /// Dynamically simulate reductions/gotos before admitting a terminal.
     ExactSimulation,
 }
 
-impl Default for AdmissionPolicy {
-    fn default() -> Self {
-        Self::RowPresenceExact
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum GlrTableConstruction {
+    #[default]
     LegacyRowBisim,
     Lalr,
     ExperimentalCoreMerged,
-}
-
-impl Default for GlrTableConstruction {
-    fn default() -> Self {
-        Self::LegacyRowBisim
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,7 +717,7 @@ pub mod artifact_serde {
                 num_states: table.num_states,
                 num_terminals: table.num_terminals,
                 num_rules: table.num_rules,
-                rules: &source_rules,
+                rules: source_rules,
                 nonterminal_display_names: &table.nonterminal_display_names,
                 construction: table.construction,
                 admission_policy: table.admission_policy,
@@ -1841,7 +1831,7 @@ impl GLRTable {
     }
 
     pub fn has_ambiguity(&self) -> bool {
-        self.action.iter().enumerate().any(|(_, row)| {
+        self.action.iter().any(|row| {
             row.into_iter()
                 .any(|(_, action)| action_ambiguity(action).is_some())
         })
@@ -2128,7 +2118,7 @@ mod ambiguity_tests {
     }
 
     fn build_table_from_named_grammar(named: &NamedGrammar) -> GLRTable {
-        let grammar = lower(&named).unwrap();
+        let grammar = lower(named).unwrap();
         let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
         GLRTable::build(&analyzed)
     }

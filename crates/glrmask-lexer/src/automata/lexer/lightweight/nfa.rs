@@ -4,7 +4,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
 use super::super::dfa::{DFA as LexerDfa, DEAD};
-use super::super::nfa::NFA as LexerNfa;
+use super::super::nfa::Nfa as LexerNfa;
 
 type TransitionTable = [u32; 256];
 

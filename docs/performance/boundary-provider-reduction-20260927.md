@@ -42,7 +42,7 @@ D measures the dynamic boundary handler, B all boundary dispatch, and N ordinary
 
 Ordinary 128k-vocabulary controls were checked independently for exact masks. Shared-host timing variability and different worst positions preclude claiming a universal ordinary-mask speedup from these measurements.
 
-See `../provider-reduction-prefix.md` for fallback, labels, budget and predecessor-isolation contracts.
+See `../design/provider-reduction-prefix.md` for fallback, labels, budget and predecessor-isolation contracts.
 
 ## Normal result-cache check
 

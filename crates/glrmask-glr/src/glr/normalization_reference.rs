@@ -363,8 +363,8 @@ impl AnalyzedGrammar {
             build_left_reachability_graph(&self.rules, &self.nullable),
             &reachable,
         );
-        if let Some(cycle) = find_indirect_lr_cycle(&lr_graph) {
-            if cycle.len() >= 2 {
+        if let Some(cycle) = find_indirect_lr_cycle(&lr_graph)
+            && cycle.len() >= 2 {
                 violations.push(format!(
                     "indirect left-recursive cycle detected: {:?}. \
                      Indirect left recursion may create unbounded GSS \
@@ -372,7 +372,6 @@ impl AnalyzedGrammar {
                     cycle,
                 ));
             }
-        }
 
         if violations.is_empty() {
             Ok(())
@@ -615,8 +614,8 @@ fn find_cycle(
     let mut colors = BTreeMap::new();
     let mut stack = Vec::new();
     for &node in graph.keys() {
-        if colors.get(&node).copied().unwrap_or(0) == 0 {
-            if let Some(cycle) = dfs(
+        if colors.get(&node).copied().unwrap_or(0) == 0
+            && let Some(cycle) = dfs(
                 node,
                 graph,
                 &mut colors,
@@ -626,7 +625,6 @@ fn find_cycle(
             ) {
                 return Some(cycle);
             }
-        }
     }
     None
 }
@@ -879,7 +877,7 @@ fn resolve_direct_rr_single_nt(
         .iter()
         .filter(|r| r.lhs == nt)
         .cloned()
-        .partition(|r| is_direct_right_recursive(r));
+        .partition(is_direct_right_recursive);
 
     if recursive.is_empty() {
         return;
@@ -1577,9 +1575,7 @@ fn get_or_create_non_nullable_nt(
         return Some(cached);
     }
 
-    let Some(alts) = by_lhs.get(&nt) else {
-        return None;
-    };
+    let alts = by_lhs.get(&nt)?;
     let nn_nt = fresh_nt();
     nn_cache.insert(nt, nn_nt);
     let mut emitted = false;
@@ -1752,21 +1748,20 @@ fn eliminate_hidden_left_recursion(
             // For each skip length, if next symbol is a cycle member, add a shortened rule.
             for skip in 1..=prefix_end {
                 let suffix = &rule.rhs[skip..];
-                if let Some(Symbol::Nonterminal(nt)) = suffix.first() {
-                    if cycle_nodes.contains(nt) {
+                if let Some(Symbol::Nonterminal(nt)) = suffix.first()
+                    && cycle_nodes.contains(nt) {
                         additions.push(Rule {
                             lhs: rule.lhs,
                             rhs: suffix.to_vec(),
                         });
                     }
-                }
             }
 
             let first_after_nullable = rule.rhs.get(prefix_end);
-            if let Some(Symbol::Nonterminal(next_nt)) = first_after_nullable {
-                if *next_nt != rule.lhs && cycle_nodes.contains(next_nt) {
+            if let Some(Symbol::Nonterminal(next_nt)) = first_after_nullable
+                && *next_nt != rule.lhs && cycle_nodes.contains(next_nt) {
                     let expansions =
-                        expand_cycle_head_paths(&rhs_by_lhs, &cycle_nodes, *next_nt, rule.lhs);
+                        expand_cycle_head_paths(&rhs_by_lhs, cycle_nodes, *next_nt, rule.lhs);
                     let mut produced_replacement = false;
                     for expansion in expansions {
                         let mut rhs = expansion;
@@ -1778,7 +1773,6 @@ fn eliminate_hidden_left_recursion(
                         replaced_cycle_rules.insert(rule.clone());
                     }
                 }
-            }
         }
 
         let existing: HashSet<Rule> = rules.iter().cloned().collect();
@@ -2535,14 +2529,13 @@ pub fn merge_identical_nonterminals(
         for (i, &nt) in nts.iter().enumerate() {
             for rhs in rhs_by_idx[i].iter() {
                 for s in rhs {
-                    if let Symbol::Nonterminal(r) = s {
-                        if *r != nt {
+                    if let Symbol::Nonterminal(r) = s
+                        && *r != nt {
                             let ri = *r as usize;
                             if ri <= max_nt_id && nt_to_idx_fast[ri] != u32::MAX {
                                 refs_of[i].push(nt_to_idx_fast[ri] as usize);
                             }
                         }
-                    }
                 }
             }
         }

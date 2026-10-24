@@ -80,9 +80,9 @@ fn build_minimized_acyclic_dfa(
     minimized.states = vec![super::dfa::DFAState::default(); num_classes];
     minimized.start_state = (class_of_state[dfa.start_state as usize] - 1) as u32;
 
-    for class_id in 1..class_representatives.len() {
-        let repr_state_id = class_representatives[class_id]
-            .expect("every non-dead acyclic DFA class has a representative");
+    for (class_id, representative) in class_representatives.iter().enumerate().skip(1) {
+        let repr_state_id =
+            representative.expect("every non-dead acyclic DFA class has a representative");
         let repr = &dfa.states[repr_state_id];
         let out_state = class_id - 1;
         minimized.states[out_state].is_accepting = repr.is_accepting;
