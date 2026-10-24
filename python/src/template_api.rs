@@ -52,7 +52,7 @@ impl PyParserProgram {
 
     /// Compile using the ordinary shared mask/commit engines. Each terminal
     /// pattern is bytes for a literal, or str for a regex; ordering matches the
-    /// parser definition. FAST_RUNTIME selects static masks; FAST_BUILD, AUTO
+    /// parser definition. FAST_MASKS selects static masks; FAST_COMPILE, AUTO
     /// and the default select the dynamic mask engine. All choices remain
     /// physically LR-table-free. Ignored terminals must have identity actions.
     #[pyo3(signature = (vocab, terminal_patterns, *, ignore_terminal=None, end_tokens=None, mask_strategy=None, optimization=None))]

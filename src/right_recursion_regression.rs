@@ -1,7 +1,9 @@
 //! Regression coverage for right-recursion elimination on a small grammar that
 //! used to grow the rule set without bound.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
-use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
+use crate::{Grammar, Module, Vocab};
 use std::collections::BTreeSet;
 
 /// Minimal grammar that previously made `eliminate_right_recursion` expand
@@ -91,14 +93,10 @@ fn minimal_right_recursion_grammar_compiles_and_masks_match_the_language() {
         (2, b"c".to_vec()),
     ]);
     let grammar = Grammar::from_lark(GRAMMAR).unwrap();
-    for strategy in [
-        MaskStrategy::TokenTrie,
-        MaskStrategy::TokenClassTrie,
-        MaskStrategy::ParserDwa,
-    ] {
+    for strategy in MaskMode::ALL {
         let module = Module::new(&grammar);
         let constraint = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&vocab, strategy.compile_options())
             .unwrap();
 
         for word in words() {

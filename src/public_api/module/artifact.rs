@@ -58,12 +58,12 @@ struct Manifest {
 
 fn err(message: impl Into<String>) -> Error { Error::Serialization(message.into()) }
 
-fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
+fn u8_to_engine(n: u8) -> Result<Engine> {
     match n {
-        0 => Ok(MaskStrategy::Auto),
-        1 => Ok(MaskStrategy::ParserDwa),
-        2 => Ok(MaskStrategy::TokenTrie),
-        3 => Ok(MaskStrategy::TokenClassTrie),
+        0 => Ok(Engine::Auto),
+        1 => Ok(Engine::ParserDwa),
+        2 => Ok(Engine::TokenTrie),
+        3 => Ok(Engine::MergedTokenTrie),
         _ => Err(err("invalid mask strategy tag")),
     }
 }
@@ -275,7 +275,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 let mut generated = BTreeSet::new();
                 if matches!(module.node.source.source, GrammarSource::Lark(_)) {
                     for (name, _) in &module.node.source.lark_document().map_err(|e| err(e.to_string()))?.schemas {
-                        if engine != MaskStrategy::TokenTrie.key() {
+                        if engine != Engine::TokenTrie.key() {
                             expected.insert(name.clone(), ExternKind::Grammar);
                             generated.insert(name.clone());
                         }
@@ -287,9 +287,9 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 let native = p.inner.has_template_parser();
                 if native && p.inner.table.is_present() { return Err(err("native Module artifact retains physical LR storage")); }
                 if !native && !p.inner.table.is_present() { return Err(err("Module artifact has no supported parser representation")); }
-                if engine != MaskStrategy::TokenTrie.key() && !native { return Err(err("native Module artifact contains LR runtime")); }
-                if engine == MaskStrategy::TokenTrie.key() && !p.inner.uses_dynamic_runtime() {
-                    return Err(err("FastBuild Module artifact contains a non-Dynamic local body"));
+                if engine != Engine::TokenTrie.key() && !native { return Err(err("corrupt module: a precompiled part has an LR table")); }
+                if engine == Engine::TokenTrie.key() && !p.inner.uses_dynamic_runtime() {
+                    return Err(err("corrupt module: a TokenTrie part has the wrong runtime"));
                 }
             }
         }
@@ -384,7 +384,7 @@ mod tests {
             &v,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
             false,
-            crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic(),
+            crate::runtime::parser_backend::DynamicParserBackend::LrTable,
         ).unwrap();
         let _ = inner.late_bind_vocab.set(v.clone());
         let non_native = PreparedGrammar {
@@ -400,7 +400,7 @@ mod tests {
         };
         m.prepared[0].bytes = non_native.save();
         let error = Module::load(&write(&m)).unwrap_err().to_string();
-        assert!(error.contains("native Module artifact contains LR"), "{error}");
+        assert!(error.contains("corrupt module: a precompiled part has an LR table"), "{error}");
         let mut m = read(&module.save());
         m.instances[0].source = 1;
         m.sources.push(Source::Ebnf("start ::= \"b\"".into()));

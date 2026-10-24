@@ -1,3 +1,4 @@
+use glrmask::test_modes::MaskMode;
 use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
@@ -70,7 +71,7 @@ fn compile_options_apply_to_the_whole_compile_and_are_atomic() {
     let v = vocab();
     let mut child = Module::new(&a());
     child
-        .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+        .precompile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
         .unwrap();
     let _bytes = child.save();
 
@@ -242,16 +243,16 @@ fn raw_module_is_owned_and_can_preserve_deferred_source_errors() {
 
 #[test]
 fn local_modes_retain_actual_native_or_lr_storage_across_load() {
-    for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie, MaskStrategy::TokenTrie] {
+    for mode in MaskMode::ALL {
         let v = vocab();
         let mut module = Module::new(&a());
         module
-            .precompile_with(&v, CompileOptions::default().mask_strategy(mode))
+            .precompile_with(&v, mode.compile_options())
             .unwrap();
         let loaded = Module::load(&module.save()).unwrap();
         assert!(accepts(
             &loaded
-                .compile_with(&v, CompileOptions::default().mask_strategy(mode))
+                .compile_with(&v, mode.compile_options())
                 .unwrap(),
             &[1],
         ));

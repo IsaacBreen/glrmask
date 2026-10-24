@@ -14,6 +14,14 @@ import pytest
 
 import glrmask
 
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
+
 
 def test_parser_machinery_is_only_available_in_internal_namespace():
     for name in ["ParserBackend", "ParserProgram"]:
@@ -26,21 +34,18 @@ def test_parser_machinery_is_only_available_in_internal_namespace():
     grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
     with pytest.raises(TypeError, match="parser_backend"):
         grammar.compile(vocab, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    public = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_BUILD)
+    public = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)
     internal = glrmask._internal.compile_with_backend(
-        grammar, vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
+        grammar, vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA,
     )
     assert np.array_equal(public.start().mask(), internal.start().mask())
 
 
-@pytest.mark.parametrize("mode", [glrmask.MaskStrategy.AUTO,
-                                  glrmask.MaskStrategy.FAST_BUILD,
-                                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-                                  glrmask.MaskStrategy.FAST_RUNTIME])
+@pytest.mark.parametrize("mode", MODES)
 def test_save_flag_preserves_default_and_external_roundtrips(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b", 3: b""})
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, mask_strategy=mode)
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, **mode)
     assert not hasattr(constraint, "save_with_external_vocab")
     self_contained = constraint.save()
     assert self_contained == constraint.save()
@@ -66,18 +71,15 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
     with pytest.raises(TypeError):
         constraint.save(True)
 
-@pytest.mark.parametrize("mode", [glrmask.MaskStrategy.AUTO,
-                                  glrmask.MaskStrategy.FAST_BUILD,
-                                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-                                  glrmask.MaskStrategy.FAST_RUNTIME])
+@pytest.mark.parametrize("mode", MODES)
 def test_boundary_option_is_eager_and_does_not_change_masks(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
     grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
-    plain = grammar.compile(vocab, mask_strategy=mode)
-    assert grammar.compile(vocab, mask_strategy=mode,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_BUILD).save() == plain.save()
-    for detail in [glrmask.BoundaryMaskStrategy.FAST_BUILD, glrmask.BoundaryMaskStrategy.FAST_RUNTIME]:
-        requested = grammar.compile(vocab, mask_strategy=mode, boundary_mask_strategy=detail)
+    plain = grammar.compile(vocab, **mode)
+    assert grammar.compile(vocab, **mode,
+        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE).save() == plain.save()
+    for detail in [glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS]:
+        requested = grammar.compile(vocab, **mode, boundary_mask_strategy=detail)
         saved = requested.save()
         for prefix in [b"", b"a", b"ab"]:
             a, b = requested.start(), plain.start()
@@ -95,7 +97,7 @@ def test_boundary_request_applies_to_compile_after_save_and_bind():
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
     child = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
-    for detail in [glrmask.BoundaryMaskStrategy.FAST_BUILD, glrmask.BoundaryMaskStrategy.FAST_RUNTIME]:
+    for detail in [glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS]:
         module = glrmask.Module(grammar)
         with pytest.raises(ValueError, match="unbound"):
             module.compile(vocab, boundary_mask_strategy=detail)
@@ -105,16 +107,13 @@ def test_boundary_request_applies_to_compile_after_save_and_bind():
         assert requested.start().mask()[3]
 
 
-@pytest.mark.parametrize("mode", [glrmask.MaskStrategy.AUTO,
-                                  glrmask.MaskStrategy.FAST_BUILD,
-                                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-                                  glrmask.MaskStrategy.FAST_RUNTIME])
+@pytest.mark.parametrize("mode", MODES)
 def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     assert hasattr(glrmask.ConstraintState, "is_terminated")
     assert hasattr(glrmask.ConstraintState, "is_accepting")
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
     end_token_ids = {130}
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, mask_strategy=mode)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()

@@ -29,18 +29,21 @@ const actual=modes.map((maskStrategy,mode)=>{
 });
 assert.deepEqual(actual,expected,'C++ and Node mask/commit/state results differ');
 run(['--save',output]);
+// `Constraint.saveSync()` takes no arguments, so there is one artifact per
+// mode. Each mode is checked in both directions: Node loads the C++ bytes and
+// the C++ `--check` run loads the bytes Node writes.
+let artifactChecks=0;
 for (const [mode,maskStrategy] of modes.entries()) {
   const reference=grammar.compileSync(vocab,{maskStrategy});
-  for (const externalVocab of [false,true]) {
-    const stem=(externalVocab?'external-':'mode-')+mode+'.glr';
-    const cppBytes=fs.readFileSync(path.join(output,'cpp-'+stem));
-    const c=api.Constraint.loadSync(cppBytes,vocab),s=c.start();
-    assert.deepEqual(s.mask(),reference.start().mask());s.commitToken(31);assert.ok(s.isAccepting());
-    fs.writeFileSync(path.join(output,'node-'+stem),reference.saveSync({externalVocab}));
-    s.dispose();c.dispose();
-  }
+  const stem='mode-'+mode+'.glr';
+  const cppBytes=fs.readFileSync(path.join(output,'cpp-'+stem));
+  const c=api.Constraint.loadSync(cppBytes,vocab),s=c.start();
+  assert.deepEqual(s.mask(),reference.start().mask());s.commitToken(31);assert.ok(s.isAccepting());
+  fs.writeFileSync(path.join(output,'node-'+stem),reference.saveSync());
+  artifactChecks+=2;
+  s.dispose();c.dispose();
   reference.dispose();
 }
 run(['--check',output]);
-fs.writeFileSync(path.join(output,'parity-report.json'),JSON.stringify({schema:1,version:api.version,modes:actual,artifactChecks:16},null,2)+'\n');
-console.log('C++/Node: four-mode masks and state transitions match; 16 two-way embedded/external artifact checks passed.');
+fs.writeFileSync(path.join(output,'parity-report.json'),JSON.stringify({schema:1,version:api.version,modes:actual,artifactChecks},null,2)+'\n');
+console.log(`C++/Node: ${modes.length}-mode masks and state transitions match; ${artifactChecks} artifact loads (Node reads C++, C++ reads Node) passed.`);

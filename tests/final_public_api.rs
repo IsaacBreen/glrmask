@@ -385,10 +385,10 @@ fn focused_5_externs_get_iter_order_len_unbound() {
 fn focused_6_compile_options_never_touch_retained_work() {
     let v = vocab();
     let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    assert_eq!(MaskStrategy::FAST_BUILD, MaskStrategy::TokenTrie);
-    assert_eq!(MaskStrategy::FAST_RUNTIME, MaskStrategy::ParserDwa);
-    assert_eq!(BoundaryMaskStrategy::FAST_BUILD, BoundaryMaskStrategy::TokenTrie);
-    assert_eq!(BoundaryMaskStrategy::FAST_RUNTIME, BoundaryMaskStrategy::ParserDwa);
+    assert_eq!(MaskStrategy::FAST_COMPILE, MaskStrategy::TokenTrie);
+    assert_eq!(MaskStrategy::FAST_MASKS, MaskStrategy::ParserDwa);
+    assert_eq!(BoundaryMaskStrategy::FAST_COMPILE, BoundaryMaskStrategy::TokenTrie);
+    assert_eq!(BoundaryMaskStrategy::FAST_MASKS, BoundaryMaskStrategy::ParserDwa);
 
     let mut m = m;
     m.precompile(&v).unwrap();
@@ -473,7 +473,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 2. Auto reuses retained TokenClassTrie
     let mut m_tct = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_tct.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+    m_tct.precompile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
         .unwrap();
     let c_tct = m_tct.compile(&v).unwrap();
     let mut s_tct = c_tct.start();

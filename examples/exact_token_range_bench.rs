@@ -3,10 +3,11 @@
 //! cargo run --release --example exact_token_range_bench -- 131072 2000
 //! Prints JSON. Run without competing CPU-heavy jobs. Vocabulary preparation,
 //! cold compilation, warm compilation and precompiled linking are distinct.
+use glrmask::test_modes::MaskMode;
 use std::hint::black_box;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
-use glrmask::{BuildOptions, Grammar, MaskStrategy, TokenSet, Vocab};
+use glrmask::{Grammar, TokenSet, Vocab};
 use serde_json::{json, Value};
 
 const SOURCE: &str = "glrm 1; start start; extern token T; nt start = T;";
@@ -42,7 +43,7 @@ fn selection(name: &str, n: u32) -> Vec<RangeInclusive<u32>> {
     }
 }
 
-fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrategy)
+fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskMode)
     -> Result<Value, Box<dyn std::error::Error>>
 {
     let ranges = selection(name, n);
@@ -71,7 +72,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrate
         black_box(result);
         explicit_samples.push(elapsed);
     }
-    let options = BuildOptions::default().optimization(mode);
+    let options = mode.build_options();
     let (bound, bind_ns) = timed(|| Grammar::from_glrm(SOURCE)?.bind_snapshot("T", tokens.clone()));
     let bound = bound?;
     let (constraint, cold_compile_ns) = timed(|| bound.compile_with_build_options(&vocab, options.clone()));
@@ -137,7 +138,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrate
 // Same two-token language through ordinary bytes and through overlapping exact
 // bindings plus a byte alternative. This exercises the DEFAULT-guard regression
 // under production settings without presenting it as a historical baseline.
-fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskStrategy, mixed: bool)
+fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
     -> Result<Value, Box<dyn std::error::Error>>
 {
     let (vocab, vocab_ns) = timed(|| Vocab::new(
@@ -155,7 +156,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskStrategy, mixed: b
     });
     let grammar = grammar?;
     let (constraint, compile_ns) = timed(|| grammar.compile_with_build_options(
-        &vocab, BuildOptions::default().optimization(mode),
+        &vocab, mode.build_options(),
     ));
     let constraint = constraint?;
     let mut check = constraint.start();
@@ -210,14 +211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut rows = Vec::new();
     for kind in ["exact_only", "byte_aliases", "empty_aliases"] {
-        for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
+        for mode in MaskMode::ALL {
             for name in ["singleton", "all", "all_except_middle", "eight_disjoint_ranges"] {
                 rows.push(run_case(n, repetitions, kind, name, mode)?);
             }
         }
     }
     let mut sanity = Vec::new();
-    for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
+    for mode in MaskMode::ALL {
         for mixed in [false, true] {
             sanity.push(run_two_event_sanity(n, repetitions, mode, mixed)?);
         }

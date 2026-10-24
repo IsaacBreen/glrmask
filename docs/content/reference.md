@@ -180,21 +180,26 @@ composition, persistence, and the Rust/Python APIs.
 
 {{dynamic}}
 
-`MaskStrategy` trades off compilation time against per-token masking latency:
+`MaskStrategy` chooses how masks are computed:
 
-- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest runtime masks).
-- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
-- `TokenClassTrie`: token-trie walk over token equivalence classes.
-- `Auto`: library chooses the strategy (default).
+- `ParserDwa` builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
+- `TokenTrie` computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+- `Auto`, the default, reuses any precompiled work; otherwise it uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
-`BoundaryMaskStrategy` selects the boundary parser for crossings between composed
-grammars:
+`FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
 
-- `ParserDwa` (alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message.
-- `TokenTrie` (alias `FAST_BUILD`): segmented dynamic boundary token walk; faster build.
-- `Auto` (default): `ParserDwa`, falling back to `TokenTrie` for each boundary whose static parser declines on budget.
+Two compile options tune `TokenTrie`. Both are off by default:
 
-All modes preserve accepted-language semantics and produce the same public `Constraint` type.
+- `template_dfas` parses with template DFAs instead of an LR table. Slower to compile, with faster masks.
+- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It requires `template_dfas`.
+
+`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
+
+- `ParserDwa` builds a parser DWA across each boundary. Slower to compile, with faster masks. It fails with `ErrorKind::ResourceLimit` if it would be too large.
+- `TokenTrie` walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
+- `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
+
+Every strategy produces the same masks; they differ only in speed.
 
 ## Grammar formats
 

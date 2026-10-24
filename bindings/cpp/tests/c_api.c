@@ -6,7 +6,7 @@
 int main(void) {
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==1);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
+    CHECK(glrmask_abi_version()==2);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,NULL,0,&vocab)==GLRMASK_INVALID_ARGUMENT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,NULL,0,&vocab)==GLRMASK_OK);
     const char source[]="start ::= \"a\"";
@@ -20,7 +20,9 @@ int main(void) {
     glrmask_module *module=NULL,*loaded=NULL;glrmask_expr* expr=NULL;glrmask_bytes* saved=NULL;
     CHECK(glrmask_module_new(grammar,&module)==GLRMASK_OK);
     glrmask_compile_options module_options=glrmask_default_compile_options();
-    module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE;
+    module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_TRIE;
+    module_options.template_dfas=1;
+    module_options.merge_equivalent_tokens=1;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
     /* Grammar::precompile is the module-returning mirror of Grammar::compile. */
     glrmask_module *from_grammar=NULL;glrmask_constraint *precompiled_constraint=NULL;

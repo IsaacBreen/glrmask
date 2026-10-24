@@ -1,4 +1,5 @@
 //! Public-consumer lifecycle tests: no internal-api shortcuts or private field access.
+use glrmask::test_modes::MaskMode;
 use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
@@ -15,7 +16,7 @@ fn construction_and_compile_options_do_not_change_the_source_grammar() {
     let v = vocab();
     let default_mask = module.compile(&v).unwrap().start().mask();
     let explicit_mask = module
-        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+        .compile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
         .unwrap()
         .start()
         .mask();
@@ -48,16 +49,16 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
 #[test]
 fn native_local_modes_survive_expression_grouping_and_persistence() {
     let v = vocab();
-    for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
+    for mode in MaskMode::ALL {
         let a = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\"").unwrap());
-        b.precompile_with(&v, CompileOptions::default().mask_strategy(mode)).unwrap();
+        b.precompile_with(&v, mode.compile_options()).unwrap();
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
         let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
         host.bind("E", expr).unwrap();
         let loaded = Module::load(&host.save()).unwrap();
         let root = loaded
-            .compile_with(&v, CompileOptions::default().mask_strategy(mode))
+            .compile_with(&v, mode.compile_options())
             .unwrap();
         let mut state = root.start();
         assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");

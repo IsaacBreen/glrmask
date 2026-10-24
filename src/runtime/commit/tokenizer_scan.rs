@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use crate::automata::lexer::Lexer;
 use rustc_hash::FxHashMap;
 
@@ -513,9 +515,9 @@ mod reset_projection_tests {
             let source = format!("start root nt root = {}", std::iter::once("\"a\"+".to_owned())
                 .chain((0..width).map(|id| format!("\"x{id}:\" @mark({id}) \"b\"")))
                 .collect::<Vec<_>>().join(" | "));
-            for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+            for mode in MaskMode::ALL {
                 let fresh = Grammar::from_glrm(&source).unwrap().compile_with_build_options(&vocab,
-                    BuildOptions::default().optimization(mode)).unwrap();
+                    mode.build_options()).unwrap();
                 let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
                 for constraint in [&fresh, &loaded] {
                     let reset = constraint.runtime_commit_initial_state();

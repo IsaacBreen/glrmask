@@ -1,3 +1,4 @@
+use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
 fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::TokenTrie)}
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).with_special_tokens([17,29])}
@@ -34,8 +35,8 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
 #[test]
 fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
     let v=vocab();
-    for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
-        let opt=BuildOptions::default().optimization(mode);
+    for mode in MaskMode::ALL {
+        let opt=mode.build_options();
         let mut a=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap();
         a.bind("VALUE",TokenSet::new([17,29])).unwrap();
         let mut b=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap().prepare(&v).unwrap();

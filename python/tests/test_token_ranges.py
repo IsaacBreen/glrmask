@@ -11,8 +11,13 @@ import pytest
 import glrmask
 
 ONE = "glrm 1; start start; extern token T; nt start = T;"
-MODES = [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
-         glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
 
 
 def vocab(n=128):
@@ -62,7 +67,7 @@ def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
     source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
     module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", glrmask.TokenSet(range(10, 31))), "B", glrmask.TokenSet.from_ranges([range(20, 41), range(70, 81)]))
-    c = module.compile(v, mask_strategy=mode)
+    c = module.compile(v, **mode)
     for first in (10, 20, 30):
         state = c.start()
         assert accepted_ids(state) == set(range(10, 31))
@@ -82,7 +87,7 @@ def test_deferred_range_binding_and_serialization():
     expected = set(range(3, 9)) | set(range(90, 100))
     loaded = glrmask.Module.load(bound.save())
     for mode in MODES:
-        constraint = loaded.compile(v, mask_strategy=mode)
+        constraint = loaded.compile(v, **mode)
         assert accepted_ids(constraint.start()) == expected
     with pytest.raises(ValueError):
         module.compile(v)
@@ -96,7 +101,7 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
     for tokens, excluded in [(glrmask.TokenSet(range(n)), None),
                              (glrmask.TokenSet.from_ranges([range(0, 65_535), range(65_536, n)]), 65_535)]:
         module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
-        constraint = module.compile(v, mask_strategy=mode)
+        constraint = module.compile(v, **mode)
         state = constraint.start()
         mask = state.mask()
         assert int(mask.sum()) == n - (excluded is not None)
@@ -140,8 +145,8 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
             compact = _bound_snapshot(compact, name, glrmask.TokenSet.from_ranges(ranges))
             oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
             pointwise = _bound_snapshot(pointwise, name, oracle)
-        actual = compact.compile(v, mask_strategy=mode)
-        expected = pointwise.compile(v, mask_strategy=mode)
+        actual = compact.compile(v, **mode)
+        expected = pointwise.compile(v, **mode)
         # Exhaust every legal prefix through two model tokens, comparing the
         # full next-token mask and acceptance at every node.
         prefixes = [()]
@@ -169,7 +174,7 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = _bound_snapshot(grammar, "A", glrmask.TokenSet(range(6)) if compact else glrmask.TokenSet([0]))
     grammar = _bound_snapshot(grammar, "B", glrmask.TokenSet(range(3, 10)) if compact else glrmask.TokenSet([1]))
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, mask_strategy=mode)
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()
     assert state.commit_token(0)
     assert state.commit_token(0)
@@ -188,7 +193,7 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     module = _bound_snapshot(_bound_snapshot(grammar, "A", glrmask.TokenSet(a)), "B", glrmask.TokenSet(b))
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet([15]))).compile(v, mask_strategy=mode)
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()
     assert state.commit_token(0)
     assert state.commit_token(0)

@@ -100,35 +100,34 @@ const moduleVocab = new Vocab([
   [2, Buffer.from('y')], [3, Buffer.from('b')],
 ]);
 const child = new Module(Grammar.fromEbnf('start ::= "a"'));
-await child.precompile(moduleVocab, { maskStrategy: MaskStrategy.TokenClassTrie });
+await child.precompile(moduleVocab, { maskStrategy: MaskStrategy.ParserDwa });
 
 const parent = new Module(Grammar.fromGlrm(
   'extern grammar child; start root; nt root = "x" child "y";'));
 parent.bind('child', child);
-const constraint = await parent.compile(moduleVocab, {
-  maskStrategy: MaskStrategy.TokenClassTrie,
-});
+const constraint = await parent.compile(moduleVocab);
 ```
 
 `bind` and `precompile` mutate atomically. A failed `bind` leaves the receiver unchanged; `copy()` gives an independent binding snapshot, and attaching a child snapshots that occurrence. Accepted bindings are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Qualified descendant paths using `::` are unsupported, each extern binds once, and a child with unbound externs cannot be attached.
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{maskStrategy, boundaryMaskStrategy}`:
+`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. `precompile` and `compile` take an options object, `{maskStrategy, boundaryMaskStrategy, templateDfas, mergeEquivalentTokens}`, which applies to the whole compile, including bound grammars:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));
 const sequence = Expr.sequence(Expr.literal('x'), expression, Expr.literal('y'));
 ```
 
-| `MaskStrategy` | Value | Intent |
+| `MaskStrategy` | Value | Behavior |
 | --- | --- | --- |
-| `Auto` | `auto` | Core default trade-off. |
-| `ParserDwa` | `parser-dwa` | Static parser-DWA masks; slowest build, lowest runtime latency. |
-| `TokenTrie` | `token-trie` | Dynamic token-trie walk; fastest build. |
-| `TokenClassTrie` | `token-class-trie` | Token-trie walk over token equivalence classes. |
+| `Auto` | `auto` | Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. |
+| `ParserDwa` | `parser-dwa` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
+| `TokenTrie` | `token-trie` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
 
-`BoundaryMaskStrategy.Auto` (`auto`, the default), `BoundaryMaskStrategy.ParserDwa` (`parser-dwa`) and `BoundaryMaskStrategy.TokenTrie` (`token-trie`) select the boundary parser for crossings between composed grammars. `ParserDwa` has faster crossings; an over-budget build raises `GlrMaskError`. `TokenTrie` keeps the segmented dynamic boundary and builds faster. `Auto` uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static parser declines on budget. `FastRuntime` and `FastBuild` alias `ParserDwa` and `TokenTrie`, and the legacy `fast-runtime`/`fast-build` input strings remain accepted.
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. With `TokenTrie`, `templateDfas: true` parses with template DFAs instead of an LR table, which is slower to compile, with faster masks, and `mergeEquivalentTokens: true` merges tokens that the grammar treats the same, so masks walk fewer tokens. `mergeEquivalentTokens` requires `templateDfas`.
+
+`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` (`parser-dwa`) is slower to compile, with faster masks, and throws `GlrMaskError` if it would be too large; `TokenTrie` (`token-trie`) is faster to compile, with slower masks; `Auto` (`auto`), the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
 ## Decoding
 

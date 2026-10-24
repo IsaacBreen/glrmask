@@ -1,10 +1,11 @@
 //! Regression coverage for the seed-3229 TokenTrie stall caused by
 //! identity unit rules (`X -> X`) created during epsilon elimination.
+use glrmask::test_modes::MaskMode;
 
 use std::sync::mpsc;
 use std::time::Duration;
 
-use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
+use glrmask::{Grammar, Module, Vocab};
 
 const ORIGINAL: &str = r#"start: n3
 n0: "a" | n1 "c" n1 | "a" n3 | "b" n1 n1
@@ -26,12 +27,7 @@ b: n a | "y"
 n: "z" |
 "#;
 
-const MODES: [MaskStrategy; 4] = [
-    MaskStrategy::Auto,
-    MaskStrategy::ParserDwa,
-    MaskStrategy::TokenTrie,
-    MaskStrategy::TokenClassTrie,
-];
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -48,7 +44,7 @@ fn xyz_vocab() -> Vocab {
 /// commit succeeds, Ok(None) when a commit is rejected, and Err on a stall.
 fn commit_tokens(
     lark: &'static str,
-    mode: MaskStrategy,
+    mode: MaskMode,
     vocab_fn: fn() -> Vocab,
     tokens: &'static [u32],
 ) -> Result<Option<bool>, String> {
@@ -56,7 +52,7 @@ fn commit_tokens(
     std::thread::spawn(move || {
         let module = Module::new(&Grammar::from_lark(lark).unwrap());
         let constraint = module
-            .compile_with(&vocab_fn(), CompileOptions::default().mask_strategy(mode))
+            .compile_with(&vocab_fn(), mode.compile_options())
             .unwrap();
         let mut state = constraint.start();
         for &token in tokens {

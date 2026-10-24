@@ -1,4 +1,5 @@
 //! Public precompiled template composition; see docs/template-parser-composition.md.
+use glrmask::test_modes::MaskMode;
 fn main() -> glrmask::Result<()> {
     use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
     
@@ -16,10 +17,9 @@ fn main() -> glrmask::Result<()> {
         r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
     )?.prepare(&vocab)?;
     
-    for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for optimization in [MaskMode::C, MaskMode::ParserDwa] {
         let linked = parent.bind_snapshot("child", &child)?.link_with(
-            BuildOptions::default()
-                .optimization(optimization)
+            optimization.build_options()
                 .parser_backend(ParserBackend::TemplateDfa),
         )?;
         assert_eq!(linked.parser_backend(), ParserBackend::TemplateDfa);

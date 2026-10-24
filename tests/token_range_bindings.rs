@@ -1,7 +1,8 @@
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 
 const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
-const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa];
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 
 fn allowed(mask: &[u32], token: u32) -> bool {
     mask.get(token as usize / 32).is_some_and(|word| word & (1 << (token % 32)) != 0)
@@ -29,7 +30,7 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
     assert_eq!(tokens.range_pairs(), &[(5, 18), (31, 33), (48, 63)]);
     let accepts = |id| (5..=18).contains(&id) || (31..=33).contains(&id) || (48..=63).contains(&id);
     for mode in MODES {
-        let options = BuildOptions::default().optimization(mode).end_tokens([95]);
+        let options = mode.build_options().end_tokens([95]);
         let constraint = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", tokens.clone()).unwrap()
             .compile_with_build_options(&vocab, options).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         assert_mask(&constraint, &[], 96, accepts);
@@ -64,7 +65,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
         let constraint = Grammar::from_glrm(source).unwrap()
             .bind_snapshot("A", TokenSet::from_ranges([10..=30])).unwrap()
             .bind_snapshot("B", TokenSet::from_ranges([20..=40])).unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab, mode.build_options()).unwrap();
         assert_mask(&constraint, &[], 100, |id| (10..=30).contains(&id));
         for first in [10, 20, 25, 30] {
             assert_mask(&constraint, &[first], 100, |id| (20..=40).contains(&id));
@@ -85,7 +86,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let serialized = bound.save();
     let loaded = PreparedGrammar::load(&serialized, &vocab).unwrap();
     for mode in MODES {
-        let options = BuildOptions::default().optimization(mode);
+        let options = mode.build_options();
         let child = loaded.link_with(options.clone()).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         assert_mask(&child, &[], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
         assert_mask(&child, &[15], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
@@ -153,7 +154,7 @@ fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
         assert_eq!(tokens.range_pairs().len(), if excluded.is_some() { 2 } else { 1 });
         for mode in MODES {
             let constraint = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", tokens.clone()).unwrap()
-                .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode))
+                .compile_with_build_options(&vocab, mode.build_options())
                 .unwrap_or_else(|e| panic!("{mode:?}, excluded={excluded:?}: {e}"));
             let mask = constraint.start().mask();
             assert_eq!(mask.iter().map(|w| w.count_ones()).sum::<u32>(), N - u32::from(excluded.is_some()));
@@ -202,7 +203,7 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
         let constraint = Grammar::from_glrm(source).unwrap()
             .bind_snapshot("A", TokenSet::from_ranges([8..=12])).unwrap()
             .bind_snapshot("B", TokenSet::from_ranges([10..=14])).unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab, mode.build_options()).unwrap();
         assert_mask(&constraint, &[], 20, |id| id == 0);
         assert_mask(&constraint, &[0], 20, |id| (8..=14).contains(&id));
         for exact in 8..=14 {
@@ -231,11 +232,11 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
     for mode in MODES {
         let singleton = Grammar::from_glrm(ONE).unwrap()
             .bind_snapshot("T", TokenSet::from_ranges([5..=5])).unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab, mode.build_options()).unwrap();
         assert_eq!(singleton.start().forced_canonical_reference(), vec![5]);
         let repeated = Grammar::from_glrm("glrm 1; start start; extern token T; nt start = T T;").unwrap()
             .bind_snapshot("T", TokenSet::from_ranges([0..=15])).unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode).end_tokens([8])).unwrap();
+            .compile_with_build_options(&vocab, mode.build_options().end_tokens([8])).unwrap();
         assert_mask(&repeated, &[], 16, |id| id != 8);
         assert_mask(&repeated, &[7], 16, |id| id != 8);
         assert_mask(&repeated, &[7, 9], 16, |id| id == 8);
@@ -278,7 +279,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
             let grammar = Grammar::from_glrm(source).unwrap()
                 .bind_snapshot("A", TokenSet::from_ranges([a])).unwrap()
                 .bind_snapshot("B", TokenSet::from_ranges([b])).unwrap();
-            let options = BuildOptions::default().optimization(mode).end_tokens([15]);
+            let options = mode.build_options().end_tokens([15]);
             let constraint = grammar.compile_with_build_options(&vocab, options).unwrap();
             for constraint in [constraint.clone(), Constraint::load(&constraint.save(), &vocab).unwrap()] {
                 assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
@@ -303,7 +304,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
             .bind_snapshot("A", TokenSet::from_ranges([0..=n - 1])).unwrap()
             .bind_snapshot("B", TokenSet::from_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1])).unwrap();
         let original = grammar.compile_with_build_options(&vocab,
-            BuildOptions::default().optimization(mode).end_tokens([n])).unwrap();
+            mode.build_options().end_tokens([n])).unwrap();
         for constraint in [original.clone(), Constraint::load(&original.save(), &vocab).unwrap()] {
             assert_mask(&constraint, &[], n + 1, |id| id < n);
             assert_mask(&constraint, &[0], n + 1, |id| id < n && id != n / 2);

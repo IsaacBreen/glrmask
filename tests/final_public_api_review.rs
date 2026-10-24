@@ -1,6 +1,7 @@
 //! Independent final-API semantic review. No benchmarks or internal engine APIs.
 //! All reference languages are compiled directly from fully bound descriptions.
-use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, MaskStrategy, TokenSet, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -277,8 +278,8 @@ fn review_optimization_choices_preserve_semantics_with_exact_bindings() {
         .prepare(&v).unwrap().bind_snapshot("child", &child).unwrap();
     let baseline = Grammar::from_glrm(BOTH).unwrap().bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap()
         .bind_snapshot("child", Grammar::from_ebnf(r#"start ::= "b""#).unwrap()).unwrap().compile(&v).unwrap();
-    for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-        let actual = desc.link_with(BuildOptions::default().optimization(mode)).unwrap();
+    for mode in MaskMode::ALL {
+        let actual = desc.link_with(mode.build_options()).unwrap();
         compare_prefixes(&actual, &baseline, &[0, 1, 2, 3, 5, 7, 63], 4);
     }
 }
@@ -343,13 +344,13 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
     use glrmask::BoundaryTriggerDetail;
     let v = vocab();
     let grammar = Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap();
-    for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-        let options = BuildOptions::default().optimization(mode);
+    for mode in MaskMode::ALL {
+        let options = mode.build_options();
         let plain = grammar.compile_with_build_options(&v, options.clone()).unwrap();
         let none = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert_ne!(plain.save(), none.save());
         for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
-            if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
+            if mode == MaskMode::A && detail == BoundaryTriggerDetail::Exact {
                 assert!(grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
                 continue;
             }

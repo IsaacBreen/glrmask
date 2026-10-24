@@ -8,6 +8,14 @@ def _bound_snapshot(source, name, value):
 
 import pytest
 import glrmask
+
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
 from glrmask._glrmask import DynamicConstraint as LegacyDynamicConstraint
 
 
@@ -67,10 +75,9 @@ def test_named_external_terminal_binding_errors(bad_bindings):
 
 def test_empty_event_binding_recognizes_no_output():
     vocab = _vocab()
-    for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
-                 glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME):
+    for mode in MODES:
         grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", glrmask.TokenSet([]))
-        constraint = grammar.compile(vocab, mask_strategy=mode)
+        constraint = grammar.compile(vocab, **mode)
         state = constraint.start()
         assert not state.is_accepting()
         # The preceding literal can be a locally viable parser prefix. Empty

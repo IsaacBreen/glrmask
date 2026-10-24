@@ -4,16 +4,22 @@ const assert=require('node:assert/strict');
 const {types}=require('node:util');
 const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
-const strategies=[MaskStrategy.Auto, MaskStrategy.ParserDwa, MaskStrategy.TokenTrie, MaskStrategy.TokenClassTrie];
+const strategies=[
+  {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
+  {label:'parser-dwa',options:{maskStrategy:MaskStrategy.ParserDwa}},
+  {label:'token-trie',options:{maskStrategy:MaskStrategy.TokenTrie}},
+  {label:'token-trie+template-dfas',options:{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true}},
+  {label:'token-trie+template-dfas+merge',options:{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true,mergeEquivalentTokens:true}},
+];
 const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
 const simple=()=>Grammar.fromEbnf('start ::= "a" "b"');
 const allowed=(m,id)=>(m[Math.floor(id/32)] & (1<<(id%32)))!==0;
 const closed=fn=>assert.throws(fn,e=>e instanceof GlrMaskError && e.code==='GLRMASK_CLOSED');
 
-for(const maskStrategy of strategies) {
+for(const {label:maskStrategy,options} of strategies) {
   test(`${maskStrategy}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,()=>{
-    const v=vocab(),g=simple(),c=g.compileSync(v,{maskStrategy}),s=c.start();
+    const v=vocab(),g=simple(),c=g.compileSync(v,{...options}),s=c.start();
     assert.equal(version,require('../package.json').version);assert.equal(c.maskLength,3);assert.equal(s.maskLength,3);
     const initial=s.mask();assert.ok(types.isUint32Array(initial));
     assert.ok(allowed(initial,0));assert.ok(allowed(initial,31));assert.ok(allowed(initial,32));
@@ -32,26 +38,26 @@ for(const maskStrategy of strategies) {
   });
   test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,()=>{
     const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],{specialTokenIds:[99]});
-    const c=Grammar.fromEbnf('start ::= "é"').compileSync(v,{maskStrategy}),s=c.start();
+    const c=Grammar.fromEbnf('start ::= "é"').compileSync(v,{...options}),s=c.start();
     assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
     for(const id of [31,40,99]) {
       const m=new Module(host);
       m.bind('T',new TokenSet([id]));
-      const e=m.compileSync(v,{maskStrategy}).start();
+      const e=m.compileSync(v,{...options}).start();
       assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));assert.ok(e.commitToken(id));assert.ok(e.isAccepting());
     }
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
     const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
-    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromEbnf('start ::= "a"'),new TokenSet([99]))).compileSync(v,{maskStrategy}).start();
+    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromEbnf('start ::= "a"'),new TokenSet([99]))).compileSync(v,{...options}).start();
     assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.equal(s.commitToken(99),false);
   });
   test(`${maskStrategy}: synchronous and asynchronous persistence`,async()=>{
-    const v=vocab(),c=await simple().compile(v,{maskStrategy});
+    const v=vocab(),c=await simple().compile(v,{...options});
     const expected=c.start().mask();
     const bytes=await c.save();assert.ok(types.isUint8Array(bytes));
     const copied=Buffer.from(bytes);const pending=Constraint.load(bytes,v);bytes.fill(0);
@@ -66,7 +72,7 @@ for(const maskStrategy of strategies) {
   });
   test(`${maskStrategy}: markers use exact BigInt byte offsets and survive snapshots`,async()=>{
     const v=vocab(),g=Grammar.fromGlrm('glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);');
-    const c=await g.compile(v,{maskStrategy});assert.deepEqual(Array.from(c.markerIds()),[10,20,30]);
+    const c=await g.compile(v,{...options});assert.deepEqual(Array.from(c.markerIds()),[10,20,30]);
     const s=c.start();assert.deepEqual(s.markerEvents(),[{id:10,byteOffset:0n}]);
     assert.ok(s.commitToken(31));const expected=[{id:20,byteOffset:1n},{id:30,byteOffset:2n}];
     assert.deepEqual(s.markerEvents(),expected);assert.deepEqual(s.clone().markerEvents(),expected);
@@ -121,6 +127,11 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{optimisation:'auto'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'bogus'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:'token_class_trie'}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:'TokenTrie'}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{templateDfas:1}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:'yes'}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:MaskStrategy.TokenTrie,mergeEquivalentTokens:true}),GlrMaskError);
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
@@ -174,11 +185,11 @@ test('ESM and CommonJS share constructor identities',async()=>{
 
 test('named Lark special tokens use explicit mappings, not byte aliases',async()=>{
   const v=new Vocab([[0,b('a')],[1,b('a')]],{specialTokenIds:[99]});
-  for(const maskStrategy of strategies) {
+  for(const {label:maskStrategy,options} of strategies) {
     const g=Grammar.fromLark('start: <|begin|> <|body|>');
     const m=new Module(g);
     m.bind('begin',new TokenSet([99]));m.bind('body',new TokenSet([1]));
-    const s=(await m.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));assert.ok(s.commitToken(99));
+    const s=(await m.compile(v,{...options})).start();assert.ok(allowed(s.mask(),99));assert.ok(s.commitToken(99));
     assert.ok(allowed(s.mask(),1));assert.ok(!allowed(s.mask(),0));assert.ok(s.commitToken(1));assert.ok(s.isAccepting());
     assert.deepEqual(Array.from(g.externs.keys()),['begin','body']);
     assert.equal(g.externs.get('begin').kind,'token');

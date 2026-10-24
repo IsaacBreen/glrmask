@@ -31,8 +31,7 @@ paths.
 The built-in grammar compiler may derive action relations using temporary LR
 analysis. It discards those tables before constructing a native `Constraint`.
 The native representation serves Balanced/O2 and Static. Ordinary Dynamic,
-selected by FastBuild, defaults to retained LR; `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects templates for
-that compilation only. Native runtime table access and implicit fallback panic. An unsupported native
+selected by FastBuild, defaults to retained LR. Native runtime table access and implicit fallback panic. An unsupported native
 composition request returns an error.
 
 The older experimental `GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE` environment switch

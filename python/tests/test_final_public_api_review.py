@@ -8,6 +8,14 @@ import numpy as np
 import pytest
 import glrmask
 
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
+
 
 TOKENS = {0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 7: b"a", 63: b"", 127: b""}
 HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
@@ -33,14 +41,14 @@ def _bound_snapshot(source, name, value):
 def test_public_types_exist_without_exposing_backend_selection():
     for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "TokenSet", "MaskStrategy", "BoundaryMaskStrategy"]:
         assert hasattr(glrmask, name), name
-    for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "TOKEN_TRIE", "TOKEN_CLASS_TRIE"]:
+    for name in ["AUTO", "FAST_COMPILE", "FAST_MASKS", "PARSER_DWA", "TOKEN_TRIE"]:
         assert hasattr(glrmask.MaskStrategy, name), name
-    assert glrmask.MaskStrategy.FAST_BUILD is glrmask.MaskStrategy.TOKEN_TRIE
-    assert glrmask.MaskStrategy.FAST_RUNTIME is glrmask.MaskStrategy.PARSER_DWA
-    for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "TOKEN_TRIE"]:
+    assert glrmask.MaskStrategy.FAST_COMPILE is glrmask.MaskStrategy.TOKEN_TRIE
+    assert glrmask.MaskStrategy.FAST_MASKS is glrmask.MaskStrategy.PARSER_DWA
+    for name in ["AUTO", "FAST_COMPILE", "FAST_MASKS", "PARSER_DWA", "TOKEN_TRIE"]:
         assert hasattr(glrmask.BoundaryMaskStrategy, name), name
-    assert glrmask.BoundaryMaskStrategy.FAST_BUILD is glrmask.BoundaryMaskStrategy.TOKEN_TRIE
-    assert glrmask.BoundaryMaskStrategy.FAST_RUNTIME is glrmask.BoundaryMaskStrategy.PARSER_DWA
+    assert glrmask.BoundaryMaskStrategy.FAST_COMPILE is glrmask.BoundaryMaskStrategy.TOKEN_TRIE
+    assert glrmask.BoundaryMaskStrategy.FAST_MASKS is glrmask.BoundaryMaskStrategy.PARSER_DWA
 
 
 def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
@@ -90,10 +98,9 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.TokenSet([126])).compile(v)
     empty = glrmask.TokenSet([])
     assert empty == glrmask.TokenSet.from_ranges([])
-    for mode in [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
-                 glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]:
+    for mode in MODES:
         m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
-        impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
+        impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.forced_tokens() == [] and state.forced_tokens() == []
@@ -169,7 +176,7 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
     assert np.flatnonzero(state.mask()).tolist() == [7, 63, 127]
 
 
-@pytest.mark.parametrize("mode_name", ["AUTO", "FAST_BUILD", "FAST_RUNTIME"])
+@pytest.mark.parametrize("mode_name", ["AUTO", "FAST_COMPILE", "FAST_MASKS"])
 def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
     mode = getattr(glrmask.MaskStrategy, mode_name)

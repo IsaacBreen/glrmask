@@ -1,7 +1,7 @@
 #ifndef GLRMASK_H
 #define GLRMASK_H
 
-/* GLRMask C ABI, revision 1.
+/* GLRMask C ABI, revision 2.
  * All lengths are element counts, except explicitly named byte lengths.
  * Text is UTF-8, length-delimited, and need not be NUL-terminated. Vocabulary
  * bytes are arbitrary bytes (including NUL and partial UTF-8 sequences).
@@ -52,27 +52,26 @@ enum {
     GLRMASK_CLOSED=5,             ///< The handle was already freed.
     GLRMASK_REJECTED=6            ///< The token or bytes were not allowed. The state is now unusable.
 };
-/// How masks are computed, trading compile time against mask speed.
+/// How masks are computed.
 enum {
-    GLRMASK_MASK_STRATEGY_AUTO=0,              ///< GLRMASK_MASK_STRATEGY_PARSER_DWA, unless the module was precompiled with GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE. The default.
-    GLRMASK_MASK_STRATEGY_PARSER_DWA=1,        ///< Precomputes masks: slowest compile, fastest masks.
-    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2,        ///< Computes each mask by walking the vocabulary: fastest compile, slower masks.
-    GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE=3   ///< Like GLRMASK_MASK_STRATEGY_TOKEN_TRIE, but treats tokens the grammar cannot tell apart as one.
+    GLRMASK_MASK_STRATEGY_AUTO=0,        ///< Reuses any precompiled work; otherwise GLRMASK_MASK_STRATEGY_PARSER_DWA, or GLRMASK_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
+    GLRMASK_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
+    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2   ///< Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
 };
 /// Same as GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
-#define GLRMASK_MASK_STRATEGY_FAST_BUILD GLRMASK_MASK_STRATEGY_TOKEN_TRIE
+#define GLRMASK_MASK_STRATEGY_FAST_COMPILE GLRMASK_MASK_STRATEGY_TOKEN_TRIE
 /// Same as GLRMASK_MASK_STRATEGY_PARSER_DWA.
-#define GLRMASK_MASK_STRATEGY_FAST_RUNTIME GLRMASK_MASK_STRATEGY_PARSER_DWA
-/// How masks are computed where one grammar meets another.
+#define GLRMASK_MASK_STRATEGY_FAST_MASKS GLRMASK_MASK_STRATEGY_PARSER_DWA
+/// How masks are computed at grammar boundaries.
 enum {
-    GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,        ///< GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA, falling back to GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Precomputes boundary masks: slower compile, faster masks. Fails with GLRMASK_ENGINE_ERROR if they would be too large.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE=2   ///< Computes boundary masks as needed: faster compile, slower masks.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,        ///< GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA, or GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA across each boundary. Slower to compile, with faster masks. Fails with GLRMASK_ENGINE_ERROR if it would be too large.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE=2   ///< Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
 };
 /// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE.
-#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE
+#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE
 /// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA.
-#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
+#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
     GLRMASK_EBNF=0,         ///< EBNF.
@@ -89,6 +88,7 @@ enum {
 typedef struct glrmask_vocab glrmask_vocab;
 typedef struct glrmask_token_set glrmask_token_set;
 typedef struct glrmask_grammar glrmask_grammar;
+/// A grammar you can compose with others and partly compile before its externs are bound.
 typedef struct glrmask_module glrmask_module;
 typedef struct glrmask_expr glrmask_expr;
 typedef struct glrmask_constraint glrmask_constraint;
@@ -103,11 +103,13 @@ typedef struct { uint32_t id; const uint8_t *bytes; size_t bytes_len; } glrmask_
 /// Token IDs from `first` to `last`, inclusive.
 typedef struct { uint32_t first; uint32_t last; } glrmask_token_range;
 /// Options for compiling a grammar or module. Set `struct_size` to
-/// `sizeof(glrmask_compile_options)`.
+/// `sizeof(glrmask_compile_options)`; fields past `struct_size` count as zero.
 typedef struct {
-    size_t struct_size;              ///< Size of this struct in bytes.
-    uint32_t mask_strategy;          ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
-    uint32_t boundary_mask_strategy; ///< A `GLRMASK_BOUNDARY_MASK_STRATEGY_*` value; 0 is Auto.
+    size_t struct_size;               ///< Size of this struct in bytes.
+    uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
+    uint32_t boundary_mask_strategy;  ///< A `GLRMASK_BOUNDARY_MASK_STRATEGY_*` value; 0 is Auto.
+    uint32_t template_dfas;           ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE parse with template DFAs instead of an LR table. Slower to compile, with faster masks.
+    uint32_t merge_equivalent_tokens; ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE merge tokens that the grammar treats the same, so masks walk fewer tokens. Requires template_dfas.
 } glrmask_compile_options;
 /// An extern declared by a grammar. Its `name` stays valid until the externs view
 /// is freed.

@@ -6,8 +6,10 @@
 //! The expected masks come from an exact CFG/prefix-DFA intersection over the
 //! source CFG, not from any glrmask parser. Masks are checked at every prefix
 //! of length at most four, for byte feeds and token feeds.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
-use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
+use crate::{Grammar, Module, Vocab};
 
 const TOKEN_BYTES: [&[u8]; 6] = [b"a", b"b", b"c", b"ab", b"bc", b"ca"];
 
@@ -227,16 +229,16 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
     }
 
     let mut compiled_modes = Vec::new();
-    let mut modes = vec![MaskStrategy::TokenTrie];
+    let mut modes = vec![MaskMode::A];
     if try_auxiliary_backends {
-        modes.push(MaskStrategy::TokenClassTrie);
-        modes.push(MaskStrategy::ParserDwa);
+        modes.push(MaskMode::C);
+        modes.push(MaskMode::ParserDwa);
     }
     for mode in modes {
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let module = Module::new(&Grammar::from_lark(lark).unwrap());
             let constraint = module
-                .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
+                .compile_with(&vocab, mode.compile_options())
                 .ok()?;
             // Some backends decline lazily during materialization rather than
             // returning a compile error. Those modes are simply not exercised.
@@ -297,7 +299,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
     }
     assert_eq!(
         compiled_modes.first().copied(),
-        Some(MaskStrategy::TokenTrie),
+        Some(MaskMode::A),
         "TokenTrie must compile every regression grammar"
     );
 }
@@ -423,7 +425,7 @@ fn seed_2530_minimised_masks_match_bounded_oracle() {
 
 #[test]
 fn seed_2530_full_masks_match_bounded_oracle() {
-    // The full grammars also decline TokenClassTrie/ParserDwa through the same
+    // The full grammars also decline merged TokenTrie/ParserDwa through the same
     // right-recursive-cycle precondition, but their terminal characterization
     // attempt costs seconds; the minimised tests above exercise that skip path.
     check_masks_and_acceptance(&seed_2530_full(), SEED_2530_FULL, false);

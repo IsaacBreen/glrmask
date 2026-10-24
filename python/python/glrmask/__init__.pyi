@@ -49,34 +49,32 @@ _internal: ModuleType
 
 @final
 class MaskStrategy:
-    """How masks are computed, trading compile time against mask speed."""
+    """How masks are computed."""
     AUTO: ClassVar[MaskStrategy]
-    """`PARSER_DWA`, unless the module was precompiled with `TOKEN_CLASS_TRIE`. The default."""
+    """Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
     PARSER_DWA: ClassVar[MaskStrategy]
-    """Precomputes masks: slowest compile, fastest masks."""
+    """Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks."""
     TOKEN_TRIE: ClassVar[MaskStrategy]
-    """Computes each mask by walking the vocabulary: fastest compile, slower masks."""
-    TOKEN_CLASS_TRIE: ClassVar[MaskStrategy]
-    """Like `TOKEN_TRIE`, but treats tokens the grammar cannot tell apart as one."""
-    FAST_BUILD: ClassVar[MaskStrategy]
+    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+
+Two arguments of `compile` and `precompile` tune it, both off by default. `template_dfas=True` parses with template DFAs instead of an LR table: slower to compile, with faster masks. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `template_dfas=True`."""
+    FAST_COMPILE: ClassVar[MaskStrategy]
     """Same as `TOKEN_TRIE`."""
-    FAST_RUNTIME: ClassVar[MaskStrategy]
+    FAST_MASKS: ClassVar[MaskStrategy]
     """Same as `PARSER_DWA`."""
 
 @final
 class BoundaryMaskStrategy:
-    """How masks are computed where one grammar meets another."""
+    """How masks are computed at grammar boundaries."""
     AUTO: ClassVar[BoundaryMaskStrategy]
-    """`PARSER_DWA`, falling back to `TOKEN_TRIE` when that would be too large. The default."""
+    """`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
     PARSER_DWA: ClassVar[BoundaryMaskStrategy]
-    """Precomputes boundary masks: slower compile, faster masks.
-
-Raises `ValueError` if they would be too large."""
+    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `ValueError` if it would be too large."""
     TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
-    """Computes boundary masks as needed: faster compile, slower masks."""
-    FAST_BUILD: ClassVar[BoundaryMaskStrategy]
+    """Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks."""
+    FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
     """Same as `TOKEN_TRIE`."""
-    FAST_RUNTIME: ClassVar[BoundaryMaskStrategy]
+    FAST_MASKS: ClassVar[BoundaryMaskStrategy]
     """Same as `PARSER_DWA`."""
 
 @final
@@ -217,10 +215,7 @@ class Expr:
 
 @final
 class Module:
-    """A grammar plus its extern bindings and any precompiled work.
-
-    Externs can stay unbound until `compile`.
-    """
+    """A grammar you can compose with others and partly compile before its externs are bound."""
     def __init__(self, source: Grammar, /) -> None:
         """Creates a module from a grammar."""
         ...
@@ -244,10 +239,12 @@ class Module:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        template_dfas: bool = False,
+        merge_equivalent_tokens: bool = False,
     ) -> None:
         """Compiles as much as possible for `vocab` now, so later compiles are fast.
 
-        Externs may still be unbound. The keyword arguments choose how masks are computed.
+        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def compile(
@@ -256,10 +253,12 @@ class Module:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        template_dfas: bool = False,
+        merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the module for `vocab`, reusing any precompiled work.
 
-        Every extern must be bound. The keyword arguments choose how masks are computed.
+        Every extern must be bound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     @property
@@ -324,10 +323,12 @@ class Grammar:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        template_dfas: bool = False,
+        merge_equivalent_tokens: bool = False,
     ) -> Module:
         """Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.
 
-        Externs may still be unbound. The keyword arguments choose how masks are computed.
+        Externs may still be unbound. The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def compile(
@@ -336,6 +337,8 @@ class Grammar:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+        template_dfas: bool = False,
+        merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the grammar for `vocab`.
 

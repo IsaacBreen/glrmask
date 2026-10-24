@@ -7,12 +7,13 @@
 //! compares every such route against an all-`ParserDwa` compile and records
 //! whether the mixed route was taken or the fallback was used.
 #![allow(clippy::needless_range_loop)]
+use crate::test_modes::MaskMode;
 
 use super::*;
 use crate::__private::VocabExt as _;
 
-const PARSER_DWA: MaskStrategy = MaskStrategy::ParserDwa;
-const TOKEN_TRIE: MaskStrategy = MaskStrategy::TokenTrie;
+const PARSER_DWA: MaskMode = MaskMode::ParserDwa;
+const TOKEN_TRIE: MaskMode = MaskMode::A;
 
 fn vocab() -> Vocab {
     let vocab = Vocab::new(vec![
@@ -196,7 +197,7 @@ fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -
         let mut module = node.kind.module();
         if precompiled.contains(&index) {
             module
-                .precompile_with(vocab, CompileOptions::default().mask_strategy(PARSER_DWA))
+                .precompile_with(vocab, PARSER_DWA.compile_options())
                 .unwrap_or_else(|error| {
                     panic!("{}: precompile node {index}: {error}", spec.name)
                 });
@@ -219,9 +220,9 @@ fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -
     built[spec.root].take().unwrap()
 }
 
-fn compile_reference(spec: &AssemblySpec, strategy: MaskStrategy, vocab: &Vocab) -> RuntimeConstraint {
+fn compile_reference(spec: &AssemblySpec, strategy: MaskMode, vocab: &Vocab) -> RuntimeConstraint {
     compile_assembly(spec, &[], vocab)
-        .compile_with(vocab, CompileOptions::default().mask_strategy(strategy))
+        .compile_with(vocab, strategy.compile_options())
         .unwrap_or_else(|error| panic!("{}: {strategy:?} reference compile: {error}", spec.name))
 }
 
@@ -304,7 +305,7 @@ fn mixed_compile_matches_parser_dwa_on_composed_assemblies() {
             let _ = crate::public_api::module::mixed_compile_probe::take();
             let module = compile_assembly(&spec, precompiled, &vocab);
             let candidate = module
-                .compile_with(&vocab, CompileOptions::default().mask_strategy(TOKEN_TRIE))
+                .compile_with(&vocab, TOKEN_TRIE.compile_options())
                 .unwrap_or_else(|error| {
                     panic!(
                         "{} subset {subset_label}: TokenTrie compile failed: {error}",
@@ -376,7 +377,7 @@ fn json_schema_child_mixed_compile_has_no_fallback() {
 
     let _ = crate::public_api::module::mixed_compile_probe::take();
     let candidate = compile_assembly(&spec, &[0], &vocab)
-        .compile_with(&vocab, CompileOptions::default().mask_strategy(TOKEN_TRIE))
+        .compile_with(&vocab, TOKEN_TRIE.compile_options())
         .unwrap_or_else(|error| panic!("{}: mixed TokenTrie compile failed: {error}", spec.name));
     let fallbacks = crate::public_api::module::mixed_compile_probe::take();
     assert!(
@@ -446,7 +447,7 @@ fn json_schema_component_matches_static_schema_compiler() {
         let reference = compile_reference(&spec, PARSER_DWA, &vocab);
         let _ = crate::public_api::module::mixed_compile_probe::take();
         let candidate = compile_assembly(&spec, &[0], &vocab)
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(TOKEN_TRIE))
+            .compile_with(&vocab, TOKEN_TRIE.compile_options())
             .unwrap_or_else(|error| panic!("{name}: mixed TokenTrie compile failed: {error}"));
         let fallbacks = crate::public_api::module::mixed_compile_probe::take();
         assert!(

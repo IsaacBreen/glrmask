@@ -11,6 +11,8 @@
 //! returned ID is committed through the full ordinary/event successor before
 //! any more output is considered. Query limits shorten results, never weaken
 //! their proof. No normal mask/commit hot path depends on this optional query.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use super::{advance_special_terminal_paths, commit_bytes_impl, expand_runtime_product_states};
 use crate::automata::lexer::Lexer;
@@ -297,13 +299,13 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, MaskStrategy, TokenSet, Vocab};
+    use crate::{Grammar, TokenSet, Vocab};
 
     #[test]
     fn union_forcing_returns_common_prefix_not_equal_whole_vectors() {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
-        for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-            let options=BuildOptions::default().optimization(mode);
+        for mode in MaskMode::ALL {
+            let options=mode.build_options();
             let first=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile_with_build_options(&vocab,options.clone()).unwrap();
             let second=Grammar::from_ebnf("start ::= \"abc\"").unwrap().compile_with_build_options(&vocab,options).unwrap();
             let states=[first.start(),second.start()];
@@ -335,8 +337,8 @@ mod tests {
         let guarded=Grammar::from_glrm(
             "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap();
-        for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
-            let options=BuildOptions::default().optimization(mode);
+        for mode in MaskMode::ALL {
+            let options=mode.build_options();
             let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
             assert_eq!(baseline.start().forced_tokens(),[1],"{mode:?}");
             let event=guarded.compile_with_build_options(&vocab,options).unwrap();
@@ -353,8 +355,8 @@ mod tests {
             "glrm 1; start root; t W=/[ \\t]+/; ignore W; nt root=\"a\" \"b\";",
             "glrm 1; start root; nt root = \"\u{e9}\u{e9}\";",
         ] {
-            for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
-                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            for mode in MaskMode::ALL {
+                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 let seed=[c.start()];
                 let fast=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),true);
                 let full=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),false);

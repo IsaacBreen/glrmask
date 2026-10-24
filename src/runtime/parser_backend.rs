@@ -50,16 +50,6 @@ pub(crate) enum DynamicParserBackend {
 }
 
 impl DynamicParserBackend {
-    /// Experimental ordinary-Dynamic templates only. This is a development
-    /// switch, not a public build option, runtime dispatcher or load policy.
-    pub(crate) fn ordinary_dynamic() -> Self {
-        if std::env::var("GLRMASK_DYNAMIC_TEMPLATE_DFA")
-            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on")) {
-            Self::Native
-        } else {
-            Self::LrTable
-        }
-    }
     #[inline]
     pub(crate) fn from_use_lr(use_lr: bool) -> Self {
         if use_lr { Self::LrTable } else { Self::Native }

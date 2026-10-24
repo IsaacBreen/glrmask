@@ -1,5 +1,6 @@
 //! General integer divisibility may not silently degrade to a range or wildcard.
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{Constraint, Grammar, Vocab};
 
 fn allowed(mask: &[u32], id: usize) -> bool {
     mask.get(id / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)
@@ -21,9 +22,9 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
                 "type": "object", "properties": {"v": number},
                 "required": ["v"], "additionalProperties": false,
             }).to_string();
-            for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+            for mode in MaskMode::ALL {
                 let constraint = Grammar::from_json_schema(&schema).unwrap()
-                    .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+                    .compile_with_build_options(&vocab, mode.build_options()).unwrap();
                 let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
                 for instance in [&constraint, &loaded] {
                     let mask = instance.start().mask();
@@ -48,7 +49,7 @@ fn integer_multiple_exact_large_divisor_is_bounded_or_explicitly_unsupported() {
     assert!(Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003}"#).is_err());
     // Finite exact expansion remains supported even above the generic DFA budget.
     let bounded = Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003,"minimum":0,"maximum":2000006}"#).unwrap()
-        .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()).unwrap();
     for id in [0, 1] {
         let mut state = bounded.start();
         assert!(state.commit_token(id));

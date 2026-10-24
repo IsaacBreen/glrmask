@@ -1,7 +1,8 @@
 //! Original-ID and byte-language forcing regressions. Kept separate from
 //! backend-agreement tests: comparing two identical bugs is not an oracle.
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, TokenSet, Vocab};
-const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa];
+use glrmask::test_modes::MaskMode;
+use glrmask::{Constraint, Grammar, TokenSet, Vocab};
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 
 fn allows(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)
@@ -46,7 +47,7 @@ fn forcing_stops_when_acceptance_competes_with_more_text() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
     for mode in MODES {
         let c = Grammar::from_glrm("glrm 1; start root; nt root = \"ab\" \"c\"?;").unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab, mode.build_options()).unwrap();
         assert_eq!(checked_force(&c), [0,1], "{mode:?}");
         assert_eq!(checked_force(&Constraint::load(&c.save(), &vocab).unwrap()), [0,1]);
     }
@@ -61,7 +62,7 @@ fn exact_only_event_competes_with_text_even_without_spelling() {
         for mode in MODES {
             let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;").unwrap()
                 .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
-                .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+                .compile_with_build_options(&vocab,mode.build_options()).unwrap();
             assert!(checked_force(&c).is_empty(), "{mode:?}, empty={empty_spelling}");
         }
     }
@@ -73,7 +74,7 @@ fn same_spelling_exact_event_is_not_a_byte_prefix_alias() {
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert!(checked_force(&c).is_empty(), "{mode:?}");
     }
 }
@@ -84,7 +85,7 @@ fn singleton_mixed_id_keeps_ordinary_and_exact_successors() {
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK \"c\";").unwrap()
             .bind_snapshot("MARK",TokenSet::new([10])).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert_eq!(checked_force(&c), [10], "{mode:?}");
         let mut after=c.start();assert!(after.commit_token(10));
         assert!(allows(&after.mask(),11));assert!(allows(&after.mask(),12));
@@ -97,7 +98,7 @@ fn canonical_alias_selection_excludes_reserved_root_end_ids() {
     let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"x\";").unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode).end_tokens([0])).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options().end_tokens([0])).unwrap();
         assert_eq!(checked_force(&c),[1],"{mode:?}");
     }
 }
@@ -107,7 +108,7 @@ fn canonical_text_forcing_is_not_token_id_uniqueness() {
     let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec()),(4,b"abc".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         // ID4 is not admitted. Its longer spelling must not block the stable ID2.
         assert_eq!(checked_force(&c),[2],"{mode:?}");
     }
@@ -123,7 +124,7 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
         "glrm 1; start root; extern token MARK; nt root = \"ab\" | \"a\" MARK \"b\";",
     ).unwrap().bind_snapshot("MARK",TokenSet::new([9])).unwrap();
     for mode in MODES {
-        let options=BuildOptions::default().optimization(mode);
+        let options=mode.build_options();
         let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
         assert_eq!(checked_force(&baseline),[1],"ordinary baseline {mode:?}");
 
@@ -156,14 +157,14 @@ fn exact_events_before_and_after_text_keep_their_original_ids() {
         ).unwrap().bind_snapshot("BEFORE",TokenSet::new([event])).unwrap()
             .bind_snapshot("AFTER",TokenSet::new([event])).unwrap();
         for mode in MODES {
-            let c=grammar.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            let c=grammar.compile_with_build_options(&vocab,mode.build_options()).unwrap();
             assert_eq!(checked_force(&c),expected,"event={event}, {mode:?}");
         }
     }
     let ambiguous=Grammar::from_glrm("extern token MARK start root nt root=MARK \"ab\"").unwrap()
         .bind_snapshot("MARK",TokenSet::new([9,10])).unwrap();
     for mode in MODES {
-        let c=ambiguous.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+        let c=ambiguous.compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert!(checked_force(&c).is_empty(),"multiple exact IDs {mode:?}");
     }
 }
@@ -173,7 +174,7 @@ fn unicode_forcing_does_not_need_individual_utf8_byte_tokens() {
     let vocab=Vocab::new(vec![(0,"\u{e9}".as_bytes().to_vec()),(1,"\u{e9}\u{e9}".as_bytes().to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"\u{e9}\u{e9}\";").unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert_eq!(checked_force(&c),[1],"{mode:?}");
     }
 }
@@ -183,7 +184,7 @@ fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
     let vocab=Vocab::new(vec![(0,b"ab".to_vec()),(1,b"abc".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\" \"c\"?;").unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert!(checked_force(&c).is_empty(),"{mode:?}");
     }
 }
@@ -196,7 +197,7 @@ fn exact_event_chain_retains_ids_and_never_canonicalizes_equal_bytes() {
             .bind_snapshot("A",TokenSet::new([1])).unwrap()
             .bind_snapshot("B",TokenSet::new([2])).unwrap()
             .bind_snapshot("C",TokenSet::new([3])).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         assert_eq!(checked_force(&c),[1,2,3],"{mode:?}");
     }
 }
@@ -239,7 +240,7 @@ fn finite_byte_languages_match_an_independent_forcing_oracle() {
         let source=format!("glrm 1; start root; nt root = {alternatives};");
         let expected=finite_language_force(&language,&entries);
         for mode in MODES {
-            let c=Grammar::from_glrm(&source).unwrap().compile_with_build_options(&vocabulary,BuildOptions::default().optimization(mode)).unwrap();
+            let c=Grammar::from_glrm(&source).unwrap().compile_with_build_options(&vocabulary,mode.build_options()).unwrap();
             assert_eq!(checked_force(&c),expected,"{mode:?} {source}");
         }
     }
@@ -251,7 +252,7 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
     let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         let state=c.start();let before=state.mask();
         assert_eq!(state.forced_canonical_reference(),[2]);
         assert!(state.forced_token_ids_reference().is_empty());
@@ -269,7 +270,7 @@ fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK \"a\" \"b\"?;").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap();
         let state=c.start();let mask=state.mask();
         assert_eq!(state.forced_token_ids_reference(),[9,0]);
         assert_eq!(state.mask(),mask);
@@ -287,11 +288,11 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
     let dual=Grammar::from_glrm("extern token MARK start root t TEXT=/éx/ nt root=TEXT | MARK \"y\"").unwrap()
         .bind_snapshot("MARK",TokenSet::new([0])).unwrap();
     for mode in MODES {
-        let c=ordinary.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=ordinary.compile_with_build_options(&v,mode.build_options()).unwrap();
         let mut s=c.start();assert!(s.commit_token(0));
         assert_eq!(s.forced_canonical_reference(),[1,2]);assert_eq!(s.forced_token_ids_reference(),[1,2]);
         replay(&s,&s.forced_canonical_reference());
-        let c=dual.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=dual.compile_with_build_options(&v,mode.build_options()).unwrap();
         let mut s=c.start();assert!(s.forced_canonical_reference().is_empty());assert!(s.commit_token(0));
         assert!(allows(&s.mask(),1));assert!(allows(&s.mask(),3));
         assert!(s.forced_canonical_reference().is_empty());assert!(s.forced_token_ids_reference().is_empty());
@@ -311,7 +312,7 @@ fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
     let p=parent.prepare(&v).unwrap().bind_snapshot("CHILD",child.prepare(&v).unwrap()).unwrap()
         .bind_snapshot("CHILD::MARK",TokenSet::new([9])).unwrap();
     for mode in MODES {
-        let c=p.link_with(BuildOptions::default().optimization(mode)).unwrap();
+        let c=p.link_with(mode.build_options()).unwrap();
         for path in [&[5][..],&[0,1,3][..],&[0,2,1,2,3][..],&[0,1,9,3][..]] {
             let mut s=c.start();
             for id in path {

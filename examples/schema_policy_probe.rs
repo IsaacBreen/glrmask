@@ -1,6 +1,7 @@
 //! JSON-lines acceptance probe for scripts/schema_policy_differential.py.
 //! Each input is {"schema": <schema>, "cases": [<JSON values>]}. No benchmarks.
-use glrmask::{BuildOptions, Grammar, MaskStrategy, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{Grammar, Vocab};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -33,7 +34,7 @@ fn canonical_json(value: &Value) -> String {
     }
 }
 
-fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
+fn probe(request: &Value, vocab: &Vocab, mode: MaskMode) -> Value {
     let Some(schema) = request.get("schema") else {
         return json!({"status":"input_error", "error":"missing schema"});
     };
@@ -42,7 +43,7 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
     };
     let text = serde_json::to_string(schema).unwrap();
     let compiled = match Grammar::from_json_schema(&text).unwrap()
-        .compile_with_build_options(vocab, BuildOptions::default().optimization(mode)) {
+        .compile_with_build_options(vocab, mode.build_options()) {
         Ok(compiled) => compiled,
         Err(error) => {
             let message = error.to_string();
@@ -88,8 +89,10 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = match args.windows(2).find(|pair| pair[0] == "--mode").map(|pair| pair[1].as_str()) {
-        None | Some("fast-build") => MaskStrategy::TokenTrie,
-        Some("fast-runtime") => MaskStrategy::ParserDwa,
+        None | Some("fast-build") | Some("token-trie") => MaskMode::A,
+        Some("fast-runtime") | Some("parser-dwa") => MaskMode::ParserDwa,
+        Some("template-dfas") => MaskMode::B,
+        Some("merge-equivalent-tokens") => MaskMode::C,
         Some(other) => { eprintln!("unknown --mode {other:?}"); std::process::exit(2); }
     };
     let vocab = Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect());

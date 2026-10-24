@@ -26,7 +26,7 @@ Time between masks. Lower is better.
 | p99.9 | 854.3 | 88.8 | 17.9 |
 | Max | 1,293.4 | 274.6 | 231.0 |
 
-Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+Static is `MaskStrategy.PARSER_DWA`; Dynamic is `MaskStrategy.TOKEN_TRIE`.
 
 14 October 2026 · 11,277 complete valid trajectories accepted by all measured engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
@@ -58,7 +58,7 @@ Time between masks. Lower is better.
 | p99.9 | 5,225.9 | 121.7 | 8.2 |
 | Max | 5,226.2 | 121.8 | 8.2 |
 
-Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+Static is `MaskStrategy.PARSER_DWA`; Dynamic is `MaskStrategy.TOKEN_TRIE`.
 
 14 October 2026 · 28 complete valid trajectories accepted by all measured engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 

@@ -4,8 +4,9 @@
 //! this checks each at all three optimization settings and all four saved
 //! feed styles: whole bytes, individual bytes, tokens, and paired tokens.
 //! Frozen archive SHA256 1c3d4ba6453af11d0f39ea16029105a0a4d159d05e20956ef97153489deee9e3.
+use glrmask::test_modes::MaskMode;
 
-use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
+use glrmask::{Expr, Grammar, Module, TokenSet, Vocab};
 
 fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
     let vocab = Vocab::new(vec![
@@ -13,10 +14,10 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
         (3, b"ab".to_vec()), (4, b"bc".to_vec()), (5, b"ca".to_vec()),
     ]);
     let grammar = Grammar::from_lark(lark).unwrap();
-    for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie] {
+    for mode in MaskMode::ALL {
         let module = Module::new(&grammar);
         let c = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
+            .compile_with(&vocab, mode.compile_options())
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: {e:?}"));
         let mut state = c.start();
         assert!(state.commit_bytes(bytes), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
@@ -200,7 +201,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             ]))
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS construction: {e:?}"));
             let with_eos = eos_module
-                .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
+                .compile_with(&vocab, mode.compile_options())
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
             let reloaded_eos = glrmask::Constraint::load(with_eos.save(), &vocab)
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));

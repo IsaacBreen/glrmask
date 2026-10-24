@@ -1,5 +1,7 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use super::*;
-use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend, Vocab};
+use crate::{Grammar, ParserBackend, Vocab};
 use crate::grammar::flat::{DirectRegularState, GrammarDef, Rule, Symbol, Terminal};
 
 fn fixture(nullable: bool, vocab: &Vocab) -> Constraint {
@@ -61,7 +63,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
     tokens.extend(["xay", "xby", "xaby", "xy", "xa", "ay", "ab", "by", "pxayq"]
         .iter().enumerate().map(|(id, s)| (256 + id as u32, s.as_bytes().to_vec())));
     let vocab = Vocab::new(tokens.clone());
-    let options = |mode| BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa);
+    let options = |mode: MaskMode| mode.build_options().parser_backend(ParserBackend::TemplateDfa);
     for nullable in [false, true] {
         let mut child = fixture(nullable, &vocab);
         child.install_template_parser().unwrap();
@@ -72,7 +74,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
         let mut words = vec![b"xay".to_vec(), b"xby".to_vec(), b"xaby".to_vec()];
         if nullable { words.push(b"xy".to_vec()); }
-        for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for mode in [MaskMode::C, MaskMode::ParserDwa] {
             let linked = host.link_with(options(mode)).unwrap();
             let loaded = Constraint::load(linked.save(), &vocab).unwrap();
             let external = Constraint::load(linked.save(), &vocab).unwrap();

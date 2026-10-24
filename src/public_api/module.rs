@@ -1,4 +1,6 @@
 //! Owned assembly snapshots. Local compilation is independent of occurrence bindings.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use super::*;
 use super::expr::check_expr_unbound;
 use std::collections::{HashMap, BTreeMap, BTreeSet};
@@ -10,30 +12,56 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 
 
 /// Options for compiling a grammar or module.
-///
-/// They apply to every part of the compile, including bound grammars.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
     pub(crate) mask_strategy: MaskStrategy,
     pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
+    pub(crate) template_dfas: bool,
+    pub(crate) merge_equivalent_tokens: bool,
 }
 
 impl CompileOptions {
     /// Sets how masks are computed. Defaults to [`MaskStrategy::Auto`].
-    ///
-    /// Precompiled parts keep their precompiled masks.
     pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
         self.mask_strategy = strategy;
         self
     }
 
-    /// Sets how masks are computed where one grammar meets another.
-    ///
-    /// Defaults to [`BoundaryMaskStrategy::Auto`].
+    /// Sets how masks are computed at grammar boundaries. Defaults to
+    /// [`BoundaryMaskStrategy::Auto`].
     pub fn boundary_mask_strategy(mut self, strategy: BoundaryMaskStrategy) -> Self {
         self.boundary_mask_strategy = strategy;
         self
+    }
+
+    /// Sets whether [`TokenTrie`](MaskStrategy::TokenTrie) parses with template DFAs
+    /// instead of an LR table. Slower to compile, with faster masks. Off by default.
+    pub fn template_dfas(mut self, enable: bool) -> Self {
+        self.template_dfas = enable;
+        self
+    }
+
+    /// Sets whether [`TokenTrie`](MaskStrategy::TokenTrie) merges tokens that the
+    /// grammar treats the same, so masks walk fewer tokens. Requires
+    /// [`template_dfas`](Self::template_dfas). Off by default.
+    pub fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
+        self.merge_equivalent_tokens = enable;
+        self
+    }
+
+    /// The internal engine for these options, rejecting combination D.
+    pub(crate) fn engine(&self) -> Result<Engine> {
+        engine_for(
+            self.mask_strategy,
+            self.template_dfas,
+            self.merge_equivalent_tokens,
+        )
+    }
+
+    /// The TokenTrie parser backend for these options.
+    fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
+        token_trie_backend(self.template_dfas)
     }
 }
 
@@ -66,9 +94,7 @@ pub(crate) enum BoundValue {
     TokenSet(TokenSet),
 }
 
-/// A grammar plus its extern bindings and any precompiled work.
-///
-/// Externs can stay unbound until [`compile`](Self::compile).
+/// A grammar you can compose with others and partly compile before its externs are bound.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) node: Arc<Node>,
@@ -174,36 +200,33 @@ fn own_local(grammar: &Grammar) -> Grammar {
 }
 
 /// A retained static preparation, if any, in preference order.
-fn retained_static(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<MaskStrategy> {
-    if prepared.contains_key(&MaskStrategy::ParserDwa.key()) {
-        Some(MaskStrategy::ParserDwa)
-    } else if prepared.contains_key(&MaskStrategy::TokenClassTrie.key()) {
-        Some(MaskStrategy::TokenClassTrie)
+fn retained_static(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<Engine> {
+    if prepared.contains_key(&Engine::ParserDwa.key()) {
+        Some(Engine::ParserDwa)
+    } else if prepared.contains_key(&Engine::MergedTokenTrie.key()) {
+        Some(Engine::MergedTokenTrie)
     } else {
         None
     }
 }
 
-/// Resolve the strategy for a whole compile.
+/// Resolve the engine for a whole compile.
 ///
 /// A static part that is already retained is never replaced by dynamic
 /// [`MaskStrategy::TokenTrie`] compilation: a `TokenTrie` request after a
 /// static precompile resolves to the retained engine, and `Module::node_engine`
 /// then compiles only the modules without it dynamically. `Auto` prefers
 /// retained work and falls back to [`MaskStrategy::ParserDwa`].
-pub(crate) fn resolve_compile_strategy(
-    requested: MaskStrategy,
-    modules: &[Module],
-) -> MaskStrategy {
+pub(crate) fn resolve_compile_strategy(requested: Engine, modules: &[Module]) -> Engine {
     match requested {
-        MaskStrategy::TokenTrie => modules
+        Engine::TokenTrie => modules
             .iter()
             .find_map(|m| retained_static(&m.node.prepared))
-            .unwrap_or(MaskStrategy::TokenTrie),
-        MaskStrategy::Auto => modules
+            .unwrap_or(Engine::TokenTrie),
+        Engine::Auto => modules
             .iter()
             .find_map(|m| retained_static(&m.node.prepared))
-            .unwrap_or(MaskStrategy::ParserDwa),
+            .unwrap_or(Engine::ParserDwa),
         explicit => explicit,
     }
 }
@@ -212,9 +235,9 @@ impl Module {
     /// The engine for this node. In a mixed compile (a `TokenTrie` request
     /// over retained static work) a node without the resolved static
     /// preparation is compiled dynamically instead of statically.
-    fn node_engine(&self, resolved: MaskStrategy, mixed: bool) -> MaskStrategy {
+    fn node_engine(&self, resolved: Engine, mixed: bool) -> Engine {
         if mixed && !self.node.prepared.contains_key(&resolved.key()) {
-            MaskStrategy::TokenTrie
+            Engine::TokenTrie
         } else {
             resolved
         }
@@ -530,16 +553,23 @@ impl Module {
             *self = self.rehydrate_retained(vocab)?;
         }
         let modules = self.index()?;
-        let resolved = resolve_compile_strategy(options.mask_strategy, &modules);
+        let resolved = resolve_compile_strategy(options.engine()?, &modules);
         let target_b = target_boundary();
         let engine_of = |m: &Module| m.node_engine(resolved, mixed);
+        // Mixed compiles keep using the native backend for their TokenTrie
+        // nodes, whatever `template_dfas` says.
+        let backend = if mixed {
+            crate::runtime::parser_backend::DynamicParserBackend::Native
+        } else {
+            options.token_trie_backend()
+        };
 
-        type JobKey = (usize, MaskStrategy, u8);
+        type JobKey = (usize, Engine, u8);
         let mut locals: HashMap<JobKey, Arc<dyn RetainedPreparation>> = HashMap::new();
 
         for m in &modules {
             let engine = engine_of(m);
-            if engine == MaskStrategy::TokenTrie && !mixed {
+            if engine == Engine::TokenTrie && !mixed {
                 continue;
             }
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
@@ -555,7 +585,7 @@ impl Module {
         let mut seen = std::collections::HashSet::new();
         let jobs: Vec<&Module> = modules.iter().filter(|m| {
             let engine = engine_of(m);
-            if engine == MaskStrategy::TokenTrie && !mixed {
+            if engine == Engine::TokenTrie && !mixed {
                 return false;
             }
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
@@ -567,7 +597,7 @@ impl Module {
             let _probe = preparation_probe::enter(m);
             let engine = engine_of(m);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            m.prepare_local_for(vocab, engine, target_b, build_boundary)
+            m.prepare_local_for(vocab, engine, target_b, build_boundary, backend)
                 .map(|p| (key, retain_local(p)))
         }).collect::<Result<Vec<_>>>()?;
 
@@ -580,7 +610,7 @@ impl Module {
             c.target(vocab)?;
             let engine = engine_of(&m);
             let node = Arc::make_mut(&mut next.node);
-            if engine != MaskStrategy::TokenTrie || mixed {
+            if engine != Engine::TokenTrie || mixed {
                 let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
                 node.prepared.insert(engine.key(), locals[&key].clone());
             }
@@ -599,9 +629,10 @@ impl Module {
     fn prepare_local_for(
         &self,
         vocab: &Vocab,
-        engine: MaskStrategy,
+        engine: Engine,
         target_b: BoundaryTriggerDetail,
         build_boundary: bool,
+        backend: crate::runtime::parser_backend::DynamicParserBackend,
     ) -> Result<PreparedGrammar> {
         if let Some(existing) = self.node.prepared.get(&engine.key()) {
             let mut upgraded = existing.prepared().clone();
@@ -614,7 +645,7 @@ impl Module {
             return Ok(upgraded);
         }
         #[cfg(test)]
-        if engine != MaskStrategy::TokenTrie {
+        if engine != Engine::TokenTrie {
             static_build_probe::record(self);
         }
         let source = &self.node.source;
@@ -633,7 +664,7 @@ impl Module {
             let mut instances = HashMap::<usize, Module>::new();
             for m in module.index()? {
                 let mut next = m.clone();
-                let p = m.prepare_local_for(vocab, engine, target_b, build_boundary)?;
+                let p = m.prepare_local_for(vocab, engine, target_b, build_boundary, backend)?;
                 let node = Arc::make_mut(&mut next.node);
                 node.prepared.insert(engine.key(), retain_local(p));
                 node.certificate = Arc::new(OnceLock::new());
@@ -665,19 +696,19 @@ impl Module {
             if e.is_strategy_decline() {
                 e
             } else {
-                Error::Compilation(format!("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: {e}"))
+                Error::Compilation(format!("cannot merge equivalent tokens for this grammar: {e}"))
             }
         };
         let mut inner = match engine {
             // Only a mixed compile prepares a TOKEN_TRIE module: a dynamic shell
             // on the table-free parser keeps its extern slots, so it composes
             // with retained static components.
-            MaskStrategy::TokenTrie => crate::import::compile_component_shell_dynamic_with_backend(
+            Engine::TokenTrie => crate::import::compile_component_shell_dynamic_with_backend(
                 source.component()?,
                 vocab,
-                crate::runtime::parser_backend::DynamicParserBackend::Native,
+                backend,
             )?,
-            MaskStrategy::TokenClassTrie => match source.source {
+            Engine::MergedTokenTrie => match source.source {
                 GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
                     crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
                         .map_err(token_class_error)?
@@ -690,12 +721,12 @@ impl Module {
                     }.map_err(token_class_error)?;
                     let mut components = dynamic.into_constraints();
                     if components.len() != 1 {
-                        return Err(Error::Compilation("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: requires one compiled component".into()));
+                        return Err(Error::Compilation("cannot merge equivalent tokens for this grammar: requires one compiled component".into()));
                     }
                     components.pop().unwrap()
                 }
             },
-            MaskStrategy::Auto | MaskStrategy::ParserDwa => {
+            Engine::Auto | Engine::ParserDwa => {
                 let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
@@ -710,7 +741,7 @@ impl Module {
         };
 
         let _ = inner.late_bind_vocab.set(vocab.clone());
-        if engine == MaskStrategy::TokenClassTrie {
+        if engine == Engine::MergedTokenTrie {
             inner.install_template_parser_from_compile()?;
         }
         if build_boundary {
@@ -819,13 +850,16 @@ impl Module {
         // composition as one ordinary Dynamic grammar, inlined at source level.
         // Over retained static work it is mixed: retained parts stay static and
         // every other module is compiled as its own dynamic component.
-        let engine = resolve_compile_strategy(options.mask_strategy, &modules);
-        let token_trie = engine == MaskStrategy::TokenTrie;
-        let mixed = options.mask_strategy == MaskStrategy::TokenTrie && !token_trie;
+        let requested = options.engine()?;
+        let engine = resolve_compile_strategy(requested, &modules);
+        let token_trie = engine == Engine::TokenTrie;
+        let mixed = requested == Engine::TokenTrie && !token_trie;
         // EXPERIMENT: one route report per top-level Module compile.
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         if token_trie {
-            let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?;
+            let result = self
+                .flatten_source()?
+                .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet, options.token_trie_backend())?;
             let result = result.with_end_tokens(end_tokens)?;
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
@@ -841,7 +875,7 @@ impl Module {
             && self.node.bindings.is_empty()
             && matches!(
                 engine,
-                MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie | MaskStrategy::Auto
+                Engine::ParserDwa | Engine::MergedTokenTrie | Engine::Auto
             );
         let mut route = crate::compiler::terminal_ended_rescue::Route::Normal;
         let mut outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried;
@@ -950,10 +984,17 @@ impl Module {
                     }
                     // Only Auto may pick a different exact strategy; an explicit
                     // strategy request is never silently replaced.
-                    if options.mask_strategy == MaskStrategy::Auto {
+                    if requested == Engine::Auto {
+                        // The fallback is exactly an explicit TokenTrie request
+                        // with the same two switches.
                         if let Ok(grammar) = self.flatten_source() {
                             let constraint = grammar
-                                .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?
+                                .compile_requested_token_trie(
+                                    vocab,
+                                    BoundaryTriggerDetail::TokenSet,
+                                    options.template_dfas,
+                                    options.merge_equivalent_tokens,
+                                )?
                                 .with_end_tokens(end_tokens)?;
                             route =
                                 crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
@@ -979,7 +1020,7 @@ impl Module {
         &self,
         vocab: &Vocab,
         cache: &mut HashMap<usize, RuntimeConstraint>,
-        resolved: MaskStrategy,
+        resolved: Engine,
         mixed: bool,
         boundary_strategy: BoundaryMaskStrategy,
     ) -> Result<RuntimeConstraint> {
@@ -994,7 +1035,7 @@ impl Module {
             let mut base = if local.bindings.is_empty() {
                 local.inner.as_ref().clone()
             } else {
-                local.link_with(BuildOptions::default().optimization(engine))?
+                local.link_with(engine.build_options())?
             };
             base.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
             Ok(base)
@@ -1039,7 +1080,7 @@ impl Module {
             if boundary_strategy != BoundaryMaskStrategy::TokenTrie
                 && !mixed
                 && all_static
-                && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
+                && matches!(engine, Engine::ParserDwa | Engine::Auto)
             {
                 // `Auto` mirrors `MaskStrategy::Auto`: prefer the static
                 // boundary parser, and fall back to the token-trie boundary
@@ -1064,7 +1105,7 @@ impl Module {
                 };
                 if declined && boundary_strategy == BoundaryMaskStrategy::ParserDwa {
                     return Err(Error::ResourceLimit(
-                        "boundary_parser_dwa: static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (TokenTrie) to keep the segmented dynamic boundary".into(),
+                        crate::error::BOUNDARY_DWA_DECLINE.into(),
                     ));
                 }
                 if declined {
@@ -1091,7 +1132,7 @@ impl Module {
         Ok(parent)
     }
 
-    fn event_adapter(&self, ranges: &[(u32, u32)], vocab: &Vocab, native: bool, engine: MaskStrategy) -> Result<RuntimeConstraint> {
+    fn event_adapter(&self, ranges: &[(u32, u32)], vocab: &Vocab, native: bool, engine: Engine) -> Result<RuntimeConstraint> {
         let local = self.node.prepared.get(&engine.key()).ok_or_else(|| error("missing prepared event owner"))?;
         let leaf = local.event_adapters.leaf(ranges)?;
         Ok(leaf.compiled_for_representation(vocab, native)?.as_ref().clone())
@@ -1314,7 +1355,7 @@ mod precompile_boundary_tests {
         let prepared_trigger = module
             .node
             .prepared
-            .get(&MaskStrategy::ParserDwa.key())
+            .get(&Engine::ParserDwa.key())
             .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("ParserDwa preparation must carry a Tokens trigger");
 
@@ -1334,7 +1375,7 @@ mod precompile_boundary_tests {
             "compile must reuse the precompiled Tokens Arc"
         );
         assert!(
-            module.node.prepared.contains_key(&MaskStrategy::ParserDwa.key()),
+            module.node.prepared.contains_key(&Engine::ParserDwa.key()),
             "compile must not discard the retained static part"
         );
 
@@ -1392,10 +1433,10 @@ mod precompile_boundary_tests {
         if precompile_parent { (assembly, child, parent) } else { (assembly, parent, child) }
     }
 
-    fn reference(strategy: MaskStrategy) -> RuntimeConstraint {
+    fn reference(strategy: MaskMode) -> RuntimeConstraint {
         assembly(false, false)
             .0
-            .compile_with(&vocab(), CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&vocab(), strategy.compile_options())
             .expect("reference compile")
     }
 
@@ -1410,8 +1451,8 @@ mod precompile_boundary_tests {
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
-        same_language(&mixed.start(), &reference(MaskStrategy::ParserDwa).start(), 4);
-        same_language(&mixed.start(), &reference(MaskStrategy::TokenTrie).start(), 4);
+        same_language(&mixed.start(), &reference(MaskMode::ParserDwa).start(), 4);
+        same_language(&mixed.start(), &reference(MaskMode::A).start(), 4);
     }
 
     #[test]
@@ -1425,8 +1466,8 @@ mod precompile_boundary_tests {
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
-        same_language(&mixed.start(), &reference(MaskStrategy::ParserDwa).start(), 4);
-        same_language(&mixed.start(), &reference(MaskStrategy::TokenTrie).start(), 4);
+        same_language(&mixed.start(), &reference(MaskMode::ParserDwa).start(), 4);
+        same_language(&mixed.start(), &reference(MaskMode::A).start(), 4);
     }
 }
 
@@ -1458,7 +1499,7 @@ mod grammar_precompile_tests {
             .expect("TokenTrie compile after a ParserDwa grammar precompile");
         assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
         assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");
-        assert!(module.node.prepared.contains_key(&MaskStrategy::ParserDwa.key()));
+        assert!(module.node.prepared.contains_key(&Engine::ParserDwa.key()));
 
         // Composing through the returned Module still matches the explicit
         // Module::new + bind + precompile path.
@@ -1680,8 +1721,8 @@ mod boundary_error_tests {
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
         match error.kind() {
             crate::ErrorKind::ResourceLimit(message) => {
-                assert!(message.starts_with("boundary_parser_dwa:"));
-                assert!(message.contains("FAST_BUILD"));
+                assert_eq!(message, crate::error::BOUNDARY_DWA_DECLINE);
+                assert!(message.contains("TokenTrie"));
             }
             other => panic!("expected ResourceLimit, got {other:?}"),
         }

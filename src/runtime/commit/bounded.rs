@@ -4,6 +4,8 @@
 //! We may read an existing exact mask, but never construct a vocabulary-wide
 //! mask. Prepared vocabulary ordering is reused only if it already exists;
 //! otherwise exact individual recognition is the allocation-bounded fallback.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use super::*;
 use crate::runtime::state::{MaskCacheData,frontier_is_accepting};
 use crate::compiler::constraint_possible_matches::PreparedOrderedTokens;
@@ -533,7 +535,7 @@ mod tests {
     use super::*;
     use crate::{BuildOptions,Grammar,MaskStrategy,TokenSet,Vocab};
 
-    const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
+    const MODES:[MaskMode;5]=MaskMode::ALL;
     fn ids(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(wi,&word)| (0..32).filter_map(move |bit|
             (word&(1<<bit)!=0).then_some((wi*32+bit) as u32))).collect()
@@ -578,7 +580,7 @@ mod tests {
         for body in ["\"ab\"","\"a\" | \"ab\" | \"aba\"","eps | \"ab\"","/a+/ \"b\"","/a|ab/ \"a\"?","/a*/ \"b\"","(/a+/ & /aa*/ ) \"b\"","(/a+/ - /aaa+/) \"b\""] {
             let source=format!("start root nt root = {body}");
             for mode in MODES {
-                let c=Grammar::from_glrm(&source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(&source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 explore(&c,&format!("{mode:?} {body}"));
                 let loaded=Constraint::load(c.save(), &v).unwrap();explore(&loaded,&format!("loaded {mode:?} {body}"));
             }
@@ -593,7 +595,7 @@ mod tests {
             for tokens in [vec![0],vec![17],vec![29],vec![29,30,31],vec![0,17,29,4096]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source).unwrap();g.bind("M",TokenSet::new(tokens.clone())).unwrap();
-                    let c=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([4096])).unwrap();
+                    let c=g.compile_with_build_options(&v,mode.build_options().end_tokens([4096])).unwrap();
                     explore(&c,&format!("{mode:?} {body} {tokens:?}"));
                 }
             }
@@ -609,8 +611,8 @@ mod tests {
         let mut p=Grammar::from_glrm("extern grammar C start root nt root=\"P\" C \" X\"").unwrap().prepare(&v).unwrap();
         p.bind("C",child.prepare(&v).unwrap()).unwrap();
         for mode in MODES {
-            explore(&p.link_with(BuildOptions::default().optimization(mode)).unwrap(),&format!("composed {mode:?}"));
-            let c=Grammar::from_glrm("start root nt root=\"\\u{e9}x\"").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            explore(&p.link_with(mode.build_options()).unwrap(),&format!("composed {mode:?}"));
+            let c=Grammar::from_glrm("start root nt root=\"\\u{e9}x\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
             explore(&c,&format!("unicode {mode:?}"));
         }
     }
@@ -618,8 +620,8 @@ mod tests {
     fn union_counts_distinct_original_ids_not_owner_occurrences() {
         let v=Vocab::new(vec![(17,b"a".to_vec()),(29,b"b".to_vec()),(33,b"c".to_vec())]);
         for mode in MODES {
-            let a=Grammar::from_glrm("start r nt r=\"ab\"").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
-            let b=Grammar::from_glrm("start r nt r=\"ac\"").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            let a=Grammar::from_glrm("start r nt r=\"ab\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
+            let b=Grammar::from_glrm("start r nt r=\"ac\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
             let states=[a.start(),b.start()];
             assert_eq!(one(states.iter().map(View::of)).unwrap(),AtMostOne::One(17));
             assert_eq!(forced_tokens(&states).unwrap(),[17]);
@@ -647,7 +649,7 @@ mod tests {
             ("start root nt root=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
         ] {
             for mode in MODES {
-                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 for loaded in [false,true] {
                     let c=if loaded{Constraint::load(c.save(), &v).unwrap()}else{c.clone()};
                     let state=c.start();
@@ -675,7 +677,7 @@ mod tests {
             "grammar C { start r nt r=\"(\" r \")\" | eps } start r nt r=C \"Z\"",
         ] {
             for mode in MODES {
-                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 explore(&c,&format!("alphabet boundary {mode:?}, {source}"));
                 let loaded=Constraint::load(c.save(), &v).unwrap();
                 explore(&loaded,&format!("loaded alphabet boundary {mode:?}, {source}"));
@@ -688,8 +690,8 @@ mod tests {
 #[cfg(test)]
 mod differential_tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, MaskStrategy, TokenSet, Vocab};
-    const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
+    use crate::{Grammar, TokenSet, Vocab};
+    const MODES:[MaskMode;5]=MaskMode::ALL;
     fn allowed(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(word,&bits)| (0..32).filter_map(move |bit|
             (bits&(1u32<<bit)!=0).then_some((word*32+bit) as u32))).collect()
@@ -757,7 +759,7 @@ mod differential_tests {
         ] {
             for mode in MODES {
                 for eos in [Vec::new(),vec![130],vec![4]] {
-                    let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens(eos.clone())).unwrap();
+                    let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options().end_tokens(eos.clone())).unwrap();
                     let tag=format!("{source:?}, {mode:?}, end={eos:?}");
                     walk(&c,&tag,2);
                     let loaded=Constraint::load(&c.save(), &v).unwrap();
@@ -779,7 +781,7 @@ mod differential_tests {
             for set in [vec![],vec![0],vec![4],vec![7],vec![99],vec![99,130],vec![0,4,7,99]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source).unwrap();g.bind("MARK",TokenSet::new(set.iter().copied())).unwrap();
-                    let c=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([130])).unwrap();
+                    let c=g.compile_with_build_options(&v,mode.build_options().end_tokens([130])).unwrap();
                     walk(&c,&format!("{body}, set={set:?}, {mode:?}"),2);
                 }
             }
@@ -794,7 +796,7 @@ mod differential_tests {
         let mut parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap().prepare(&v).unwrap();
         parent.bind("CHILD",&child).unwrap();parent.bind("CHILD::MARK",TokenSet::from(9)).unwrap();
         for mode in MODES {
-            let c=parent.link_with(BuildOptions::default().optimization(mode)).unwrap();
+            let c=parent.link_with(mode.build_options()).unwrap();
             walk(&c,&format!("composed {mode:?}"),2);
             for path in [&[5][..],&[0,1,3][..],&[0,1,9,3][..]] {
                 let mut state=c.start();for &id in path {check(&state,&format!("{mode:?}, path={path:?}, next={id}"));assert!(state.commit_token(id));}
@@ -847,7 +849,7 @@ mod differential_tests {
             ("regular-difference",Grammar::from_glrm(regular).unwrap(),list),
         ] {
             for mode in MODES {
-                let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([2000])).unwrap();
+                let c=grammar.compile_with_build_options(&v,mode.build_options().end_tokens([2000])).unwrap();
                 for loaded in [false,true] {
                     let c=if loaded{Constraint::load(c.save(), &v).unwrap()}else{c.clone()};
                     let mut state=c.start();let mut remaining=text.as_bytes();let mut step=0;

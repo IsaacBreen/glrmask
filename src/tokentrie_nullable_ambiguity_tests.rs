@@ -4,6 +4,8 @@
 //! Committing one `a` leaves a parser state whose epsilon/GLR bookkeeping is
 //! cyclic; the next mask or byte commit must merge equivalent stack
 //! configurations instead of regenerating them forever.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -23,10 +25,10 @@ fn token_trie() -> crate::runtime::Constraint {
         .unwrap()
 }
 
-fn mode_constraint(mode: MaskStrategy) -> crate::runtime::Constraint {
+fn mode_constraint(mode: MaskMode) -> crate::runtime::Constraint {
     let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
-        .compile_with(&vocab(), CompileOptions::default().mask_strategy(mode))
+        .compile_with(&vocab(), mode.compile_options())
         .unwrap()
 }
 
@@ -61,7 +63,7 @@ fn tokentrie_nullable_ambiguity_mask_and_byte_commit_terminate() {
 fn tokentrie_masks_match_parser_dwa_for_nullable_ambiguity() {
     let words = within_deadline("cross-mode comparison", || {
         let trie = token_trie();
-        let dwa = mode_constraint(MaskStrategy::ParserDwa);
+        let dwa = mode_constraint(MaskMode::ParserDwa);
         let mut diffs = Vec::new();
         let mut words = vec![Vec::new()];
         let mut frontier = vec![Vec::new()];

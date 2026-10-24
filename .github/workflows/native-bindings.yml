@@ -290,3 +290,18 @@ jobs:
         run: cargo test --locked --release -p glrmask-binding-core -p glrmask-c
       - name: Generated guides remain synchronized
         run: python scripts/sync-guide.py --check
+
+  debug-assertions:
+    name: Rust tests (debug assertions)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Library tests with debug assertions
+        run: >-
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --locked --release
+          -p glrmask --features internal-api --lib

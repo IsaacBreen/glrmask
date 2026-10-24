@@ -37,17 +37,17 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
     assert not state.mask().any()
 
 
-@pytest.mark.parametrize("mask_strategy", [
-    glrmask.MaskStrategy.AUTO,
-    glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-    glrmask.MaskStrategy.PARSER_DWA,
+@pytest.mark.parametrize("options", [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
 ])
-def test_python_compile_options_do_not_discard_work(mask_strategy):
+def test_python_compile_options_do_not_discard_work(options):
     v = vocab()
     g = source("a")
     m = glrmask.Module(g)
-    m.precompile(v, mask_strategy=mask_strategy)
-    assert g.compile(v).start().mask().tolist() == m.compile(v, mask_strategy=mask_strategy).start().mask().tolist()
+    m.precompile(v, **options)
+    assert g.compile(v).start().mask().tolist() == m.compile(v, **options).start().mask().tolist()
     assert g.compile(v).start().mask().tolist() == m.compile(v).start().mask().tolist()
 
 

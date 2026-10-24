@@ -11,6 +11,8 @@
 //! longer than the enumeration bound. It is applied to the exact TokenTrie
 //! reference of every fuzz seed so the seeds themselves stay exact even though
 //! the template strategies now decline them.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -318,15 +320,15 @@ const V2_1654: Case = Case {
     ],
 };
 
-fn try_compile_case(case: Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
+fn try_compile_case(case: Case, strategy: MaskMode) -> crate::Result<Constraint> {
     let source = lark(case);
     Grammar::from_lark(&source)?.compile_with_build_options(
         &fuzz_vocab(),
-        BuildOptions::default().optimization(strategy),
+        strategy.build_options(),
     )
 }
 
-fn compile_case(case: Case, strategy: MaskStrategy) -> Constraint {
+fn compile_case(case: Case, strategy: MaskMode) -> Constraint {
     try_compile_case(case, strategy)
         .unwrap_or_else(|error| panic!("{strategy:?} compile failed: {error}"))
 }
@@ -355,17 +357,17 @@ fn fuzz_seeds_return_typed_decline_under_tiny_budget() {
         // The exact TokenTrie reference stays the mask oracle for each seed, so
         // the grammars themselves keep exact coverage even though every
         // template strategy now declines them under the tiny budget.
-        let reference = compile_case(case, MaskStrategy::TokenTrie);
+        let reference = compile_case(case, MaskMode::A);
         check_exact_oracle(&reference, case);
         // Auto alone may fall back to the exact TokenTrie strategy; its masks
         // must still match the oracle.
         {
             let _limit = TestBudgetLimit::set(1_000);
-            let auto = try_compile_case(case, MaskStrategy::Auto)
+            let auto = try_compile_case(case, MaskMode::Auto)
                 .unwrap_or_else(|error| panic!("start={} Auto must fall back: {error}", case.start));
             check_exact_oracle(&auto, case);
         }
-        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for strategy in [MaskMode::C, MaskMode::ParserDwa] {
             let _ = {
                 let _limit = TestBudgetLimit::set(1_000);
                 expect_strategy_decline(
@@ -384,9 +386,9 @@ fn forced_tiny_budget_returns_typed_decline() {
         bound: 3,
         rules: &[(0, &[-1]), (0, &[-2, -3])],
     };
-    let reference = compile_case(SMALL, MaskStrategy::TokenTrie);
+    let reference = compile_case(SMALL, MaskMode::A);
     check_exact_oracle(&reference, SMALL);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let _ = {
             let _limit = TestBudgetLimit::set(1);
             expect_strategy_decline(
@@ -465,7 +467,7 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
         10 * REAL_GRAMMAR_MAX_UNITS,
     );
     for (name, source) in REAL_GRAMMARS {
-        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for strategy in [MaskMode::C, MaskMode::ParserDwa] {
             let grammar = if name.ends_with(".lark") {
                 Grammar::from_lark(source).unwrap()
             } else {
@@ -474,7 +476,7 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
             let constraint = grammar
                 .compile_with_build_options(
                     &real_vocab(),
-                    BuildOptions::default().optimization(strategy),
+                    strategy.build_options(),
                 )
                 .unwrap_or_else(|error| panic!("{name} {strategy:?} failed: {error}"));
             assert_eq!(
@@ -483,5 +485,50 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
                 "{name} {strategy:?} fell back at the default budget",
             );
         }
+    }
+}
+
+#[test]
+fn auto_decline_fallback_honours_template_dfas() {
+    const SMALL: Case = Case {
+        start: 0,
+        bound: 3,
+        rules: &[(0, &[-1]), (0, &[-2, -3])],
+    };
+    let reference = compile_case(SMALL, MaskMode::ParserDwa);
+    // Auto only reaches TokenTrie through the decline fallback. That fallback
+    // must compile exactly as an explicit TokenTrie request with the same two
+    // switches would, so with `template_dfas` it is table-free.
+    let auto = {
+        let _limit = TestBudgetLimit::set(1);
+        Grammar::from_lark(&lark(SMALL))
+            .unwrap()
+            .compile_with_build_options(
+                &fuzz_vocab(),
+                MaskMode::Auto.build_options().template_dfas(true),
+            )
+            .expect("Auto must fall back to TokenTrie")
+    };
+    assert_eq!(
+        auto.parser_backend(),
+        ParserBackend::TemplateDfa,
+        "Auto's fallback must honour template_dfas",
+    );
+    assert!(!auto.table.is_present(), "the fallback must not retain an LR table");
+    check_exact_oracle(&auto, SMALL);
+    for prefix in [b"".as_slice(), b"a", b"b", b"c", b"ab", b"ba", b"abc"] {
+        let mut fallback = auto.start();
+        let mut dwa = reference.start();
+        assert_eq!(
+            fallback.commit_bytes(prefix),
+            dwa.commit_bytes(prefix),
+            "commit {prefix:?}",
+        );
+        assert_eq!(fallback.mask(), dwa.mask(), "mask after {prefix:?}");
+        assert_eq!(
+            fallback.is_accepting(),
+            dwa.is_accepting(),
+            "acceptance after {prefix:?}",
+        );
     }
 }

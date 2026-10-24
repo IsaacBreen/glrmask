@@ -5,6 +5,8 @@
 //! component's public outward interface from some component-local history?
 //! It is an upper bound. Every uncertainty widens; none is interpreted as an
 //! empty language.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1262,10 +1264,10 @@ mod tests {
 
     #[test]
     fn composite_fingerprint_uses_only_matching_fresh_component_queries() {
-        use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend};
+        use crate::{Grammar, ParserBackend};
         let vocabulary = crate::Vocab::new(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
-        let options = || BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
+        let options = || MaskMode::C.build_options()
             .parser_backend(ParserBackend::TemplateDfa);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#).unwrap()
             .compile_with_build_options(&vocabulary, options()).unwrap();
@@ -1703,14 +1705,13 @@ mod preparation_tests {
             (3, b"b".to_vec()),
             (4, b"ba".to_vec()),
         ]);
-        for optimization in [crate::MaskStrategy::ParserDwa, crate::MaskStrategy::TokenClassTrie] {
+        for optimization in [MaskMode::C, MaskMode::ParserDwa] {
             let source = crate::Grammar::from_glrm(
                 r#"glrm 1; start document; nt document = "a";"#,
             ).unwrap()
             .compile_with_build_options(
                 &vocab,
-                crate::BuildOptions::default()
-                    .optimization(optimization)
+                optimization.build_options()
                     .parser_backend(crate::ParserBackend::TemplateDfa),
             )
             .unwrap();
@@ -1737,7 +1738,7 @@ mod preparation_tests {
     fn persisted_pre_nullable_fix_proof_is_rejected_before_composition() {
         let vocab = crate::Vocab::new(vec![(0, b"X[a]!".to_vec()),
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-        let options = crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenClassTrie)
+        let options = MaskMode::C.build_options()
             .parser_backend(crate::ParserBackend::TemplateDfa);
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options.clone()).unwrap();

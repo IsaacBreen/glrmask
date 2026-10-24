@@ -11,8 +11,13 @@ import numpy as np
 import pytest
 import glrmask
 
-MODES = [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
-         glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -21,7 +26,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
         {0: b"(", 2: b")", 7: b"()", 15: b"(", 20: b"x", 25: b""})
     grammar = glrmask.Grammar.from_ebnf('start ::= "(" start ")" start | ""')
     reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=mode)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"(", b"()", b"()("]:
@@ -56,10 +61,10 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
     reference = _bound_snapshot(glrmask.Module(parent), "child", glrmask.Module(child)).compile(vocab)
     configured_child = glrmask.Module(child)
     configured = _bound_snapshot(glrmask.Module(parent), "child", configured_child)
-    compiled = configured.compile(vocab, mask_strategy=mode)
+    compiled = configured.compile(vocab, **mode)
     module = _bound_snapshot(glrmask.Module(parent), "child", configured_child)
-    module.precompile(vocab, mask_strategy=mode)
-    linked = module.compile(vocab, mask_strategy=mode)
+    module.precompile(vocab, **mode)
+    linked = module.compile(vocab, **mode)
     for constraint in [compiled, linked, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"x", b"xa", b"xab", b"xab\t", b"xaby"]:
@@ -76,7 +81,7 @@ def test_exact_token_identity_survives_source_compilation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 15: b"a"})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         "glrm 1; start root; extern token MARK; nt root = MARK;"), "MARK", glrmask.TokenSet([15]))
-    compiled = grammar.compile(vocab, mask_strategy=mode)
+    compiled = grammar.compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
@@ -90,8 +95,8 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa"})
     source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(30)) + 'r30: "b"\n'
     grammar = glrmask.Grammar.from_lark(source)
-    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_BUILD)
+    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE, template_dfas=True, merge_equivalent_tokens=True)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for n in [0, 1, 15, 29, 30]:
@@ -119,8 +124,8 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa", 3: word, 7: word,
                                          8: b"a" * (n-1) + b"b", 9: b"a" * (n+1) + b"b", 11: b"x"})
     grammar = glrmask.Grammar.from_lark(source)
-    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_BUILD)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=mode)
+    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"a", b"a" * (n-1), b"a" * n, word]:

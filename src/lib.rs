@@ -209,6 +209,58 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
     glrmask_json_schema::__private::set_test_compat_mode(enabled);
 }
 
+/// The five mask configurations the test suite exercises: `Auto`, `ParserDwa`,
+/// and TokenTrie with neither switch (A), template DFAs only (B), and both
+/// switches (C). Test scaffold only.
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub mod test_modes {
+    use crate::{BuildOptions, CompileOptions, MaskStrategy};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MaskMode {
+        Auto,
+        ParserDwa,
+        A,
+        B,
+        C,
+    }
+
+    impl MaskMode {
+        pub const ALL: [Self; 5] = [Self::Auto, Self::ParserDwa, Self::A, Self::B, Self::C];
+
+        pub fn strategy(self) -> MaskStrategy {
+            match self {
+                Self::Auto => MaskStrategy::Auto,
+                Self::ParserDwa => MaskStrategy::ParserDwa,
+                Self::A | Self::B | Self::C => MaskStrategy::TokenTrie,
+            }
+        }
+
+        pub fn template_dfas(self) -> bool {
+            matches!(self, Self::B | Self::C)
+        }
+
+        pub fn merge_equivalent_tokens(self) -> bool {
+            matches!(self, Self::C)
+        }
+
+        pub fn build_options(self) -> BuildOptions {
+            BuildOptions::default()
+                .optimization(self.strategy())
+                .template_dfas(self.template_dfas())
+                .merge_equivalent_tokens(self.merge_equivalent_tokens())
+        }
+
+        pub fn compile_options(self) -> CompileOptions {
+            CompileOptions::default()
+                .mask_strategy(self.strategy())
+                .template_dfas(self.template_dfas())
+                .merge_equivalent_tokens(self.merge_equivalent_tokens())
+        }
+    }
+}
+
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {

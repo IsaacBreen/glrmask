@@ -57,8 +57,7 @@ pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
         0 => Ok(glrmask::MaskStrategy::Auto),
         1 => Ok(glrmask::MaskStrategy::ParserDwa),
         2 => Ok(glrmask::MaskStrategy::TokenTrie),
-        3 => Ok(glrmask::MaskStrategy::TokenClassTrie),
-        _ => Err(Error::invalid("unknown mask strategy; expected 0..3")),
+        _ => Err(Error::invalid("unknown mask strategy; expected 0, 1 or 2")),
     }
 }
 
@@ -67,7 +66,6 @@ pub fn mask_strategy_value(strategy: glrmask::MaskStrategy) -> u32 {
         glrmask::MaskStrategy::Auto => 0,
         glrmask::MaskStrategy::ParserDwa => 1,
         glrmask::MaskStrategy::TokenTrie => 2,
-        glrmask::MaskStrategy::TokenClassTrie => 3,
         _ => 0,
     }
 }
@@ -77,7 +75,7 @@ pub fn boundary_mask_strategy(val: u32) -> Result<glrmask::BoundaryMaskStrategy>
         0 => Ok(glrmask::BoundaryMaskStrategy::Auto),
         1 => Ok(glrmask::BoundaryMaskStrategy::ParserDwa),
         2 => Ok(glrmask::BoundaryMaskStrategy::TokenTrie),
-        _ => Err(Error::invalid("unknown boundary mask strategy; expected 0..2")),
+        _ => Err(Error::invalid("unknown boundary mask strategy; expected 0, 1 or 2")),
     }
 }
 
@@ -93,10 +91,14 @@ pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> 
 pub fn compile_options(
     mask_strategy: glrmask::MaskStrategy,
     boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
+    template_dfas: bool,
+    merge_equivalent_tokens: bool,
 ) -> glrmask::CompileOptions {
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy)
         .boundary_mask_strategy(boundary_mask_strategy)
+        .template_dfas(template_dfas)
+        .merge_equivalent_tokens(merge_equivalent_tokens)
 }
 
 type BorrowedState<'a> = glrmask::ConstraintState<'a>;
@@ -167,7 +169,7 @@ mod tests {
     #[test]
     fn state_retains_owner_and_clones_independently() {
         let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())], vec![]).unwrap();
-        for mode in 0..4 {
+        for mode in 0..3 {
             let grammar = glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"").unwrap();
             let module = glrmask::Module::new(&grammar);
             let options = compile_options(

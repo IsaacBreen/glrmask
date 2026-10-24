@@ -1286,7 +1286,7 @@ impl Constraint {
         let matched_flags = (0..self.tokenizer.num_states())
             .map(|state| {
                 let matched = self.tokenizer.matched_terminal_bitset(state);
-                (!matched.is_empty(), !matched.is_disjoint(relevant))
+                (!matched.is_empty(), !matched.is_disjoint_prefix(relevant))
             })
             .collect::<Vec<_>>();
 
@@ -15333,5 +15333,31 @@ WS: /[ \t]+/
         .expect("placeholder prepare");
         let mut placeholder = placeholder.boundary_test_inner().clone();
         assert_matches_reference(&mut placeholder, "placeholder");
+    }
+
+    #[test]
+    fn trie_trigger_matches_scan_on_composed_child_and_token_bindings() {
+        let vocab = vocab();
+
+        // A composed constraint keeps only the parent's tokenizer while its
+        // parser terminal space spans parent and child leaves, so the two
+        // widths differ by construction. This must not trip a width assertion.
+        let mut host = crate::Module::new(&Grammar::from_glrm(
+            r#"glrm 1; start start; extern grammar child; nt start = "a" child "b";"#,
+        ).unwrap());
+        host.bind("child", Grammar::from_ebnf(r#"start ::= "ab""#).unwrap())
+            .unwrap();
+        let mut composed = host.compile(&vocab).expect("composed child compile");
+        assert_matches_reference(&mut composed, "composed child");
+
+        // The same shape with a token extern bound to a TokenSet: the child leaf
+        // is an event adapter, so the tokenizer sees fewer terminals than the
+        // composed parser.
+        let mut host = crate::Module::new(&Grammar::from_glrm(
+            r#"glrm 1; start root; extern token T; nt root = T;"#,
+        ).unwrap());
+        host.bind("T", crate::TokenSet::new([1])).unwrap();
+        let mut composed = host.compile(&vocab).expect("composed token-set compile");
+        assert_matches_reference(&mut composed, "composed token set");
     }
 }

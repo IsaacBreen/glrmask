@@ -1,5 +1,6 @@
-use glrmask::{BuildOptions, Constraint, ExternKind, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
-const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
+use glrmask::test_modes::MaskMode;
+use glrmask::{Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab};
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]).with_special_tokens([4,5])}
@@ -31,7 +32,7 @@ fn source_open_attachments_have_independent_qualified_environments() {
     let complete=pair.bind_snapshot("LEFT::MARK",TokenSet::from(4)).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::from(5)).unwrap();
     assert!(complete.bind_snapshot("LEFT::MARK",TokenSet::from(5)).is_err());
     assert_eq!(leaf.requirements().unwrap().len(),1);
-    for mode in MODES {check_pair(&complete.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap());}
+    for mode in MODES {check_pair(&complete.compile_with_build_options(&v,mode.build_options()).unwrap());}
 }
 #[test]
 fn prepared_open_children_survive_serialization_and_independent_binding() {
@@ -41,7 +42,7 @@ fn prepared_open_children_survive_serialization_and_independent_binding() {
     let loaded=PreparedGrammar::load(pair.save(),&v).unwrap();
     assert!(loaded.bind_snapshot("LEFT::MARK",Grammar::from_glrm("start x nt x=\"x\"").unwrap().prepare(&v).unwrap()).is_err());
     let complete=loaded.bind_snapshot("LEFT::MARK",TokenSet::from(4)).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::from(5)).unwrap();
-    for mode in MODES {check_pair(&complete.link_with(BuildOptions::default().optimization(mode)).unwrap());}
+    for mode in MODES {check_pair(&complete.link_with(mode.build_options()).unwrap());}
     assert_eq!(pair.requirements().unwrap().len(),2);assert_eq!(leaf.requirements().unwrap().len(),1);
 }
 #[test]
@@ -49,7 +50,7 @@ fn explicit_exact_adapter_has_event_not_spelling_semantics() {
     let v=vocab();let event=Grammar::exact(TokenSet::new([2,4]));
     let host=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap();
     for mode in MODES {
-        let c=host.bind_snapshot("VALUE",&event).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=host.bind_snapshot("VALUE",&event).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
         let mask=c.start().mask();assert!(!allowed(&mask,0));assert!(allowed(&mask,2));assert!(allowed(&mask,4));assert!(!allowed(&mask,5));
         for id in [2,4] {let mut s=c.start();assert!(s.commit_token(id));assert!(s.is_accepting());}
     }
@@ -174,7 +175,7 @@ fn empty_exact_bindings_are_empty_languages_not_epsilon() {
     let loaded=PreparedGrammar::load(prepared.save(),&v).unwrap();
     let event=Grammar::exact(empty);
     for mode in MODES {
-        let options=BuildOptions::default().optimization(mode);
+        let options=mode.build_options();
         for c in [source.compile_with_build_options(&v,options.clone()).unwrap(),loaded.link_with(options.clone()).unwrap()] {
             assert!(!c.start().is_accepting());assert_eq!(c.start().mask(),Grammar::from_glrm("start root nt root=\"x\"").unwrap().compile_with_build_options(&v,options.clone()).unwrap().start().mask());
         }

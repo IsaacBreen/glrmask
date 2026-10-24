@@ -30,7 +30,7 @@ Vocab vocabulary() { return Vocab({{0,"a"},{1,"b"},{31,"ab"},{32,"a"},{65,"z"}})
 auto simple() { return Grammar::from_ebnf(R"(start ::= "a" "b")"); }
 
 void basic() {
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto v = vocabulary();
         auto g = simple();
         auto m = Module(g);
@@ -58,7 +58,7 @@ void exact_and_unicode() {
     const Bytes first{0xc3}, last{0xa9}, whole{0xc3, 0xa9};
     Vocab v({{0,first},{1,last},{31,whole},{32,whole},{40,Bytes{0,255}}},{99});
     const std::string source = "start ::= \"" + std::string(whole.begin(), whole.end()) + "\"";
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_ebnf(source);
         auto m = Module(g);
         auto c = m.compile(v, strategy_options(i));
@@ -94,7 +94,7 @@ void exact_and_unicode() {
 
 void end_tokens() {
     Vocab v({{0,"a"}}, {99});
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         CompileOptions o;
         o.mask_strategy = static_cast<MaskStrategy>(i);
         auto m = Module(Grammar::from_expr(Expr::sequence({
@@ -163,7 +163,7 @@ void composition_and_persistence() {
 
 void markers_and_frontends() {
     auto v = vocabulary();
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_glrm(R"(glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);)");
         auto m = Module(g);
         auto c = m.compile(v, strategy_options(i)); CHECK(c.marker_ids()==std::vector<TokenId>({10,20,30}));
@@ -176,7 +176,7 @@ void markers_and_frontends() {
         auto l = lm.compile(v, strategy_options(i)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
     }
     Vocab special({{0,"a"},{1,"a"}}, {99});
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_lark("start: <|begin|> <|body|>");
         auto m = Module(g);
         m.bind("begin", TokenSet({99}));
@@ -212,7 +212,7 @@ void threads_and_errors() {
 #if defined(__linux__)
 int thread_stack_probe(std::size_t stack_bytes) {
     auto v = vocabulary(); std::vector<Constraint> constraints;
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
         constraints.push_back(m.compile(v, strategy_options(i)));
     }
@@ -249,7 +249,7 @@ int thread_stack_probe(std::size_t stack_bytes) {
 
 void emit_parity() {
     auto v = vocabulary(); std::cout << '[';
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         if (i) std::cout << ','; std::cout << "{\"mode\":" << i << ",\"states\":[";
         auto m = Module(simple());
         auto s = m.compile(v, strategy_options(i)).start();
@@ -269,7 +269,7 @@ Bytes read_bytes(const std::filesystem::path& path) {
 
 void artifacts(const std::filesystem::path& directory, bool check) {
     std::filesystem::create_directories(directory); auto v = vocabulary();
-    for (unsigned i=0; i<4; ++i) {
+    for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
         auto c = m.compile(v, strategy_options(i));
         for (bool external : {false, true}) {
@@ -295,12 +295,14 @@ void canonical_modules() {
     auto original = parent; // copy constructor is a cheap snapshot
 
     auto child = Module(Grammar::from_ebnf("start ::= \"a\""));
-    CHECK(BoundaryMaskStrategy::FastBuild == BoundaryMaskStrategy::TokenTrie);
-    CHECK(BoundaryMaskStrategy::FastRuntime == BoundaryMaskStrategy::ParserDwa);
+    CHECK(BoundaryMaskStrategy::FastCompile == BoundaryMaskStrategy::TokenTrie);
+    CHECK(BoundaryMaskStrategy::FastMasks == BoundaryMaskStrategy::ParserDwa);
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::TokenTrie) == GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE);
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
     CompileOptions child_options = strategy_options(
-        static_cast<unsigned>(MaskStrategy::TokenClassTrie), BoundaryMaskStrategy::TokenTrie);
+        static_cast<unsigned>(MaskStrategy::TokenTrie), BoundaryMaskStrategy::TokenTrie);
+    child_options.template_dfas = true;
+    child_options.merge_equivalent_tokens = true;
     child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save());

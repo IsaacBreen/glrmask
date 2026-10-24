@@ -6433,7 +6433,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     default_table_construction: GlrTableConstruction,
 ) -> crate::Result<DynamicConstraint> {
     compile_dynamic_owned_with_backend(grammar, vocab, default_table_construction,
-        crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())
+        crate::runtime::parser_backend::DynamicParserBackend::LrTable)
 }
 
 /// Shared ordinary Dynamic entry with a choice resolved before worker launch.

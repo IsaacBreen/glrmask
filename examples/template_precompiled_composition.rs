@@ -3,7 +3,8 @@
 //! FIXTURE_DIR contains schema-00.json through schema-09.json, vocab_dump.bin, traces.json.
 //! All masks are compared in memory; only measurements and hashes are saved.
 use std::{fs, path::Path, io::{BufWriter, Write}, time::Instant};
-use glrmask::{BuildOptions,Grammar,MaskStrategy,Constraint,ParserBackend,Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{Grammar,Constraint,ParserBackend,Vocab};
 use glrmask::__private::parser_backend_report;
 use serde::Deserialize;
 use glrmask_grammar::__private::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
@@ -158,9 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(decoded, trace.text.as_bytes(), "canonical trace byte identity");
     }
     eprintln!("LOAD canonical selected10, traces={} positions=11767", traces.len());
-    let options = BuildOptions::default()
-        .optimization(if args[3] == "static" { MaskStrategy::ParserDwa } else { MaskStrategy::TokenClassTrie })
-        .parser_backend(ParserBackend::TemplateDfa);
+    let mode = if args[3] == "static" { MaskMode::ParserDwa } else { MaskMode::C };
+    let options = mode.build_options().parser_backend(ParserBackend::TemplateDfa);
     // Prepare the complete native child before starting the link timer. Schema
     // lowering and child compilation are reported separately, never hidden.
     let started = Instant::now();

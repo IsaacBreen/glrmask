@@ -23,36 +23,34 @@ using MarkerEvent = glrmask_marker_event;
 /// A byte buffer.
 using Bytes = std::vector<std::uint8_t>;
 
-/// How masks are computed, trading compile time against mask speed.
+/// How masks are computed.
 enum class MaskStrategy : std::uint32_t {
-    /// `ParserDwa`, unless the module was precompiled with `TokenClassTrie`. The default.
+    /// Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be
+    /// too large. The default.
     Auto = 0,
-    /// Precomputes masks: slowest compile, fastest masks.
+    /// Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
     ParserDwa = 1,
-    /// Computes each mask by walking the vocabulary: fastest compile, slower masks.
+    /// Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
     TokenTrie = 2,
-    /// Like `TokenTrie`, but treats tokens the grammar cannot tell apart as one.
-    TokenClassTrie = 3,
     /// Same as `TokenTrie`.
-    FastBuild = TokenTrie,
+    FastCompile = TokenTrie,
     /// Same as `ParserDwa`.
-    FastRuntime = ParserDwa
+    FastMasks = ParserDwa
 };
 
-/// How masks are computed where one grammar meets another.
+/// How masks are computed at grammar boundaries.
 enum class BoundaryMaskStrategy : std::uint32_t {
-    /// `ParserDwa`, falling back to `TokenTrie` when that would be too large. The default.
+    /// `ParserDwa`, or `TokenTrie` when that would be too large. The default.
     Auto = 0,
-    /// Precomputes boundary masks: slower compile, faster masks.
-    ///
-    /// Throws `Error` if they would be too large.
+    /// Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws
+    /// `Error` if it would be too large.
     ParserDwa = 1,
-    /// Computes boundary masks as needed: faster compile, slower masks.
+    /// Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
     TokenTrie = 2,
     /// Same as `TokenTrie`.
-    FastBuild = TokenTrie,
+    FastCompile = TokenTrie,
     /// Same as `ParserDwa`.
-    FastRuntime = ParserDwa
+    FastMasks = ParserDwa
 };
 
 /// What an extern can be bound to.
@@ -135,21 +133,24 @@ public:
 };
 
 /// Options for compiling a grammar or module.
-///
-/// They apply to every part of the compile, including bound grammars.
 struct CompileOptions {
-    /// Sets how masks are computed. Defaults to `MaskStrategy::Auto`.
-    ///
-    /// Precompiled parts keep their precompiled masks.
+    /// How masks are computed. Defaults to `MaskStrategy::Auto`.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
-    /// Sets how masks are computed where one grammar meets another. Defaults to
-    /// `BoundaryMaskStrategy::Auto`.
+    /// How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy::Auto`.
     BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
+    /// Whether `MaskStrategy::TokenTrie` parses with template DFAs instead of an LR table.
+    /// Slower to compile, with faster masks. Off by default.
+    bool template_dfas = false;
+    /// Whether `MaskStrategy::TokenTrie` merges tokens that the grammar treats the same, so
+    /// masks walk fewer tokens. Requires `template_dfas`. Off by default.
+    bool merge_equivalent_tokens = false;
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         return {sizeof(glrmask_compile_options),
                 static_cast<std::uint32_t>(mask_strategy),
-                static_cast<std::uint32_t>(boundary_mask_strategy)};
+                static_cast<std::uint32_t>(boundary_mask_strategy),
+                static_cast<std::uint32_t>(template_dfas),
+                static_cast<std::uint32_t>(merge_equivalent_tokens)};
     }
 };
 
@@ -376,9 +377,7 @@ inline void Grammar::bind(std::string_view name, const Expr& value) {
     detail::check(glrmask_grammar_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
 }
 
-/// A grammar plus its extern bindings and any precompiled work.
-///
-/// Externs can stay unbound until `compile`.
+/// A grammar you can compose with others and partly compile before its externs are bound.
 class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone> {
     using Base = detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone>;
     explicit Module(glrmask_module* p) : Base(p) {}

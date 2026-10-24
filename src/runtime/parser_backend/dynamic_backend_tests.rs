@@ -2,6 +2,8 @@
 //! `ParserBackend::LrTable` runtime, compared against the default native
 //! `TemplateDfa` backend. Construction-shape witnesses (retained table, no
 //! template artifacts) live in the crate-internal `explicit_lr_tests` module.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
 
@@ -30,7 +32,7 @@ fn compile(vocab: &Vocab, source: &str, backend: ParserBackend) -> Constraint {
             .with_end_tokens(&[END_TOKEN]).expect("end tokens")
     } else {
         Grammar::from_ebnf(source).unwrap().compile_with_build_options(vocab,
-            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
+            MaskMode::C.build_options()
                 .end_tokens([END_TOKEN])).expect("O2 template compile")
     }
 }
@@ -327,24 +329,24 @@ fn external_lr_rejects_wrong_vocabulary_with_same_ids() {
 
 
 #[test]
-fn development_toggle_is_compile_only_and_o2_static_are_isolated() {
+fn ordinary_lr_and_o2_static_are_isolated_across_reload() {
     use std::process::Command;
     let vocab = vocab();
     let source = r#"start ::= ("(" start ")")?"#;
     const CHILD: &str = "GLRMASK_DYNAMIC_BACKEND_TEST_CHILD";
     if let Ok(directory) = std::env::var(CHILD) {
         let directory = std::path::Path::new(&directory);
-        let expected = if std::env::var("GLRMASK_DYNAMIC_TEMPLATE_DFA").unwrap() == "1" {
-            ParserBackend::TemplateDfa
-        } else { ParserBackend::LrTable };
+        // Ordinary Dynamic always retains the LR table; there is no
+        // process-wide backend switch.
         let dynamic = crate::DynamicConstraint::from_ebnf(source, &vocab).unwrap();
-        assert_eq!(dynamic.clone().into_constraint().parser_backend(), expected);
+        assert_eq!(dynamic.clone().into_constraint().parser_backend(), ParserBackend::LrTable);
         let o2 = crate::DynamicConstraint::from_ebnf_with_vocab_partition(source, &vocab)
             .unwrap().into_constraint();
         assert_eq!(o2.parser_backend(), ParserBackend::TemplateDfa);
         assert!(!o2.table.is_present());
-        let fast_build = compile(&vocab, source, ParserBackend::TemplateDfa);
-        assert_eq!(fast_build.parser_backend(), ParserBackend::TemplateDfa);
+        let native = compile(&vocab, source, ParserBackend::TemplateDfa);
+        assert_eq!(native.parser_backend(), ParserBackend::TemplateDfa);
+        std::fs::write(directory.join("native.constraint"), native.save()).unwrap();
         let static_constraint = Grammar::from_ebnf(source).unwrap().compile_with_build_options(&vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         assert_eq!(static_constraint.parser_backend(), ParserBackend::TemplateDfa);
@@ -354,10 +356,6 @@ fn development_toggle_is_compile_only_and_o2_static_are_isolated() {
         let loaded_dynamic = crate::DynamicConstraint::load(
             &std::fs::read(directory.join("lr.dynamic")).unwrap(), &vocab).unwrap();
         assert_eq!(loaded_dynamic.into_constraint().parser_backend(), ParserBackend::LrTable);
-        if expected == ParserBackend::TemplateDfa {
-            std::fs::write(directory.join("native.constraint"), dynamic.clone().into_constraint().save()).unwrap();
-            std::fs::write(directory.join("native.dynamic"), dynamic.save()).unwrap();
-        }
         return;
     }
     let directory = std::env::temp_dir().join(format!("glrmask-dynamic-backend-test-{}", std::process::id()));
@@ -366,20 +364,15 @@ fn development_toggle_is_compile_only_and_o2_static_are_isolated() {
     assert_eq!(dynamic.clone().into_constraint().parser_backend(), ParserBackend::LrTable);
     std::fs::write(directory.join("lr.constraint"), dynamic.clone().into_constraint().save()).unwrap();
     std::fs::write(directory.join("lr.dynamic"), dynamic.save()).unwrap();
-    for value in ["0", "1"] {
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "runtime::parser_backend::dynamic_backend_tests::development_toggle_is_compile_only_and_o2_static_are_isolated", "--nocapture"])
-            .env(CHILD, &directory).env("GLRMASK_DYNAMIC_TEMPLATE_DFA", value)
-            // Legacy diagnostic advance switches must never convert LR at runtime.
-            .env("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE", "1")
-            .status().unwrap();
-        assert!(status.success(), "backend isolation child {value} failed");
-    }
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "runtime::parser_backend::dynamic_backend_tests::ordinary_lr_and_o2_static_are_isolated_across_reload", "--nocapture"])
+        .env(CHILD, &directory)
+        // Legacy diagnostic advance switches must never convert LR at runtime.
+        .env("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE", "1")
+        .status().unwrap();
+    assert!(status.success(), "backend isolation child failed");
     let native = Constraint::load(std::fs::read(directory.join("native.constraint")).unwrap(), &vocab).unwrap();
     assert_eq!(native.parser_backend(), ParserBackend::TemplateDfa);
-    let native_dynamic = crate::DynamicConstraint::load(
-        &std::fs::read(directory.join("native.dynamic")).unwrap(), &vocab).unwrap();
-    assert_eq!(native_dynamic.into_constraint().parser_backend(), ParserBackend::TemplateDfa);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -391,7 +384,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
     let lr = crate::DynamicConstraint::from_lark(source, &vocab).unwrap()
         .into_constraint().with_end_tokens(&[END_TOKEN]).unwrap();
     let native = Grammar::from_lark(source).unwrap().compile_with_build_options(&vocab,
-        BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([END_TOKEN])).unwrap();
+        MaskMode::C.build_options().end_tokens([END_TOKEN])).unwrap();
     for constraint in [&lr, &native] {
         for loaded in [Constraint::load(constraint.save(), &vocab).unwrap(),
             Constraint::load(constraint.save(), &vocab).unwrap()] {
@@ -416,7 +409,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
     let native = Grammar::from_glrm(source).unwrap().bind_snapshot("MARK", crate::TokenSet::from(9)).unwrap()
-        .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+        .compile_with_build_options(&vocab, MaskMode::C.build_options()).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
         assert!(allowed(&state.mask(), 9));
@@ -490,9 +483,9 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
     let lr = crate::DynamicConstraint::from_ebnf(source, &vocab).unwrap()
         .into_constraint().with_end_tokens(&[26]).unwrap();
     let mut constraints = vec![lr];
-    for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for mode in MaskMode::ALL {
         constraints.push(Grammar::from_ebnf(source).unwrap().compile_with_build_options(&vocab,
-            BuildOptions::default().optimization(mode).end_tokens([26])).unwrap());
+            mode.build_options().end_tokens([26])).unwrap());
     }
     for compiled in constraints {
         for constraint in [&compiled,
@@ -525,9 +518,9 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source,&vocab,&[("MARK",&[(25, 25)])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
-    for mode in [MaskStrategy::Auto,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
+    for mode in MaskMode::ALL {
         constraints.push(Grammar::from_glrm(source).unwrap().bind_snapshot("MARK",crate::TokenSet::from(25)).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap());
+            .compile_with_build_options(&vocab,mode.build_options()).unwrap());
     }
     for compiled in constraints {
         for constraint in [&compiled,&Constraint::load(compiled.save(), &vocab).unwrap(),
@@ -550,9 +543,9 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
     let expected = crate::compiler::compile::vocab_empty_byte_token_ids(&vocab);
     let mut compiled = vec![crate::DynamicConstraint::from_ebnf(source, &vocab)
         .unwrap().into_constraint()];
-    for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for mode in MaskMode::ALL {
         compiled.push(Grammar::from_ebnf(source).unwrap().compile_with_build_options(&vocab,
-            BuildOptions::default().optimization(mode)).unwrap());
+            mode.build_options()).unwrap());
     }
     for constraint in &compiled {
         assert!(std::sync::Arc::ptr_eq(&constraint.empty_byte_token_ids, &expected));

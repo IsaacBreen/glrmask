@@ -2,10 +2,7 @@
 
 Ordinary Dynamic (O1) retains an executable LR table by default. O2/vocabulary
 partition and public Balanced explicitly use native templates; Static is
-unchanged. The internal development switch `GLRMASK_DYNAMIC_TEMPLATE_DFA=1`
-(or true/yes/on) selects ordinary Dynamic templates at compilation only. It is
-resolved once for a complete source build before alternatives/worker pools.
-No public API was added; artifact loading ignores this environment switch.
+unchanged.
 
 The shared compiler uses a narrow normalization choice and one runtime assembly
 boundary. LR skips `PreparedTemplateParser::from_compiler_parts` entirely;

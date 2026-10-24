@@ -3,6 +3,8 @@
 //! Reuse the ordinary boundary lexical walk, signed-template substitution,
 //! exact cancellation/normalization, and StaticParser runtime publication.
 //! The only parser input is the persisted finite relation inventory.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use std::{collections::BTreeMap, sync::Arc};
 use crate::{Constraint, Error, Result, Vocab};
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
@@ -489,7 +491,7 @@ mod tests {
                 .compile(&vocab).unwrap();
             let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("child",&child).unwrap()
-                .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+                .link_with(MaskMode::C.build_options()).unwrap();
             let prepared=prepared_root_call_candidates(&dynamic);
             assert_eq!(prepared.is_none(),nullable);
             if let Some(prepared)=prepared {

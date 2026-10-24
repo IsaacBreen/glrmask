@@ -1,10 +1,11 @@
 //! Public marker integration gates. The engine reports observations, not captures.
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, PreparedGrammar, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, Vocab};
 
-fn modes() -> [MaskStrategy; 4] {
-    [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto]
+fn modes() -> [MaskMode; 5] {
+    MaskMode::ALL
 }
-fn options(mode: MaskStrategy) -> BuildOptions { BuildOptions::default().optimization(mode) }
+fn options(mode: MaskMode) -> BuildOptions { mode.build_options() }
 fn vocabulary() -> Vocab {
     Vocab::new(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
         (3,b"x".to_vec()), (4,b"y".to_vec()), (5,b"xab y".to_vec()),
@@ -69,7 +70,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
         let mut bound = host.clone();
         bound.bind("child", &child).unwrap();
         let bound = PreparedGrammar::load(bound.save(), &vocab).unwrap();
-        for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
+        for mode in MaskMode::ALL {
             let linked = bound.link_with(options(mode)).unwrap();
             assert_eq!(linked.marker_ids().len(), 5, "child={child_mode:?} link={mode:?}");
             let loaded = Constraint::load(linked.save(), &vocab).unwrap();
@@ -97,7 +98,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
 #[test]
 fn malformed_marker_envelopes_fail_without_panics() {
     let vocab=vocabulary();
-    let bytes=annotated().compile_with_build_options(&vocab,options(MaskStrategy::TokenClassTrie)).unwrap().save();
+    let bytes=annotated().compile_with_build_options(&vocab,options(MaskMode::C)).unwrap().save();
     let mut malformed=Vec::new();
     for length in [0,1,7,8,12,19,20,27,28,bytes.len()-1] {malformed.push(bytes[..length].to_vec());}
     for count in [0,u32::MAX] {let mut v=bytes.clone();v[40+8..40+12].copy_from_slice(&count.to_le_bytes());malformed.push(v);}

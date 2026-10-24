@@ -170,7 +170,7 @@ def python_module_source(path):
 
 def check_python_symbol_docs():
     symbols = json.loads((CONTENT / 'python-api.json').read_text())
-    for file, prefix in [('__init__.pyi', ''), ('auto.py', 'auto.')]:
+    for file, prefix in [('__init__.pyi', '')]:
         seen = set()
         def visit(nodes, scope):
             for node in nodes:

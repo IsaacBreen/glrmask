@@ -201,13 +201,13 @@ pub struct TemplateBuildOptions {
 
 impl Default for TemplateBuildOptions {
     fn default() -> Self {
-        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::TokenClassTrie }
+        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::TokenTrie }
     }
 }
 
 impl TemplateBuildOptions {
     /// Select eager static masking with ParserDwa, or the shared dynamic
-    /// mask engine with TokenClassTrie/Auto. Default is TokenClassTrie.
+    /// mask engine with TokenTrie/Auto. Default is TokenTrie.
     pub fn optimization(mut self, optimization: crate::MaskStrategy) -> Self {
         self.optimization = optimization;
         self
@@ -337,9 +337,7 @@ impl ParserProgram {
         names: Vec<String>, ignore: Option<u32>, specials: Vec<crate::runtime::SpecialTokenTerminal>,
         vocab: &Vocab, options: TemplateBuildOptions) -> Result<Constraint> {
         let mut constraint = match options.optimization {
-            crate::MaskStrategy::TokenTrie => return Err(crate::Error::Compilation(
-                "mask strategy TOKEN_TRIE ordinary Dynamic does not accept a custom native parser; use TOKEN_CLASS_TRIE".into())),
-            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenClassTrie => {
+            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenTrie => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
                     tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,

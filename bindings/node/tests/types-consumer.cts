@@ -27,9 +27,9 @@ void [precompiled, precompiledAsync];
 const module = new api.Module(g);
 const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');
-module.precompileSync(v, {maskStrategy: api.MaskStrategy.TokenClassTrie});
+module.precompileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie});
 const independent: api.Module = module.clone();
-const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.TokenClassTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa});
+const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa});
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');

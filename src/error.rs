@@ -1,5 +1,10 @@
 use thiserror::Error as ThisError;
 
+/// The one typed decline that is a boundary request, not a mask strategy
+/// decline: `BoundaryMaskStrategy::ParserDwa` refused the boundary parser DWA.
+pub(crate) const BOUNDARY_DWA_DECLINE: &str =
+    "boundary parser DWA would be too large; use the TokenTrie or Auto boundary mask strategy";
+
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
         glrmask_invariant::__private::catch_internal_invariant_message(f)
@@ -119,7 +124,7 @@ impl Error {
     /// rescue when it is explicitly enabled.
     pub(crate) fn is_strategy_decline(&self) -> bool {
         match &self.kind {
-            ErrorKind::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => false,
+            ErrorKind::ResourceLimit(message) if message == BOUNDARY_DWA_DECLINE => false,
             ErrorKind::ResourceLimit(_) | ErrorKind::StrategyUnsupported(_) => true,
             _ => false,
         }
@@ -138,7 +143,7 @@ impl Error {
             ErrorKind::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
             ErrorKind::ResourceLimit(message) if message.starts_with("single_use_inlining") => "single_use_inlining",
             ErrorKind::ResourceLimit(message) if message.starts_with("bound_reduction_length") => "bound_reduction_length",
-            ErrorKind::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => "boundary_parser_dwa",
+            ErrorKind::ResourceLimit(message) if message == BOUNDARY_DWA_DECLINE => "boundary_parser_dwa",
             ErrorKind::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
             ErrorKind::ResourceLimit(_) => "template",
             ErrorKind::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",

@@ -2,9 +2,11 @@
 //! `ParserBackend::LrTable` backend. These assert the *construction* shape that
 //! the public enum alone cannot prove: a retained LR table with no template
 //! parser, no template DFAs and no direct-regular runtime bypass.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use super::ParserTableStorage;
-use crate::public_api::{BuildOptions, MaskStrategy, ParserBackend};
+use crate::public_api::{ParserBackend};
 use crate::Grammar;
 
 fn vocab_from(words: &[&str]) -> crate::Vocab {
@@ -26,7 +28,7 @@ fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
     Grammar::from_ebnf(source).unwrap()
         .compile_with_build_options(
             vocab,
-            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
+            MaskMode::C.build_options(),
         )
         .expect("native template compile")
 }

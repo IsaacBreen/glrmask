@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 // PRE-RELEASE COMPATIBILITY POLICY
 // ================================
 // GLRMask has not reached a compatibility-stable release. Old serialized
@@ -9585,7 +9587,7 @@ mod tests {
         let native = grammar
             .compile_with_build_options(
                 &vocab,
-                crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenClassTrie),
+                MaskMode::C.build_options(),
             )
             .unwrap();
         let mut native_as_lr = native.save();

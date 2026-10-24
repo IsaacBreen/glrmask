@@ -43,7 +43,7 @@ The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` ->
 glrmask::Vocab module_vocab({{0, "x"}, {1, "a"}, {2, "y"}, {3, "b"}});
 auto child = glrmask::Module(glrmask::Grammar::from_ebnf(R"(start ::= "a")"));
 glrmask::CompileOptions options;
-options.mask_strategy = glrmask::MaskStrategy::TokenClassTrie;
+options.mask_strategy = glrmask::MaskStrategy::ParserDwa;
 child.precompile(module_vocab, options);
 
 auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
@@ -51,12 +51,12 @@ auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
        start root
        nt root = "x" child "y")"));
 parent.bind("child", child);
-auto constraint = parent.compile(module_vocab, options);
+auto constraint = parent.compile(module_vocab);
 ```
 
 `bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
-`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile; an option never downgrades a part that already has a static preparation:
+`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` holds `mask_strategy`, `boundary_mask_strategy`, `template_dfas` and `merge_equivalent_tokens`, and applies to the whole compile, including bound grammars:
 
 ```cpp
 auto expression = glrmask::Expr::choice({
@@ -65,14 +65,15 @@ auto sequence = glrmask::Expr::sequence({
     glrmask::Expr::literal("x"), expression, glrmask::Expr::literal("y")});
 ```
 
-| `MaskStrategy` | Value | Intent |
+| `MaskStrategy` | Value | Behavior |
 | --- | --- | --- |
-| `Auto` | `0` | Core default trade-off. |
-| `ParserDwa` | `1` | Static parser-DWA masks; slowest build, lowest runtime latency. |
-| `TokenTrie` | `2` | Dynamic token-trie walk; fastest build. |
-| `TokenClassTrie` | `3` | Token-trie walk over token equivalence classes. |
+| `Auto` | `0` | Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. |
+| `ParserDwa` | `1` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
+| `TokenTrie` | `2` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
 
-`BoundaryMaskStrategy::Auto` (the default), `ParserDwa` and `TokenTrie` select the boundary parser for crossings between composed grammars. `ParserDwa` has faster crossings; an over-budget build throws `Error`. `TokenTrie` keeps the segmented dynamic boundary and builds faster. `Auto` uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static parser declines on budget. `FastRuntime` and `FastBuild` alias `ParserDwa` and `TokenTrie`, and the C constants `GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME`/`..._FAST_BUILD` keep their values.
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`; in C they are `GLRMASK_MASK_STRATEGY_FAST_MASKS` and `GLRMASK_MASK_STRATEGY_FAST_COMPILE`. With `TokenTrie`, `template_dfas = true` parses with template DFAs instead of an LR table, which is slower to compile, with faster masks, and `merge_equivalent_tokens = true` merges tokens that the grammar treats the same, so masks walk fewer tokens. `merge_equivalent_tokens` requires `template_dfas`.
+
+`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` is slower to compile, with faster masks, and throws `Error` if it would be too large; `TokenTrie` is faster to compile, with slower masks; `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
 ## Decoding
 

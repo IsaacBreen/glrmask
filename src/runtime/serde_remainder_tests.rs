@@ -94,8 +94,7 @@ fn ordinary_composition_metadata_unwrap_has_identical_bytes() {
     let constraint = crate::Grammar::glrm("start root; nt root ::= 'a' 'b'?;")
         .compile_with_build_options(
             &vocab,
-            crate::BuildOptions::default()
-                .optimization(crate::MaskStrategy::TokenClassTrie),
+            MaskMode::C.build_options(),
         )
         .unwrap();
 

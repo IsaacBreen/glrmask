@@ -11,7 +11,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
         let (mut vocab, mut grammar) = (ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
         assert_eq!(glrmask_grammar_from_source(0, source.as_ptr().cast(), source.len(), &mut grammar), 0);
-        for strategy in 0..4 {
+        for strategy in 0..3 {
             let rust_g = g::Grammar::from_ebnf(source).unwrap();
             let rust_m = g::Module::new(&rust_g);
             let rust_options = core::compile_options(
@@ -26,6 +26,8 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 struct_size: size_of::<glrmask_compile_options>(),
                 mask_strategy: strategy,
                 boundary_mask_strategy: 0,
+                template_dfas: 0,
+                merge_equivalent_tokens: 0,
             };
             let (mut constraint, mut state) = (ptr::null_mut(), ptr::null_mut());
             assert_eq!(glrmask_module_compile(module, vocab, &options, &mut constraint), 0);
@@ -63,7 +65,7 @@ fn invalid_foreign_lengths_and_null_outputs_fail_before_access() {
 fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<*const u8>(), 8);
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
-    assert_eq!(size_of::<glrmask_compile_options>(), 16);
+    assert_eq!(size_of::<glrmask_compile_options>(), 24);
     assert_eq!(size_of::<glrmask_extern>(), 24);
     assert_eq!(size_of::<glrmask_marker_event>(), 16);
     assert_eq!(offset_of!(glrmask_marker_event, byte_offset), 8);
@@ -91,6 +93,8 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
             struct_size: size_of::<glrmask_compile_options>(),
             mask_strategy: 1,
             boundary_mask_strategy: 0,
+            template_dfas: 0,
+            merge_equivalent_tokens: 0,
         };
         assert_eq!(glrmask_module_precompile(prepared, vocab, &parse_options), 0);
 
@@ -131,4 +135,38 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         glrmask_module_free(clone);
         glrmask_vocab_free(vocab);
     }
+}
+
+#[test]
+fn older_shorter_compile_options_default_the_new_switches_to_zero() {
+    // The original ABI struct had only `struct_size`, `mask_strategy` and
+    // `boundary_mask_strategy`. A caller built against it must keep working:
+    // the new fields count as zero because `struct_size` does not cover them.
+    #[repr(C)]
+    struct OldOptions {
+        struct_size: usize,
+        mask_strategy: u32,
+        boundary_mask_strategy: u32,
+    }
+    let old = OldOptions {
+        struct_size: size_of::<OldOptions>(),
+        mask_strategy: 2,
+        boundary_mask_strategy: 1,
+    };
+    let options = unsafe { root_options((&old as *const OldOptions).cast()) }.unwrap();
+    let reference = core::compile_options(
+        g::MaskStrategy::TokenTrie,
+        g::BoundaryMaskStrategy::ParserDwa,
+        false,
+        false,
+    );
+    assert_eq!(options, reference);
+
+    // A struct shorter than the original ABI is still rejected.
+    let too_short = OldOptions {
+        struct_size: size_of::<usize>(),
+        mask_strategy: 0,
+        boundary_mask_strategy: 0,
+    };
+    assert!(unsafe { root_options((&too_short as *const OldOptions).cast()) }.is_err());
 }

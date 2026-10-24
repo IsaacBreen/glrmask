@@ -1,6 +1,8 @@
 //! Link table-free components through shared programs and offset descriptors.
 //! Lexer execution, vocabulary walking and CALL/RETURN closure stay in the
 //! common recursive runtime. No LR action/goto representation is constructed.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use std::{collections::BTreeSet, sync::Arc};
 use crate::{Error, Result, Vocab};
 use crate::automata::lexer::Lexer;
@@ -332,7 +334,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(MaskStrategy::TokenClassTrie)
+                    .optimization(MaskStrategy::TokenTrie).template_dfas(true).merge_equivalent_tokens(true)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();
@@ -372,7 +374,7 @@ mod candidate_tests {
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
-                let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
+                let options = MaskMode::C.build_options()
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).unwrap().compile_with_build_options(&vocab, options.clone()).unwrap();
                 let linked = Grammar::from_glrm(parent).unwrap().prepare(&vocab).unwrap()
@@ -416,7 +418,7 @@ mod candidate_tests {
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
-            .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+            .link_with(MaskMode::C.build_options()).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {
             reason: crate::runtime::SummaryUnavailable::Disabled }).unwrap();

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
@@ -1846,8 +1848,8 @@ mod tests {
         let mut expected = vec![0; 8];
         expected[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut errors = Vec::new();
-        for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
-            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
+        for optimization in MaskMode::ALL {
+            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, optimization.build_options()).unwrap();
             let loaded = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
@@ -1883,8 +1885,8 @@ mod tests {
         initial[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut after_bang = vec![0; 8];
         after_bang[b'x' as usize / 32] = 1 << (b'x' % 32);
-        for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
-            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
+        for optimization in MaskMode::ALL {
+            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, optimization.build_options()).unwrap();
             let loaded = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for constraint in [compiled, loaded, external] {

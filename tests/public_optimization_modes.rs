@@ -1,8 +1,8 @@
 //! Public root policy and state operations across actual Dynamic, O2, and Static.
+use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, TokenSet, Vocab};
 
-const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie,
-    MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa];
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
 }
@@ -17,7 +17,7 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
     let g = Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#).unwrap();
     let reference = g.compile_with_build_options(&v, BuildOptions::default().end_tokens([100])).unwrap();
     for mode in MODES {
-        let compiled = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
+        let compiled = g.compile_with_build_options(&v, mode.build_options().end_tokens([100])).unwrap();
         for c in [compiled.clone(), Constraint::load(compiled.save(), &vocab()).unwrap(),
             Constraint::load(compiled.save(), &v).unwrap()] {
             for prefix in [b"".as_slice(),b"(",b"()",b"()(" ] {
@@ -50,7 +50,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
     let g = Grammar::from_ebnf(r#"start ::= "(" ")""#).unwrap();
     let reference = g.compile(&v).unwrap();
     for mode in MODES {
-        let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
+        let c = g.compile_with_build_options(&v, mode.build_options()).unwrap();
         let mut a = c.start(); let mut r = reference.start();
         assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference());
         assert_eq!(a.mask(),r.mask());
@@ -61,7 +61,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
     let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;").unwrap()
         .bind_snapshot("MARK", glrmask::TokenSet::from(15)).unwrap();
     for mode in MODES {
-        let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
+        let c = g.compile_with_build_options(&v, mode.build_options()).unwrap();
         let mut a = c.start(); assert!(allowed(&a.mask(),15)); assert!(!allowed(&a.mask(),0));
         assert!(a.commit_token(15)); assert!(a.is_accepting());
     }
@@ -75,12 +75,12 @@ fn source_dynamic_composition_and_precompiled_link_have_distinct_scopes() {
         .bind_snapshot("child", &child).unwrap();
     let reference = grammar.compile(&v).unwrap();
     for mode in MODES {
-        let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=grammar.compile_with_build_options(&v,mode.build_options()).unwrap();
         compare_prefixes(&c,&reference,&[0,2,7,15,20],3);
     }
     let module = grammar.prepare(&v).unwrap();
     for mode in MODES {
-        let c=module.link_with(BuildOptions::default().optimization(mode)).unwrap();
+        let c=module.link_with(mode.build_options()).unwrap();
         compare_prefixes(&c,&reference,&[0,2,7,15,20],3);
     }
 }
@@ -138,7 +138,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
     source.push_str("r30: \"b\"\n");
     let g=Grammar::from_lark(&source).unwrap();
-    let oracle=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([100])).unwrap();
+    let oracle=g.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options().end_tokens([100])).unwrap();
     let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
     for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
@@ -176,7 +176,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let g=Grammar::from_lark(&source).unwrap();
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
         for mode in MODES {
-            let compiled=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
+            let compiled=g.compile_with_build_options(&v,mode.build_options().end_tokens([100])).unwrap();
             for c in [compiled.clone(),
                 Constraint::load(compiled.save(),&v).unwrap()] {
                 for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
@@ -206,7 +206,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
     source.push_str("r30: \"b\"\n");let mut word=vec![b'a';30];word.push(b'b');
     let v=Vocab::new(vec![(3,word)]);
     for mode in MODES {
-        let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
         let mut a=c.start();assert_eq!(a.mask(),vec![8]);assert!(a.commit_token(3));assert!(a.is_accepting());
     }
 }

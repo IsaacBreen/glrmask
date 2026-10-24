@@ -10,6 +10,8 @@
 //! the grammar.  The production hierarchy currently keeps one-byte tails for
 //! ordinary leaf preparation and a two-byte compositional refinement. Unknown
 //! interiors widen locally; known parent postambles remain exact.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -820,11 +822,11 @@ fn r1_trie_and_reference_match_for_every_byte_without_changing_preparation() {
 #[cfg(test)]
 #[test]
 fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
-    use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend, Vocab};
+    use crate::{Grammar, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"X[a]!".to_vec()), (1, b"a]!".to_vec()),
         (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-    for mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-        let options = || BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa);
+    for mode in [MaskMode::C, MaskMode::ParserDwa] {
+        let options = || mode.build_options().parser_backend(ParserBackend::TemplateDfa);
         let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
@@ -2381,7 +2383,7 @@ fn pure_cut_postings_preserve_binary_sparse_same_cut_predicates() {
 #[cfg(test)]
 #[test]
 fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
-    use crate::{BuildOptions, Grammar, MaskStrategy, Vocab};
+    use crate::{Grammar, Vocab};
     use crate::runtime::BoundaryCandidateSummary;
     let vocab = Vocab::new(vec![
         (0, b"a".to_vec()), (7, b"aa".to_vec()), (19, b"aa".to_vec()),
@@ -2397,7 +2399,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
         (format!("start ::= r0?\n{large_body}"), true, true)];
     for (source, nullable, large) in cases {
         let constraint = Grammar::from_ebnf(&source).unwrap().compile_with_build_options(&vocab,
-            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+            MaskMode::C.build_options()).unwrap();
         assert!(constraint.has_template_parser());
         assert!(!constraint.table.is_present());
         let rules = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap().rules().len();

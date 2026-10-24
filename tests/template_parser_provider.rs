@@ -1,5 +1,6 @@
 //! The parser is supplied as data; no LR grammar or callback implementation is
 //! involved in constructing or replaying the parenthesis recognizer.
+use glrmask::test_modes::MaskMode;
 use std::cell::Cell;
 use glrmask::{BuildOptions, Constraint, Grammar, ParserBackend, Vocab};
 use glrmask::template_parser::{LexerDefinition, ParserDefinition, ParserProgram, ParserProvider,
@@ -219,7 +220,6 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
 
 #[test]
 fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
-    use glrmask::MaskStrategy;
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),
         (3,b"\"".to_vec()),(4,b"\"ab\"".to_vec()),(5,b"x".to_vec())]);
     let schema=r#"{"enum":["a","ab"]}"#;
@@ -230,10 +230,10 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
         (Grammar::from_json_schema(schema).unwrap(),"\"ab\""),
     ];
     for (source,word) in sources {
-        let c=source.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
+        let c=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options()
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_eq!(c.parser_backend(),ParserBackend::TemplateDfa);
-        let ordinary=source.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+        let ordinary=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options()).unwrap();
         let language: &[&[u8]]=if word.starts_with('"') {&[b"\"a\"",b"\"ab\""]} else {&[b"a",b"ab"]};
         for parser in native_representations(&c,&v).into_iter().chain(native_representations(&ordinary,&v)) {
             assert_finite_language(&parser,&v,language);
@@ -279,10 +279,10 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
     ).unwrap().prepare(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();
-        for optimization in [glrmask::MaskStrategy::Auto, glrmask::MaskStrategy::ParserDwa, glrmask::MaskStrategy::TokenClassTrie] {
+        for optimization in [MaskMode::Auto, MaskMode::ParserDwa, MaskMode::C] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 module.bind_snapshot("child", &child).and_then(|bound| bound.link_with(
-                    BuildOptions::default().optimization(optimization)))
+                    optimization.build_options()))
             }));
             assert!(outcome.is_ok(), "native composition must not touch an absent LR table");
             let linked=outcome.unwrap().unwrap();
@@ -401,8 +401,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         .enumerate().map(|(i,byte)|(i as u32,vec![byte])).collect());
     let compiled = glrmask::Grammar::from_json_schema(
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#).unwrap()
-        .compile_with_build_options(&vocab, glrmask::BuildOptions::default()
-            .optimization(glrmask::MaskStrategy::TokenClassTrie)
+        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
     let loaded = glrmask::Constraint::load(compiled.save(), &vocab).unwrap();
     for constraint in [&compiled,&loaded] {
@@ -424,12 +423,12 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
 #[test]
 fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::__private::{ConstraintExt, parser_backend_report};
-    use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+    use glrmask::{Constraint, Grammar, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
         (2, b"t".to_vec()), (3, b"rue".to_vec())]);
-    for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for mode in [MaskMode::C, MaskMode::ParserDwa] {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#).unwrap()
-            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)
+            .compile_with_build_options(&vocab, mode.build_options()
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         let loaded = Constraint::load(compiled.save(), &vocab).unwrap();
         let external = Constraint::load(

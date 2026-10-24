@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use super::*;
 
 fn vocab() -> Vocab {
@@ -23,7 +25,7 @@ fn compile_dynamic(vocab: &Vocab) -> DynamicConstraint {
     // Select that representation explicitly so restoring ordinary Dynamic LR
     // does not change the subject or require a process-global environment switch.
     let native = crate::Grammar::glrm(source()).compile_with_build_options(
-        vocab, crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenClassTrie),
+        vocab, MaskMode::C.build_options(),
     ).unwrap();
     DynamicConstraint::from_constraints(vec![native])
 }
@@ -273,15 +275,11 @@ fn current_dynamic_envelope_rejects_truncation_and_trailing_data() {
 #[test]
 fn canonical_and_static_public_routes_keep_complete_mask_words() {
     let vocab = vocab();
-    for optimization in [
-        crate::MaskStrategy::TokenClassTrie,
-        crate::MaskStrategy::ParserDwa,
-        crate::MaskStrategy::Auto,
-    ] {
+    for optimization in MaskMode::ALL {
         let direct = crate::Grammar::glrm(source())
             .compile_with_build_options(
                 &vocab,
-                crate::BuildOptions::default().optimization(optimization),
+                optimization.build_options(),
             )
             .unwrap();
         let loaded = crate::Constraint::load(direct.save(), &vocab).unwrap();
@@ -292,10 +290,14 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
         .unwrap();
 
         for constraint in [&direct, &loaded, &external] {
-            assert_eq!(
-                constraint.parser_backend(),
-                crate::ParserBackend::TemplateDfa,
-            );
+            // A is ordinary Dynamic TokenTrie and keeps its LR table; every
+            // other configuration is table-free.
+            if optimization != MaskMode::A {
+                assert_eq!(
+                    constraint.parser_backend(),
+                    crate::ParserBackend::TemplateDfa,
+                );
+            }
             for prefix in [b"".as_slice(), b"!!", b"!!x", b"!!x;"] {
                 let mut state = constraint.start();
                 assert!(state.commit_bytes(prefix));

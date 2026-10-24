@@ -1,15 +1,15 @@
-use glrmask::{BuildOptions, Constraint, Grammar, MarkerEvent, MaskStrategy, TokenSet, Vocab};
+use glrmask::test_modes::MaskMode;
+use glrmask::{Constraint, Grammar, MarkerEvent, TokenSet, Vocab};
 
-const MODES: [MaskStrategy; 4] = [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie,
-    MaskStrategy::ParserDwa, MaskStrategy::Auto];
+const MODES: [MaskMode; 5] = MaskMode::ALL;
 fn vocab(parts: &[&[u8]]) -> Vocab {
     Vocab::new(parts.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect())
 }
 fn events(state: &glrmask::ConstraintState<'_>) -> Vec<(u32,u64)> {
     state.marker_events().iter().map(|e| (e.id,e.byte_offset)).collect()
 }
-fn compile(source: &str, vocab: &Vocab, mode: MaskStrategy) -> Constraint {
-    Grammar::from_glrm(source).unwrap().compile_with_build_options(vocab, BuildOptions::default().optimization(mode)).unwrap()
+fn compile(source: &str, vocab: &Vocab, mode: MaskMode) -> Constraint {
+    Grammar::from_glrm(source).unwrap().compile_with_build_options(vocab, mode.build_options()).unwrap()
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn clone_masks_forcing_errors_and_eos_obey_batch_lifecycle() {
     let v=vocab(&[b"a",b"b",b"ab",b"BAD",b"<eos>"]);
     for mode in MODES {
         let c=Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(1) \"b\" @mark(2)\n").unwrap()
-            .compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([4])).unwrap();
+            .compile_with_build_options(&v,mode.build_options().end_tokens([4])).unwrap();
         let mut s=c.start();let initial=s.marker_events().to_vec();
         let _=s.mask();let _=s.forced_tokens();assert_eq!(s.marker_events(),initial);
         let mut fork=s.clone();assert!(fork.commit_token(2));
@@ -127,7 +127,7 @@ fn exact_model_events_and_marker_ids_are_distinct_namespaces() {
             let mut grammar=Grammar::from_glrm("start root\nextern token SEP\nnt root = \"a\" @mark(1) SEP @mark(2) \"b\" @mark(3)\n").unwrap()
                 ;
             grammar.bind("SEP", TokenSet::new([2])).unwrap();
-            let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            let c=grammar.compile_with_build_options(&v,mode.build_options()).unwrap();
             let mut s=c.start();assert!(s.commit_token(0));assert_eq!(events(&s),[(1,1)]);
             assert!(s.commit_token(2));assert_eq!(events(&s),[(2,1+spelling.len() as u64)],"special {mode:?}");
             assert!(s.commit_token(1));assert_eq!(events(&s),[(3,2+spelling.len() as u64)]);

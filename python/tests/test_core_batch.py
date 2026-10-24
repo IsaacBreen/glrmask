@@ -8,8 +8,13 @@ import numpy as np
 import pytest
 
 
-MODES = [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
-         glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
 
 
 def vocab():
@@ -66,11 +71,11 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
     for value in [glrmask.TokenSet([17]), glrmask.TokenSet([17, 29])]:
         m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
         m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
-        m2.precompile(v, mask_strategy=mode)
+        m2.precompile(v, **mode)
         m1.bind("X", value)
         m2.bind("X", value)
-        a = m1.compile(v, mask_strategy=mode)
-        b = m2.compile(v, mask_strategy=mode)
+        a = m1.compile(v, **mode)
+        b = m2.compile(v, **mode)
         assert np.array_equal(a.start().mask(), b.start().mask())
         for constraint in [a, b, glrmask.Constraint.load(b.save(), v)]:
             assert constraint.start().mask()[17]
@@ -84,7 +89,7 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
     v = vocab()
-    state = glrmask.Grammar.from_ebnf('r ::= "ab"').compile(v, mask_strategy=mode).start()
+    state = glrmask.Grammar.from_ebnf('r ::= "ab"').compile(v, **mode).start()
     assert state.forced_tokens() == [2]  # longest spelling of the forced bytes
     assert state.commit_token(0)
     assert state.forced_tokens() == [1]

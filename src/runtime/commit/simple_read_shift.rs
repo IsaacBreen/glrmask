@@ -325,7 +325,7 @@ mod tests {
             .compile_with(
                 &lexer,
                 &vocab,
-                TemplateBuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
+                TemplateBuildOptions::default().optimization(MaskStrategy::TokenTrie),
             )
             .unwrap();
         let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
@@ -519,7 +519,7 @@ mod tests {
         })
         .unwrap();
         let lexer = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-        for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for optimization in [MaskStrategy::TokenTrie, MaskStrategy::ParserDwa] {
             let fresh = parser
                 .compile_with(
                     &lexer,

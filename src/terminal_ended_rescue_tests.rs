@@ -8,6 +8,8 @@
 //! constraint against the exact TokenTrie compilation of the original source.
 //! A rescue that declines is surfaced as the original typed strategy decline,
 //! never as a silent TokenTrie recompile.
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
@@ -229,16 +231,16 @@ fn fill_mask(constraint: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
     (mask, state.is_accepting())
 }
 
-fn compile(case: &Case, strategy: MaskStrategy) -> Constraint {
+fn compile(case: &Case, strategy: MaskMode) -> Constraint {
     try_compile(case, strategy)
         .unwrap_or_else(|error| panic!("{strategy:?} compile failed: {error}"))
 }
 
-fn try_compile(case: &Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
+fn try_compile(case: &Case, strategy: MaskMode) -> crate::Result<Constraint> {
     let source = lark(case);
     Grammar::from_lark(&source)?.compile_with_build_options(
         &vocab(),
-        BuildOptions::default().optimization(strategy),
+        strategy.build_options(),
     )
 }
 
@@ -367,8 +369,8 @@ fn check_rescued(case: &Case, label: &str) {
     // production default is now sized for the real SQL/Go benchmarks.
     enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
-    let reference = compile(case, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile(case, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let started = Instant::now();
         let rescued = compile(case, strategy);
         eprintln!(
@@ -442,9 +444,9 @@ fn seed_cfg(rules: &[(usize, &[isize])], start: usize, bound: usize) -> Case {
 /// The grammar source for the 2530/360 seeds already includes empty
 /// alternatives in a shape the generic Lark emitter would reorder. Parse the
 /// canonical text directly instead.
-fn compile_source(source: &str, strategy: MaskStrategy) -> Constraint {
+fn compile_source(source: &str, strategy: MaskMode) -> Constraint {
     Grammar::from_lark(source).unwrap()
-        .compile_with_build_options(&vocab(), BuildOptions::default().optimization(strategy))
+        .compile_with_build_options(&vocab(), strategy.build_options())
         .unwrap_or_else(|error| panic!("{strategy:?} compile failed for {source:?}: {error}"))
 }
 
@@ -453,8 +455,8 @@ fn check_source_case(case: &Case, source: &str, label: &str) {
     // 10,000,000-unit default so the rescue is what publishes.
     enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
-    let reference = compile_source(source, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile_source(source, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let started = Instant::now();
         let rescued = compile_source(source, strategy);
         eprintln!(
@@ -682,7 +684,7 @@ fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
         bound: 3,
         rules,
     };
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let started = Instant::now();
         let error = expect_strategy_decline(
             try_compile(&case, strategy),
@@ -714,8 +716,8 @@ fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
     // default explicit now that the production default is larger.
     let _limit = TestBudgetLimit::set(10_000_000);
     let case = case(2, 4, V2_267);
-    let reference = compile(&case, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile(&case, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let started = Instant::now();
         let compiled = compile(&case, strategy);
         eprintln!(
@@ -735,8 +737,8 @@ fn legacy_template_grammar_does_not_enter_the_rescue() {
     disable_test_rescue();
     let case = case(0, 3, &[(0, &[-1]), (0, &[-2, -1])]);
     reset_test_rescue_entries();
-    let reference = compile(&case, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile(&case, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let compiled = compile(&case, strategy);
         assert_eq!(
             compiled.parser_backend(),
@@ -759,8 +761,8 @@ fn nullable_right_recursive_start_is_preserved_by_the_rescue() {
     enable_test_rescue();
     // start -> a | epsilon ; a -> "a" a | "a"
     let case = case(0, 4, &[(0, &[1]), (0, &[]), (1, &[-1, 1]), (1, &[-1])]);
-    let reference = compile(&case, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile(&case, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let rescued = compile(&case, strategy);
         assert_eq!(
             rescued.parser_backend(),
@@ -799,7 +801,7 @@ fn tiny_budget_returns_typed_decline() {
             (4, &[3, 1]),
         ],
     );
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         reset_test_rescue_entries();
         eprintln!("[tiny-budget] compiling {strategy:?} under limit=1");
         let error = {
@@ -832,7 +834,7 @@ fn rescue_disabled_returns_the_normal_typed_decline() {
     let _limit = TestBudgetLimit::set(10_000_000);
     reset_test_rescue_entries();
     let error = expect_strategy_decline(
-        try_compile(&case, MaskStrategy::ParserDwa),
+        try_compile(&case, MaskMode::ParserDwa),
         "rescue_disabled",
     );
     assert!(
@@ -859,8 +861,8 @@ fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[i
     enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
     let case = case(start, bound, rules);
-    let reference = compile(&case, MaskStrategy::TokenTrie);
-    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+    let reference = compile(&case, MaskMode::A);
+    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let started = Instant::now();
         let compiled = compile(&case, strategy);
         eprintln!(
@@ -942,12 +944,12 @@ fn json_vocab() -> Vocab {
 fn compile_with_te_first(
     grammar: Grammar,
     vocab: &Vocab,
-    strategy: MaskStrategy,
+    strategy: MaskMode,
 ) -> crate::Result<Constraint> {
     set_test_terminal_ended_rescue(Some(true));
     set_test_terminal_ended_first(Some(true));
     let result =
-        grammar.compile_with_build_options(vocab, BuildOptions::default().optimization(strategy));
+        grammar.compile_with_build_options(vocab, strategy.build_options());
     set_test_terminal_ended_first(None);
     set_test_terminal_ended_rescue(None);
     result
@@ -964,7 +966,7 @@ fn terminal_ended_first_json_schema_matches_the_exact_oracle() {
     let constraint = compile_with_te_first(
         Grammar::from_json_schema(SCHEMA).unwrap(),
         &json_vocab(),
-        MaskStrategy::ParserDwa,
+        MaskMode::ParserDwa,
     )
     .unwrap_or_else(|error| panic!("TE-first JSON Schema compile failed: {error}"));
     assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
@@ -985,7 +987,7 @@ fn terminal_ended_first_lark_event_matches_the_exact_oracle() {
     let constraint = compile_with_te_first(
         Grammar::from_lark("start: \"a\" <[1]>").unwrap(),
         &vocab(),
-        MaskStrategy::ParserDwa,
+        MaskMode::ParserDwa,
     )
     .unwrap_or_else(|error| panic!("TE-first Lark event compile failed: {error}"));
     assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
@@ -1058,11 +1060,11 @@ fn check_prepass_case(case: &Case, label: &str, budget: u64) -> bool {
     let _limit = TestBudgetLimit::set(budget);
     set_test_epsfree_prepass(Some(true));
     set_test_terminal_ended_rescue(Some(false));
-    let result = try_compile(case, MaskStrategy::ParserDwa);
+    let result = try_compile(case, MaskMode::ParserDwa);
     let compiled = match result {
         Ok(constraint) => {
             assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
-            let reference = compile(case, MaskStrategy::TokenTrie);
+            let reference = compile(case, MaskMode::A);
             check_matches_token_trie(&constraint, &reference, case);
             check_exact_oracle(&constraint, case);
             true

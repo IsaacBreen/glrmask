@@ -2,30 +2,34 @@
 /** GLRMask for Node.js. */
 export declare const version: string;
 
-/** How masks are computed, trading compile time against mask speed. */
+/** How masks are computed. */
 export declare const MaskStrategy: Readonly<{
-  /** `ParserDwa`, unless the module was precompiled with `TokenClassTrie`. The default. */
+  /** Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. */
   Auto: 'auto';
-  /** Precomputes masks: slowest compile, fastest masks. */
+  /** Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. */
   ParserDwa: 'parser-dwa';
-  /** Computes each mask by walking the vocabulary: fastest compile, slower masks. */
+  /** Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. */
   TokenTrie: 'token-trie';
-  /** Like `TokenTrie`, but treats tokens the grammar cannot tell apart as one. */
-  TokenClassTrie: 'token-class-trie';
+  /** Same as `TokenTrie`. */
+  FastCompile: 'token-trie';
+  /** Same as `ParserDwa`. */
+  FastMasks: 'parser-dwa';
 }>;
 /** A `MaskStrategy` value. */
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
 
-/** How masks are computed where one grammar meets another. */
+/** How masks are computed at grammar boundaries. */
 export declare const BoundaryMaskStrategy: Readonly<{
-  /** `ParserDwa`, falling back to `TokenTrie` when that would be too large. The default. */
+  /** `ParserDwa`, or `TokenTrie` when that would be too large. The default. */
   Auto: 'auto';
-  /** Precomputes boundary masks: slower compile, faster masks.
-   *
-   * Throws `GlrMaskError` if they would be too large. */
+  /** Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws `GlrMaskError` if it would be too large. */
   ParserDwa: 'parser-dwa';
-  /** Computes boundary masks as needed: faster compile, slower masks. */
+  /** Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks. */
   TokenTrie: 'token-trie';
+  /** Same as `TokenTrie`. */
+  FastCompile: 'token-trie';
+  /** Same as `ParserDwa`. */
+  FastMasks: 'parser-dwa';
 }>;
 /** A `BoundaryMaskStrategy` value. */
 export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
@@ -112,16 +116,16 @@ export declare class TokenSet implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** Options for compiling a grammar or module.
- *
- * They apply to every part of the compile, including bound grammars. */
+/** Options for compiling a grammar or module. */
 export interface CompileOptions {
-  /** How masks are computed. Defaults to `MaskStrategy.Auto`.
-   *
-   * Precompiled parts keep their precompiled masks. */
+  /** How masks are computed. Defaults to `MaskStrategy.Auto`. */
   maskStrategy?: MaskStrategy;
-  /** How masks are computed where one grammar meets another. Defaults to `BoundaryMaskStrategy.Auto`. */
+  /** How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
   boundaryMaskStrategy?: BoundaryMaskStrategy;
+  /** Whether `MaskStrategy.TokenTrie` parses with template DFAs instead of an LR table. Slower to compile, with faster masks. Defaults to `false`. */
+  templateDfas?: boolean;
+  /** Whether `MaskStrategy.TokenTrie` merges tokens that the grammar treats the same, so masks walk fewer tokens. Requires `templateDfas`. Defaults to `false`. */
+  mergeEquivalentTokens?: boolean;
 }
 
 /** A grammar, written as source text or built from an `Expr`. */
@@ -198,9 +202,7 @@ export declare class Expr implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A grammar plus its extern bindings and any precompiled work.
- *
- * Externs can stay unbound until `compile`. */
+/** A grammar you can compose with others and partly compile before its externs are bound. */
 export declare class Module implements Disposable {
   private readonly __moduleBrand: void;
   /** Creates a module from `grammar`. */

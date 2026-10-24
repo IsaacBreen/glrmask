@@ -2,8 +2,13 @@
 import pytest
 import glrmask
 
-MODES = [glrmask.MaskStrategy.FAST_BUILD, glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-         glrmask.MaskStrategy.FAST_RUNTIME, glrmask.MaskStrategy.AUTO]
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
 SOURCE = 'glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);'
 
 
@@ -15,7 +20,7 @@ def test_cold_canonical_forcing_is_silent_across_exact_events_and_markers(mode):
         'nt root=@mark(1) EVENT @mark(2) "a" @mark(3);'
     ))
     grammar.bind("EVENT", glrmask.TokenSet([10]))
-    compiled = grammar.compile(v, mask_strategy=mode)
+    compiled = grammar.compile(v, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), v)]:
         state = constraint.start()
         before = state.marker_events()
@@ -48,7 +53,7 @@ def events(state):
 @pytest.mark.parametrize("mode", MODES)
 def test_initial_split_and_fused_commits(mode):
     v = vocab()
-    c = glrmask.Grammar.from_glrm(SOURCE).compile(v, mask_strategy=mode)
+    c = glrmask.Grammar.from_glrm(SOURCE).compile(v, **mode)
     assert c.marker_ids() == [10, 20, 30]
     for trace in [[0, 1], [2]]:
         s = c.start()
@@ -70,7 +75,7 @@ def test_initial_split_and_fused_commits(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_save_load_external_vocab_and_compiled_children(mode):
     v = vocab()
-    c = glrmask.Grammar.from_glrm(SOURCE).compile(v, mask_strategy=mode)
+    c = glrmask.Grammar.from_glrm(SOURCE).compile(v, **mode)
     for restored in [glrmask.Constraint.load(c.save(), v),
                      glrmask.Constraint.load(c.save(), vocab=v)]:
         assert restored.marker_ids() == [10, 20, 30]
@@ -82,9 +87,9 @@ def test_save_load_external_vocab_and_compiled_children(mode):
     ))
     child = glrmask.Module(glrmask.Grammar.from_glrm(SOURCE))
     assert parent.bind("child", child) is None
-    parent.precompile(v, mask_strategy=mode)
+    parent.precompile(v, **mode)
     prepared = glrmask.Module.load(parent.save())
-    linked = prepared.compile(v, mask_strategy=mode)
+    linked = prepared.compile(v, **mode)
     assert linked.marker_ids() == [10, 20, 30, 40, 50]
     s = linked.start(); assert events(s) == [(40, 0)]
     assert s.commit_token(5)
@@ -96,7 +101,7 @@ def test_markers_are_not_emitted_inside_an_incomplete_terminal(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"c", 3: b"abc"})
     c = glrmask.Grammar.from_glrm(
         'glrm 1; start root; t WORD = "abc"; nt root = @mark(0) WORD @mark(1);'
-    ).compile(v, mask_strategy=mode)
+    ).compile(v, **mode)
     s = c.start(); assert events(s) == [(0, 0)]
     assert s.commit_token(0); assert events(s) == []
     assert s.commit_token(1); assert events(s) == []
@@ -108,7 +113,7 @@ def test_byte_offsets_can_cross_utf8_model_token_boundaries(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b"\xc3", 1: b"\xa9", 2: b"x", 3: "éx".encode()})
     c = glrmask.Grammar.from_glrm(
         'glrm 1; start root; nt root = "é" @mark(1) "x" @mark(2);'
-    ).compile(v, mask_strategy=mode)
+    ).compile(v, **mode)
     s = c.start(); assert s.commit_token(0); assert events(s) == []
     assert s.commit_token(1); assert events(s) == [(1, 2)]
     assert s.commit_token(2); assert events(s) == [(2, 3)]
@@ -120,7 +125,7 @@ def test_ambiguity_is_a_union_of_observations_not_an_error(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"c"})
     c = glrmask.Grammar.from_glrm(
         'glrm 1; start root; nt root = "a" @mark(1) "b" | "a" @mark(2) "c";'
-    ).compile(v, mask_strategy=mode)
+    ).compile(v, **mode)
     s = c.start(); assert s.commit_token(0)
     before = events(s); assert before == [(1, 1), (2, 1)]
     assert s.commit_token(1)
@@ -130,7 +135,7 @@ def test_ambiguity_is_a_union_of_observations_not_an_error(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_clone_and_failed_commits_do_not_leak_marker_batches(mode):
-    v = vocab(); c = glrmask.Grammar.from_glrm(SOURCE).compile(v, mask_strategy=mode)
+    v = vocab(); c = glrmask.Grammar.from_glrm(SOURCE).compile(v, **mode)
     original = c.start(); branch = original.copy()
     assert branch.commit_token(0)
     assert events(branch) == [(20, 1)] and events(original) == [(10, 0)]
@@ -148,7 +153,7 @@ def test_empty_spelling_special_events_do_not_become_marker_tokens(mode):
         'glrm 1; start root; extern token EVENT; nt root = @mark(0) EVENT @mark(1) "a" @mark(2);'
     ))
     assert grammar.bind("EVENT", glrmask.TokenSet([10])) is None
-    c = grammar.compile(v, mask_strategy=mode)
+    c = grammar.compile(v, **mode)
     s = c.start(); assert events(s) == [(0, 0)]
     assert s.mask()[10]
     assert s.commit_token(10); assert events(s) == [(1, 0)]
@@ -161,7 +166,7 @@ def test_repeated_and_sparse_ids_are_deduplicated_without_id_sized_storage(mode)
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"aa"})
     c = glrmask.Grammar.from_glrm(
         'glrm 1; start root; nt root = @mark(4294967295) @mark(4294967295) ("a" @mark(7))+;'
-    ).compile(v, mask_strategy=mode)
+    ).compile(v, **mode)
     assert c.marker_ids() == [7, 4294967295]
     s = c.start(); assert events(s) == [(4294967295, 0)]
     assert s.commit_token(1); assert events(s) == [(7, 1), (7, 2)]
@@ -189,10 +194,10 @@ def test_parent_markers_surround_a_prepared_json_schema_child(mode):
     child = glrmask.Module(glrmask.Grammar.from_json_schema({"type": "object",
         "properties": {"x": {"type": "integer"}}, "required": ["x"],
         "additionalProperties": False}))
-    parent.precompile(v, mask_strategy=mode)
-    child.precompile(v, mask_strategy=mode)
+    parent.precompile(v, **mode)
+    child.precompile(v, **mode)
     assert parent.bind("C", child) is None
-    linked = parent.compile(v, mask_strategy=mode)
+    linked = parent.compile(v, **mode)
     for c in [linked, glrmask.Constraint.load(linked.save(), v)]:
         for trace in [[0, 1, 2], [3], [0, 4, 5, 6, 7, 8, 2]]:
             s = c.start(); observed = events(s)
@@ -211,10 +216,10 @@ def test_nullable_child_can_report_more_than_one_possible_end(mode):
         'nt root=@mark(1) "(" @mark(2) C @mark(3) ")" @mark(4);'
     ))
     child = glrmask.Module(glrmask.Grammar.from_glrm('glrm 1; start body; nt body="a"?;'))
-    parent.precompile(v, mask_strategy=mode)
-    child.precompile(v, mask_strategy=mode)
+    parent.precompile(v, **mode)
+    child.precompile(v, **mode)
     assert parent.bind("C", child) is None
-    linked = parent.compile(v, mask_strategy=mode)
+    linked = parent.compile(v, **mode)
     for c in [linked, glrmask.Constraint.load(linked.save(), v)]:
         for trace in [[0, 1, 2], [3], [4]]:
             s = c.start(); observed = events(s)

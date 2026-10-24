@@ -8,17 +8,29 @@ pub struct glrmask_expr(pub(super) g::Expr);
     pub struct_size: usize,
     pub mask_strategy: u32,
     pub boundary_mask_strategy: u32,
+    pub template_dfas: u32,
+    pub merge_equivalent_tokens: u32,
 }
 /// kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 TokenSet. Inputs are borrowed for this call only.
 #[repr(C)] pub struct glrmask_expr_operand { pub kind: u32, pub handle: *const c_void }
 
 pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g::CompileOptions> {
     if p.is_null() { return Ok(g::CompileOptions::default()); }
-    let o = unsafe { read(p)? };
-    if o.struct_size != size_of::<glrmask_compile_options>() { return Err(Error::invalid("compile-options struct_size does not match ABI")); }
+    // The first three fields are the original ABI. A caller built against it
+    // passes the shorter struct; its missing fields count as zero.
+    let minimum = size_of::<usize>() + 2 * size_of::<u32>();
+    let struct_size = unsafe { std::ptr::addr_of!((*p).struct_size).read() };
+    if struct_size < minimum || struct_size > size_of::<glrmask_compile_options>() {
+        return Err(Error::invalid("compile-options struct_size does not match ABI"));
+    }
+    let mut o: glrmask_compile_options = unsafe { std::mem::zeroed() };
+    unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), struct_size) };
+    o.struct_size = struct_size;
     Ok(core::compile_options(
         core::mask_strategy(o.mask_strategy)?,
         core::boundary_mask_strategy(o.boundary_mask_strategy)?,
+        o.template_dfas != 0,
+        o.merge_equivalent_tokens != 0,
     ))
 }
 
@@ -27,6 +39,8 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
         struct_size: size_of::<glrmask_compile_options>(),
         mask_strategy: 0,
         boundary_mask_strategy: 0,
+        template_dfas: 0,
+        merge_equivalent_tokens: 0,
     }
 }
 

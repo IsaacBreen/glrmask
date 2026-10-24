@@ -79,7 +79,7 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 1 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 2 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
 

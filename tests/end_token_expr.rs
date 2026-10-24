@@ -41,7 +41,7 @@ fn end_token_expression_fast_path_is_exact() {
     for strategy in [MaskStrategy::ParserDwa, MaskStrategy::TokenTrie] {
         let v = vocab();
         let c = root(body(), [99])
-            .compile_with(&v, CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&v, strategy.compile_options())
             .unwrap();
         assert!(!c.has_child_components());
 

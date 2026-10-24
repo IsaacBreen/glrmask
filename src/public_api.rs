@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 use snapshot_map::SnapshotMap as OrdMap;
@@ -30,61 +32,84 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// How masks are computed, trading compile time against mask speed.
+/// How masks are computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
-    /// [`ParserDwa`](Self::ParserDwa), unless the module was precompiled with
-    /// [`TokenClassTrie`](Self::TokenClassTrie). The default.
+    /// Reuses any precompiled work; otherwise [`ParserDwa`](Self::ParserDwa), or
+    /// [`TokenTrie`](Self::TokenTrie) when that would be too large. The default.
     #[default]
     Auto,
-    /// Precomputes masks: slowest compile, fastest masks.
+    /// Builds a parser DWA for the grammar. Slowest to compile, with the fastest
+    /// masks.
     ParserDwa,
-    /// Computes each mask by walking the vocabulary: fastest compile, slower masks.
+    /// Computes each mask by walking the vocabulary. Fastest to compile, with
+    /// slower masks.
+    ///
+    /// See [`CompileOptions::template_dfas`] and
+    /// [`CompileOptions::merge_equivalent_tokens`].
     TokenTrie,
-    /// Like [`TokenTrie`](Self::TokenTrie), but treats tokens the grammar cannot
-    /// tell apart as one.
-    TokenClassTrie,
 }
 
 impl MaskStrategy {
     /// Same as [`TokenTrie`](Self::TokenTrie).
-    pub const FAST_BUILD: Self = Self::TokenTrie;
+    pub const FAST_COMPILE: Self = Self::TokenTrie;
     /// Same as [`ParserDwa`](Self::ParserDwa).
-    pub const FAST_RUNTIME: Self = Self::ParserDwa;
-
-    pub(crate) fn key(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::ParserDwa => 1,
-            Self::TokenTrie => 2,
-            Self::TokenClassTrie => 3,
-        }
-    }
+    pub const FAST_MASKS: Self = Self::ParserDwa;
 }
 
-/// How masks are computed where one grammar meets another.
+/// How masks are computed at grammar boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
-    /// [`ParserDwa`](Self::ParserDwa), falling back to
-    /// [`TokenTrie`](Self::TokenTrie) when that would be too large. The default.
+    /// [`ParserDwa`](Self::ParserDwa), or [`TokenTrie`](Self::TokenTrie) when that
+    /// would be too large. The default.
     #[default]
     Auto,
-    /// Precomputes boundary masks: slower compile, faster masks.
-    ///
-    /// Fails with [`ErrorKind::ResourceLimit`](crate::ErrorKind::ResourceLimit) if
-    /// they would be too large.
+    /// Builds a parser DWA across each boundary. Slower to compile, with faster
+    /// masks. Fails with [`ErrorKind::ResourceLimit`](crate::ErrorKind::ResourceLimit)
+    /// if it would be too large.
     ParserDwa,
-    /// Computes boundary masks as needed: faster compile, slower masks.
+    /// Walks the vocabulary at each boundary as needed. Faster to compile, with
+    /// slower masks.
     TokenTrie,
 }
 
 impl BoundaryMaskStrategy {
     /// Same as [`TokenTrie`](Self::TokenTrie).
-    pub const FAST_BUILD: Self = Self::TokenTrie;
+    pub const FAST_COMPILE: Self = Self::TokenTrie;
     /// Same as [`ParserDwa`](Self::ParserDwa).
-    pub const FAST_RUNTIME: Self = Self::ParserDwa;
+    pub const FAST_MASKS: Self = Self::ParserDwa;
+}
+
+/// Internal mask engine. The wire tags are unchanged so `GLRASM03` module
+/// artifacts keep their meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum Engine {
+    /// Reuses retained work; otherwise [`ParserDwa`](Self::ParserDwa).
+    #[default]
+    Auto,
+    ParserDwa,
+    /// [`TokenTrie`](Self::TokenTrie) with the full vocabulary (combinations A
+    /// and B; nothing is retained).
+    TokenTrie,
+    /// [`TokenTrie`](Self::TokenTrie) over the merged vocabulary (combination C).
+    MergedTokenTrie,
+}
+
+impl Engine {
+    pub(crate) fn key(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::ParserDwa => 1,
+            Self::TokenTrie => 2,
+            Self::MergedTokenTrie => 3,
+        }
+    }
+
+    pub(crate) fn is_token_trie(self) -> bool {
+        matches!(self, Self::TokenTrie | Self::MergedTokenTrie)
+    }
 }
 
 /// An extern declared by a grammar: a named slot to bind later.
@@ -223,6 +248,8 @@ pub enum ParserBackend {
 pub struct BuildOptions {
     end_tokens: Vec<u32>,
     optimization: MaskStrategy,
+    template_dfas: bool,
+    merge_equivalent_tokens: bool,
     parser_backend: ParserBackend,
     boundary_trigger: Option<BoundaryTriggerDetail>,
 }
@@ -237,6 +264,20 @@ impl BuildOptions {
     /// Defaults to [`MaskStrategy::Auto`].
     pub fn optimization(mut self, optimization: MaskStrategy) -> Self {
         self.optimization = optimization;
+        self
+    }
+
+    /// Parses with template DFAs instead of an LR table.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn template_dfas(mut self, enable: bool) -> Self {
+        self.template_dfas = enable;
+        self
+    }
+
+    /// Merges tokens that the grammar treats the same. Requires template DFAs.
+    pub fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
+        self.merge_equivalent_tokens = enable;
         self
     }
 
@@ -258,8 +299,62 @@ impl BuildOptions {
         &self.end_tokens
     }
 
-    pub(crate) fn optimization_value(&self) -> MaskStrategy {
-        self.optimization
+    /// The internal engine for these options, rejecting combination D.
+    pub(crate) fn engine(&self) -> Result<Engine> {
+        engine_for(self.optimization, self.template_dfas, self.merge_equivalent_tokens)
+    }
+
+    /// The TokenTrie parser backend for these options.
+    pub(crate) fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
+        token_trie_backend(self.template_dfas)
+    }
+}
+
+/// Derive the internal engine from the public switches.
+///
+/// Merging equivalent tokens needs the template parser: without it the merged
+/// vocabulary would have to be paired with a retained LR table, which no
+/// backend produces.
+pub(crate) fn engine_for(
+    strategy: MaskStrategy,
+    template_dfas: bool,
+    merge_equivalent_tokens: bool,
+) -> Result<Engine> {
+    if merge_equivalent_tokens && !template_dfas {
+        return Err(Error::StrategyUnsupported(
+            "merging equivalent tokens requires template DFAs".into(),
+        ));
+    }
+    Ok(match strategy {
+        MaskStrategy::Auto => Engine::Auto,
+        MaskStrategy::ParserDwa => Engine::ParserDwa,
+        MaskStrategy::TokenTrie if merge_equivalent_tokens => Engine::MergedTokenTrie,
+        MaskStrategy::TokenTrie => Engine::TokenTrie,
+    })
+}
+
+pub(crate) fn token_trie_backend(
+    template_dfas: bool,
+) -> crate::runtime::parser_backend::DynamicParserBackend {
+    use crate::runtime::parser_backend::DynamicParserBackend;
+    if template_dfas { DynamicParserBackend::Native } else { DynamicParserBackend::LrTable }
+}
+
+impl Engine {
+    /// Link options that reproduce this engine for an already prepared body.
+    pub(crate) fn build_options(self) -> BuildOptions {
+        let (optimization, template_dfas, merge_equivalent_tokens) = match self {
+            Self::Auto => (MaskStrategy::Auto, false, false),
+            Self::ParserDwa => (MaskStrategy::ParserDwa, false, false),
+            Self::TokenTrie => (MaskStrategy::TokenTrie, false, false),
+            Self::MergedTokenTrie => (MaskStrategy::TokenTrie, true, true),
+        };
+        BuildOptions {
+            optimization,
+            template_dfas,
+            merge_equivalent_tokens,
+            ..BuildOptions::default()
+        }
     }
 }
 
@@ -723,19 +818,24 @@ impl Grammar {
         options: BuildOptions,
     ) -> Result<RuntimeConstraint> {
         graph::source_preflight(self)?;
+        let engine = options.engine()?;
         if matches!(self.source,GrammarSource::Lark(_)){return self.resolve_lark(vocab)?.compile_with_build_options(vocab,options);}
         self.validate_exact_target(vocab)?;
         if let Some(name) = self.unresolved_external_names()?.first() {
             return Err(Error::Compilation(format!(
-                "external {name:?} is unbound; prepare() if a reusable pre-link artifact is intended",
+                "extern {name:?} is not bound; bind it before compiling",
             )));
         }
-        if options.optimization == MaskStrategy::TokenTrie {
-            let constraint = self.compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?;
+        if engine == Engine::TokenTrie {
+            let constraint = self.compile_token_trie(
+                vocab,
+                options.boundary_trigger.unwrap_or_default(),
+                options.token_trie_backend(),
+            )?;
             return constraint.with_end_tokens(options.end_token_ids());
         }
         if options.parser_backend == ParserBackend::TemplateDfa {
-            if options.optimization == MaskStrategy::TokenClassTrie && self.bindings.is_empty() {
+            if engine == Engine::MergedTokenTrie && self.bindings.is_empty() {
                 return self.finish_template_attempt(vocab, &options, || {
                     let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                     // A partial template build must not leave prepared caches on
@@ -788,10 +888,10 @@ impl Grammar {
                     spec.automatic_boundary_selection = true;
                     if let Some(name) = spec.unbound_grammar_names.first() {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} is unbound; prepare() if a reusable pre-link artifact is intended",
+                            "extern {name:?} is not bound; bind it before compiling",
                         )));
                     }
-                    let mut constraint = spec.compile_final(attempt_options.optimization_value())?;
+                    let mut constraint = spec.compile_final(engine)?;
                     ensure_runnable_constraint(&constraint)?;
                     let detail = attempt_options.boundary_trigger.unwrap_or_default();
                     if attempt_options.parser_backend == ParserBackend::TemplateDfa {
@@ -836,7 +936,7 @@ impl Grammar {
             report_route, RescueExperiment, RescueOutcome, Route,
         };
         let experiment = RescueExperiment::read();
-        let strategy = options.optimization;
+        let strategy = options.engine()?;
         let template = options.parser_backend == ParserBackend::TemplateDfa;
         let te_first = experiment.terminal_ended_rescue
             && experiment.terminal_ended_first
@@ -844,7 +944,7 @@ impl Grammar {
             && self.bindings.is_empty()
             && matches!(
                 strategy,
-                MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie | MaskStrategy::Auto
+                Engine::ParserDwa | Engine::MergedTokenTrie | Engine::Auto
             );
         let mut route = Route::Normal;
         let mut outcome = RescueOutcome::NotTried;
@@ -875,7 +975,7 @@ impl Grammar {
                                 if crate::compiler::compile::compile_profile_enabled() {
                                     eprintln!(
                                         "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=ok",
-                                        options.optimization,
+                                        strategy,
                                     );
                                 }
                                 route = Route::TerminalEnded;
@@ -886,7 +986,7 @@ impl Grammar {
                                 if crate::compiler::compile::compile_profile_enabled() {
                                     eprintln!(
                                         "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=declined reason={rescue_error}",
-                                        options.optimization,
+                                        strategy,
                                     );
                                 }
                                 outcome = RescueOutcome::Declined(rescue_error.to_string());
@@ -896,17 +996,21 @@ impl Grammar {
                     if crate::compiler::compile::compile_profile_enabled() {
                         eprintln!(
                             "[glrmask/profile][template_decline] strategy={:?} stage={} reason={error}",
-                            options.optimization,
+                            strategy,
                             error.decline_stage(),
                         );
                     }
                     // Only Auto may pick a different exact strategy; an explicit
                     // strategy request is never silently replaced.
-                    if options.optimization == MaskStrategy::Auto {
+                    if strategy == Engine::Auto {
+                        // The fallback is exactly an explicit TokenTrie request
+                        // with the same two switches.
                         let constraint = self
-                            .compile_token_trie(
+                            .compile_requested_token_trie(
                                 vocab,
                                 options.boundary_trigger.unwrap_or_default(),
+                                options.template_dfas,
+                                options.merge_equivalent_tokens,
                             )?
                             .with_end_tokens(options.end_token_ids())?;
                         route = Route::TokenTrieFallback;
@@ -1140,10 +1244,15 @@ impl Grammar {
     // Use the ordinary Dynamic compiler with one complete, unsplit source
     // body. Resolve bindings as typed nodes before compilation, without
     // rebuilding the resulting Constraint through the native/O2 path.
-    pub(crate) fn compile_token_trie(&self, vocab: &Vocab, boundary: BoundaryTriggerDetail) -> Result<RuntimeConstraint> {
+    pub(crate) fn compile_token_trie(
+        &self,
+        vocab: &Vocab,
+        boundary: BoundaryTriggerDetail,
+        backend: crate::runtime::parser_backend::DynamicParserBackend,
+    ) -> Result<RuntimeConstraint> {
         graph::source_preflight(self)?;
         if matches!(self.source, GrammarSource::Lark(_)) {
-            return self.resolve_lark(vocab)?.compile_token_trie(vocab, boundary);
+            return self.resolve_lark(vocab)?.compile_token_trie(vocab, boundary, backend);
         }
         self.validate_exact_target(vocab)?;
         let named = self.resolve_dynamic_source(vocab, false)?;
@@ -1151,11 +1260,87 @@ impl Grammar {
             GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
             _ => crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         };
-        let mut constraint = crate::import::compile_dynamic_named_single(named, vocab, construction, matches!(self.source, GrammarSource::JsonSchema(_)))?;
+        let mut constraint = crate::import::compile_dynamic_named_single_with_backend(
+            named,
+            vocab,
+            construction,
+            matches!(self.source, GrammarSource::JsonSchema(_)),
+            backend,
+        )?;
         let _ = constraint.late_bind_vocab.set(vocab.clone());
         ensure_runnable_constraint(&constraint)?;
         apply_final_boundary_trigger(&mut constraint, boundary)?;
         Ok(constraint)
+    }
+
+    /// Compile the whole grammar as TokenTrie over the merged vocabulary
+    /// (combination C). The merged vocabulary needs the template parser, so no
+    /// parser backend argument is accepted.
+    pub(crate) fn compile_merged_token_trie(
+        &self,
+        vocab: &Vocab,
+        boundary: BoundaryTriggerDetail,
+    ) -> Result<RuntimeConstraint> {
+        graph::source_preflight(self)?;
+        if matches!(self.source, GrammarSource::Lark(_)) {
+            return self.resolve_lark(vocab)?.compile_merged_token_trie(vocab, boundary);
+        }
+        self.validate_exact_target(vocab)?;
+        let merge_error = |e: Error| {
+            if e.is_strategy_decline() {
+                e
+            } else {
+                Error::Compilation(format!(
+                    "cannot merge equivalent tokens for this grammar: {e}"
+                ))
+            }
+        };
+        let mut inner = match self.source {
+            GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
+                crate::import::compile_component_shell_balanced(self.component()?, vocab, &[])
+                    .map_err(merge_error)?
+            }
+            _ => {
+                let dynamic = match &self.source {
+                    GrammarSource::Lark(source) => {
+                        DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab)
+                    }
+                    GrammarSource::JsonSchema(source) => {
+                        DynamicConstraint::from_json_schema_with_bounded_template_parser(source, vocab)
+                    }
+                    _ => unreachable!(),
+                }
+                .map_err(merge_error)?;
+                let mut components = dynamic.into_constraints();
+                if components.len() != 1 {
+                    return Err(Error::Compilation(
+                        "cannot merge equivalent tokens for this grammar: requires one compiled component".into(),
+                    ));
+                }
+                components.pop().unwrap()
+            }
+        };
+        let _ = inner.late_bind_vocab.set(vocab.clone());
+        inner.install_template_parser_from_compile()?;
+        ensure_runnable_constraint(&inner)?;
+        apply_final_boundary_trigger(&mut inner, boundary)?;
+        Ok(inner)
+    }
+
+    /// Compile a TokenTrie request with the supplied switches, whether they
+    /// were explicit or reached through `Auto`'s decline fallback.
+    fn compile_requested_token_trie(
+        &self,
+        vocab: &Vocab,
+        boundary: BoundaryTriggerDetail,
+        template_dfas: bool,
+        merge_equivalent_tokens: bool,
+    ) -> Result<RuntimeConstraint> {
+        if merge_equivalent_tokens {
+            self.compile_merged_token_trie(vocab, boundary)
+        } else {
+            self.compile_token_trie(vocab, boundary, token_trie_backend(template_dfas))
+        }
     }
 
     /// Creates a grammar from an expression.
@@ -1649,10 +1834,10 @@ impl<'a> ConstraintSpec<'a> {
         })
     }
 
-    fn compile_final(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
+    fn compile_final(&self, optimization: Engine) -> Result<RuntimeConstraint> {
         match optimization {
-            MaskStrategy::TokenTrie => Ok(self.compile_dynamic()?.into_constraint()),
-            MaskStrategy::TokenClassTrie => {
+            Engine::TokenTrie => Ok(self.compile_dynamic()?.into_constraint()),
+            Engine::MergedTokenTrie => {
                 let dynamic = self.compile_dynamic()?;
                 collapse_dynamic_alternatives(
                     dynamic.into_constraints(),
@@ -1660,7 +1845,7 @@ impl<'a> ConstraintSpec<'a> {
                     SegmentedBoundaryBackend::Dynamic,
                 )
             }
-            MaskStrategy::Auto | MaskStrategy::ParserDwa => self.compile(),
+            Engine::Auto | Engine::ParserDwa => self.compile(),
         }
     }
 
@@ -2037,7 +2222,7 @@ impl GrammarBinding<'_> {
                         }
                     }
                     let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
-                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
+                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(Engine::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {
                     let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
@@ -2079,7 +2264,7 @@ impl GrammarBinding<'_> {
                         )));
                     }
                     let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
-                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
+                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(Engine::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {
                     let spec = ConstraintSpec::builder(grammar, vocab)?.build()?;
@@ -2610,11 +2795,11 @@ fn compile_exact_token_adapter(vocab: &Vocab, token_ids: &[(u32, u32)]) -> Resul
 fn boundary_for_optimization(
     parent: &RuntimeConstraint,
     children: &[(String, Arc<RuntimeConstraint>)],
-    optimization: MaskStrategy,
+    optimization: Engine,
 ) -> Result<SegmentedBoundaryBackend> {
     match optimization {
-        MaskStrategy::TokenTrie | MaskStrategy::TokenClassTrie => Ok(SegmentedBoundaryBackend::Dynamic),
-        MaskStrategy::Auto | MaskStrategy::ParserDwa => {
+        Engine::TokenTrie | Engine::MergedTokenTrie => Ok(SegmentedBoundaryBackend::Dynamic),
+        Engine::Auto | Engine::ParserDwa => {
             select_supported_boundary(parent, children)
         }
     }
@@ -2808,7 +2993,7 @@ impl PreparedGrammar {
         let mut next=self.clone();next.bind(name,value)?;Ok(next)
     }
 
-    fn materialize(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
+    fn materialize(&self, optimization: Engine) -> Result<RuntimeConstraint> {
         self.validate_slot_manifest()?;
         if self.bindings.is_empty() {
             return Ok(self.inner.as_ref().clone());
@@ -2880,7 +3065,7 @@ impl PreparedGrammar {
         })
     }
 
-    fn materialize_template_components(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
+    fn materialize_template_components(&self, optimization: Engine) -> Result<RuntimeConstraint> {
         self.validate_slot_manifest()?;
         let vocab = constraint_vocab(self.inner.as_ref());
         let mut parent = self.inner.as_ref().clone();
@@ -2915,7 +3100,7 @@ impl PreparedGrammar {
         if children.is_empty(){return Ok(parent);}
         crate::error::catch_internal_invariant(|| {
             let mut linked = crate::runtime::parser_backend::link::compose_owned(parent, children, &vocab)?;
-            if optimization == MaskStrategy::ParserDwa {
+            if optimization == Engine::ParserDwa {
                 crate::compiler::template_boundary::install(&mut linked, &vocab)?;
             }
             Ok(linked)
@@ -2930,9 +3115,10 @@ impl PreparedGrammar {
                 "external {name:?} is still unbound",
             )));
         }
+        let engine = options.engine()?;
         let mut constraint = if options.parser_backend == ParserBackend::TemplateDfa && self.requires_template_linker() {
-            self.materialize_template_components(options.optimization_value())?
-        } else { self.materialize(options.optimization_value())? };
+            self.materialize_template_components(engine)?
+        } else { self.materialize(engine)? };
         ensure_runnable_constraint(&constraint)?;
         if options.parser_backend == ParserBackend::TemplateDfa {
             constraint.install_template_parser()?;
@@ -3270,7 +3456,7 @@ mod tests {
         let (vocab, parent, child) = compose_owned_test_fixture();
         let parent_bytes = parent.save(); let parent_mask = parent.inner.start().mask();
         let child = Arc::new(child); let child_bytes = child.save(); let child_mask = child.start().mask();
-        let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
+        let options = MaskMode::C.build_options().parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
         let borrowed_bound = parent.bind_snapshot("child", child.as_ref()).unwrap();
         let owned_bound = parent.bind_snapshot("child", Arc::clone(&child)).unwrap();
         let borrowed_bytes = borrowed_bound.save(); let owned_bytes = owned_bound.save();
@@ -6281,7 +6467,7 @@ mod final_unlinked_optimization_tests {
         assert!(bound.inner.static_dynamic_overlay.is_none(), "bind must not compile a boundary eagerly");
 
         let fast_build = bound.link_with(
-            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
+            MaskMode::C.build_options(),
         ).unwrap();
         let fast_runtime = bound.link_with(
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -6293,7 +6479,7 @@ mod final_unlinked_optimization_tests {
         let loaded = PreparedGrammar::load(bound.save(), &vocab).unwrap();
         assert!(loaded.inner.late_grammar_slots.iter().any(|slot| slot.name == "child"));
         assert_dynamic_boundary(&loaded.link_with(
-            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
+            MaskMode::C.build_options(),
         ).unwrap());
         assert_static_boundary(&loaded.link_with(
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -6479,7 +6665,7 @@ mod cached_parent_main_tests {
         let fast_build = grammar
             .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
+                MaskMode::C.build_options(),
             )
             .unwrap();
         let fast_runtime = grammar
@@ -6529,11 +6715,11 @@ mod final_boundary_option_tests {
     fn trigger_metadata_exists_before_first_use_in_every_public_mode() {
         let v = vocab();
         let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#).unwrap();
-        for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for mode in MaskMode::ALL {
             for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
                 let result = grammar.compile_with_build_options(&v,
-                    BuildOptions::default().optimization(mode).boundary_trigger(detail));
-                if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
+                    mode.build_options().boundary_trigger(detail));
+                if mode == MaskMode::A && detail == BoundaryTriggerDetail::Exact {
                     assert!(result.unwrap_err().to_string().contains("retained-LR Dynamic"));
                     continue;
                 }
@@ -6606,11 +6792,11 @@ mod final_ordinary_dynamic_selection_tests {
                 assert_eq!(a.mask(),b.mask());assert_eq!(a.is_accepting(),b.is_accepting());
             }
         }
-        let balanced=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
+        let balanced=g.compile_with_build_options(&v,MaskMode::C.build_options()).unwrap();
         assert!(balanced.uses_dynamic_runtime()); assert!(balanced.has_template_parser());
         assert!(!balanced.table.is_present());
-        for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
-            assert!(!g.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap().uses_dynamic_runtime());
+        for mode in [MaskMode::Auto,MaskMode::ParserDwa] {
+            assert!(!g.compile_with_build_options(&v,mode.build_options()).unwrap().uses_dynamic_runtime());
         }
     }
 }
@@ -6721,8 +6907,8 @@ mod static_whole_token_regression_tests {
         let mut word=vec![b'a';30];word.push(b'b');
         for entries in [vec![(3,word.clone())],vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),(3,word.clone())]] {
             let singleton=entries.len()==1;let v=Vocab::new(entries);
-            for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
-                let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            for mode in [MaskMode::Auto,MaskMode::ParserDwa] {
+                let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 assert!(c.direct_regular_automaton.is_some());
                 for c in [c.clone(),RuntimeConstraint::load(c.save(), &v).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
@@ -6925,18 +7111,18 @@ mod tiny_cfg_compile_blowup_tests {
         }
     }
 
-    fn compile(case: &Case, strategy: MaskStrategy) -> RuntimeConstraint {
+    fn compile(case: &Case, strategy: MaskMode) -> RuntimeConstraint {
         let source = lark(case);
         let grammar = Grammar::from_lark(&source).unwrap();
         let module = Module::new(&grammar);
         module
-            .compile_with(&vocabulary(), CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&vocabulary(), strategy.compile_options())
             .unwrap()
     }
 
     #[test]
     fn compact_nullable_left_recursive_grammar_builds_minimal_templates() {
-        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        for strategy in [MaskMode::C, MaskMode::ParserDwa] {
             let constraint = compile(&COMPACT, strategy);
             assert!(
                 !constraint.table.is_present(),
@@ -6972,9 +7158,8 @@ mod module_build_overhead_tests {
         vocab
     }
 
-    fn median(mut values: Vec<f64>) -> f64 {
-        values.sort_by(|a, b| a.total_cmp(b));
-        values[values.len() / 2]
+    fn minimum(values: &[f64]) -> f64 {
+        values.iter().copied().fold(f64::INFINITY, f64::min)
     }
 
     /// A standalone Module builds the same default TokenSet trigger as the
@@ -7010,9 +7195,32 @@ mod module_build_overhead_tests {
             "Module and Grammar must agree on the standalone token set"
         );
 
+        // One untimed warm-up pair: the first compile of each shape pays lazy
+        // pool and cache initialization that neither steady-state path should
+        // be charged for.
+        {
+            let grammar = Grammar::from_json_schema(&source).unwrap();
+            grammar
+                .compile_with_build_options(
+                    &vocab,
+                    BuildOptions::default()
+                        .optimization(MaskStrategy::ParserDwa)
+                        .end_tokens([0u32]),
+                )
+                .expect("warmup direct build");
+            let grammar = Grammar::from_json_schema(&source).unwrap();
+            Grammar::from_expr(Expr::sequence([
+                Expr::from(grammar.clone()),
+                Expr::from(TokenSet::new([0u32])),
+            ]))
+            .expect("root expression")
+            .compile(&vocab)
+            .expect("warmup module build");
+        }
+
         let mut grammar_ms = Vec::new();
         let mut module_ms = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..7 {
             let grammar = Grammar::from_json_schema(&source).unwrap();
             let started = Instant::now();
             grammar
@@ -7036,15 +7244,64 @@ mod module_build_overhead_tests {
             .expect("module build");
             module_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         }
-        let grammar_median = median(grammar_ms);
-        let module_median = median(module_ms);
+        // Uncontended work time: noise only ever adds time, so the minimum is
+        // the robust estimator for these single-shot compiles.
+        let grammar_min = minimum(&grammar_ms);
+        let module_min = minimum(&module_ms);
         eprintln!(
-            "[module-build-overhead] grammar={grammar_median:.3}ms module={module_median:.3}ms ratio={:.2}",
-            module_median / grammar_median
+            "[module-build-overhead] grammar_min={grammar_min:.3}ms module_min={module_min:.3}ms ratio={:.2} grammar_ms={grammar_ms:?} module_ms={module_ms:?}",
+            module_min / grammar_min
         );
         assert!(
-            module_median <= grammar_median * 1.5,
-            "Module build {module_median:.3}ms is more than 1.5x the direct Grammar build {grammar_median:.3}ms",
+            module_min <= grammar_min * 1.5,
+            "Module build minimum {module_min:.3}ms is more than 1.5x the direct Grammar build minimum {grammar_min:.3}ms; grammar samples {grammar_ms:?}, module samples {module_ms:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod mask_strategy_configuration_tests {
+    use super::*;
+    use crate::test_modes::MaskMode;
+
+    #[test]
+    fn merged_token_trie_quotient_does_not_survive_composition() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"y".to_vec()),
+        ]);
+        // Control: a local C compile attaches the merged vocabulary.
+        let local = Grammar::from_ebnf(r#"start ::= "a" "b" | "ab""#)
+            .unwrap()
+            .compile_with(&vocab, MaskMode::C.compile_options())
+            .unwrap();
+        assert!(
+            local.dynamic_mask_vocab.is_grammar_quotiented(),
+            "a local C compile runs the vocabulary-quotient lane",
+        );
+
+        // A composed C compile: the parent shell and the child are merged
+        // locally, but `link::compose` rebuilds the composed body's mask
+        // vocabulary from the full vocabulary.
+        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
+        let mut parent = Module::new(
+            &Grammar::from_glrm(
+                r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
+            )
+            .unwrap(),
+        );
+        parent.bind("child", child).unwrap();
+        let composed = parent
+            .compile_with(&vocab, MaskMode::C.compile_options())
+            .unwrap();
+        // True today: the quotient is lost at the composition boundary. This
+        // asserts current behaviour, not the intent; see the batch report.
+        assert!(
+            !composed.dynamic_mask_vocab.is_grammar_quotiented(),
+            "the composed mask vocabulary is rebuilt from the full vocabulary",
         );
     }
 }

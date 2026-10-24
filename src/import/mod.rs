@@ -703,7 +703,7 @@ pub(crate) fn compile_dynamic_named_single(
     table_construction: GlrTableConstruction, prepare_json_schema: bool,
 ) -> crate::Result<Constraint> {
     compile_dynamic_named_single_with_backend(named,vocab,table_construction,prepare_json_schema,
-        crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())
+        crate::runtime::parser_backend::DynamicParserBackend::LrTable)
 }
 
 pub(crate) fn compile_dynamic_named_single_with_backend(
@@ -727,7 +727,7 @@ fn compile_dynamic_from_named(
     default_table_construction: GlrTableConstruction,
     end_token_ids: &[u32],
 ) -> crate::Result<DynamicConstraint> {
-    let backend = crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic();
+    let backend = crate::runtime::parser_backend::DynamicParserBackend::LrTable;
     let alternatives = dynamic_named_alternatives_from_named(named, None, end_token_ids)?;
     let mut compiled = Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
@@ -750,7 +750,7 @@ fn compile_dynamic_from_source(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<DynamicConstraint> {
-    let backend = crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic();
+    let backend = crate::runtime::parser_backend::DynamicParserBackend::LrTable;
     let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started = profile_top.then(std::time::Instant::now);
     let import_started = profile_top.then(std::time::Instant::now);
@@ -824,7 +824,7 @@ fn compile_dynamic_serialized_from_source_profiled(
     end_token_ids: &[u32],
     vocab_partition: bool,
 ) -> crate::Result<(Vec<u8>, u64, u64)> {
-    let backend = crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic();
+    let backend = crate::runtime::parser_backend::DynamicParserBackend::LrTable;
     let wall_started = std::time::Instant::now();
     let profile = compile_profile_enabled() || compile_top_profile_enabled();
     let total_started = profile.then(std::time::Instant::now);

@@ -1,13 +1,13 @@
+use glrmask::test_modes::MaskMode;
 use glrmask::{
-    CompileOptions, Constraint, ConstraintState, DynamicConstraint, Expr, Grammar, MaskStrategy,
-    Module, TokenSet, Vocab,
-};
+    Constraint, ConstraintState, DynamicConstraint, Expr, Grammar, 
+    Module, TokenSet, Vocab};
 
-const STRATEGIES: [MaskStrategy; 2] = [MaskStrategy::ParserDwa, MaskStrategy::TokenTrie];
+const STRATEGIES: [MaskMode; 2] = [MaskMode::ParserDwa, MaskMode::A];
 
-fn compile(grammar: &Grammar, vocab: &Vocab, strategy: MaskStrategy) -> Constraint {
+fn compile(grammar: &Grammar, vocab: &Vocab, strategy: MaskMode) -> Constraint {
     grammar
-        .compile_with(vocab, CompileOptions::default().mask_strategy(strategy))
+        .compile_with(vocab, strategy.compile_options())
         .unwrap()
 }
 
@@ -171,7 +171,7 @@ fn special_token_on_the_normal_path_keeps_the_state_live() {
         let mut module = Module::new(&grammar);
         module.bind("eos", TokenSet::new([99])).unwrap();
         let constraint = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&vocab, strategy.compile_options())
             .unwrap();
 
         let mut state = constraint.start();
@@ -206,7 +206,7 @@ fn ignored_root_with_a_special_token_stays_live() {
         let mut module = Module::new(&grammar);
         module.bind("eos", TokenSet::new([99])).unwrap();
         let constraint = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(strategy))
+            .compile_with(&vocab, strategy.compile_options())
             .unwrap();
 
         let mut state = constraint.start();

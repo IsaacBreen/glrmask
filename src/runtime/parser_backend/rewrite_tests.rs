@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_modes::MaskMode;
 use super::*;
 use super::prepare::prepare_terminal_inventory;
 
@@ -441,10 +443,10 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
     let source = crate::Grammar::glrm(
         r#"start root; ignore WS; t WS ::= " "+; nt root ::= "a" root "b" | "";"#
     );
-    for optimization in [crate::MaskStrategy::TokenClassTrie, crate::MaskStrategy::ParserDwa] {
+    for optimization in [MaskMode::C, MaskMode::ParserDwa] {
         let fresh = source.compile_with_build_options(
             &vocab,
-            crate::BuildOptions::default().optimization(optimization),
+            optimization.build_options(),
         ).unwrap().with_end_tokens(&[64]).unwrap();
         let self_bytes = fresh.save();
         let loaded = Constraint::load(&self_bytes, &vocab).unwrap();

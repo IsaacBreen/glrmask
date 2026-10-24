@@ -41,7 +41,7 @@ Time between masks. Lower is better.
 | p99.9 | 854.3 | 88.8 | 17.9 |
 | Max | 1,293.4 | 274.6 | 231.0 |
 
-Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+Static is `MaskStrategy.PARSER_DWA`; Dynamic is `MaskStrategy.TOKEN_TRIE`.
 
 14 October 2026 · 11,277 complete valid trajectories accepted by all measured engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
@@ -78,7 +78,7 @@ Time between masks. Lower is better.
 | p99.9 | 5,225.9 | 121.7 | 8.2 |
 | Max | 5,226.2 | 121.8 | 8.2 |
 
-Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+Static is `MaskStrategy.PARSER_DWA`; Dynamic is `MaskStrategy.TOKEN_TRIE`.
 
 14 October 2026 · 28 complete valid trajectories accepted by all measured engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
@@ -346,21 +346,26 @@ composition, persistence, and the Rust/Python APIs.
 
 GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).
 
-`MaskStrategy` trades off compilation time against per-token masking latency:
+`MaskStrategy` chooses how masks are computed:
 
-- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest runtime masks).
-- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
-- `TokenClassTrie`: token-trie walk over token equivalence classes.
-- `Auto`: library chooses the strategy (default).
+- `ParserDwa` builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
+- `TokenTrie` computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
+- `Auto`, the default, reuses any precompiled work; otherwise it uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
-`BoundaryMaskStrategy` selects the boundary parser for crossings between composed
-grammars:
+`FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
 
-- `ParserDwa` (alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message.
-- `TokenTrie` (alias `FAST_BUILD`): segmented dynamic boundary token walk; faster build.
-- `Auto` (default): `ParserDwa`, falling back to `TokenTrie` for each boundary whose static parser declines on budget.
+Two compile options tune `TokenTrie`. Both are off by default:
 
-All modes preserve accepted-language semantics and produce the same public `Constraint` type.
+- `template_dfas` parses with template DFAs instead of an LR table. Slower to compile, with faster masks.
+- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It requires `template_dfas`.
+
+`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
+
+- `ParserDwa` builds a parser DWA across each boundary. Slower to compile, with faster masks. It fails with `ErrorKind::ResourceLimit` if it would be too large.
+- `TokenTrie` walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
+- `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
+
+Every strategy produces the same masks; they differ only in speed.
 
 ## Grammar formats
 

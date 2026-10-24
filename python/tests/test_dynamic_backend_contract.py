@@ -11,18 +11,15 @@ def version(raw):
     return int.from_bytes(bytes(raw)[8:10], "little")
 
 
-@pytest.mark.parametrize("flag", ["0", "1"])
 @pytest.mark.parametrize("partition", [False, True])
-def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch, flag, partition):
-    monkeypatch.setenv("GLRMASK_DYNAMIC_TEMPLATE_DFA", flag)
+def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
+    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE", "1")
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     compiled = DynamicConstraint.from_ebnf(SOURCE, vocab, vocab_partition=partition)
     raw = bytes(compiled.save())
-    expected = 16 if partition or flag == "1" else 17
+    expected = 16 if partition else 17
     assert version(raw) == expected
-    # Changing the compile switch must not change existing or loaded objects.
-    monkeypatch.setenv("GLRMASK_DYNAMIC_TEMPLATE_DFA", "1" if flag == "0" else "0")
     loaded = DynamicConstraint.load(raw, vocab)
     assert bytes(loaded.save()) == raw
     for constraint in [compiled, loaded]:
@@ -53,11 +50,19 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
                 DynamicConstraint.load(bytes(old), vocab)
 
 
-@pytest.mark.parametrize("mode", [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD, glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
-                                  glrmask.MaskStrategy.FAST_RUNTIME])
+MODES = [
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+]
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf(SOURCE), glrmask.TokenSet([26]))).compile(vocab, mask_strategy=mode)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
@@ -77,10 +82,8 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
                 assert not state.mask().any()
 
 
-@pytest.mark.parametrize("flag", ["0", "1"])
 @pytest.mark.parametrize("partition", [False, True])
-def test_dynamic_profiled_wrapper_preserves_empty_eos(monkeypatch, flag, partition):
-    monkeypatch.setenv("GLRMASK_DYNAMIC_TEMPLATE_DFA", flag)
+def test_dynamic_profiled_wrapper_preserves_empty_eos(partition):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     raw, _, _ = glrmask._internal.compile_ebnf_serialized_profiled(
         SOURCE, vocab, end_token_ids=[26], vocab_partition=partition)
@@ -100,9 +103,7 @@ def test_dynamic_profiled_wrapper_preserves_empty_eos(monkeypatch, flag, partiti
             assert (not state.mask().any())
 
 
-@pytest.mark.parametrize("flag", ["0", "1"])
-def test_dynamic_empty_exact_special_id_remains_live(monkeypatch, flag):
-    monkeypatch.setenv("GLRMASK_DYNAMIC_TEMPLATE_DFA", flag)
+def test_dynamic_empty_exact_special_id_remains_live():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 25: b"", 26: b""})
     compiled = DynamicConstraint.from_glrm_grammar(
         'glrm 1; start root; extern token MARK; nt root = "a" MARK;',
