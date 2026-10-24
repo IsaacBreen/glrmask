@@ -109,7 +109,9 @@ A published GitHub Release is the human decision to publish.
 
 ## Before publishing a new release
 
-1. Update all three versions (Rust, Python, npm), documentation and changelog on `main`.
+1. Update all four versions (Rust, Python, npm, C++ CMake), documentation and
+   changelog on `main`. The C++ CMake project version in
+   `bindings/cpp/CMakeLists.txt` must match the `bindings/cpp` crate version.
    Check that the new version is not already published on any registry. Do not
    repurpose the existing `v0.3.0` tag: it predates the merged native bindings.
 2. If an internal Rust crate changed, bump its version. `python3 scripts/publish-crates.py`

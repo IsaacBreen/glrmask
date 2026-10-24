@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 0.4.0
 
 - The `end_tokens` compile option is removed. To require an end token after a
   grammar, write `Grammar::from_expr(Expr::sequence([grammar, eos]))`. GLRMask
