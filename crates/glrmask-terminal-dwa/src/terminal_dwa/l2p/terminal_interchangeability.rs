@@ -12545,8 +12545,8 @@ mod tests {
             range_set_blaze::RangeSetBlaze::from_iter([10..=10, 20..=20]),
         );
         let suffix_weight = Weight::from_per_tsid_token_sets([
-            (0, range_set_blaze::RangeSetBlaze::from_iter([10..=10])),
-            (1, range_set_blaze::RangeSetBlaze::from_iter([20..=20])),
+            (0, range_set_blaze::RangeSetBlaze::from_iter(std::iter::once(10..=10))),
+            (1, range_set_blaze::RangeSetBlaze::from_iter(std::iter::once(20..=20))),
         ]);
         let core = DWA::from_parts(
             vec![
@@ -12588,7 +12588,7 @@ mod tests {
     fn forward_domain_normalization_removes_unreachable_weight_coordinates() {
         let reachable = Weight::from_uniform(
             0..=0,
-            range_set_blaze::RangeSetBlaze::from_iter([7..=7]),
+            range_set_blaze::RangeSetBlaze::from_iter(std::iter::once(7..=7)),
         );
         let source = DWAState {
             transitions: DwaTransitionMap::Owned(BTreeMap::from([(10, (1, reachable.clone()))])),
@@ -12615,7 +12615,7 @@ mod tests {
     fn forward_domain_normalization_converges_on_cycles() {
         let reachable = Weight::from_uniform(
             0..=0,
-            range_set_blaze::RangeSetBlaze::from_iter([7..=7]),
+            range_set_blaze::RangeSetBlaze::from_iter(std::iter::once(7..=7)),
         );
         let before = DWA::from_parts(
             vec![

@@ -8321,7 +8321,7 @@ mod tests {
             VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         assert!(runtime.has_bounded_code_liveness_oracle());
 
-        let alphabet = [b'<', b'>', b'a', b'b', b'c'];
+        let alphabet = *b"<>abc";
         let mut queue = VecDeque::from([(Vec::<u8>::new(), 1u32, 0u32)]);
         let mut seen = FxHashSet::<(u32, u32)>::default();
         seen.insert((1, 0));
@@ -8407,7 +8407,7 @@ mod tests {
         .expect("BCO2 oracle should restore without rebuilding dense relations");
         assert!(loaded.has_bounded_code_liveness_oracle());
 
-        let alphabet = [b'<', b'>', b'a', b'b', b'c'];
+        let alphabet = *b"<>abc";
         let mut queue = VecDeque::from([(Vec::<u8>::new(), 1u32, 1u32)]);
         let mut seen = FxHashSet::<(u32, u32)>::default();
         seen.insert((1, 1));
@@ -8614,7 +8614,7 @@ mod tests {
             );
             assert_eq!(direct_actual, direct_expected, "direct finite slice prefix={prefix:?}");
             assert_eq!(direct_actual, Some(true));
-            for byte in [b'a', b'c'] {
+            for byte in *b"ac" {
                 let family = U8Set::single(byte);
                 for horizon in [1, 3] {
                     let expected = original.parser_transparent_byte_family(old_state, family, horizon);

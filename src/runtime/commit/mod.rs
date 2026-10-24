@@ -8146,14 +8146,12 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                 None,
              observer) {
                 match result {
-                    LinearFastPathResult::Complete(result) => match result {
-                        Ok(final_gss) => {
-                            state.clear();
-                            state.insert(constraint.runtime_commit_initial_state(), final_gss);
-                            return Ok(());
-                        }
-                        Err(err) => return Err(err),
-                    },
+                    LinearFastPathResult::Complete(result) => {
+                        let final_gss = result?;
+                        state.clear();
+                        state.insert(constraint.runtime_commit_initial_state(), final_gss);
+                        return Ok(());
+                    }
                     LinearFastPathResult::Continue { gss, offset } => {
                         state.clear();
                         state.insert(constraint.runtime_commit_initial_state(), gss);
@@ -8255,14 +8253,10 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                 exec_result.clone(),
              observer) {
                 LinearFastPathResult::Complete(result) => {
-                    match result {
-                        Ok(final_gss) => {
-                            state.clear();
-                            state.insert(constraint.runtime_commit_initial_state(), final_gss);
-                            return Ok(());
-                        }
-                        Err(err) => return Err(err),
-                    }
+                    let final_gss = result?;
+                    state.clear();
+                    state.insert(constraint.runtime_commit_initial_state(), final_gss);
+                    return Ok(());
                 }
                 LinearFastPathResult::Continue { gss, offset } => {
                     bufs.clear_all();

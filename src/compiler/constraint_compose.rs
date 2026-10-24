@@ -8506,7 +8506,7 @@ fn add_boundary_special_token_paths(
         let first = exact_map.vocab_tokens.original_to_internal[special.token_id as usize];
         let last = exact_map.vocab_tokens.original_to_internal[special.token_id_end as usize];
         exact.add_transition(exact_start, special.terminal_id as i32, exact_final,
-            Weight::from_per_tsid_token_sets([(source_tsid, RangeSetBlaze::from_iter([first..=last]))]));
+            Weight::from_per_tsid_token_sets([(source_tsid, RangeSetBlaze::from_iter(std::iter::once(first..=last)))]));
     }
     let paired = MappedArtifact::from((artifact,
         MappedArtifact::new(TerminalAutomaton::EpsilonNwa(exact), exact_map)));
@@ -24550,7 +24550,7 @@ table: &child_tables[index],
         fn weight(start: u32, end: u32) -> Weight {
             Weight::from_token_set_for_tsid(
                 0,
-                RangeSetBlaze::from_iter([start..=end]),
+                RangeSetBlaze::from_iter(std::iter::once(start..=end)),
             )
         }
 
@@ -24647,7 +24647,7 @@ table: &child_tables[index],
                         state,
                         Weight::from_token_set_for_tsid(
                             0,
-                            RangeSetBlaze::from_iter([start..=end]),
+                            RangeSetBlaze::from_iter(std::iter::once(start..=end)),
                         ),
                     );
                 }
@@ -24679,7 +24679,7 @@ table: &child_tables[index],
                         target,
                         Weight::from_token_set_for_tsid(
                             0,
-                            RangeSetBlaze::from_iter([start..=end]),
+                            RangeSetBlaze::from_iter(std::iter::once(start..=end)),
                         ),
                     );
                 }
@@ -36068,7 +36068,7 @@ table: &dispatch.table,
                 None => Weight::all(),
                 Some(keep) => {
                     let all_tokens =
-                        RangeSetBlaze::from_iter([0..=id_map.max_internal_token_id()]);
+                        RangeSetBlaze::from_iter(std::iter::once(0..=id_map.max_internal_token_id()));
                     let mut initial = Weight::empty();
                     for (tsid, selected) in keep.iter().enumerate() {
                         if *selected {
@@ -36490,7 +36490,7 @@ table: &dispatch.table,
             let mut original_to_internal = vec![u32::MAX; max_token + 1];
             let mut internal_to_originals = Vec::new();
             let mut representative_original_ids = Vec::new();
-            for (&token, _) in vocab.entries_map().iter() {
+            for &token in vocab.entries_map().keys() {
                 let internal = internal_to_originals.len() as u32;
                 original_to_internal[token as usize] = internal;
                 internal_to_originals.push(vec![token]);
@@ -37964,7 +37964,7 @@ table: &dispatch.table,
 
         // (a2) Concrete single-byte transition targets from the merged reset:
         // where a post-reset byte lands, per owning component.
-        for byte in [b'{', b';', b'.', b'(', b')', b',', b' ', b'"', b'\n', b'\t', b'\r'] {
+        for byte in *b"{;.(), \"\n\t\r" {
             let stepped = composed.tokenizer.execute_from_state(&[byte], 0);
             let mut ends: Vec<u32> = stepped.end_state.iter().copied().collect();
             ends.sort();

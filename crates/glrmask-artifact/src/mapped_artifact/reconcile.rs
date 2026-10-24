@@ -1835,6 +1835,9 @@ fn remap_weight_general(
 }
 
 #[cfg(test)]
+// Tests intentionally build one-range sets; clippy's suggested rewrite would
+// replace the range element with the individual range members.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 

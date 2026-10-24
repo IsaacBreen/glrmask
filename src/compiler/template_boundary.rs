@@ -523,7 +523,7 @@ mod tests {
                                 b.commit_bytes(&word[prefix..prefix+1]));}
                         }
                     }
-                    if depth<4 {for byte in [b'x',b'a',b'y',b'b'] {let mut following=word.clone();following.push(byte);next.push(following);}}
+                    if depth<4 {for byte in *b"xayb" {let mut following=word.clone();following.push(byte);next.push(following);}}
                 }
                 words=next;
             }

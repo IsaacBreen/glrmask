@@ -3585,12 +3585,12 @@ fn chunked_anchored_prefix_pattern_preserves_bounds_and_search_semantics() {
     assert!(!schema_accepts_bytes(&schema, br#""/a""#));
     assert!(schema_accepts_bytes(&schema, br#""/ab""#));
 
-    let mut at_limit = Vec::from([b'"', b'/']);
+    let mut at_limit = Vec::from(*b"\"/");
     at_limit.extend(std::iter::repeat_n(b'a', 129));
     at_limit.push(b'"');
     assert!(schema_accepts_bytes(&schema, &at_limit));
 
-    let mut too_long = Vec::from([b'"', b'/']);
+    let mut too_long = Vec::from(*b"\"/");
     too_long.extend(std::iter::repeat_n(b'a', 130));
     too_long.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &too_long));
@@ -3634,7 +3634,7 @@ fn chunked_anchored_prefix_pattern_rejects_prefix_longer_than_max() {
     let glrm = to_glrm(&grammar);
     assert!(!glrm.contains(" & "), "{glrm}");
 
-    let mut input = Vec::from([b'"']);
+    let mut input = Vec::from(*b"\"");
     input.extend(std::iter::repeat_n(b'a', 80));
     input.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &input));
@@ -4020,12 +4020,12 @@ fn legacy_pattern_max_length_disable_cannot_weaken_schema_language() {
     };
     assert!(regex.contains("{0,80}"), "{regex}");
 
-    let mut at_limit = Vec::from([b'"']);
+    let mut at_limit = Vec::from(*b"\"");
     at_limit.extend(std::iter::repeat_n(b'a', 80));
     at_limit.push(b'"');
     assert!(schema_accepts_bytes(&schema, &at_limit));
 
-    let mut too_long = Vec::from([b'"']);
+    let mut too_long = Vec::from(*b"\"");
     too_long.extend(std::iter::repeat_n(b'a', 81));
     too_long.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &too_long));
@@ -4265,17 +4265,17 @@ fn large_pattern_max_length_is_preserved_by_default() {
     assert!(regex.contains("{2,80}"), "{regex}");
     lower(&grammar).unwrap();
 
-    let mut too_short = Vec::from([b'"']);
+    let mut too_short = Vec::from(*b"\"");
     too_short.push(b'a');
     too_short.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &too_short));
 
-    let mut at_limit = Vec::from([b'"']);
+    let mut at_limit = Vec::from(*b"\"");
     at_limit.extend(std::iter::repeat_n(b'a', 80));
     at_limit.push(b'"');
     assert!(schema_accepts_bytes(&schema, &at_limit));
 
-    let mut too_long = Vec::from([b'"']);
+    let mut too_long = Vec::from(*b"\"");
     too_long.extend(std::iter::repeat_n(b'a', 81));
     too_long.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &too_long));

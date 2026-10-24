@@ -125,10 +125,10 @@ impl PrefixObserver{
         for _ in 0..n{
             let count=reader.u32()?as usize;if count>runs_left{return None;}runs_left-=count;
             let payload=reader.take(count.checked_mul(14)?)?;
-            let runs=payload.chunks_exact(14).map(|b|Run{target:u32::from_le_bytes(b[..4].try_into().expect("exact chunk")),origin:u32::from_le_bytes(b[4..8].try_into().expect("exact chunk")),len:u32::from_le_bytes(b[8..12].try_into().expect("exact chunk")),target_step:b[12],origin_step:b[13]}).collect();
+            let runs=payload.as_chunks::<14>().0.iter().map(|b|Run{target:u32::from_le_bytes(b[..4].try_into().expect("exact chunk")),origin:u32::from_le_bytes(b[4..8].try_into().expect("exact chunk")),len:u32::from_le_bytes(b[8..12].try_into().expect("exact chunk")),target_step:b[12],origin_step:b[13]}).collect();
             let count=reader.u32()?as usize;if count>256||count>edges_left{return None;}edges_left-=count;
             let payload=reader.take(count.checked_mul(5)?)?;
-            let transitions=payload.chunks_exact(5).map(|b|(b[0],u32::from_le_bytes(b[1..].try_into().expect("exact chunk")))).collect();
+            let transitions=payload.as_chunks::<5>().0.iter().map(|b|(b[0],u32::from_le_bytes(b[1..].try_into().expect("exact chunk")))).collect();
             states.push(State{runs,transitions});
         }
         if reader.offset!=bytes.len(){return None;}

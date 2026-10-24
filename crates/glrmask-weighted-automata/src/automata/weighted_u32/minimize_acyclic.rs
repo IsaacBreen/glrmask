@@ -4162,7 +4162,7 @@ fn decode_pointwise_region(
                     entry.get_mut().1.push(token_range.start..=token_range.end);
                 }
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert((target, vec![token_range.start..=token_range.end]));
+                    entry.insert((target, vec![std::ops::RangeInclusive::new(token_range.start, token_range.end)]));
                 }
             }
         }

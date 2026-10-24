@@ -233,8 +233,8 @@ mod tests {
         let sources=vec![
             Weight::all(), Weight::empty(),
             Weight::from_uniform(4..=x,[2..=7, x-2..=x].into_iter().collect()),
-            Weight::from_uniform(9..=x-1,[5..=11].into_iter().collect()),
-            Weight::from_uniform(x..=x,[x..=x].into_iter().collect()),
+            Weight::from_uniform(9..=x-1,std::iter::once(5..=11).collect()),
+            Weight::from_uniform(x..=x,std::iter::once(x..=x).collect()),
         ];
         let domain=Weight::from_per_tsid_token_sets([(4,[2,5].into_iter().collect()),(x,[x].into_iter().collect())]);
         let quotient=FaithfulWeightQuotient::new(&domain,&sources).unwrap();

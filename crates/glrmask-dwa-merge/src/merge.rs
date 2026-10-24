@@ -4103,7 +4103,7 @@ mod tests {
     fn affine_token_remap_matches_explicit_token_map() {
         let weight = Weight::from_per_tsid_token_sets([
             (0, RangeSetBlaze::from_iter([0..=2, 5..=5])),
-            (1, RangeSetBlaze::from_iter([1..=4])),
+            (1, RangeSetBlaze::from_iter(std::iter::once(1..=4))),
         ]);
         let tsid_map = vec![vec![1, 3], vec![2]];
         let explicit = vec![vec![7], vec![8], vec![9], vec![10], vec![11], vec![12]];
@@ -4136,8 +4136,8 @@ mod tests {
     #[test]
     fn interval_remap_matches_generic_and_overlapping_fallback() {
         let weight = Weight::from_per_tsid_token_sets([
-            (0, RangeSetBlaze::from_iter([0..=1])),
-            (1, RangeSetBlaze::from_iter([2..=3])),
+            (0, RangeSetBlaze::from_iter(std::iter::once(0..=1))),
+            (1, RangeSetBlaze::from_iter(std::iter::once(2..=3))),
         ]);
         let token_remap = TokenRemap::Offset {
             offset: 10,
@@ -4183,7 +4183,7 @@ mod tests {
             &mut cache,
             &mut token_cache,
         );
-        let expected = Weight::from_uniform(0..=4, RangeSetBlaze::from_iter([10..=12]));
+        let expected = Weight::from_uniform(0..=4, RangeSetBlaze::from_iter(std::iter::once(10..=12)));
         assert_eq!(remapped, expected);
     }
 

@@ -1283,16 +1283,11 @@ impl FastTokenizerTransitions {
         children: &[(&FastTokenizerTransitions, u32)],
     ) -> Option<Self> {
         fn flat_rows(flat: &[u32]) -> Option<Vec<[u32; 256]>> {
-            let chunks = flat.chunks_exact(256);
-            if !chunks.remainder().is_empty() {
+            let (chunks, remainder) = flat.as_chunks::<256>();
+            if !remainder.is_empty() {
                 return None;
             }
-            chunks
-                .map(|chunk| {
-                    let row: &[u32; 256] = chunk.try_into().ok()?;
-                    Some(*row)
-                })
-                .collect()
+            chunks.iter().map(|chunk| Some(*chunk)).collect()
         }
 
         fn rebased_row(row: &[u32; 256], offset: u32) -> [u32; 256] {
@@ -9132,7 +9127,7 @@ pub(crate) mod original_token_map_artifact_serde {
                     encoded as u32
                 }
             })),
-            2 => out.extend(payload.chunks_exact(2).map(|bytes| {
+            2 => out.extend(payload.as_chunks::<2>().0.iter().map(|bytes| {
                 let encoded = u16::from_le_bytes([bytes[0], bytes[1]]);
                 if encoded == u16::MAX {
                     u32::MAX
@@ -9140,7 +9135,7 @@ pub(crate) mod original_token_map_artifact_serde {
                     encoded as u32
                 }
             })),
-            4 => out.extend(payload.chunks_exact(4).map(|bytes| {
+            4 => out.extend(payload.as_chunks::<4>().0.iter().map(|bytes| {
                 u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             })),
             _ => unreachable!(),

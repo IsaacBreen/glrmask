@@ -118,7 +118,7 @@ pub fn compare(left:&DWA,right:&DWA,domain:&StackDomain,budget:Budget)->Result<C
     // not a finite complement representation. The ordinary exact oracle
     // instead uses this single compressed rectangle over every valid raw
     // coordinate. No coordinate enumeration is performed.
-    let universe=Weight::from_uniform(0..=u32::MAX-1,[0..=u32::MAX].into_iter().collect());
+    let universe=Weight::from_uniform(0..=u32::MAX-1,std::iter::once(0..=u32::MAX).collect());
     if universe.is_full(){return Err("comparison universe collided with identity sentinel".into());}
     let mut pending=VecDeque::from([(start,universe.clone(),Vec::<u32>::new())]);
     let mut seen=FxHashMap::<Product,Weight>::from_iter([(start,universe)]);

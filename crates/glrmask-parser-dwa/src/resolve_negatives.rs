@@ -2448,7 +2448,7 @@ mod terminal_default_tests {
         assert!(targets.merge(3, first_add));
         assert_eq!(
             targets.get(3).unwrap().tokens_for_tsid(0),
-            Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([0..=11]))
+            Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter(std::iter::once(0..=11)))
                 .tokens_for_tsid(0)
         );
 

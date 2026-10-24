@@ -11263,7 +11263,7 @@ mod tests {
     fn extended_boundary_weight_rows_preserve_exact_finite_algebra() {
         for rows in [1usize, 16, 17, 64] {
             let mut interner = super::FastBoundaryWeightInterner::new(rows, 64).unwrap();
-            let domain = Weight::from_uniform(0..=rows as u32 - 1, RangeSetBlaze::from_iter([0..=63]));
+            let domain = Weight::from_uniform(0..=rows as u32 - 1, RangeSetBlaze::from_iter(std::iter::once(0..=63)));
             let mut sources = vec![Weight::empty(), Weight::all()];
             for i in 0..24u32 {
                 sources.push(Weight::from_per_tsid_token_sets((0..rows as u32).filter_map(|row| {
@@ -12030,7 +12030,7 @@ mod partial_default_domain_regressions {
             let end = nwa.add_state();
             nwa.set_start_states(vec![start]);
             nwa.set_final_weight(end, Weight::all());
-            let accepted = Weight::from_uniform(0..=1, RangeSetBlaze::from_iter([3..=127]));
+            let accepted = Weight::from_uniform(0..=1, RangeSetBlaze::from_iter(std::iter::once(3..=127)));
             nwa.add_transition(start, 1, end, accepted.clone());
             nwa.add_transition(start, 2, end, accepted);
             let built = determinize_with_supports(&nwa, Some(alphabet));

@@ -717,7 +717,7 @@ fn proves_fresh_dead_class(dwa: &DWA, dead_class: u32, use_root_bound: bool) -> 
     };
     if use_root_bound
         && let Some(root) = dwa.states().get(dwa.start_state() as usize)
-            && root.final_weight.as_ref().is_none_or(&below)
+            && root.final_weight.as_ref().is_none_or(below)
                 && root.transitions.values().all(|(_, weight)| below(weight)) {
                 return true;
             }
@@ -738,7 +738,7 @@ mod support_finalize_gate {
             (0..n).collect(), (0..n).collect())
     }
     fn weight(row: u32, lo: u32, hi: u32) -> Weight {
-        Weight::from_uniform(row..=row, RangeSetBlaze::from_iter([lo..=hi]))
+        Weight::from_uniform(row..=row, RangeSetBlaze::from_iter(std::iter::once(lo..=hi)))
     }
 
     #[test]

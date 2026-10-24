@@ -195,7 +195,7 @@ impl UntrustedCompletionIndex {
             fn word(&mut self) -> Result<usize> { Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| Error::Malformed)?) as usize) }
             fn words(&mut self, count: usize) -> Result<Vec<u32>> {
                 let source = self.take(count.checked_mul(4).ok_or(Error::ResourceLimit)?)?;
-                Ok(source.chunks_exact(4).map(|x| u32::from_le_bytes(x.try_into().expect("four-byte chunk"))).collect())
+                Ok(source.as_chunks::<4>().0.iter().map(|x| u32::from_le_bytes(*x)).collect())
             }
         }
         let mut r = Reader { bytes, offset: 8 };

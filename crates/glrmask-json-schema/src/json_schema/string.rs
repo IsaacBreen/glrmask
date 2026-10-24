@@ -4333,7 +4333,7 @@ fn class_contains_ascii_control(class: &Class) -> bool {
 }
 
 fn class_contains_url_punctuation(class: &Class) -> bool {
-    [b'!', b'$', b'&', b'\'', b'(', b')', b'*', b'+', b',', b';', b'=', b'@', b'~']
+    (*b"!$&'()*+,;=@~")
         .into_iter()
         .any(|byte| decoded_class_contains(class, char::from(byte)))
 }

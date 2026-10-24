@@ -1619,8 +1619,8 @@ fn decode_word_sparse_token_mask_cache(input: &[u8]) -> Result<Vec<InternalToken
     }
     let offsets_body = &input[HEADER_LEN..HEADER_LEN + offsets_bytes];
     let mut offsets = Vec::<u32>::with_capacity(group_count + 1);
-    for bytes in offsets_body.chunks_exact(4) {
-        offsets.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+    for bytes in offsets_body.as_chunks::<4>().0.iter() {
+        offsets.push(u32::from_le_bytes(*bytes));
     }
     if offsets.first().copied() != Some(0)
         || offsets.last().copied() != Some(entry_count as u32)
@@ -1691,8 +1691,8 @@ fn decode_cache_u32_rows(
             } else {
                 row.extend(
                     bytes
-                        .chunks_exact(4)
-                        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())),
+                        .as_chunks::<4>().0.iter()
+                        .map(|chunk| u32::from_le_bytes(*chunk)),
                 );
             }
             *pos = end;
@@ -1721,8 +1721,8 @@ fn decode_cache_u32_rows(
     } else {
         flat.extend(
             bytes
-                .chunks_exact(4)
-                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap())),
+                .as_chunks::<4>().0.iter()
+                .map(|bytes| u32::from_le_bytes(*bytes)),
         );
     }
     *pos = end;
@@ -1996,8 +1996,8 @@ fn decode_token_mask_cache_impl(
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let body_started = profile.then(std::time::Instant::now);
         let mut offsets = Vec::<u32>::with_capacity(word_groups + 1);
-        for bytes in input[offsets_start..entries_start].chunks_exact(4) {
-            offsets.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+        for bytes in input[offsets_start..entries_start].as_chunks::<4>().0.iter() {
+            offsets.push(u32::from_le_bytes(*bytes));
         }
         if offsets.first().copied() != Some(0)
             || offsets.last().copied() != Some(word_entries as u32)
@@ -2367,8 +2367,8 @@ fn decode_internal_token_buf_masks(
     } else {
         offsets.extend(
             offsets_body
-                .chunks_exact(4)
-                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap())),
+                .as_chunks::<4>().0.iter()
+                .map(|bytes| u32::from_le_bytes(*bytes)),
         );
     }
     if offsets.first().copied() != Some(0)
@@ -3145,7 +3145,7 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
             let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual sparse map range overflow".to_owned())?;
             if map_end > section.len() { return Err("truncated static residual sparse projection map".to_owned()); }
             let mut previous = None;
-            for pair in section[pos..map_end].chunks_exact(8) {
+            for pair in section[pos..map_end].as_chunks::<8>().0.iter() {
                 let index = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
                 let state = u32::from_le_bytes(pair[4..8].try_into().unwrap());
                 if index >= map_len
@@ -3163,7 +3163,7 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
             let map_bytes = map_len.checked_mul(4).ok_or_else(|| "static residual map byte length overflow".to_owned())?;
             let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual map range overflow".to_owned())?;
             if map_end > section.len() { return Err("truncated static residual projection map".to_owned()); }
-            for word in section[pos..map_end].chunks_exact(4) { map.push(u32::from_le_bytes(word.try_into().unwrap())); }
+            for word in section[pos..map_end].as_chunks::<4>().0.iter() { map.push(u32::from_le_bytes(*word)); }
             pos = map_end;
         }
         let oracle_end = pos.checked_add(oracle_len).ok_or_else(|| "static residual oracle range overflow".to_owned())?;
@@ -7186,11 +7186,11 @@ impl Constraint {
         let start = metadata_count.checked_mul(4).and_then(|len| 16usize.checked_add(len))
             .filter(|&start| start < bytes.len())
             .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
-        let end_ids = bytes[16..16 + end_count * 4].chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+        let end_ids = bytes[16..16 + end_count * 4].as_chunks::<4>().0.iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
-        let exact_ids = bytes[16 + end_count * 4..start].chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+        let exact_ids = bytes[16 + end_count * 4..start].as_chunks::<4>().0.iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         if end_ids.windows(2).any(|pair| pair[0] >= pair[1])
             || exact_ids.windows(2).any(|pair| pair[0] >= pair[1])
@@ -7230,8 +7230,8 @@ impl Constraint {
         let start = count.checked_mul(4).and_then(|len| 12usize.checked_add(len))
             .filter(|&start| start < bytes.len())
             .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
-        let ids: Vec<u32> = bytes[12..start].chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked"))).collect();
+        let ids: Vec<u32> = bytes[12..start].as_chunks::<4>().0.iter()
+            .map(|chunk| u32::from_le_bytes(*chunk)).collect();
         if count == 0 || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(crate::Error::Serialization("noncanonical end-token policy".to_owned()));
         }
@@ -7263,7 +7263,7 @@ impl Constraint {
         // Inspect canonical ordering before allocating from untrusted counts.
         let records = &bytes[MARKER_BODY_HEADER_LEN..body_start];
         let mut previous = None;
-        for record in records.chunks_exact(8) {
+        for record in records.as_chunks::<8>().0.iter() {
             let terminal = u32::from_le_bytes(record[..4].try_into().expect("fixed record"));
             if previous.is_some_and(|prior| terminal <= prior) {
                 return Err(fail("marker artifact terminal IDs must be strictly increasing"));
@@ -7273,7 +7273,7 @@ impl Constraint {
         if bytes[body_start..].starts_with(MARKER_BODY_MAGIC) {
             return Err(fail("nested marker annotation envelopes are not canonical"));
         }
-        let terminals = records.chunks_exact(8).map(|record| super::markers::MarkerTerminal {
+        let terminals = records.as_chunks::<8>().0.iter().map(|record| super::markers::MarkerTerminal {
             terminal_id: u32::from_le_bytes(record[..4].try_into().expect("fixed record")),
             marker_id: u32::from_le_bytes(record[4..].try_into().expect("fixed record")),
         }).collect::<Vec<_>>();

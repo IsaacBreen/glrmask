@@ -7194,7 +7194,7 @@ mod tiny_cfg_compile_blowup_tests {
         for _ in 0..case.bound {
             let mut next = Vec::new();
             for word in &level {
-                for byte in [b'a', b'b', b'c'] {
+                for byte in *b"abc" {
                     let mut extended = word.clone();
                     extended.push(byte);
                     next.push(extended);

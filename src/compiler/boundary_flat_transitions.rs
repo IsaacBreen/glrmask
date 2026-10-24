@@ -17,7 +17,7 @@ fn build_bounded(tokenizer:&Tokenizer,parallel:bool,word_limit:usize)->Option<Ar
  };
  if parallel&&states>=2048&&rayon::current_num_threads()>1{
   storage.par_chunks_mut(256).with_min_len(256).enumerate().for_each(|(state,row)|fill(state,row));
- }else{for (state,row)in storage.chunks_exact_mut(256).enumerate(){fill(state,row);}}
+ }else{for (state,row)in storage.as_chunks_mut::<256>().0.iter_mut().enumerate(){fill(state,row);}}
  // SAFETY: len is a checked multiple of 256. Both branches initialize every
  // row/element before returning; Rayon joins all disjoint row tasks. On panic,
  // this line is never reached and MaybeUninit storage needs no element drops.
@@ -26,7 +26,7 @@ fn build_bounded(tokenizer:&Tokenizer,parallel:bool,word_limit:usize)->Option<Ar
 #[cfg(test)]
 fn reference(tokenizer:&Tokenizer)->Arc<[u32]>{
  let mut values=vec![0;tokenizer.num_states()as usize*256];
- for (state,row)in values.chunks_exact_mut(256).enumerate(){tokenizer.fill_transition_row(state as u32,row.try_into().unwrap());}
+ for (state,row)in values.as_chunks_mut::<256>().0.iter_mut().enumerate(){tokenizer.fill_transition_row(state as u32,row);}
  Arc::from(values)
 }
 #[cfg(test)]mod tests{

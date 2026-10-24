@@ -1403,7 +1403,7 @@ fn large_final_decode_preserves_full_prefix_masks() {
     let mut rows = vec![DWAState::default(); 301];
     for q in 0..300 { rows[q].transitions.insert(0, ((q + 1) as u32, Weight::all())); }
     rows[300].final_weight = Some(Weight::from_per_tsid_token_sets([
-        (0, range_set_blaze::RangeSetBlaze::from_iter([7..=7])),
+        (0, range_set_blaze::RangeSetBlaze::from_iter(std::iter::once(7..=7))),
     ]));
     let input = DWA::from_parts(rows, 0);
     let (output, _) = minimize_finite_final_atoms(&input, 2147483646)

@@ -2380,7 +2380,7 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
         Option<SharedTokenSet>,
     ); 8]> = SmallVec::new();
 
-    let bounds = CheckSortedDisjoint::new([single.start..=single.end]);
+    let bounds = CheckSortedDisjoint::new(std::iter::once(single.start..=single.end));
     for (range, other_tokens) in other.0.range_values().map_and_set_intersection(bounds) {
         let start = *range.start();
         let end = *range.end();
@@ -3577,6 +3577,9 @@ impl PartialEq for Weight {
 }
 
 #[cfg(test)]
+// Tests intentionally build one-range sets; clippy's suggested rewrite would
+// replace the range element with the individual range members.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 

@@ -41,8 +41,8 @@ pub(super) fn mask_hash(mask: &[u32]) -> u64 {
     // extension. This fingerprint is only an index: every hit still checks
     // the complete output below, so a collision cannot admit a wrong token.
     let mut lanes: [FxHasher; 8] = std::array::from_fn(|_| FxHasher::default());
-    let mut blocks = mask.chunks_exact(16);
-    for words in &mut blocks {
+    let (blocks, remainder) = mask.as_chunks::<16>();
+    for words in blocks {
         for lane in 0..8 {
             lanes[lane]
                 .write_u64(u64::from(words[lane * 2]) | (u64::from(words[lane * 2 + 1]) << 32));
@@ -53,7 +53,7 @@ pub(super) fn mask_hash(mask: &[u32]) -> u64 {
     for lane in &lanes {
         result.write_u64(lane.finish());
     }
-    for &word in blocks.remainder() {
+    for &word in remainder {
         result.write_u32(word);
     }
     result.finish()

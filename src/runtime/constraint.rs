@@ -14840,7 +14840,7 @@ mod dense_internal_token_mask_tests {
                 let limit = (words / 2).min(2048) as u64;
                 let prefix = Constraint::direct_sparse_work_prefix(&rows, words);
                 let sets = (0..rows.len()).map(|id| (id, Arc::new(
-                    RangeSetBlaze::from_iter([id as u32..=id as u32])
+                    RangeSetBlaze::from_iter(std::iter::once(id as u32..=id as u32))
                 ))).collect::<Vec<_>>();
                 let expected = sets.iter().filter_map(|(key, set)|
                     (Constraint::direct_sparse_expanded_work(set, &prefix) <= limit).then_some(*key)
@@ -14991,7 +14991,7 @@ mod dense_internal_token_mask_tests {
     fn direct_sparse_expanded_work_clamps_out_of_bounds_ranges() {
         let masks = vec![vec![(0, 1)], vec![(1, 1), (2, 1)]];
         let work_prefix = Constraint::direct_sparse_work_prefix(&masks, 16);
-        let selected = RangeSetBlaze::from_iter([1u32..=100]);
+        let selected = RangeSetBlaze::from_iter(std::iter::once(1u32..=100));
 
         assert_eq!(
             Constraint::direct_sparse_expanded_work(&selected, &work_prefix),

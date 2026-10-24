@@ -1787,7 +1787,7 @@ mod tests {
             let mut state = constraint.start();
             let mut mask = vec![0; constraint.mask_len()];
             let mut expected = vec![0; constraint.mask_len()];
-            for token in [b'!', b'x'] { expected[token as usize / 32] |= 1 << (token % 32); }
+            for token in *b"!x" { expected[token as usize / 32] |= 1 << (token % 32); }
             for _ in 0..depth {
                 state.fill_mask(&mut mask);
                 assert_eq!(mask, expected, "depth={depth}: unary prefix");

@@ -108,7 +108,7 @@ pub(in crate::terminal_dwa) fn try_build_borrowed(
     let mut classes=Vec::with_capacity(groups.len());
     for (class,raws)in groups{
         let node=if direct_seed{classes.len()as u32+2}else{seed.add_state()};classes.push(class);
-        if !direct_seed{seed.add_epsilon(start,node,Weight::from_token_set_for_tsid(class,[0..=id_map.max_internal_token_id()].into_iter().collect()));}
+        if !direct_seed{seed.add_epsilon(start,node,Weight::from_token_set_for_tsid(class,std::iter::once(0..=id_map.max_internal_token_id()).collect()));}
         for raw in raws{roots.entries.entry(raw).or_default().push(node);}
     }
     let active = vec![true; tokenizer.num_terminals() as usize];

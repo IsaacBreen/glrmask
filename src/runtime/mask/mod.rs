@@ -2470,7 +2470,7 @@ mod tests {
     #[test]
     fn precomputed_dense_intersection_reuses_arc_when_unchanged() {
         let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
-        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let token_set = Arc::new(RangeSetBlaze::from_iter(std::iter::once(0_u32..=127)));
         let precomputed = precomputed_for(&token_set, Arc::from([!0_u64, !0_u64]));
 
         let mut cache = FxHashMap::default();
@@ -2489,7 +2489,7 @@ mod tests {
     #[test]
     fn precomputed_dense_intersection_allocates_when_pruned() {
         let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
-        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let token_set = Arc::new(RangeSetBlaze::from_iter(std::iter::once(0_u32..=127)));
         let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0000]));
 
         let mut cache = FxHashMap::default();
@@ -2509,7 +2509,7 @@ mod tests {
     #[test]
     fn small_intersection_cache_reuses_exact_result() {
         let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
-        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let token_set = Arc::new(RangeSetBlaze::from_iter(std::iter::once(0_u32..=127)));
         let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0100]));
         let mut cache = DenseTokenSetIntersectionSmallCache::new();
 

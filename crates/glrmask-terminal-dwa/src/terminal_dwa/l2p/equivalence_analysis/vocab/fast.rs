@@ -6502,7 +6502,7 @@ mod shared_base_tests {
             *random
         }
 
-        const ALPHABET: [u8; 7] = [b'a', b'A', b'b', b'p', b'q', b'x', b'y'];
+        const ALPHABET: [u8; 7] = *b"aAbpqxy";
         for seed in 0..48u64 {
             let mut random = seed.wrapping_add(0x9e3779b97f4a7c15);
             let state_count = 3 + (next(&mut random) as usize % 6);

@@ -220,7 +220,7 @@ pub fn compare_parser_mask_prefix_languages(
     type Pair = (Option<u32>, Option<u32>);
     let initial = (Some(left.start_state()), Some(right.start_state()));
     let universe = Weight::from_uniform(
-        0..=u32::MAX - 1, RangeSetBlaze::from_iter([0..=u32::MAX]),
+        0..=u32::MAX - 1, RangeSetBlaze::from_iter(std::iter::once(0..=u32::MAX)),
     );
     assert!(!universe.is_full(), "the explicit comparison universe must not become the identity sentinel");
     let mut visited = FxHashMap::<Pair, Weight>::default();
@@ -290,7 +290,7 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
 
     fn token(id: u32) -> Weight {
-        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([id..=id]))
+        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter(std::iter::once(id..=id)))
     }
 
     fn evaluate(dwa: &DWA, word: &[u32]) -> Weight {

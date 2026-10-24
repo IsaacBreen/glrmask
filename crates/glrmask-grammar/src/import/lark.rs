@@ -1549,11 +1549,11 @@ mod tests {
 
         assert!(dfa_accepts(dfa, b"z"));
         assert!(dfa_accepts(dfa, b"az"));
-        assert!(dfa_accepts(dfa, &[b'a'; 95].into_iter().chain([b'z']).collect::<Vec<_>>()));
+        assert!(dfa_accepts(dfa, &[b'a'; 95].into_iter().chain(*b"z").collect::<Vec<_>>()));
         assert!(!dfa_accepts(dfa, b"a"));
         assert!(!dfa_accepts(
             dfa,
-            &[b'a'; 96].into_iter().chain([b'z']).collect::<Vec<_>>()
+            &[b'a'; 96].into_iter().chain(*b"z").collect::<Vec<_>>()
         ));
     }
 

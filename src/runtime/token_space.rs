@@ -437,10 +437,10 @@ impl Constraint {
 			let Some(max_token_id) = self.max_original_token_id() else {
 				return RangeSetBlaze::new();
 			};
-			return RangeSetBlaze::from_iter([0..=max_token_id]);
+			return RangeSetBlaze::from_iter(std::iter::once(0..=max_token_id));
 		}
 
-		RangeSetBlaze::from_iter([0..=self.internal_token_count().saturating_sub(1) as u32])
+		RangeSetBlaze::from_iter(std::iter::once(0..=self.internal_token_count().saturating_sub(1) as u32))
 	}
 
 	pub(crate) fn expand_internal_token_set(

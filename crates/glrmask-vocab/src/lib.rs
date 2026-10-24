@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(TokenSet::from(2u32).range_pairs(), &[(2, 2)]);
         assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
         assert_eq!(TokenSet::new([]).range_pairs(), &[]);
-        assert_eq!(TokenSet::from_ranges([3..=5]).range_pairs(), &[(3, 5)]);
+        assert_eq!(TokenSet::from_ranges(std::iter::once(3..=5)).range_pairs(), &[(3, 5)]);
         assert_eq!(TokenSet::from_ranges(std::iter::once(3..6)).range_pairs(), &[(3, 5)]);
         assert_eq!(
             TokenSet::from_ranges([0..10, 5..13, 20..30]).range_pairs(),
@@ -473,7 +473,7 @@ mod tests {
         // An excluded start bound starts after that ID, not at it.
         assert_eq!(
             TokenSet::from_ranges([(Bound::Excluded(1), Bound::Included(3))]),
-            TokenSet::from_ranges([2..=3]),
+            TokenSet::from_ranges(std::iter::once(2..=3)),
         );
         assert_eq!(
             TokenSet::from_ranges([(Bound::Excluded(u32::MAX), Bound::Included(u32::MAX))])
@@ -517,7 +517,7 @@ mod compact_token_range_tests {
     #[test]
     fn coverage_validation_handles_gaps_and_u32_endpoint_without_expansion() {
         let vocab = Vocab::new(Vec::new()).with_special_tokens([0, 1, 3, 4, u32::MAX]);
-        assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges([0..=4])), Some(2));
+        assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges(std::iter::once(0..=4))), Some(2));
         let selected = TokenSet::new([3, 4, u32::MAX, 0, 1]);
         assert_eq!(selected.range_pairs(), &[(0, 1), (3, 4), (u32::MAX, u32::MAX)]);
         assert_eq!(vocab.next_available_token_id(0), Some(2));

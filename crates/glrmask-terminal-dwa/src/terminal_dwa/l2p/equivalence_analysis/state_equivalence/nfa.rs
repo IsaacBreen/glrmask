@@ -1203,7 +1203,7 @@ impl TokenBoundedAnalysisTrie {
         // Scan each contiguous raw transition row once, not one strided full
         // lexer pass for every byte. This changes storage order only; each
         // byte column remains sorted by original source-state identity.
-        for (source,row) in flat_trans.chunks_exact(256).enumerate(){
+        for (source,row) in flat_trans.as_chunks::<256>().0.iter().enumerate(){
             for &byte in &used_bytes{
                 let target=row[byte];
                 if target==u32::MAX{continue;}

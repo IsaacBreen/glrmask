@@ -31,8 +31,8 @@ fn timed<T>(operation: impl FnOnce() -> T) -> (T, f64) {
 
 fn selection(name: &str, n: u32) -> Vec<RangeInclusive<u32>> {
     match name {
-        "singleton" => vec![n - 1..=n - 1],
-        "all" => vec![0..=n - 1],
+        "singleton" => vec![std::ops::RangeInclusive::new(n - 1, n - 1)],
+        "all" => vec![std::ops::RangeInclusive::new(0, n - 1)],
         "all_except_middle" => vec![0..=n / 2 - 1, n / 2 + 1..=n - 1],
         "eight_disjoint_ranges" => (0..8).map(|i| {
             let start = i * n / 8 + n / 16;
@@ -148,8 +148,8 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
         if mixed {
             Ok(Grammar::from_glrm(
                 "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
-            )?.bind_snapshot("A", TokenSet::from_ranges([0..=n - 1]))?
-                .bind_snapshot("B", TokenSet::from_ranges([0..=n - 2]))?)
+            )?.bind_snapshot("A", TokenSet::from_ranges(std::iter::once(0..=n - 1)))?
+                .bind_snapshot("B", TokenSet::from_ranges(std::iter::once(0..=n - 2)))?)
         } else {
             Ok(Grammar::from_glrm("glrm 1; start start; nt start = \"x\" \"x\";")?)
         }

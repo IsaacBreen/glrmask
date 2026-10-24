@@ -483,7 +483,7 @@ mod proper_prefix_byte_tests {
             b"zzzzzzzzzzb",b"zzzzzzzzzzbx",b"\xff",b"\xff\x00",b"x\xff",b"x\xffy"]
             .into_iter().enumerate().map(|(i,b)| (i*19+7,b.to_vec())).collect::<Vec<_>>();
         let tree = VocabPrefixTree::build_owned(entries.clone());
-        for query in [mask([b'a']),mask([b'b']),mask([b'c']),mask([255]),mask([0]),mask([255,b'b']),[u64::MAX;4],[0;4]] {
+        for query in [mask(*b"a"),mask(*b"b"),mask(*b"c"),mask([255]),mask([0]),mask([255,b'b']),[u64::MAX;4],[0;4]] {
             let expected=reference(&entries,&query);
             let mut actual=tree.token_ids_with_proper_prefix_byte(&query,usize::MAX).unwrap();
             actual.sort_unstable(); assert_eq!(actual,expected);
@@ -493,7 +493,7 @@ mod proper_prefix_byte_tests {
                 }
             }
         }
-        assert!(tree.token_ids_with_proper_prefix_byte(&mask([b'b']),0).is_none());
+        assert!(tree.token_ids_with_proper_prefix_byte(&mask(*b"b"),0).is_none());
         assert_eq!(tree.token_ids_with_proper_prefix_byte(&[0;4],0),Some(Vec::new()));
     }
 
@@ -503,13 +503,13 @@ mod proper_prefix_byte_tests {
         let tree = VocabPrefixTree::build_owned(entries.clone());
         // One root visit, one matching compressed edge and two strict
         // descendants. The endpoint "a" is not an extra emitted ID.
-        assert_eq!(tree.token_ids_with_proper_prefix_byte(&mask([b'a']),3),None);
-        let mut ids = tree.token_ids_with_proper_prefix_byte(&mask([b'a']),4).unwrap();
+        assert_eq!(tree.token_ids_with_proper_prefix_byte(&mask(*b"a"),3),None);
+        let mut ids = tree.token_ids_with_proper_prefix_byte(&mask(*b"a"),4).unwrap();
         ids.sort_unstable(); assert_eq!(ids,vec![19,41]);
         let leaf = VocabPrefixTree::build_owned(vec![(99,b"za".to_vec())]);
-        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask([b'a']),2),Some(Vec::new()));
-        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask([b'z']),2),None);
-        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask([b'z']),3),Some(vec![99]));
+        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask(*b"a"),2),Some(Vec::new()));
+        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask(*b"z"),2),None);
+        assert_eq!(leaf.token_ids_with_proper_prefix_byte(&mask(*b"z"),3),Some(vec![99]));
     }
 
     #[test]
@@ -520,7 +520,7 @@ mod proper_prefix_byte_tests {
             (id*3+11,bytes)
         }).collect::<Vec<_>>();
         let tree=VocabPrefixTree::build_owned(entries.clone());
-        let query=mask([b'a',b'b']);
+        let query=mask(*b"ab");
         // Either first subtree fits alone, but their union does not. The
         // complete plan must succeed before any partial answer is returned.
         assert!(tree.token_ids_with_proper_prefix_byte(&query,5000).is_none());

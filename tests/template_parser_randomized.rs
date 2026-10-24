@@ -254,7 +254,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
     pieces.push((255, b"<END>".to_vec()));
     let vocab = Vocab::new(pieces.clone());
     let lexer = LexerDefinition::new(
-        [b'a', b'b', b'0', b'1', b'2', b'x']
+        b"ab012x"
             .iter()
             .map(|b| TerminalPattern::literal(vec![*b]))
             .collect(),
@@ -335,7 +335,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
                 break;
             }
             if prefix.len() < 4 && words.len() < 80 {
-                for b in [b'a', b'b', b'0', b'1', b'2', b'x'] {
+                for b in *b"ab012x" {
                     let after = advance(&ts, &words, &[b]);
                     if after.is_empty() || after.len() > 160 || after.iter().any(|s| s.len() > 12) {
                         continue;
@@ -596,7 +596,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                 break;
             }
             if prefix.len() < 4 {
-                for b in [b'a', b'b', b'0', b'1', b'2', b'x', b' '] {
+                for b in *b"ab012x " {
                     let mut next = prefix.clone();
                     next.push(b);
                     if recognize(&patterns, &ts, &done, &next).0 {

@@ -1395,7 +1395,7 @@ impl PackedRowIds {
                 .get(*start..*start + *len * 2)
                 .is_some_and(|bytes| {
                     bytes
-                        .chunks_exact(2)
+                        .as_chunks::<2>().0.iter()
                         .all(|b| (u16::from_le_bytes([b[0], b[1]]) as usize) < limit)
                 }),
             Self::BackedU32 {
@@ -1405,7 +1405,7 @@ impl PackedRowIds {
             } => backing
                 .get(*start..*start + *len * 4)
                 .is_some_and(|bytes| {
-                    bytes.chunks_exact(4).all(|b| {
+                    bytes.as_chunks::<4>().0.iter().all(|b| {
                         (u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize) < limit
                     })
                 }),
@@ -2011,14 +2011,14 @@ pub mod artifact_serde {
                         }
                         pos += 16;
                     }
-                    return bytes[pos..].chunks_exact(2).all(|word| {
+                    return bytes[pos..].as_chunks::<2>().0.iter().all(|word| {
                         (u16::from_le_bytes([word[0], word[1]]) as usize) < limit
                     });
                 }
             }
         }
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .all(|word| (u16::from_le_bytes([word[0], word[1]]) as usize) < limit)
     }
     use serde::{Deserializer, Serializer};
@@ -2870,7 +2870,7 @@ pub mod artifact_serde {
             let end = pos.checked_add(bytes_len).ok_or_else(|| "compressed tokenizer offset overflow".to_owned())?;
             let bytes = input.get(*pos..end).ok_or_else(|| "truncated compressed tokenizer vector".to_owned())?;
             let mut out = Vec::with_capacity(count);
-            out.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())));
+            out.extend(bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)));
             *pos = end;
             Ok(out)
         };
@@ -2879,8 +2879,8 @@ pub mod artifact_serde {
             let end = pos.checked_add(bytes_len).ok_or_else(|| "compressed tokenizer offset overflow".to_owned())?;
             let bytes = input.get(*pos..end).ok_or_else(|| "truncated compressed tokenizer ids".to_owned())?;
             let out = match width {
-                2 => bytes.chunks_exact(2).map(|b| u16::from_le_bytes(b.try_into().unwrap()) as u32).collect(),
-                4 => bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect(),
+                2 => bytes.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b) as u32).collect(),
+                4 => bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect(),
                 _ => unreachable!(),
             };
             *pos = end;
@@ -3078,14 +3078,14 @@ pub mod artifact_serde {
             1 => Ok(PackedRowIds::U8(Arc::from(bytes))),
             2 => Ok(PackedRowIds::U16(Arc::from(
                 bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>().0.iter()
                     .map(|b| u16::from_le_bytes([b[0], b[1]]))
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ))),
             4 => Ok(PackedRowIds::U32(Arc::from(
                 bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -3997,8 +3997,8 @@ pub mod artifact_serde {
                 .ok_or_else(|| "truncated giant tokenizer vector".to_owned())?;
             *pos = end;
             Ok(bytes
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>().0.iter()
+                .map(|b| u32::from_le_bytes(*b))
                 .collect())
         }
         let prefix_offsets = read_u32_vec_at(input, &mut pos, prefix_state_count + 1)?;
@@ -4171,7 +4171,7 @@ pub mod artifact_serde {
             } else {
                 PackedI16Values::Owned(Arc::from(
                     delta_bytes
-                        .chunks_exact(2)
+                        .as_chunks::<2>().0.iter()
                         .map(|b| i16::from_le_bytes([b[0], b[1]]))
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
@@ -4541,7 +4541,7 @@ pub mod artifact_serde {
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr().cast::<u8>(), bytes_len);
                 }
             } else {
-                out.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())));
+                out.extend(bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)));
             }
             *pos = end;
             Ok(out)
@@ -4560,7 +4560,7 @@ pub mod artifact_serde {
             let mut out = Vec::<u32>::with_capacity(count);
             out.extend(
                 bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>().0.iter()
                     .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))),
             );
             *pos = end;
@@ -4625,7 +4625,7 @@ pub mod artifact_serde {
                     let mut targets = Vec::with_capacity(transition_count);
                     targets.extend(
                         bytes
-                            .chunks_exact(2)
+                            .as_chunks::<2>().0.iter()
                             .map(|word| u16::from_le_bytes([word[0], word[1]])),
                     );
                     PackedRuntimeTargets::U16(Arc::from(targets.into_boxed_slice()))
@@ -4644,7 +4644,7 @@ pub mod artifact_serde {
                     .ok_or_else(|| "truncated fast tokenizer targets".to_owned())?;
                 let validate_chunk = |chunk: &[u8]| {
                     debug_assert_eq!(chunk.len() % 4, 0);
-                    chunk.chunks_exact(4).all(|word| {
+                    chunk.as_chunks::<4>().0.iter().all(|word| {
                         (u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize)
                             < state_count
                     })
@@ -4671,7 +4671,7 @@ pub mod artifact_serde {
                     }
                 } else {
                     let mut targets = Vec::with_capacity(transition_count);
-                    targets.extend(bytes.chunks_exact(4).map(|word| {
+                    targets.extend(bytes.as_chunks::<4>().0.iter().map(|word| {
                         u32::from_le_bytes([word[0], word[1], word[2], word[3]])
                     }));
                     PackedRuntimeTargets::U32(Arc::from(targets.into_boxed_slice()))
@@ -15320,7 +15320,7 @@ mod tests {
         let mut dfa = DFA::new(4);
         dfa.ensure_group_capacity(1);
         let mut group = U8Set::empty();
-        for byte in [b'a', b'b', b'x'] {
+        for byte in *b"abx" {
             group.insert(byte);
         }
         dfa.set_group_u8set(0, group);

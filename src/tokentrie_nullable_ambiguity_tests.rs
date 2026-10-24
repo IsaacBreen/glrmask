@@ -70,7 +70,7 @@ fn tokentrie_masks_match_parser_dwa_for_nullable_ambiguity() {
         for _ in 0..5 {
             let mut next = Vec::new();
             for prefix in frontier {
-                for byte in [b'a', b'b'] {
+                for byte in *b"ab" {
                     let mut word = prefix.clone();
                     word.push(byte);
                     next.push(word);

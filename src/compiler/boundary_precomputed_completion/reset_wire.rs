@@ -24,7 +24,7 @@ impl ResetIndex{
                 let count=self.word()?;if count>*budget{return None}*budget-=count;
                 let end=self.at.checked_add(count.checked_mul(4)?)?;let raw=self.bytes.get(self.at..end)?;self.at=end;
                 let mut result=Vec::with_capacity(count);let mut prev=None;
-                for bytes in raw.chunks_exact(4){let id=u32::from_le_bytes(bytes.try_into().ok()?);if id>=max||prev.is_some_and(|p|p>=id){return None}prev=Some(id);result.push(id);}
+                for bytes in raw.as_chunks::<4>().0.iter(){let id=u32::from_le_bytes(*bytes);if id>=max||prev.is_some_and(|p|p>=id){return None}prev=Some(id);result.push(id);}
                 Some(result)
             }
         }

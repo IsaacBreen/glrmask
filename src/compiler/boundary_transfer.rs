@@ -3131,7 +3131,7 @@ fn compile_signed_shard_parser_with_support(
     let resolved_reverse_topo = resolve_negative_codes_in_nwa(&mut arena, false);
     let resolve_ms = resolve_started.elapsed().as_secs_f64() * 1000.0;
     for state in arena.states() {
-        for (&label, _) in state.transitions.iter() {
+        for &label in state.transitions.keys() {
             if is_negative_label(label) {
                 return Err(format!(
                     "signed link shard {start_component} retains negative stack label {label} after exact resolution",
@@ -3617,10 +3617,10 @@ mod tests {
         use crate::compiler::stages::id_map_and_terminal_dwa::l2p::canonicalize_acyclic_nwa;
 
         let weights = [Weight::all(), Weight::empty(),
-            Weight::from_per_tsid_token_sets([(0, RangeSetBlaze::from_iter([0..=2]))]),
+            Weight::from_per_tsid_token_sets([(0, RangeSetBlaze::from_iter(std::iter::once(0..=2)))]),
             Weight::from_per_tsid_token_sets([
-                (0, RangeSetBlaze::from_iter([1..=3])),
-                (2, RangeSetBlaze::from_iter([7..=7])),
+                (0, RangeSetBlaze::from_iter(std::iter::once(1..=3))),
+                (2, RangeSetBlaze::from_iter(std::iter::once(7..=7))),
             ])];
         let mut random = 19u64;
         let mut next = || {

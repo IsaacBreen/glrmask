@@ -1633,7 +1633,7 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
                 }
             }
             PackedRuntimeTokenSetStorageRef::BackedFlat16(bytes) => {
-                for pair in bytes.chunks_exact(4) {
+                for pair in bytes.as_chunks::<4>().0.iter() {
                     let start = u16::from_le_bytes([pair[0], pair[1]]) as u32;
                     let end = u16::from_le_bytes([pair[2], pair[3]]) as u32;
                     f(start, end);
@@ -3007,7 +3007,7 @@ impl PackedRuntimeDwa {
                 .for_each(|(dst, &value)| dst.copy_from_slice(&(value as u16).to_le_bytes()));
         } else {
             for (dst, &value) in out[weight_token_ids_start..]
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>().0.iter_mut()
                 .zip(self.weight_token_ids.iter())
             {
                 dst.copy_from_slice(&(value as u16).to_le_bytes());
@@ -3046,7 +3046,7 @@ impl PackedRuntimeDwa {
                     .for_each(|(dst, entry)| write_transition(dst, entry));
             } else {
                 for (dst, entry) in out[transitions_start..]
-                    .chunks_exact_mut(7)
+                    .as_chunks_mut::<7>().0.iter_mut()
                     .zip(
                         self.label_pool
                             .values
@@ -3103,7 +3103,7 @@ impl PackedRuntimeDwa {
                     .for_each(|(dst, pair)| write_transition(dst, pair));
             } else {
                 for (dst, pair) in out[transitions_start..]
-                    .chunks_exact_mut(4)
+                    .as_chunks_mut::<4>().0.iter_mut()
                     .zip(
                         self.target_pool
                             .values
@@ -3138,7 +3138,7 @@ impl PackedRuntimeDwa {
                 .for_each(|(dst, state)| write_state(dst, state));
         } else {
             for (dst, state) in out[states_start..]
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>().0.iter_mut()
                 .zip(self.states.iter())
             {
                 write_state(dst, state);
@@ -3877,8 +3877,8 @@ impl PackedRuntimeDwa {
                 Ok(out)
             } else {
                 Ok(bytes
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                    .as_chunks::<4>().0.iter()
+                    .map(|chunk| u32::from_le_bytes(*chunk))
                     .collect())
             }
         }
@@ -3905,8 +3905,8 @@ impl PackedRuntimeDwa {
                 Ok(out)
             } else {
                 Ok(bytes
-                    .chunks_exact(4)
-                    .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                    .as_chunks::<4>().0.iter()
+                    .map(|chunk| i32::from_le_bytes(*chunk))
                     .collect())
             }
         }
@@ -4043,7 +4043,7 @@ impl PackedRuntimeDwa {
                 Ok(out)
             } else {
                 Ok(bytes
-                    .chunks_exact(8)
+                    .as_chunks::<8>().0.iter()
                     .map(|chunk| {
                         [
                             u32::from_le_bytes(chunk[..4].try_into().expect("four-byte chunk")),

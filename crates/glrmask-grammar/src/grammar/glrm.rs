@@ -1862,7 +1862,7 @@ fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut RangeSetBl
             token_ids.insert(*token_id);
         }
         GrammarExpr::SpecialTokenRange(start, end) => {
-            *token_ids |= RangeSetBlaze::from_iter([*start..=*end]);
+            *token_ids |= RangeSetBlaze::from_iter(std::iter::once(*start..=*end));
         }
         GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
             collect_expr_special_token_ids(inner, token_ids);

@@ -5665,13 +5665,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         let (v, kids) = b.children.iter().next().unwrap();
                         if kids.len() == 1 {
                             let child = kids.values().next().unwrap();
-                            if let Some(nc) = transform_td::<T, A, B, M>(child, memo, m) {
-                                let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
-                                let new_children = CompactMap::unit(v.clone(), new_kids);
-                                return Some(new_branch(new_children, None));
-                            } else {
-                                return None;
-                            }
+                            let nc = transform_td::<T, A, B, M>(child, memo, m)?;
+                            let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
+                            let new_children = CompactMap::unit(v.clone(), new_kids);
+                            return Some(new_branch(new_children, None));
                         }
                     }
                     let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
@@ -5836,16 +5833,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         let (v, kids) = b.children.iter().next().unwrap();
                         if kids.len() == 1 {
                             let child = kids.values().next().unwrap();
-                            if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
-                                if empty_unchanged && Arc::ptr_eq(&nc, child) {
-                                    return Some(node.clone());
-                                }
-                                let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
-                                let new_children = CompactMap::unit(v.clone(), new_kids);
-                                return Some(new_branch(new_children, None));
-                            } else {
-                                return None;
+                            let nc = transform_np::<T, A, M>(child, memo, m)?;
+                            if empty_unchanged && Arc::ptr_eq(&nc, child) {
+                                return Some(node.clone());
                             }
+                            let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
+                            let new_children = CompactMap::unit(v.clone(), new_kids);
+                            return Some(new_branch(new_children, None));
                         }
                     }
                     let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();

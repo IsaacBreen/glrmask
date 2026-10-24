@@ -4437,7 +4437,7 @@ mod tests {
 
     #[test]
     fn demanded_possible_matches_match_direct_execution_on_random_small_lexers() {
-        let alphabet = [b'a', b'b', b' '];
+        let alphabet = *b"ab ";
         let mut entries = vec![(0u32, Vec::new())];
         fn add_words(
             entries: &mut Vec<(u32, Vec<u8>)>,

@@ -284,7 +284,7 @@ impl<'tok> NfaTrieScanCache<'tok> {
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
-        RangeSetBlaze::from_iter([0..=max_token_id]),
+        RangeSetBlaze::from_iter(std::iter::once(0..=max_token_id)),
     )
 }
 
@@ -814,7 +814,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             } else {
                 Weight::from_uniform(
                     0..=self.num_tsids - 1,
-                    RangeSetBlaze::from_iter([internal_token_id..=internal_token_id]),
+                    RangeSetBlaze::from_iter(std::iter::once(internal_token_id..=internal_token_id)),
                 )
             };
             self.add_match_from_sources(sources, label, self.leaf_state, &weight);

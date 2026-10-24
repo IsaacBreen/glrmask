@@ -4774,7 +4774,7 @@ fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
             let x = byte_val as u8;
 
             let b_next = if b < body_dead {
-                body_dfa.step(b, x).map_or(body_dead, |t| t)
+                body_dfa.step(b, x).unwrap_or(body_dead)
             } else {
                 body_dead
             };
@@ -4798,7 +4798,7 @@ fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                 if new_c >= min as u32 && new_c <= max as u32 {
                     let fresh_s = suffix_dfa
                         .step(0, x)
-                        .map_or(suffix_dead, |t| t);
+                        .unwrap_or(suffix_dead);
                     if fresh_s != suffix_dead {
                         return None;
                     }
@@ -4809,17 +4809,17 @@ fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                 if body_is_accept && b_next == body_dead {
                     let new_c = c + 1;
                     let new_b = if new_c < max as u32 {
-                        body_dfa.step(0, x).map_or(body_dead, |t| t)
+                        body_dfa.step(0, x).unwrap_or(body_dead)
                     } else {
                         body_dead
                     };
                     let old_s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
+                        suffix_dfa.step(s, x).unwrap_or(suffix_dead)
                     } else {
                         suffix_dead
                     };
                     let fresh_s = if new_c >= min as u32 {
-                        suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
+                        suffix_dfa.step(0, x).unwrap_or(suffix_dead)
                     } else {
                         suffix_dead
                     };
@@ -4832,7 +4832,7 @@ fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                     (new_b, new_s, new_c)
                 } else {
                     let s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
+                        suffix_dfa.step(s, x).unwrap_or(suffix_dead)
                     } else {
                         suffix_dead
                     };

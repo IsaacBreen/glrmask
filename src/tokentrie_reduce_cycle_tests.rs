@@ -170,7 +170,7 @@ fn all_words(max_len: usize) -> Vec<Vec<u8>> {
     for _ in 0..max_len {
         let mut next = Vec::new();
         for prefix in frontier {
-            for byte in [b'a', b'b', b'c'] {
+            for byte in *b"abc" {
                 let mut word = prefix.clone();
                 word.push(byte);
                 next.push(word);

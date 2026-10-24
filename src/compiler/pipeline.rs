@@ -354,10 +354,10 @@ pub(crate) fn compile_thread_count() -> Option<usize> {
 
     #[cfg(target_os = "macos")]
     {
-        return std::thread::available_parallelism()
+        std::thread::available_parallelism()
             .ok()
             .map(|parallelism| parallelism.get().min(DEFAULT_COMPILE_THREAD_CAP))
-            .filter(|&value| value > 1);
+            .filter(|&value| value > 1)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2031,7 +2031,7 @@ mod huge_parser_top_accept_collapse_tests {
     fn point_weight(token: u32) -> Weight {
         Weight::from_per_tsid_token_sets([(
             0,
-            RangeSetBlaze::from_iter([token..=token]),
+            RangeSetBlaze::from_iter(std::iter::once(token..=token)),
         )])
     }
 
@@ -3416,7 +3416,7 @@ fn build_special_token_terminal_family(
     for special in specials {
         let first = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
         let last = id_map.vocab_tokens.original_to_internal[special.token_id_end as usize];
-        let tokens = RangeSetBlaze::from_iter([first..=last]);
+        let tokens = RangeSetBlaze::from_iter(std::iter::once(first..=last));
         let weight = Weight::from_uniform(0..=0, tokens);
         dwa.add_transition(
             dwa.start_state(),

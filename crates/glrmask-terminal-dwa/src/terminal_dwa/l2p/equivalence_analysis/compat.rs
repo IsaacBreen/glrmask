@@ -173,7 +173,7 @@ pub fn derive_flat_transition_cache(
 
 pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
     let mut column_hashes = [0u64; 256];
-    for row in dfa.transitions.chunks_exact(256) {
+    for row in dfa.transitions.as_chunks::<256>().0.iter() {
         for (hash, &target) in column_hashes.iter_mut().zip(row) {
             *hash = hash
                 .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
