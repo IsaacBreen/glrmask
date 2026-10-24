@@ -150,6 +150,6 @@ configure_package_config_file(cmake/glrmaskConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/glrmaskConfig.cmake"
   INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/glrmask")
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/glrmaskConfigVersion.cmake"
-  VERSION "${PROJECT_VERSION}" COMPATIBILITY SameMinorVersion)
+  VERSION "${PROJECT_VERSION}" COMPATIBILITY SameMajorVersion)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glrmaskConfig.cmake" "${CMAKE_CURRENT_BINARY_DIR}/glrmaskConfigVersion.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/glrmask")

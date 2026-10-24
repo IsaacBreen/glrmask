@@ -10,7 +10,14 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 
 ## Installation
 
-The C++17 facade and C interface call the same Rust compiler and decoding engine as the Rust API. Building from a complete checkout requires a current stable Rust toolchain, CMake 3.20 or newer, and the platform C/C++ compiler. C++ consumers need C++17. The installed CMake package exports `glrmask::glrmask` for C++ and `glrmask::c` for C. See [Building from source](#building-from-source) for the commands.
+Each [GitHub release](https://github.com/IsaacBreen/glrmask/releases) includes static and shared libraries for Windows x64 and arm64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and arm64 (glibc 2.28 or newer, or musl). Extract the archive for your platform, then:
+
+```cmake
+find_package(glrmask 0.4 CONFIG REQUIRED)
+target_link_libraries(application PRIVATE glrmask::glrmask)
+```
+
+Configure with `-DCMAKE_PREFIX_PATH=/absolute/path/to/glrmask`. C consumers link `glrmask::c` and include `glrmask.h`. C++ consumers need C++17 and CMake 3.20 or newer. To build from source instead, see [Building from source](#building-from-source).
 
 ## Usage
 

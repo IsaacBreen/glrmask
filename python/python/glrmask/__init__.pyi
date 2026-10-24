@@ -50,7 +50,7 @@ _T = TypeVar("_T")
 _internal: ModuleType
 
 __version__: str
-"""The GLRMask version, for example "1.0.0"."""
+"""The GLRMask version, for example "0.4.0"."""
 __all__: list[str] = [
     "BoundaryMaskStrategy",
     "Constraint",

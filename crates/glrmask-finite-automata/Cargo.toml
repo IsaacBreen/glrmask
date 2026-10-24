@@ -2,7 +2,8 @@
 name = "glrmask-finite-automata"
 version = "0.1.2"
 edition = "2024"
-description = "Finite-automata primitives used by GLRMask"
+rust-version = "1.88"
+description = "Part of GLRMask: finite automata. Depend on the glrmask crate instead; this crate has no stable API."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
