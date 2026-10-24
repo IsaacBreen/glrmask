@@ -147,7 +147,7 @@ cmake --install build/native --config Release --prefix /absolute/path/glrmask-in
 The default is a static library; add `-DGLRMASK_SHARED=ON` for a shared build. The installed package exports `glrmask::glrmask` for C++17 and `glrmask::c` for C:
 
 ```cmake
-find_package(glrmask 0.4 CONFIG REQUIRED)
+find_package(glrmask 1.0 CONFIG REQUIRED)
 target_link_libraries(application PRIVATE glrmask::glrmask)
 ```
 

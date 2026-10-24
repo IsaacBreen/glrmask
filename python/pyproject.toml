@@ -4,18 +4,29 @@ build-backend = "maturin"
 
 [project]
 name = "glrmask"
-version = "0.4.0"
+version = "1.0.0"
 requires-python = ">=3.9,<3.16"
 description = "Extremely fast grammar-constrained decoding for LLMs"
 readme = "PYTHON.md"
 license = { text = "MIT OR Apache-2.0" }
 license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE", "licenses/NOTICE-LARK"]
 dependencies = ["numpy>=1.21"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 
 [project.urls]
+Homepage = "https://glrmask.com"
 Documentation = "https://glrmask.com/reference/python/"
 Repository = "https://github.com/IsaacBreen/glrmask"
-Changelog = "https://github.com/IsaacBreen/glrmask/blob/v0.4.0/CHANGELOG.md"
+Changelog = "https://github.com/IsaacBreen/glrmask/blob/v1.0.0/CHANGELOG.md"
 
 [tool.maturin]
 features = []

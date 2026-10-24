@@ -203,14 +203,14 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "f641f38279d4374494795f62d0769300a61a5c73a2e3cb18abd96557f6affe67",
-    "bindings/node/README.md": "317179444d73e4ae9109a46fd63e64ca8b176b4bc177d5708244dc7827675a3b",
-    "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
-    "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
+    "bindings\\cpp\\README.md": "2d17d6bd51b28ea1005301cb8b14cca160c38db2b14b3bb8e1833d7ad3ebe73c",
+    "bindings\\node\\README.md": "3f8fc1c2bffdf509383ed233feb80e318377b07c232d633c076ff657519dd020",
+    "docs\\content\\releases\\0.3\\cpp.md": "a429dfbbd09455e1a1b999e547778b09f4a896b09d6a11309989410d7ad27371",
+    "docs\\content\\releases\\0.3\\javascript.md": "325c01694d45220dcb62bf41ae7d0ca27c37fa9830ca42192214454265821197"
   },
   "api_reference": {
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "92f03001ad8b00e105991b1fd8f995086003d300530973387f219eea65623fcd"
+  "content_sha256": "d278f86c600469aa3045208d3a88f13c319eabf2975120c41cb6d12f3effc5c5"
 }
