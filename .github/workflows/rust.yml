@@ -68,7 +68,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Test with internal API
-        run: cargo test --locked --profile fasttest -p glrmask --features internal-api
+        run: cargo test --locked --profile fasttest -p glrmask -p glrmask-grammar --features internal-api
 
   examples:
     name: Examples

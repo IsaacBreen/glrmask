@@ -278,55 +278,55 @@ spans={}
 == rejected
 start.0: "a"
 -- result
-error: Grammar parse error at line 1, column 6 (bytes 5..6): Lark rule and terminal priorities are not supported
+error: Grammar parse error at line 1, column 6: Lark rule and terminal priorities are not supported
 == rejected
 start.-2: "a"
 -- result
-error: Grammar parse error at line 1, column 6 (bytes 5..6): Lark rule and terminal priorities are not supported
+error: Grammar parse error at line 1, column 6: Lark rule and terminal priorities are not supported
 == rejected
 start: A
 A.2: "a"
 -- result
-error: Grammar parse error at line 2, column 2 (bytes 10..11): Lark rule and terminal priorities are not supported
+error: Grammar parse error at line 2, column 2: Lark rule and terminal priorities are not supported
 == rejected
 %extend start: "x"
 start: "a"
 -- result
-error: Grammar parse error at line 1, column 1 (bytes 0..7): unsupported Lark directive %extend; directives are never silently ignored
+error: Grammar parse error at line 1, column 1: unsupported Lark directive %extend; directives are never silently ignored
 == rejected
 %unknown thing
 start: "a"
 -- result
-error: Grammar parse error at line 1, column 1 (bytes 0..8): unsupported Lark directive %unknown; directives are never silently ignored
+error: Grammar parse error at line 1, column 1: unsupported Lark directive %unknown; directives are never silently ignored
 == rejected
 %import unknown.A
 start: A
 -- result
-error: Grammar parse error at line 1, column 16 (bytes 15..16): unsupported Lark import module "unknown"; only 'common' is supported
+error: Grammar parse error at line 1, column 16: unsupported Lark import module "unknown"; only 'common' is supported
 == rejected
 start: .
 -- result
-error: Grammar parse error at line 1, column 9 (bytes 8..8): bare '.' is not a Lark atom; use /./ for a Unicode character
+error: Grammar parse error at line 1, column 9: bare '.' is not a Lark atom; use /./ for a Unicode character
 == rejected
 other: "a"
 -- result
-error: Grammar parse error at line 1, column 11 (bytes 10..10): Lark grammar must define a rule named 'start'
+error: Grammar parse error at line 1, column 11: Lark grammar must define a rule named 'start'
 == rejected
 start: /a+?/
 -- result
-error: Grammar parse error at line 1, column 8 (bytes 7..12): reluctant regex quantifiers are unsupported; use the whole-terminal shortest operation or [lazy]
+error: Grammar parse error at line 1, column 8: reluctant regex quantifiers are unsupported; use the whole-terminal shortest operation or [lazy]
 == rejected
 start: /a+/q
 -- result
-error: Grammar parse error at line 1, column 8 (bytes 7..12): unsupported regex flag 'q'; supported flags are i, s, x, u
+error: Grammar parse error at line 1, column 8: unsupported regex flag 'q'; supported flags are i, s, x, u
 == rejected
 start: "ab".."z"
 -- result
-error: Grammar parse error at line 1, column 17 (bytes 16..16): Lark literal ranges require single Unicode-scalar endpoints
+error: Grammar parse error at line 1, column 17: Lark literal ranges require single Unicode-scalar endpoints
 == rejected
 start: "a"~3..2
 -- result
-error: Grammar parse error at line 1, column 16 (bytes 15..15): repetition upper bound 2 is smaller than lower bound 3
+error: Grammar parse error at line 1, column 16: repetition upper bound 2 is smaller than lower bound 3
 == rejected
 start: A
 A: B
