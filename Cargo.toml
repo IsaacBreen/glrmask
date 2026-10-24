@@ -12,7 +12,7 @@ repository = "https://github.com/IsaacBreen/glrmask"
 homepage = "https://glrmask.com"
 keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
-include = ["/src/**", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+include = ["/src/**", "/benches/*.rs", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [features]
 default = []

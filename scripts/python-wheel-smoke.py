@@ -116,18 +116,18 @@ control_module = glrmask.Module(glrmask.Grammar.from_glrm(
 ))
 assert control_module.bind("CONTROL", glrmask.TokenSet([2])) is None
 control_constraint = control_module.compile(llama_vocab)
-assert control_constraint.start().mask(6).tolist() == [False, False, True, False, False, False]
+assert control_constraint.start().mask(size=6).tolist() == [False, False, True, False, False, False]
 
 llama_constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(
     glrmask.Grammar.from_ebnf('start ::= "a"'),
     glrmask.TokenSet(llama_vocab.llama_cpp_end_token_ids),
 )).compile(llama_vocab)
 llama_state = llama_constraint.start()
-assert llama_state.mask(6).tolist() == [True, False, False, False, False, False]
+assert llama_state.mask(size=6).tolist() == [True, False, False, False, False, False]
 assert llama_state.commit_token(0)
-assert llama_state.mask(6).tolist() == [False, False, False, True, False, True]
+assert llama_state.mask(size=6).tolist() == [False, False, False, True, False, True]
 assert llama_state.commit_token(3)
 assert llama_state.is_accepting() and llama_state.is_terminated()
-assert not llama_state.mask(6).any()
+assert not llama_state.mask(size=6).any()
 
 print("public Python API smoke test passed")
