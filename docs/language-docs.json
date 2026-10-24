@@ -203,8 +203,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "1ca71a834a9a510a5212d8cc8cfef67773fff01d9496f73582f6bad6a5e8a732",
-    "bindings/node/README.md": "8f558a430242220207856b2211667c8f39e9eda46c1d93da1183331cc2954971",
+    "bindings/cpp/README.md": "a86b4efc03ffbc164c0efb820136b665258a30bffaad8cd41f6451c2216b50be",
+    "bindings/node/README.md": "54b3b50dd271312a26d2aad406afc0fc8210fd0b0d1d3aac3f1ce1ad2bd945ea",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -212,5 +212,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "9a0d50e40b5839e3447211b0b50f11c053668d6b249604089e8ce10c5ba0350a"
+  "content_sha256": "35482c225b699f42e7c848092c4d747b4d1a809314744ff613b9775f17839e5f"
 }

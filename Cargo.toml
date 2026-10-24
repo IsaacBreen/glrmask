@@ -1,29 +1,18 @@
 [package]
 name = "glrmask"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.88"
 autotests = false
 description = "Extremely fast grammar-constrained decoding for LLMs"
 license = "MIT OR Apache-2.0"
 readme = "README.rust.md"
 documentation = "https://docs.rs/glrmask"
 repository = "https://github.com/IsaacBreen/glrmask"
+homepage = "https://glrmask.com"
 keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
-exclude = [
-    ".agents/**",
-    ".github/**",
-    "AGENTS.md",
-    "CORE-API.md",
-    "CORE-PROGRESS.md",
-    "docs/validation/**",
-    ".benchmarks/**",
-    ".cache/**",
-    "python/**",
-    "bindings/**",
-    "scripts/**",
-    "target/**",
-]
+include = ["/src/**", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [features]
 default = []
@@ -38,12 +27,13 @@ slow-tests = [
 
 [[example]]
 name = "composition_component_candidates"
+path = "examples/dev/composition_component_candidates.rs"
 required-features = ["internal-api"]
 
 [dependencies]
 glrmask-finite-automata = { version = "=0.1.2", path = "crates/glrmask-finite-automata" }
-glrmask-weight = { version = "=0.1.1", path = "crates/glrmask-weight", features = ["internal-api"] }
-glrmask-weighted-automata = { version = "=0.1.1", path = "crates/glrmask-weighted-automata" }
+glrmask-weight = { version = "=0.2.0", path = "crates/glrmask-weight", features = ["internal-api"] }
+glrmask-weighted-automata = { version = "=0.2.0", path = "crates/glrmask-weighted-automata" }
 glrmask-vocab = { version = "=0.2.1", path = "crates/glrmask-vocab", features = ["internal-api"] }
 glrmask-lexer = { version = "=0.2.1", path = "crates/glrmask-lexer", features = ["internal-api"] }
 glrmask-grammar = { version = "=0.2.1", path = "crates/glrmask-grammar", features = ["internal-api"] }
@@ -104,9 +94,131 @@ required-features = ["internal-api"]
 
 [[example]]
 name = "profile_glr"
+path = "examples/dev/profile_glr.rs"
+
+[[example]]
+name = "boundary_runtime_replay"
+path = "examples/dev/boundary_runtime_replay.rs"
+
+[[example]]
+name = "compare_boundary_native_rows"
+path = "examples/dev/compare_boundary_native_rows.rs"
+
+[[example]]
+name = "composition_build_static_artifact"
+path = "examples/dev/composition_build_static_artifact.rs"
+
+[[example]]
+name = "composition_dynamic_control"
+path = "examples/dev/composition_dynamic_control.rs"
+
+[[example]]
+name = "composition_loaded_static_probe"
+path = "examples/dev/composition_loaded_static_probe.rs"
+
+[[example]]
+name = "composition_prepare_component"
+path = "examples/dev/composition_prepare_component.rs"
+
+[[example]]
+name = "composition_real_binding_control"
+path = "examples/dev/composition_real_binding_control.rs"
+
+[[example]]
+name = "composition_real_dynamic_control"
+path = "examples/dev/composition_real_dynamic_control.rs"
+
+[[example]]
+name = "composition_semantic_probe"
+path = "examples/dev/composition_semantic_probe.rs"
+
+[[example]]
+name = "composition_static_history_probe"
+path = "examples/dev/composition_static_history_probe.rs"
+
+[[example]]
+name = "composition_static_probe"
+path = "examples/dev/composition_static_probe.rs"
+
+[[example]]
+name = "composition_tbm_probe"
+path = "examples/dev/composition_tbm_probe.rs"
+
+[[example]]
+name = "composition_virtual_control"
+path = "examples/dev/composition_virtual_control.rs"
+
+[[example]]
+name = "core_batch_bench"
+path = "examples/dev/core_batch_bench.rs"
+
+[[example]]
+name = "core_batch_scaling"
+path = "examples/dev/core_batch_scaling.rs"
+
+[[example]]
+name = "exact_token_range_bench"
+path = "examples/dev/exact_token_range_bench.rs"
+
+[[example]]
+name = "marker_bench"
+path = "examples/dev/marker_bench.rs"
+
+[[example]]
+name = "o21137_subgrammar_bench"
+path = "examples/dev/o21137_subgrammar_bench.rs"
+
+[[example]]
+name = "parser_grammar_constructor"
+path = "examples/dev/parser_grammar_constructor.rs"
+
+[[example]]
+name = "schema_policy_probe"
+path = "examples/dev/schema_policy_probe.rs"
+
+[[example]]
+name = "selected10_layout_explore"
+path = "examples/dev/selected10_layout_explore.rs"
+
+[[example]]
+name = "serialization_cfa1000_probe"
+path = "examples/dev/serialization_cfa1000_probe.rs"
+
+[[example]]
+name = "serialization_compiled_replay"
+path = "examples/dev/serialization_compiled_replay.rs"
+
+[[example]]
+name = "serialization_probe"
+path = "examples/dev/serialization_probe.rs"
+
+[[example]]
+name = "serialization_save_tail_probe"
+path = "examples/dev/serialization_save_tail_probe.rs"
+
+[[example]]
+name = "serialization_schema_save_tail_probe"
+path = "examples/dev/serialization_schema_save_tail_probe.rs"
+
+[[example]]
+name = "static_link_diff"
+path = "examples/dev/static_link_diff.rs"
+
+[[example]]
+name = "static_link_measure"
+path = "examples/dev/static_link_measure.rs"
+
+[[example]]
+name = "vocab_partition_bench"
+path = "examples/dev/vocab_partition_bench.rs"
+
+[[example]]
+name = "vocab_partition_profile"
+path = "examples/dev/vocab_partition_profile.rs"
 
 [[example]]
 name = "selected10_programmatic_tools"
+path = "examples/dev/selected10_programmatic_tools.rs"
 required-features = ["internal-api"]
 
 # Public API suites.
@@ -360,10 +472,12 @@ required-features = ["internal-api"]
 
 [[example]]
 name = "template_precompiled_composition"
+path = "examples/dev/template_precompiled_composition.rs"
 required-features = ["internal-api"]
 
 [[example]]
 name = "template_schema_reparse_oracle"
+path = "examples/dev/template_schema_reparse_oracle.rs"
 required-features = ["internal-api"]
 
 [[test]]
@@ -387,10 +501,12 @@ required-features = ["internal-api"]
 
 [[example]]
 name = "template_composition"
+path = "examples/dev/template_composition.rs"
 required-features = ["internal-api"]
 
 [[example]]
 name = "template_composition_control"
+path = "examples/dev/template_composition_control.rs"
 required-features = ["internal-api"]
 
 [[test]]

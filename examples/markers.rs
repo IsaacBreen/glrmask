@@ -1,4 +1,4 @@
-//! Report numeric grammar-boundary observations during token generation.
+//! Markers: see which points in the grammar each commit passed.
 use glrmask::{Grammar, MarkerEvent, Result, Vocab};
 
 fn main() -> Result<()> {

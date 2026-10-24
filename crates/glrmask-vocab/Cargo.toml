@@ -2,7 +2,8 @@
 name = "glrmask-vocab"
 version = "0.2.1"
 edition = "2024"
-description = "Vocabulary representation and derived-artifact cache for GLRMask"
+rust-version = "1.88"
+description = "Part of GLRMask: vocabularies and token sets. Depend on the glrmask crate instead; this crate has no stable API."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
