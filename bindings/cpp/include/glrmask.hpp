@@ -53,6 +53,14 @@ enum class BoundaryMaskStrategy : std::uint32_t {
     FastMasks = ParserDwa
 };
 
+/// How the parser is represented and run when masks are computed with `MaskStrategy::TokenTrie`.
+enum class ParserBackend : std::uint32_t {
+    /// An LR table. Faster to compile, with slower masks. The default.
+    LrTable = 0,
+    /// Template DFAs. Slower to compile, with faster masks.
+    TemplateDfa = 1
+};
+
 /// What an extern can be bound to.
 enum class ExternKind {
     /// A token set or token ID.
@@ -138,18 +146,17 @@ struct CompileOptions {
     MaskStrategy mask_strategy = MaskStrategy::Auto;
     /// How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy::Auto`.
     BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
-    /// Whether `MaskStrategy::TokenTrie` parses with template DFAs instead of an LR table.
-    /// Slower to compile, with faster masks. Off by default.
-    bool template_dfas = false;
+    /// How the parser is represented for parts compiled with `MaskStrategy::TokenTrie`. Defaults to `ParserBackend::LrTable`.
+    ParserBackend parser_backend = ParserBackend::LrTable;
     /// Whether `MaskStrategy::TokenTrie` merges tokens that the grammar treats the same, so
-    /// masks walk fewer tokens. Requires `template_dfas`. Off by default.
+    /// masks walk fewer tokens. Requires `ParserBackend::TemplateDfa`. Off by default.
     bool merge_equivalent_tokens = false;
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         return {sizeof(glrmask_compile_options),
                 static_cast<std::uint32_t>(mask_strategy),
                 static_cast<std::uint32_t>(boundary_mask_strategy),
-                static_cast<std::uint32_t>(template_dfas),
+                static_cast<std::uint32_t>(parser_backend),
                 static_cast<std::uint32_t>(merge_equivalent_tokens)};
     }
 };

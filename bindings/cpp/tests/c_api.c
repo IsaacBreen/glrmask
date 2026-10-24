@@ -21,7 +21,7 @@ int main(void) {
     CHECK(glrmask_module_new(grammar,&module)==GLRMASK_OK);
     glrmask_compile_options module_options=glrmask_default_compile_options();
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_TRIE;
-    module_options.template_dfas=1;
+    module_options.parser_backend=GLRMASK_PARSER_BACKEND_TEMPLATE_DFA;
     module_options.merge_equivalent_tokens=1;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
     /* Grammar::precompile is the module-returning mirror of Grammar::compile. */

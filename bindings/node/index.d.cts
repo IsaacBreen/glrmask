@@ -34,6 +34,16 @@ export declare const BoundaryMaskStrategy: Readonly<{
 /** A `BoundaryMaskStrategy` value. */
 export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
 
+/** How the parser is represented and run when masks are computed with `MaskStrategy.TokenTrie`. */
+export declare const ParserBackend: Readonly<{
+  /** An LR table. Faster to compile, with slower masks. The default. */
+  LrTable: 'lr-table';
+  /** Template DFAs. Slower to compile, with faster masks. */
+  TemplateDfa: 'template-dfa';
+}>;
+/** A `ParserBackend` value. */
+export type ParserBackend = typeof ParserBackend[keyof typeof ParserBackend];
+
 /** The kinds of `GlrMaskError`. */
 export type ErrorCode = 'GLRMASK_INVALID_ARGUMENT' | 'GLRMASK_ENGINE_ERROR' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
 /** A GLRMask error. */
@@ -122,9 +132,9 @@ export interface CompileOptions {
   maskStrategy?: MaskStrategy;
   /** How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
   boundaryMaskStrategy?: BoundaryMaskStrategy;
-  /** Whether `MaskStrategy.TokenTrie` parses with template DFAs instead of an LR table. Slower to compile, with faster masks. Defaults to `false`. */
-  templateDfas?: boolean;
-  /** Whether `MaskStrategy.TokenTrie` merges tokens that the grammar treats the same, so masks walk fewer tokens. Requires `templateDfas`. Defaults to `false`. */
+  /** How the parser is represented for parts compiled with `MaskStrategy.TokenTrie`. Defaults to `ParserBackend.LrTable`. */
+  parserBackend?: ParserBackend;
+  /** Whether `MaskStrategy.TokenTrie` merges tokens that the grammar treats the same, so masks walk fewer tokens. Requires `ParserBackend.TemplateDfa`. Defaults to `false`. */
   mergeEquivalentTokens?: boolean;
 }
 

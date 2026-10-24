@@ -15,11 +15,14 @@
     "MaskStrategy": "How masks are computed.",
     "MaskStrategy.AUTO": "Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default.",
     "MaskStrategy.PARSER_DWA": "Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.",
-    "MaskStrategy.TOKEN_TRIE": "Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.\n\nTwo arguments of `compile` and `precompile` tune it, both off by default. `template_dfas=True` parses with template DFAs instead of an LR table: slower to compile, with faster masks. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `template_dfas=True`.",
+    "MaskStrategy.TOKEN_TRIE": "Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.\n\nTwo arguments of `compile` and `precompile` tune it. `parser_backend` chooses how the parser is represented; see `ParserBackend`. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `parser_backend=ParserBackend.TEMPLATE_DFA`.",
     "BoundaryMaskStrategy": "How masks are computed at grammar boundaries.",
     "BoundaryMaskStrategy.PARSER_DWA": "Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `ValueError` if it would be too large.",
     "BoundaryMaskStrategy.AUTO": "`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default.",
     "BoundaryMaskStrategy.TOKEN_TRIE": "Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.",
+    "ParserBackend": "How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`.",
+    "ParserBackend.LR_TABLE": "An LR table. Faster to compile, with slower masks. The default.",
+    "ParserBackend.TEMPLATE_DFA": "Template DFAs. Slower to compile, with faster masks.",
     "TokenSet": "A set of token IDs.\n\nIn a grammar, it matches any one of its tokens. Every ID must be in the vocabulary.",
     "TokenSet.__init__": "Creates a set from `ids`.",
     "TokenSet.from_ranges": "Creates a set from `range` objects, which must have step 1.",
@@ -197,8 +200,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "f2e6dac6640d9b8959615979db887f0e3fd242c41cc3af3c175e6e49d1d5e277",
-    "bindings/node/README.md": "3ace862d53eed13c532ab6bd77541f52532446913b4ca5efb23fe30df46dbd45",
+    "bindings/cpp/README.md": "99e5ed434d392f374656a3e04ca17634d48d74663d7f469d6e1a83e35391fc58",
+    "bindings/node/README.md": "82bd340b7c7c4ab42ee4b9f4187737c18601cad7de5a9611895363d30148979c",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -206,5 +209,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "2ffcbf82c0319fd96484c30553bbfbce01d307702a8d0e2596c2b6bec20bcf69"
+  "content_sha256": "dfc7b0c2076af23a10171ed192935c9b7d84e5b7d087a878ecb885f5554fccf0"
 }

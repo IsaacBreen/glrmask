@@ -113,20 +113,20 @@ impl NativeModule {
         call(|| Ok(externs_to_native(self.snapshot()?.externs().unbound().iter())))
     }
 
-    fn options(mode: f64, boundary: f64, template_dfas: bool, merge_equivalent_tokens: bool) -> core::Result<g::CompileOptions> {
+    fn options(mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> core::Result<g::CompileOptions> {
         Ok(core::compile_options(
             core::mask_strategy(id(mode)?)?,
             core::boundary_mask_strategy(id(boundary)?)?,
-            template_dfas,
+            core::parser_backend(parser_backend as u32)?,
             merge_equivalent_tokens,
         ))
     }
 
     #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: bool, merge_equivalent_tokens: bool) -> napi::Result<()> {
+    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> napi::Result<()> {
         call(|| {
             let vocab = live(&vocab.inner)?.clone();
-            let options = Self::options(mode, boundary, template_dfas, merge_equivalent_tokens)?;
+            let options = Self::options(mode, boundary, parser_backend, merge_equivalent_tokens)?;
             let mut target = live(&self.inner)?;
             target.module.precompile_with(&vocab, options)?;
             target.revision += 1;
@@ -134,7 +134,7 @@ impl NativeModule {
         })
     }
     #[napi]
-    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: bool, merge_equivalent_tokens: bool) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
+    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
         call(|| {
             let target = live(&self.inner)?;
             Ok(AsyncTask::new(ModulePrecompileTask {
@@ -142,23 +142,23 @@ impl NativeModule {
                 revision: target.revision,
                 owner: self.inner.clone(),
                 vocab: live(&vocab.inner)?.clone(),
-                options: Self::options(mode, boundary, template_dfas, merge_equivalent_tokens)?,
+                options: Self::options(mode, boundary, parser_backend, merge_equivalent_tokens)?,
             }))
         })
     }
 
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: bool, merge_equivalent_tokens: bool) -> napi::Result<NativeConstraint> {
+    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> napi::Result<NativeConstraint> {
         call(|| Ok(NativeConstraint {
-            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(mode, boundary, template_dfas, merge_equivalent_tokens)?)?)),
+            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(mode, boundary, parser_backend, merge_equivalent_tokens)?)?)),
         }))
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: bool, merge_equivalent_tokens: bool) -> napi::Result<AsyncTask<ModuleCompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: f64, merge_equivalent_tokens: bool) -> napi::Result<AsyncTask<ModuleCompileTask>> {
         call(|| Ok(AsyncTask::new(ModuleCompileTask {
             module: self.snapshot()?,
             vocab: live(&vocab.inner)?.clone(),
-            options: Self::options(mode, boundary, template_dfas, merge_equivalent_tokens)?,
+            options: Self::options(mode, boundary, parser_backend, merge_equivalent_tokens)?,
         })))
     }
 

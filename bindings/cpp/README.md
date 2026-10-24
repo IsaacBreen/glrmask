@@ -109,7 +109,7 @@ auto constraint = parent.compile(module_vocab);
 
 `bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
-`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` holds `mask_strategy`, `boundary_mask_strategy`, `template_dfas` and `merge_equivalent_tokens`, and applies to the whole compile, including bound grammars:
+`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` holds `mask_strategy`, `boundary_mask_strategy`, `parser_backend` and `merge_equivalent_tokens`, and applies to the whole compile, including bound grammars:
 
 ```cpp
 auto expression = glrmask::Expr::choice({
@@ -124,7 +124,7 @@ auto sequence = glrmask::Expr::sequence({
 | `ParserDwa` | `1` | Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. |
 | `TokenTrie` | `2` | Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. |
 
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`; in C they are `GLRMASK_MASK_STRATEGY_FAST_MASKS` and `GLRMASK_MASK_STRATEGY_FAST_COMPILE`. With `TokenTrie`, `template_dfas = true` parses with template DFAs instead of an LR table, which is slower to compile, with faster masks, and `merge_equivalent_tokens = true` merges tokens that the grammar treats the same, so masks walk fewer tokens. `merge_equivalent_tokens` requires `template_dfas`.
+`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`; in C they are `GLRMASK_MASK_STRATEGY_FAST_MASKS` and `GLRMASK_MASK_STRATEGY_FAST_COMPILE`. With `TokenTrie`, `parser_backend` chooses how the parser is represented: `ParserBackend::LrTable`, the default, or `ParserBackend::TemplateDfa`, which is slower to compile, with faster masks. `merge_equivalent_tokens = true` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `ParserBackend::TemplateDfa`. Precompiled work is never thrown away: each precompiled part keeps its masks unless you request a faster strategy for it, and parts compiled now that link with precompiled parts use `TemplateDfa`.
 
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries: `ParserDwa` is slower to compile, with faster masks, and throws `Error` if it would be too large; `TokenTrie` is faster to compile, with slower masks; `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 

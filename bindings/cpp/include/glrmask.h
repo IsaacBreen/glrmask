@@ -72,6 +72,11 @@ enum {
 #define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE
 /// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA.
 #define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
+/// How the parser is represented and run when masks are computed with GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
+enum {
+    GLRMASK_PARSER_BACKEND_LR_TABLE=0,     ///< An LR table. Faster to compile, with slower masks. The default.
+    GLRMASK_PARSER_BACKEND_TEMPLATE_DFA=1  ///< Template DFAs. Slower to compile, with faster masks.
+};
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
     GLRMASK_EBNF=0,         ///< EBNF.
@@ -108,8 +113,8 @@ typedef struct {
     size_t struct_size;               ///< Size of this struct in bytes.
     uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
     uint32_t boundary_mask_strategy;  ///< A `GLRMASK_BOUNDARY_MASK_STRATEGY_*` value; 0 is Auto.
-    uint32_t template_dfas;           ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE parse with template DFAs instead of an LR table. Slower to compile, with faster masks.
-    uint32_t merge_equivalent_tokens; ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE merge tokens that the grammar treats the same, so masks walk fewer tokens. Requires template_dfas.
+    uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value for parts compiled with GLRMASK_MASK_STRATEGY_TOKEN_TRIE; 0 is an LR table.
+    uint32_t merge_equivalent_tokens; ///< Nonzero to make GLRMASK_MASK_STRATEGY_TOKEN_TRIE merge tokens that the grammar treats the same, so masks walk fewer tokens. Requires GLRMASK_PARSER_BACKEND_TEMPLATE_DFA.
 } glrmask_compile_options;
 /// An extern declared by a grammar. Its `name` stays valid until the externs view
 /// is freed.

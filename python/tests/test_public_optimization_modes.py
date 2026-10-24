@@ -15,8 +15,8 @@ MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
     {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
 ]
 
 
@@ -95,7 +95,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa"})
     source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(30)) + 'r30: "b"\n'
     grammar = glrmask.Grammar.from_lark(source)
-    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE, template_dfas=True, merge_equivalent_tokens=True)
+    reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE, parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:

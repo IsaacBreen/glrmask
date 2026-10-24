@@ -262,6 +262,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 certificate: Arc::new(OnceLock::new()),
                 #[cfg(test)]
                 force_boundary_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                #[cfg(test)]
+                force_parser_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
         };
         if !module.node.prepared.is_empty() || !module.node.bindings.is_empty() {
@@ -371,6 +373,33 @@ mod tests {
         bytes.extend_from_slice(&u64::MAX.to_le_bytes());
         assert!(Module::load(&bytes).is_err());
     }
+    #[test]
+    fn corrupt_key_2_body_is_rejected() {
+        let v = Vocab::new(vec![(0, b"a".to_vec())]);
+        let mut shell = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
+        shell
+            .precompile_with(
+                &v,
+                CompileOptions::default()
+                    .mask_strategy(MaskStrategy::TokenTrie)
+                    .parser_backend(ParserBackend::TemplateDfa),
+            )
+            .unwrap();
+        let mut static_part = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
+        static_part
+            .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+            .unwrap();
+        let static_bytes = read(&static_part.save()).prepared[0].bytes.clone();
+        let mut manifest = read(&shell.save());
+        assert_eq!(manifest.prepared[0].engine, 2);
+        manifest.prepared[0].bytes = static_bytes;
+        let error = Module::load(&write(&manifest)).unwrap_err().to_string();
+        assert!(
+            error.contains("corrupt module: a TokenTrie part has the wrong runtime"),
+            "{error}",
+        );
+    }
+
     #[test]
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
         let v = Vocab::new(vec![(0, b"a".to_vec())]);

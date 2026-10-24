@@ -75,11 +75,11 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab};
 pub use error::{Error, ErrorKind, Result};
-pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, ParserBackend, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{
-    BuildOptions, PreparedGrammar, UnlinkedConstraint, ParserBackend, Requirement,
+    BuildOptions, PreparedGrammar, UnlinkedConstraint, Requirement,
 };
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
@@ -215,7 +215,7 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub mod test_modes {
-    use crate::{BuildOptions, CompileOptions, MaskStrategy};
+    use crate::{BuildOptions, CompileOptions, MaskStrategy, ParserBackend};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum MaskMode {
@@ -237,8 +237,12 @@ pub mod test_modes {
             }
         }
 
-        pub fn template_dfas(self) -> bool {
-            matches!(self, Self::B | Self::C)
+        pub fn parser_backend(self) -> ParserBackend {
+            if matches!(self, Self::B | Self::C) {
+                ParserBackend::TemplateDfa
+            } else {
+                ParserBackend::LrTable
+            }
         }
 
         pub fn merge_equivalent_tokens(self) -> bool {
@@ -248,14 +252,14 @@ pub mod test_modes {
         pub fn build_options(self) -> BuildOptions {
             BuildOptions::default()
                 .optimization(self.strategy())
-                .template_dfas(self.template_dfas())
+                .engine_backend(self.parser_backend())
                 .merge_equivalent_tokens(self.merge_equivalent_tokens())
         }
 
         pub fn compile_options(self) -> CompileOptions {
             CompileOptions::default()
                 .mask_strategy(self.strategy())
-                .template_dfas(self.template_dfas())
+                .parser_backend(self.parser_backend())
                 .merge_equivalent_tokens(self.merge_equivalent_tokens())
         }
     }

@@ -6,8 +6,8 @@ MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
     {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
 ]
 SOURCE = 'glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);'
 

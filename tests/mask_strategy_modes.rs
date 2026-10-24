@@ -24,14 +24,14 @@ fn d_options() -> CompileOptions {
 fn assert_d_rejected(error: glrmask::Error) {
     match error.kind() {
         ErrorKind::StrategyUnsupported(message) => assert_eq!(
-            message, "merging equivalent tokens requires template DFAs",
+            message, "merging equivalent tokens requires the TemplateDfa parser backend",
         ),
         other => panic!("expected StrategyUnsupported, got {other:?}"),
     }
 }
 
 #[test]
-fn merging_equivalent_tokens_without_template_dfas_is_rejected_at_every_entry_point() {
+fn merging_equivalent_tokens_without_the_template_parser_backend_is_rejected_at_every_entry_point() {
     let vocab = vocab();
     let grammar = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
     let module = Module::new(&grammar);

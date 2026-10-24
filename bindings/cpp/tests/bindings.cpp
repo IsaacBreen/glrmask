@@ -299,7 +299,7 @@ void canonical_modules() {
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
     CompileOptions child_options = strategy_options(
         static_cast<unsigned>(MaskStrategy::TokenTrie), BoundaryMaskStrategy::TokenTrie);
-    child_options.template_dfas = true;
+    child_options.parser_backend = ParserBackend::TemplateDfa;
     child_options.merge_equivalent_tokens = true;
     child.precompile(v, child_options); parent.bind("child", child);
 

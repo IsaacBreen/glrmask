@@ -125,11 +125,11 @@ impl NativeTokenSet {
     pub fn to_string(&self) -> napi::Result<String> { call(|| Ok(format!("{:?}", *live(&self.inner)?))) }
 }
 
-fn grammar_compile_options(mode: f64, boundary: f64, template_dfas: Option<bool>, merge_equivalent_tokens: Option<bool>) -> core::Result<g::CompileOptions> {
+fn grammar_compile_options(mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> core::Result<g::CompileOptions> {
     Ok(core::compile_options(
         core::mask_strategy(id(mode)?)?,
         core::boundary_mask_strategy(id(boundary)?)?,
-        template_dfas.unwrap_or(false),
+        core::parser_backend(parser_backend.unwrap_or(0.0) as u32)?,
         merge_equivalent_tokens.unwrap_or(false),
     ))
 }
@@ -179,33 +179,33 @@ impl NativeGrammar {
         call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
     }
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: Option<bool>, merge_equivalent_tokens: Option<bool>) -> napi::Result<NativeConstraint> {
+    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> napi::Result<NativeConstraint> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            let options = grammar_compile_options(mode, boundary, template_dfas, merge_equivalent_tokens)?;
+            let options = grammar_compile_options(mode, boundary, parser_backend, merge_equivalent_tokens)?;
             Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, options)?)) })
         })
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: Option<bool>, merge_equivalent_tokens: Option<bool>) -> napi::Result<AsyncTask<CompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> napi::Result<AsyncTask<CompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary, template_dfas, merge_equivalent_tokens)? }))
+            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary, parser_backend, merge_equivalent_tokens)? }))
         })
     }
     #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: Option<bool>, merge_equivalent_tokens: Option<bool>) -> napi::Result<NativeModule> {
+    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> napi::Result<NativeModule> {
         call(|| {
             let mut m = g::Module::new(&*live(&self.inner)?);
-            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(mode, boundary, template_dfas, merge_equivalent_tokens)?)?;
+            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(mode, boundary, parser_backend, merge_equivalent_tokens)?)?;
             Ok(NativeModule::new(m))
         })
     }
     #[napi]
-    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, template_dfas: Option<bool>, merge_equivalent_tokens: Option<bool>) -> napi::Result<AsyncTask<GrammarPrecompileTask>> {
+    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> napi::Result<AsyncTask<GrammarPrecompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary, template_dfas, merge_equivalent_tokens)? }))
+            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary, parser_backend, merge_equivalent_tokens)? }))
         })
     }
 }

@@ -188,10 +188,10 @@ composition, persistence, and the Rust/Python APIs.
 
 `FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
 
-Two compile options tune `TokenTrie`. Both are off by default:
+Two compile options tune `TokenTrie`:
 
-- `template_dfas` parses with template DFAs instead of an LR table. Slower to compile, with faster masks.
-- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It requires `template_dfas`.
+- `parser_backend` chooses how the parser is represented: `LrTable`, the default, or `TemplateDfa`, which is slower to compile, with faster masks.
+- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default and requires `TemplateDfa`.
 
 `BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
 
@@ -200,6 +200,8 @@ Two compile options tune `TokenTrie`. Both are off by default:
 - `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
 
 Every strategy produces the same masks; they differ only in speed.
+
+Precompiled work is never thrown away. Each precompiled part keeps its masks unless you request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with precompiled parts use `TemplateDfa`.
 
 ## Grammar formats
 

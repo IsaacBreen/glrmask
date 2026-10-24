@@ -88,16 +88,24 @@ pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> 
     }
 }
 
+pub fn parser_backend(value: u32) -> Result<glrmask::ParserBackend> {
+    match value {
+        0 => Ok(glrmask::ParserBackend::LrTable),
+        1 => Ok(glrmask::ParserBackend::TemplateDfa),
+        _ => Err(Error::invalid("unknown parser backend; expected 0 or 1")),
+    }
+}
+
 pub fn compile_options(
     mask_strategy: glrmask::MaskStrategy,
     boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
-    template_dfas: bool,
+    parser_backend: glrmask::ParserBackend,
     merge_equivalent_tokens: bool,
 ) -> glrmask::CompileOptions {
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy)
         .boundary_mask_strategy(boundary_mask_strategy)
-        .template_dfas(template_dfas)
+        .parser_backend(parser_backend)
         .merge_equivalent_tokens(merge_equivalent_tokens)
 }
 
@@ -175,7 +183,7 @@ mod tests {
             let options = compile_options(
                 mask_strategy(mode).unwrap(),
                 glrmask::BoundaryMaskStrategy::Auto,
-                false,
+                glrmask::ParserBackend::LrTable,
                 false,
             );
             let c = Arc::new(module.compile_with(&vocab, options).unwrap());

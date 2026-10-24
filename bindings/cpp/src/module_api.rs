@@ -8,7 +8,7 @@ pub struct glrmask_expr(pub(super) g::Expr);
     pub struct_size: usize,
     pub mask_strategy: u32,
     pub boundary_mask_strategy: u32,
-    pub template_dfas: u32,
+    pub parser_backend: u32,
     pub merge_equivalent_tokens: u32,
 }
 /// kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 TokenSet. Inputs are borrowed for this call only.
@@ -29,7 +29,7 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     Ok(core::compile_options(
         core::mask_strategy(o.mask_strategy)?,
         core::boundary_mask_strategy(o.boundary_mask_strategy)?,
-        o.template_dfas != 0,
+        core::parser_backend(o.parser_backend)?,
         o.merge_equivalent_tokens != 0,
     ))
 }
@@ -39,7 +39,7 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
         struct_size: size_of::<glrmask_compile_options>(),
         mask_strategy: 0,
         boundary_mask_strategy: 0,
-        template_dfas: 0,
+        parser_backend: 0,
         merge_equivalent_tokens: 0,
     }
 }

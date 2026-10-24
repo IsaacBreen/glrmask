@@ -17,7 +17,7 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 pub struct CompileOptions {
     pub(crate) mask_strategy: MaskStrategy,
     pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
-    pub(crate) template_dfas: bool,
+    pub(crate) parser_backend: ParserBackend,
     pub(crate) merge_equivalent_tokens: bool,
 }
 
@@ -35,16 +35,16 @@ impl CompileOptions {
         self
     }
 
-    /// Sets whether [`TokenTrie`](MaskStrategy::TokenTrie) parses with template DFAs
-    /// instead of an LR table. Slower to compile, with faster masks. Off by default.
-    pub fn template_dfas(mut self, enable: bool) -> Self {
-        self.template_dfas = enable;
+    /// Sets how the parser is represented for parts compiled with
+    /// [`TokenTrie`](MaskStrategy::TokenTrie). Defaults to [`ParserBackend::LrTable`].
+    pub fn parser_backend(mut self, backend: ParserBackend) -> Self {
+        self.parser_backend = backend;
         self
     }
 
     /// Sets whether [`TokenTrie`](MaskStrategy::TokenTrie) merges tokens that the
     /// grammar treats the same, so masks walk fewer tokens. Requires
-    /// [`template_dfas`](Self::template_dfas). Off by default.
+    /// [`ParserBackend::TemplateDfa`]. Off by default.
     pub fn merge_equivalent_tokens(mut self, enable: bool) -> Self {
         self.merge_equivalent_tokens = enable;
         self
@@ -54,14 +54,14 @@ impl CompileOptions {
     pub(crate) fn engine(&self) -> Result<Engine> {
         engine_for(
             self.mask_strategy,
-            self.template_dfas,
+            self.parser_backend,
             self.merge_equivalent_tokens,
         )
     }
 
     /// The TokenTrie parser backend for these options.
     fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
-        token_trie_backend(self.template_dfas)
+        token_trie_backend(self.parser_backend)
     }
 }
 
@@ -108,6 +108,8 @@ pub(crate) struct Node {
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
     #[cfg(test)]
     pub(crate) force_boundary_dwa_decline: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) force_parser_dwa_decline: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) trait RetainedPreparation: Send + Sync + std::fmt::Debug {
@@ -199,48 +201,70 @@ fn own_local(grammar: &Grammar) -> Grammar {
     }
 }
 
-/// A retained static preparation, if any, in preference order.
-fn retained_static(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<Engine> {
+/// The best retained preparation, in mask-speed order: `ParserDwa` (key 1),
+/// merged `TokenTrie` (key 3), then a retained template-DFA `TokenTrie` shell
+/// (key 2).
+fn best_retained(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<Engine> {
     if prepared.contains_key(&Engine::ParserDwa.key()) {
         Some(Engine::ParserDwa)
     } else if prepared.contains_key(&Engine::MergedTokenTrie.key()) {
         Some(Engine::MergedTokenTrie)
+    } else if prepared.contains_key(&Engine::TokenTrie.key()) {
+        Some(Engine::TokenTrie)
     } else {
         None
     }
 }
 
-/// Resolve the engine for a whole compile.
-///
-/// A static part that is already retained is never replaced by dynamic
-/// [`MaskStrategy::TokenTrie`] compilation: a `TokenTrie` request after a
-/// static precompile resolves to the retained engine, and `Module::node_engine`
-/// then compiles only the modules without it dynamically. `Auto` prefers
-/// retained work and falls back to [`MaskStrategy::ParserDwa`].
-pub(crate) fn resolve_compile_strategy(requested: Engine, modules: &[Module]) -> Engine {
-    match requested {
-        Engine::TokenTrie => modules
-            .iter()
-            .find_map(|m| retained_static(&m.node.prepared))
-            .unwrap_or(Engine::TokenTrie),
-        Engine::Auto => modules
-            .iter()
-            .find_map(|m| retained_static(&m.node.prepared))
-            .unwrap_or(Engine::ParserDwa),
-        explicit => explicit,
-    }
+/// How one node is compiled by the current call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodePlan {
+    /// The engine preparation this node uses or builds.
+    engine: Engine,
+    /// The parser backend for a `TokenTrie` build.
+    backend: ParserBackend,
 }
 
-impl Module {
-    /// The engine for this node. In a mixed compile (a `TokenTrie` request
-    /// over retained static work) a node without the resolved static
-    /// preparation is compiled dynamically instead of statically.
-    fn node_engine(&self, resolved: Engine, mixed: bool) -> Engine {
-        if mixed && !self.node.prepared.contains_key(&resolved.key()) {
-            Engine::TokenTrie
-        } else {
-            resolved
-        }
+/// Resolve one node's plan. `any_retained` is true when any node in the graph
+/// already owns compiled machinery; a `TokenTrie` built in that graph must be
+/// template-backed because it will be linked with template parts.
+fn plan_node(
+    requested: Engine,
+    prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>,
+    any_retained: bool,
+    requested_backend: ParserBackend,
+) -> NodePlan {
+    let retained = best_retained(prepared);
+    match requested {
+        Engine::Auto => NodePlan {
+            engine: retained.unwrap_or(Engine::ParserDwa),
+            backend: ParserBackend::TemplateDfa,
+        },
+        Engine::ParserDwa => NodePlan {
+            engine: Engine::ParserDwa,
+            backend: ParserBackend::TemplateDfa,
+        },
+        Engine::MergedTokenTrie => NodePlan {
+            engine: match retained {
+                Some(Engine::ParserDwa) | Some(Engine::MergedTokenTrie) => retained.unwrap(),
+                _ => Engine::MergedTokenTrie,
+            },
+            backend: ParserBackend::TemplateDfa,
+        },
+        Engine::TokenTrie => match retained {
+            Some(engine) => NodePlan {
+                engine,
+                backend: ParserBackend::TemplateDfa,
+            },
+            None => NodePlan {
+                engine: Engine::TokenTrie,
+                backend: if any_retained {
+                    ParserBackend::TemplateDfa
+                } else {
+                    requested_backend
+                },
+            },
+        },
     }
 }
 
@@ -255,6 +279,13 @@ impl Module {
     pub(crate) fn force_boundary_dwa_decline(&mut self) {
         Arc::make_mut(&mut self.node)
             .force_boundary_dwa_decline
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_parser_dwa_decline(&mut self) {
+        Arc::make_mut(&mut self.node)
+            .force_parser_dwa_decline
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -286,6 +317,8 @@ impl Module {
                     certificate: Arc::new(OnceLock::new()),
                     #[cfg(test)]
                     force_boundary_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    #[cfg(test)]
+                    force_parser_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 }),
             };
             let _ = grammar.module_snapshot.set(module.clone());
@@ -504,7 +537,7 @@ impl Module {
 
     /// Like [`precompile`](Self::precompile), with `options`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, &options, true, false))
+        with_deep_stack(|| self.precompile_on_stack(vocab, &options, true))
     }
 
     /// Rehydrates vocabulary-free retained work loaded from a Module artifact.
@@ -540,11 +573,11 @@ impl Module {
 
     /// Internal compile preparation: retain compilation artifacts and the
     /// default boundary token set.
-    fn precompile_for_compile(&mut self, vocab: &Vocab, options: &CompileOptions, mixed: bool) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, options, true, mixed))
+    fn precompile_for_compile(&mut self, vocab: &Vocab, options: &CompileOptions) -> Result<()> {
+        with_deep_stack(|| self.precompile_on_stack(vocab, options, true))
     }
 
-    fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool, mixed: bool) -> Result<()> {
+    fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
         if self.index()?.iter().any(|module| module.node.prepared.values().any(|prepared| {
@@ -553,66 +586,77 @@ impl Module {
             *self = self.rehydrate_retained(vocab)?;
         }
         let modules = self.index()?;
-        let resolved = resolve_compile_strategy(options.engine()?, &modules);
+        let requested = options.engine()?;
+        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
         let target_b = target_boundary();
-        let engine_of = |m: &Module| m.node_engine(resolved, mixed);
-        // Mixed compiles keep using the native backend for their TokenTrie
-        // nodes, whatever `template_dfas` says.
-        let backend = if mixed {
-            crate::runtime::parser_backend::DynamicParserBackend::Native
-        } else {
-            options.token_trie_backend()
-        };
+        let plan_of = |m: &Module| plan_node(requested, &m.node.prepared, any_retained, options.parser_backend);
+        let backend_of = |plan: NodePlan| token_trie_backend(plan.backend);
 
-        type JobKey = (usize, Engine, u8);
-        let mut locals: HashMap<JobKey, Arc<dyn RetainedPreparation>> = HashMap::new();
+        // Keyed by source identity: every node has exactly one plan.
+        let mut locals: HashMap<usize, (Engine, Arc<dyn RetainedPreparation>)> = HashMap::new();
 
         for m in &modules {
-            let engine = engine_of(m);
-            if engine == Engine::TokenTrie && !mixed {
+            let plan = plan_of(m);
+            // A pure LR TokenTrie precompile retains nothing.
+            if plan.engine == Engine::TokenTrie && plan.backend == ParserBackend::LrTable {
                 continue;
             }
-            let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            if let Some(p) = m.node.prepared.get(&engine.key()) {
+            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
+            if let Some(p) = m.node.prepared.get(&plan.engine.key()) {
                 // `boundary_trigger` records the requested detail; the trigger
                 // itself is built lazily in `materialize`.
                 if p.prepared().boundary_trigger >= target_b {
-                    locals.insert(key, p.clone());
+                    locals.insert(source, (plan.engine, p.clone()));
                 }
             }
         }
 
         let mut seen = std::collections::HashSet::new();
         let jobs: Vec<&Module> = modules.iter().filter(|m| {
-            let engine = engine_of(m);
-            if engine == Engine::TokenTrie && !mixed {
+            let plan = plan_of(m);
+            if plan.engine == Engine::TokenTrie && plan.backend == ParserBackend::LrTable {
                 return false;
             }
-            let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            !locals.contains_key(&key) && seen.insert(key)
+            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
+            !locals.contains_key(&source) && seen.insert(source)
         }).collect();
 
         let results = jobs.par_iter().map(|m| {
             #[cfg(test)]
             let _probe = preparation_probe::enter(m);
-            let engine = engine_of(m);
-            let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            m.prepare_local_for(vocab, engine, target_b, build_boundary, backend)
-                .map(|p| (key, retain_local(p)))
+            let plan = plan_of(m);
+            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
+            let built = match m.prepare_local_for(vocab, plan.engine, target_b, build_boundary, backend_of(plan)) {
+                Ok(p) => (plan.engine, p),
+                Err(error) if requested == Engine::Auto
+                    && plan.engine == Engine::ParserDwa
+                    && any_retained
+                    && error.is_strategy_decline() =>
+                {
+                    // Auto may fall back per part, but only when the graph keeps
+                    // retained work that a whole-composition retry would discard.
+                    let fallback = NodePlan { engine: Engine::TokenTrie, backend: ParserBackend::TemplateDfa };
+                    let p = m.prepare_local_for(vocab, fallback.engine, target_b, build_boundary, backend_of(fallback))?;
+                    (fallback.engine, p)
+                }
+                Err(error) => return Err(error),
+            };
+            Ok((source, built.0, retain_local(built.1)))
         }).collect::<Result<Vec<_>>>()?;
 
-        locals.extend(results);
+        for (source, engine, prepared) in results {
+            locals.insert(source, (engine, prepared));
+        }
 
         let mut instances = HashMap::<usize, Module>::new();
         for m in modules {
             let mut next = m.clone();
             let mut c = m.certificate()?.as_ref().clone();
             c.target(vocab)?;
-            let engine = engine_of(&m);
+            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
             let node = Arc::make_mut(&mut next.node);
-            if engine != Engine::TokenTrie || mixed {
-                let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-                node.prepared.insert(engine.key(), locals[&key].clone());
+            if let Some((engine, prepared)) = locals.get(&source) {
+                node.prepared.insert(engine.key(), prepared.clone());
             }
             node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
             for (name, value) in &m.node.bindings {
@@ -643,10 +687,6 @@ impl Module {
             }
             upgraded.boundary_trigger = target_b;
             return Ok(upgraded);
-        }
-        #[cfg(test)]
-        if engine != Engine::TokenTrie {
-            static_build_probe::record(self);
         }
         let source = &self.node.source;
         if matches!(source.source, GrammarSource::Lark(_)) {
@@ -686,6 +726,8 @@ impl Module {
                     BoundValue::TokenSet(t) => local.bind(name, t.clone())?,
                 }
             }
+            #[cfg(test)]
+            static_build_probe::record(self, engine);
             return Ok(local);
         }
 
@@ -727,6 +769,16 @@ impl Module {
                 }
             },
             Engine::Auto | Engine::ParserDwa => {
+                #[cfg(test)]
+                if self
+                    .node
+                    .force_parser_dwa_decline
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    return Err(Error::ResourceLimit(
+                        "grammar_normalization build budget exhausted".into(),
+                    ));
+                }
                 let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
@@ -736,6 +788,8 @@ impl Module {
                     inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
                 }
                 p.boundary_trigger = target_b;
+                #[cfg(test)]
+                static_build_probe::record(self, engine);
                 return Ok(p);
             }
         };
@@ -760,6 +814,8 @@ impl Module {
         };
         prepared.validate_local_slot_manifest(vocab)?;
         prepared.validate_slot_manifest()?;
+        #[cfg(test)]
+        static_build_probe::record(self, engine);
         Ok(prepared)
     }
 
@@ -851,12 +907,13 @@ impl Module {
         // Over retained static work it is mixed: retained parts stay static and
         // every other module is compiled as its own dynamic component.
         let requested = options.engine()?;
-        let engine = resolve_compile_strategy(requested, &modules);
-        let token_trie = engine == Engine::TokenTrie;
-        let mixed = requested == Engine::TokenTrie && !token_trie;
+        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
+        // The whole-composition flatten path is only valid when the request is
+        // TokenTrie and no part owns precompiled machinery.
+        let whole = requested == Engine::TokenTrie && !any_retained;
         // EXPERIMENT: one route report per top-level Module compile.
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
-        if token_trie {
+        if whole {
             let result = self
                 .flatten_source()?
                 .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet, options.token_trie_backend())?;
@@ -864,7 +921,7 @@ impl Module {
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
                 crate::compiler::terminal_ended_rescue::Route::Normal,
-                engine,
+                requested,
                 experiment,
                 &crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried,
             );
@@ -874,7 +931,7 @@ impl Module {
             && experiment.terminal_ended_first
             && self.node.bindings.is_empty()
             && matches!(
-                engine,
+                requested,
                 Engine::ParserDwa | Engine::MergedTokenTrie | Engine::Auto
             );
         let mut route = crate::compiler::terminal_ended_rescue::Route::Normal;
@@ -902,19 +959,17 @@ impl Module {
                     }
                 }
             }
-            let build = |mixed: bool| {
+            let build = || {
                 let mut prepared = self.clone();
                 let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                 let end_tokens = end_tokens.to_vec();
                 let compile_options = options.clone();
                 budget.install(move || {
                     crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
-                        prepared.precompile_for_compile(vocab, &compile_options, mixed)?;
+                        prepared.precompile_for_compile(vocab, &compile_options)?;
                         let constraint = prepared.materialize(
                             vocab,
                             &mut HashMap::new(),
-                            engine,
-                            mixed,
                             compile_options.boundary_mask_strategy,
                         )?;
                         ensure_runnable_constraint(&constraint)?;
@@ -922,23 +977,7 @@ impl Module {
                     })
                 })
             };
-            // A module source without a dynamic component shell cannot join a
-            // mixed compile; the whole assembly then uses the retained static
-            // engine, which never discards static work.
-            let attempt = match build(mixed) {
-                Err(error) if mixed => {
-                    // A failed mixed build is retried as the all-static build.
-                    // Record the reason so callers never have to infer a
-                    // fallback from timing or engine shape.
-                    #[cfg(test)]
-                    mixed_compile_probe::record(&error);
-                    if crate::compiler::compile::compile_profile_enabled() {
-                        eprintln!("[glrmask/profile][mixed_compile] outcome=fallback error={error}");
-                    }
-                    build(false)
-                }
-                attempt => attempt,
-            };
+            let attempt = build();
             match attempt {
                 Ok(constraint) => Ok(constraint),
                 Err(error) if error.is_strategy_decline() => {
@@ -954,7 +993,7 @@ impl Module {
                             Ok(constraint) => {
                                 if crate::compiler::compile::compile_profile_enabled() {
                                     eprintln!(
-                                        "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=ok",
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={requested:?} outcome=ok",
                                     );
                                 }
                                 route =
@@ -966,7 +1005,7 @@ impl Module {
                             Err(rescue_error) => {
                                 if crate::compiler::compile::compile_profile_enabled() {
                                     eprintln!(
-                                        "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=declined reason={rescue_error}",
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={requested:?} outcome=declined reason={rescue_error}",
                                     );
                                 }
                                 outcome =
@@ -978,21 +1017,24 @@ impl Module {
                     }
                     if crate::compiler::compile::compile_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][template_decline] strategy={engine:?} stage={} reason={error}",
+                            "[glrmask/profile][template_decline] strategy={requested:?} stage={} reason={error}",
                             error.decline_stage(),
                         );
                     }
                     // Only Auto may pick a different exact strategy; an explicit
-                    // strategy request is never silently replaced.
-                    if requested == Engine::Auto {
+                    // strategy request is never silently replaced. With retained
+                    // work the per-part fallback above already kept it; the
+                    // whole-composition retry is only allowed when nothing is
+                    // retained.
+                    if requested == Engine::Auto && !any_retained {
                         // The fallback is exactly an explicit TokenTrie request
-                        // with the same two switches.
+                        // with the same switches.
                         if let Ok(grammar) = self.flatten_source() {
                             let constraint = grammar
                                 .compile_requested_token_trie(
                                     vocab,
                                     BoundaryTriggerDetail::TokenSet,
-                                    options.template_dfas,
+                                    options.parser_backend,
                                     options.merge_equivalent_tokens,
                                 )?
                                 .with_end_tokens(end_tokens)?;
@@ -1009,7 +1051,7 @@ impl Module {
         crate::compiler::terminal_ended_rescue::report_route(
             experiment.report_route,
             route,
-            engine,
+            requested,
             experiment,
             &outcome,
         );
@@ -1020,13 +1062,12 @@ impl Module {
         &self,
         vocab: &Vocab,
         cache: &mut HashMap<usize, RuntimeConstraint>,
-        resolved: Engine,
-        mixed: bool,
         boundary_strategy: BoundaryMaskStrategy,
     ) -> Result<RuntimeConstraint> {
         let id = Arc::as_ptr(&self.node) as usize;
         if let Some(c) = cache.get(&id) { return Ok(c.clone()); }
-        let engine = self.node_engine(resolved, mixed);
+        let engine = best_retained(&self.node.prepared)
+            .ok_or_else(|| error("missing local compilation"))?;
         let local = self.node.prepared.get(&engine.key()).ok_or_else(|| error("missing local compilation"))?;
         // Rebuilding the pre-composition parent is only needed when the rare
         // `Auto` boundary decline has to redo composition, so keep it in a
@@ -1044,7 +1085,7 @@ impl Module {
         let active = parent.late_grammar_slots.iter().map(|s| s.name.as_str()).collect::<BTreeSet<_>>();
         let children = self.node.bindings.iter().filter(|(name, _)| active.contains(name.as_str())).map(|(name, value)| {
             let child = match value {
-                BoundValue::Module(child) => child.materialize(vocab, cache, resolved, mixed, boundary_strategy)?,
+                BoundValue::Module(child) => child.materialize(vocab, cache, boundary_strategy)?,
                 BoundValue::TokenSet(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
             };
             Ok((name.clone(), Arc::new(child)))
@@ -1075,10 +1116,9 @@ impl Module {
                 Ok(composed)
             };
             parent = compose(parent)?;
-            // A mixed compile builds no new static work, so its crossings keep
-            // the segmented dynamic boundary.
+            // All-template compositions may still install the static boundary
+            // parser; retained parts keep their own machinery.
             if boundary_strategy != BoundaryMaskStrategy::TokenTrie
-                && !mixed
                 && all_static
                 && matches!(engine, Engine::ParserDwa | Engine::Auto)
             {
@@ -1174,29 +1214,38 @@ impl Module {
 }
 
 #[cfg(test)]
-pub(super) mod static_build_probe {
+pub(crate) mod static_build_probe {
     use super::*;
     use std::sync::Mutex;
     // Each count keeps a liveness check for its grammar, because a dropped
     // grammar's address can be reused by a grammar in a parallel test.
+    type Key = (usize, u8);
     type Entry = (Box<dyn Fn() -> bool + Send>, usize);
-    fn counts() -> &'static Mutex<HashMap<usize, Entry>> {
-        static COUNTS: OnceLock<Mutex<HashMap<usize, Entry>>> = OnceLock::new();
+    fn counts() -> &'static Mutex<HashMap<Key, Entry>> {
+        static COUNTS: OnceLock<Mutex<HashMap<Key, Entry>>> = OnceLock::new();
         COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
     }
     fn key(m: &Module) -> usize { Arc::as_ptr(&m.node.source.parsed_component) as usize }
-    pub(crate) fn record(m: &Module) {
+    pub(crate) fn record(m: &Module, engine: Engine) {
         let mut counts = counts().lock().unwrap();
-        let entry = counts.entry(key(m)).or_insert_with(|| (Box::new(|| false), 0));
+        let entry = counts.entry((key(m), engine.key())).or_insert_with(|| (Box::new(|| false), 0));
         if !(entry.0)() {
             let weak = Arc::downgrade(&m.node.source.parsed_component);
             *entry = (Box::new(move || weak.strong_count() > 0), 0);
         }
         entry.1 += 1;
     }
-    /// Static preparations built so far for this module's grammar.
+    /// Static preparations (ParserDwa and merged) built so far for this
+    /// module's grammar.
     pub(crate) fn builds(m: &Module) -> usize {
-        counts().lock().unwrap().get(&key(m)).filter(|e| (e.0)()).map_or(0, |e| e.1)
+        let source = key(m);
+        counts().lock().unwrap().iter().filter(|((candidate, engine), entry)| {
+            *candidate == source && (*engine == 1 || *engine == 3) && (entry.0)()
+        }).map(|(_, entry)| entry.1).sum()
+    }
+    /// Preparations built for one exact engine.
+    pub(crate) fn builds_for(m: &Module, engine: Engine) -> usize {
+        counts().lock().unwrap().get(&(key(m), engine.key())).filter(|e| (e.0)()).map_or(0, |e| e.1)
     }
 }
 
@@ -1468,6 +1517,60 @@ mod precompile_boundary_tests {
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
         same_language(&mixed.start(), &reference(MaskMode::ParserDwa).start(), 4);
         same_language(&mixed.start(), &reference(MaskMode::A).start(), 4);
+    }
+}
+
+#[cfg(test)]
+mod b_shell_tests {
+    use super::*;
+
+    fn vocab() -> Vocab {
+        Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"xay".to_vec()),
+            (5, b"ab".to_vec()),
+        ])
+    }
+
+    #[test]
+    fn b_shell_survives_save_and_is_reused_by_an_lr_request() {
+        let vocab = vocab();
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" ("a" | "b") "y" | "xay""#).unwrap();
+        let mut module = Module::new(&grammar);
+        module
+            .precompile_with(&vocab, MaskMode::B.compile_options())
+            .expect("precompile the B shell");
+        assert!(module.node.prepared.contains_key(&Engine::TokenTrie.key()));
+
+        let loaded = Module::load(module.save()).expect("load the B shell");
+        assert!(
+            loaded.node.prepared.contains_key(&Engine::TokenTrie.key()),
+            "the B shell must survive Module save/load",
+        );
+        let before = static_build_probe::builds_for(&loaded, Engine::TokenTrie);
+        let compiled = loaded
+            .compile_with(&vocab, MaskMode::A.compile_options())
+            .expect("compile an LR request over a B shell");
+        assert!(compiled.uses_dynamic_runtime());
+        assert_eq!(
+            static_build_probe::builds_for(&loaded, Engine::TokenTrie),
+            before,
+            "the LR request rebuilt the retained B shell",
+        );
+        let reference = loaded
+            .compile_with(&vocab, MaskMode::ParserDwa.compile_options())
+            .expect("ParserDwa reference");
+        let mut left = reference.start();
+        let mut right = compiled.start();
+        assert_eq!(left.mask(), right.mask());
+        for token in [0u32, 1, 3, 0] {
+            assert_eq!(left.commit_token(token), right.commit_token(token));
+            assert_eq!(left.mask(), right.mask());
+            assert_eq!(left.is_accepting(), right.is_accepting());
+        }
     }
 }
 

@@ -39,7 +39,7 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
 
 @pytest.mark.parametrize("options", [
     {},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
 ])
 def test_python_compile_options_do_not_discard_work(options):

@@ -2,14 +2,14 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GlrMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[
   {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
   {label:'parser-dwa',options:{maskStrategy:MaskStrategy.ParserDwa}},
   {label:'token-trie',options:{maskStrategy:MaskStrategy.TokenTrie}},
-  {label:'token-trie+template-dfas',options:{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true}},
-  {label:'token-trie+template-dfas+merge',options:{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true,mergeEquivalentTokens:true}},
+  {label:'token-trie+template-dfas',options:{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa}},
+  {label:'token-trie+template-dfas+merge',options:{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}},
 ];
 const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
@@ -129,7 +129,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'token_class_trie'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'TokenTrie'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{templateDfas:1}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{parserBackend:'nope'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:'yes'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:MaskStrategy.TokenTrie,mergeEquivalentTokens:true}),GlrMaskError);
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);

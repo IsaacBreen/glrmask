@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,ParserBackend}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]],{specialTokenIds:[63]});
 const source=(text='a')=>Grammar.fromEbnf(`start ::= "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
@@ -14,7 +14,7 @@ test('Module: copy and root-only final options',()=>{
 
   const configured=original.clone();
   const child=new Module(source());
-  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true,mergeEquivalentTokens:true,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie}),undefined);
+  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie}),undefined);
   accept(child,v,[1]);
 
   assert.equal(configured.bind('child',child),undefined);
@@ -22,7 +22,7 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const options={maskStrategy:MaskStrategy.TokenTrie,templateDfas:true,mergeEquivalentTokens:true,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
+  const options={maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
   const root=Grammar.fromExpr(Expr.sequence(configured,new TokenSet([63])));
   const state=root.compileSync(v,options).start();
   assert.ok(!allowed(state,63));assert.ok(state.commitToken(4));assert.ok(!state.isAccepting());assert.ok(allowed(state,63));assert.ok(state.commitToken(63));assert.ok(state.isAccepting());assert.ok(state.mask().every(w=>w===0));
@@ -133,7 +133,7 @@ for(const parentPrepared of [false,true])for(const childPrepared of [false,true]
   test(`Module: saved mixed graph parent=${parentPrepared}, child=${childPrepared}`,async()=>{
     const v=vocab(),parent=new Module(host()),child=new Module(mark());
     if(parentPrepared)assert.equal(await parent.precompile(v),undefined);
-    if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.TokenTrie,templateDfas:true,mergeEquivalentTokens:true}),undefined);
+    if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.TokenTrie,parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}),undefined);
     child.bind('MARK',new TokenSet([8]));
     parent.bind('child',child);const bytes=await parent.save();
     const loaded=await Module.load(bytes);

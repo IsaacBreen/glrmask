@@ -57,7 +57,7 @@ class MaskStrategy:
     TOKEN_TRIE: ClassVar[MaskStrategy]
     """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
 
-Two arguments of `compile` and `precompile` tune it, both off by default. `template_dfas=True` parses with template DFAs instead of an LR table: slower to compile, with faster masks. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `template_dfas=True`."""
+Two arguments of `compile` and `precompile` tune it. `parser_backend` chooses how the parser is represented; see `ParserBackend`. `merge_equivalent_tokens=True` merges tokens that the grammar treats the same, so masks walk fewer tokens; it requires `parser_backend=ParserBackend.TEMPLATE_DFA`."""
     FAST_COMPILE: ClassVar[MaskStrategy]
     """Same as `TOKEN_TRIE`."""
     FAST_MASKS: ClassVar[MaskStrategy]
@@ -76,6 +76,14 @@ class BoundaryMaskStrategy:
     """Same as `TOKEN_TRIE`."""
     FAST_MASKS: ClassVar[BoundaryMaskStrategy]
     """Same as `PARSER_DWA`."""
+
+@final
+class ParserBackend:
+    """How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`."""
+    LR_TABLE: ClassVar[ParserBackend]
+    """An LR table. Faster to compile, with slower masks. The default."""
+    TEMPLATE_DFA: ClassVar[ParserBackend]
+    """Template DFAs. Slower to compile, with faster masks."""
 
 @final
 class TokenSet:
@@ -239,7 +247,7 @@ class Module:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        template_dfas: bool = False,
+        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
         merge_equivalent_tokens: bool = False,
     ) -> None:
         """Compiles as much as possible for `vocab` now, so later compiles are fast.
@@ -253,7 +261,7 @@ class Module:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        template_dfas: bool = False,
+        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
         merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the module for `vocab`, reusing any precompiled work.
@@ -323,7 +331,7 @@ class Grammar:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        template_dfas: bool = False,
+        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
         merge_equivalent_tokens: bool = False,
     ) -> Module:
         """Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.
@@ -337,7 +345,7 @@ class Grammar:
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-        template_dfas: bool = False,
+        parser_backend: ParserBackend = ParserBackend.LR_TABLE,
         merge_equivalent_tokens: bool = False,
     ) -> Constraint:
         """Compiles the grammar for `vocab`.

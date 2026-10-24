@@ -18,23 +18,25 @@ MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
     {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "template_dfas": True, "merge_equivalent_tokens": True},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA},
+    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE, "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
 ]
 
 
-def test_parser_machinery_is_only_available_in_internal_namespace():
-    for name in ["ParserBackend", "ParserProgram"]:
-        assert not hasattr(glrmask, name)
-        assert not hasattr(glrmask._glrmask, name)
-        assert hasattr(glrmask._internal, name)
-    assert "parser_backend" not in inspect.signature(glrmask.Grammar.compile).parameters
+def test_parser_backend_is_public_but_constraint_inspection_is_internal():
+    assert hasattr(glrmask, "ParserBackend")
+    assert not hasattr(glrmask, "ParserProgram")
+    assert not hasattr(glrmask._glrmask, "ParserProgram")
+    assert hasattr(glrmask._internal, "ParserProgram")
+    assert "parser_backend" in inspect.signature(glrmask.Grammar.compile).parameters
     assert not hasattr(glrmask.Constraint, "parser_backend")
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
     grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
-    with pytest.raises(TypeError, match="parser_backend"):
-        grammar.compile(vocab, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    public = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)
+    public = grammar.compile(
+        vocab,
+        mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,
+        parser_backend=glrmask.ParserBackend.TEMPLATE_DFA,
+    )
     internal = glrmask._internal.compile_with_backend(
         grammar, vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA,

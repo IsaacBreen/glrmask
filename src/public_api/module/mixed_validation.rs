@@ -1,11 +1,9 @@
-//! Differential harness for the mixed static/dynamic compile.
+//! Differential harness for mixed retained/fresh compiles.
 //!
-//! A `TokenTrie` request over an assembly that has at least one retained
-//! `ParserDwa` preparation is compiled mixed: retained parts stay static and
-//! the remaining modules are compiled as dynamic component shells. If that
-//! build fails it silently retries the all-static build. This ignored suite
-//! compares every such route against an all-`ParserDwa` compile and records
-//! whether the mixed route was taken or the fallback was used.
+//! A `TokenTrie` request over an assembly that has retained work keeps those
+//! parts and compiles only the remaining modules. This ignored suite compares
+//! every route against an all-`ParserDwa` compile and records whether any
+//! fallback was used.
 #![allow(clippy::needless_range_loop)]
 use crate::test_modes::MaskMode;
 
@@ -190,17 +188,57 @@ fn assemblies() -> Vec<AssemblySpec> {
     ]
 }
 
+/// One precompile choice for a part in the engine matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Precompile {
+    None,
+    ParserDwa,
+    Merged,
+    B,
+}
+
+impl Precompile {
+    const ALL: [Self; 4] = [Self::None, Self::ParserDwa, Self::Merged, Self::B];
+
+    fn options(self) -> Option<crate::CompileOptions> {
+        match self {
+            Self::None => None,
+            Self::ParserDwa => Some(PARSER_DWA.compile_options()),
+            Self::Merged => Some(MaskMode::C.compile_options()),
+            Self::B => Some(MaskMode::B.compile_options()),
+        }
+    }
+}
+
 fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -> Module {
+    let modes = (0..spec.nodes.len())
+        .map(|index| {
+            if precompiled.contains(&index) {
+                Precompile::ParserDwa
+            } else {
+                Precompile::None
+            }
+        })
+        .collect::<Vec<_>>();
+    build_assembly(spec, &modes, vocab).0
+}
+
+/// Build the assembly leaves-up and return the root plus every built part, so
+/// the differential can inspect retained keys and build counts.
+fn build_assembly(
+    spec: &AssemblySpec,
+    modes: &[Precompile],
+    vocab: &Vocab,
+) -> (Module, Vec<Module>) {
+    assert_eq!(modes.len(), spec.nodes.len());
     let mut built: Vec<Option<Module>> = (0..spec.nodes.len()).map(|_| None).collect();
     for index in (0..spec.nodes.len()).rev() {
         let node = &spec.nodes[index];
         let mut module = node.kind.module();
-        if precompiled.contains(&index) {
-            module
-                .precompile_with(vocab, PARSER_DWA.compile_options())
-                .unwrap_or_else(|error| {
-                    panic!("{}: precompile node {index}: {error}", spec.name)
-                });
+        if let Some(options) = modes[index].options() {
+            module.precompile_with(vocab, options).unwrap_or_else(|error| {
+                panic!("{}: precompile node {index} as {:?}: {error}", spec.name, modes[index])
+            });
         }
         for &(slot, child) in node.slots {
             let child = built[child]
@@ -217,7 +255,28 @@ fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -
         }
         built[index] = Some(module);
     }
-    built[spec.root].take().unwrap()
+    let parts = built
+        .iter()
+        .map(|module| module.clone().unwrap_or_else(|| panic!("{}: part missing", spec.name)))
+        .collect();
+    (built[spec.root].clone().unwrap(), parts)
+}
+
+fn precompile_assignments(count: usize) -> Vec<Vec<Precompile>> {
+    let mut assignments = vec![Vec::new()];
+    for _ in 0..count {
+        assignments = assignments
+            .into_iter()
+            .flat_map(|prefix| {
+                Precompile::ALL.into_iter().map(move |mode| {
+                    let mut next = prefix.clone();
+                    next.push(mode);
+                    next
+                })
+            })
+            .collect();
+    }
+    assignments
 }
 
 fn compile_reference(spec: &AssemblySpec, strategy: MaskMode, vocab: &Vocab) -> RuntimeConstraint {
@@ -351,6 +410,86 @@ fn mixed_compile_matches_parser_dwa_on_composed_assemblies() {
         fallbacks.is_empty(),
         "mixed compile fell back for {} subset(s): {fallbacks:?}",
         fallbacks.len(),
+    );
+}
+
+fn engine_for_key(key: u8) -> Option<Engine> {
+    match key {
+        1 => Some(Engine::ParserDwa),
+        2 => Some(Engine::TokenTrie),
+        3 => Some(Engine::MergedTokenTrie),
+        _ => None,
+    }
+}
+
+#[test]
+#[ignore = "engine/precompile differential matrix; run explicitly"]
+fn precompiled_work_is_reused_across_every_engine_request() {
+    let vocab = vocab();
+    let compile_modes = [
+        MaskMode::Auto,
+        MaskMode::ParserDwa,
+        MaskMode::A,
+        MaskMode::B,
+        MaskMode::C,
+    ];
+    let mut compiles = 0usize;
+    let mut retained_parts = 0usize;
+
+    for spec in assemblies() {
+        let reference = compile_reference(&spec, PARSER_DWA, &vocab);
+        for assignment in precompile_assignments(spec.nodes.len()) {
+            let (module, parts) = build_assembly(&spec, &assignment, &vocab);
+            for (index, mode) in assignment.iter().enumerate() {
+                let expected = match mode {
+                    Precompile::None => continue,
+                    Precompile::ParserDwa => Engine::ParserDwa.key(),
+                    Precompile::Merged => Engine::MergedTokenTrie.key(),
+                    Precompile::B => Engine::TokenTrie.key(),
+                };
+                assert!(
+                    parts[index].node.prepared.contains_key(&expected),
+                    "{} node {index}: {:?} did not retain key {expected}",
+                    spec.name,
+                    mode,
+                );
+                retained_parts += 1;
+            }
+            let mut retained = Vec::new();
+            for part in &parts {
+                for &key in part.node.prepared.keys() {
+                    if let Some(engine) = engine_for_key(key) {
+                        retained.push((part, engine, static_build_probe::builds_for(part, engine)));
+                    }
+                }
+            }
+
+            for mode in compile_modes {
+                let candidate = module
+                    .compile_with(&vocab, mode.compile_options())
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{} assignment {assignment:?} mode {mode:?}: compile failed: {error}",
+                            spec.name,
+                        )
+                    });
+                for (part, engine, before) in &retained {
+                    assert_eq!(
+                        static_build_probe::builds_for(part, *engine),
+                        *before,
+                        "{} assignment {assignment:?} mode {mode:?}: retained {engine:?} was rebuilt",
+                        spec.name,
+                    );
+                }
+                let label = format!("{} assignment {assignment:?} mode {mode:?}", spec.name);
+                compare_against_parser_dwa(&reference, &candidate, &label);
+                compiles += 1;
+            }
+        }
+    }
+    eprintln!(
+        "[engine-matrix] assemblies={} compiles={compiles} retained_parts={retained_parts}",
+        assemblies().len(),
     );
 }
 

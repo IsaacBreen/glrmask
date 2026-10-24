@@ -325,7 +325,7 @@ pub(super) fn bind_grammar(
 pub(super) fn compile_options(
     mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
     boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-    template_dfas: bool,
+    parser_backend: Option<PyRef<'_, PyParserBackend>>,
     merge_equivalent_tokens: bool,
 ) -> glrmask::CompileOptions {
     let mask_strategy = mask_strategy
@@ -336,10 +336,14 @@ pub(super) fn compile_options(
         .as_deref()
         .copied()
         .unwrap_or(PyBoundaryMaskStrategy::AUTO);
+    let parser_backend = parser_backend
+        .as_deref()
+        .copied()
+        .unwrap_or(PyParserBackend::LR_TABLE);
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy.into())
         .boundary_mask_strategy(boundary_mask_strategy.into())
-        .template_dfas(template_dfas)
+        .parser_backend(parser_backend.into())
         .merge_equivalent_tokens(merge_equivalent_tokens)
 }
 
@@ -420,18 +424,18 @@ impl PyModule {
         }
     }
 
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, template_dfas = false, merge_equivalent_tokens = false))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, parser_backend = None, merge_equivalent_tokens = false))]
     fn precompile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-        template_dfas: bool,
+        parser_backend: Option<PyRef<'_, PyParserBackend>>,
         merge_equivalent_tokens: bool,
     ) -> PyResult<()> {
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy, boundary_mask_strategy, template_dfas, merge_equivalent_tokens);
+        let options = compile_options(mask_strategy, boundary_mask_strategy, parser_backend, merge_equivalent_tokens);
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
         let next = py
@@ -444,19 +448,19 @@ impl PyModule {
         Ok(())
     }
 
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, template_dfas = false, merge_equivalent_tokens = false))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, parser_backend = None, merge_equivalent_tokens = false))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-        template_dfas: bool,
+        parser_backend: Option<PyRef<'_, PyParserBackend>>,
         merge_equivalent_tokens: bool,
     ) -> PyResult<PyConstraint> {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy, boundary_mask_strategy, template_dfas, merge_equivalent_tokens);
+        let options = compile_options(mask_strategy, boundary_mask_strategy, parser_backend, merge_equivalent_tokens);
         let constraint = py
             .detach(move || snapshot.compile_with(&vocab, options))
             .map_err(api_error)?;

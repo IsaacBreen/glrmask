@@ -34,6 +34,7 @@ def compile_grammar(grammar, vocab, **options):
     if "optimization" in options:
         options["mask_strategy"] = options.pop("optimization")
     if "parser_backend" in options:
+        options["template_dfas"] = options["parser_backend"] == glrmask.ParserBackend.TEMPLATE_DFA
         return glrmask._internal.compile_with_backend(grammar, vocab, **options)
     return grammar.compile(vocab, **options)
 
@@ -117,7 +118,7 @@ def depth_after(word, depth=0, ignore_whitespace=True):
 MODES = [
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
     {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE,
-     "template_dfas": True, "merge_equivalent_tokens": True},
+     "parser_backend": glrmask.ParserBackend.TEMPLATE_DFA, "merge_equivalent_tokens": True},
 ]
 
 
@@ -134,7 +135,11 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
     words, vocab = words_and_vocab()
     grammar = grammar_from_ebnf('start ::= "(" start ")" start | ""')
     reference = compile_grammar(grammar, vocab, **mode)
-    candidate = compile_grammar(grammar, vocab, **mode, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
+    candidate = compile_grammar(
+        grammar,
+        vocab,
+        **{**mode, "parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA},
+    )
     assert glrmask._internal.parser_backend(reference) == glrmask._internal.ParserBackend.TEMPLATE_DFA
     reference_bytes = reference.save()
     for compiled in representations(reference, vocab) + representations(candidate, vocab):
@@ -224,8 +229,10 @@ def test_python_prepared_composition_uses_native_defaults(mode):
     # Standalone representations and composed representations are both native;
     # executable roots are not implicitly converted into reusable components.
     for root in [body.compile(vocab, **mode),
-                 body.compile(vocab, **mode,
-                              parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)]:
+                 body.compile(
+                     vocab,
+                     **{**mode, "parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA},
+                 )]:
         for restored in representations(root, vocab):
             assert glrmask._internal.parser_backend(restored) == glrmask._internal.ParserBackend.TEMPLATE_DFA
             assert restored.start().mask().tolist() == [True, False, False]

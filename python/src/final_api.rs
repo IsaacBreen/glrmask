@@ -83,12 +83,14 @@ impl From<glrmask::BoundaryMaskStrategy> for PyBoundaryMaskStrategy {
     }
 }
 
-/// Parser execution and storage backend, independent of mask optimization.
+/// How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int, from_py_object)]
+#[pyclass(name = "ParserBackend", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyParserBackend {
+    /// An LR table. Faster to compile, with slower masks. The default.
     LR_TABLE,
+    /// Template DFAs. Slower to compile, with faster masks.
     TEMPLATE_DFA,
 }
 
@@ -270,14 +272,14 @@ impl PyGrammar {
     }
 
     /// Compile this grammar against the target vocabulary. Sugar for `Module(self, mask_strategy=..., boundary_mask_strategy=...).compile(vocab)`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, template_dfas = false, merge_equivalent_tokens = false))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, parser_backend = None, merge_equivalent_tokens = false))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-        template_dfas: bool,
+        parser_backend: Option<PyRef<'_, PyParserBackend>>,
         merge_equivalent_tokens: bool,
     ) -> PyResult<PyConstraint> {
         let grammar = slf.try_borrow()?.inner.clone();
@@ -285,7 +287,7 @@ impl PyGrammar {
         let options = canonical::compile_options(
             mask_strategy,
             boundary_mask_strategy,
-            template_dfas,
+            parser_backend,
             merge_equivalent_tokens,
         );
         py.detach(move || {
@@ -299,14 +301,14 @@ impl PyGrammar {
     /// Retains vocabulary-specific compilation artifacts and returns the module.
     ///
     /// Equivalent to `Module(self).precompile(vocab, ...)`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, template_dfas = false, merge_equivalent_tokens = false))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None, parser_backend = None, merge_equivalent_tokens = false))]
     fn precompile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-        template_dfas: bool,
+        parser_backend: Option<PyRef<'_, PyParserBackend>>,
         merge_equivalent_tokens: bool,
     ) -> PyResult<canonical::PyModule> {
         let grammar = slf.try_borrow()?.inner.clone();
@@ -314,7 +316,7 @@ impl PyGrammar {
         let options = canonical::compile_options(
             mask_strategy,
             boundary_mask_strategy,
-            template_dfas,
+            parser_backend,
             merge_equivalent_tokens,
         );
         let module = py
@@ -351,6 +353,7 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTokenSet>()?;
     module.add_class::<PyMaskStrategy>()?;
     module.add_class::<PyBoundaryMaskStrategy>()?;
+    module.add_class::<PyParserBackend>()?;
 
     let mask_strat = module.getattr("MaskStrategy")?;
     mask_strat.setattr("FAST_COMPILE", mask_strat.getattr("TOKEN_TRIE")?)?;
@@ -393,7 +396,11 @@ fn compile_with_backend(
         .end_tokens(end_tokens.unwrap_or_default())
         .optimization(strategy.into())
         .parser_backend(backend.into())
-        .template_dfas(template_dfas)
+        .engine_backend(if template_dfas {
+            glrmask::ParserBackend::TemplateDfa
+        } else {
+            glrmask::ParserBackend::LrTable
+        })
         .merge_equivalent_tokens(merge_equivalent_tokens);
     let grammar = grammar.as_rust().map_err(api_error)?;
     py.detach(|| grammar.compile_with_build_options(&vocab.inner, options))

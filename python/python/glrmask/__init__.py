@@ -41,6 +41,7 @@ assert state.is_accepting()
 from collections.abc import Mapping as _Mapping
 from ._glrmask import (
     BoundaryMaskStrategy,
+    ParserBackend,
     Constraint,
     ConstraintState,
     TokenSet,
@@ -58,6 +59,7 @@ _Mapping.register(Externs)
 
 __all__ = [
     "BoundaryMaskStrategy",
+    "ParserBackend",
     "Constraint",
     "ConstraintState",
     "TokenSet",

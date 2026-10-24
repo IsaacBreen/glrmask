@@ -489,7 +489,60 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
 }
 
 #[test]
-fn auto_decline_fallback_honours_template_dfas() {
+fn auto_decline_with_a_retained_child_keeps_that_child() {
+    use crate::public_api::module::static_build_probe;
+    use crate::Module;
+
+    const CHILD: Case = Case {
+        start: 0,
+        bound: 3,
+        rules: &[(0, &[-1]), (0, &[-2, -3])],
+    };
+    let vocab = fuzz_vocab();
+    let mut child = Module::new(&Grammar::from_lark(&lark(CHILD)).unwrap());
+    child
+        .precompile_with(&vocab, MaskMode::ParserDwa.compile_options())
+        .expect("precompile the retained child");
+    let child_builds = static_build_probe::builds(&child);
+
+    let parent_source = Grammar::from_glrm(
+        r#"glrm 1; start start; extern grammar child; nt start = "a" child;"#,
+    )
+    .unwrap();
+    let mut reference_parent = Module::new(&parent_source);
+    reference_parent.bind("child", child.clone()).unwrap();
+    let reference = reference_parent
+        .compile_with(&vocab, MaskMode::ParserDwa.compile_options())
+        .expect("reference ParserDwa compile");
+    let mut parent = Module::new(&parent_source);
+    parent.bind("child", child.clone()).unwrap();
+    let before = static_build_probe::builds(&parent);
+    parent.force_parser_dwa_decline();
+    let auto = parent
+        .compile_with(&vocab, MaskMode::Auto.compile_options())
+        .expect("Auto must fall back for the parent only");
+    assert_eq!(
+        static_build_probe::builds(&parent),
+        before,
+        "Auto's fallback built the parent statically instead of as a B shell",
+    );
+    assert_eq!(
+        static_build_probe::builds(&child),
+        child_builds,
+        "Auto's per-part fallback rebuilt the retained child",
+    );
+    let mut left = reference.start();
+    let mut right = auto.start();
+    assert_eq!(left.mask(), right.mask());
+    for token in [0u32, 1, 3, 0] {
+        assert_eq!(left.commit_token(token), right.commit_token(token));
+        assert_eq!(left.mask(), right.mask());
+        assert_eq!(left.is_accepting(), right.is_accepting());
+    }
+}
+
+#[test]
+fn auto_decline_fallback_honours_parser_backend() {
     const SMALL: Case = Case {
         start: 0,
         bound: 3,
@@ -498,21 +551,21 @@ fn auto_decline_fallback_honours_template_dfas() {
     let reference = compile_case(SMALL, MaskMode::ParserDwa);
     // Auto only reaches TokenTrie through the decline fallback. That fallback
     // must compile exactly as an explicit TokenTrie request with the same two
-    // switches would, so with `template_dfas` it is table-free.
+    // switches would, so with `TemplateDfa` it is table-free.
     let auto = {
         let _limit = TestBudgetLimit::set(1);
         Grammar::from_lark(&lark(SMALL))
             .unwrap()
             .compile_with_build_options(
                 &fuzz_vocab(),
-                MaskMode::Auto.build_options().template_dfas(true),
+                MaskMode::Auto.build_options().engine_backend(ParserBackend::TemplateDfa),
             )
             .expect("Auto must fall back to TokenTrie")
     };
     assert_eq!(
         auto.parser_backend(),
         ParserBackend::TemplateDfa,
-        "Auto's fallback must honour template_dfas",
+        "Auto's fallback must honour the parser backend",
     );
     assert!(!auto.table.is_present(), "the fallback must not retain an LR table");
     check_exact_oracle(&auto, SMALL);
