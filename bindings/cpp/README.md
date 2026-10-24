@@ -10,7 +10,7 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 
 ## Installation
 
-Each [GitHub release](https://github.com/IsaacBreen/glrmask/releases) includes static and shared libraries for Windows x64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and arm64 (glibc 2.35 or newer). Extract the archive for your platform, then:
+Each [GitHub release](https://github.com/IsaacBreen/glrmask/releases) includes static and shared libraries for Windows x64 and arm64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and arm64 (glibc 2.28 or newer, or musl). Extract the archive for your platform, then:
 
 ```cmake
 find_package(glrmask 1.0 CONFIG REQUIRED)

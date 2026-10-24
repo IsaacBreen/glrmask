@@ -67,8 +67,8 @@ def installation(language, release=None):
     if release is None:
         if language == 'cpp':
             return (f'Each [GitHub release]({REPO}/releases) includes static and shared libraries for '
-                    'Windows x64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and arm64 '
-                    '(glibc 2.35 or newer). Extract the archive for your platform, then:\n\n'
+                    'Windows x64 and arm64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and '
+                    'arm64 (glibc 2.28 or newer, or musl). Extract the archive for your platform, then:\n\n'
                     '```cmake\n'
                     f'find_package(glrmask {PACKAGE_MINOR} CONFIG REQUIRED)\n'
                     'target_link_libraries(application PRIVATE glrmask::glrmask)\n'
