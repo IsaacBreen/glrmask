@@ -201,7 +201,12 @@ class Grammar extends Owned {
   static fromLark(source) {
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('lark', string(source))));
   }
-  get externs() { return formatExterns(invoke(() => handle(this, Grammar).externs()), null); }
+  get externs() {
+    const target = handle(this, Grammar);
+    const rawAll = invoke(() => target.externs());
+    const unboundSupplier = () => formatExterns(invoke(() => target.unboundExterns()), null);
+    return formatExterns(rawAll, unboundSupplier);
+  }
   clone() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
   static fromExpr(value) {
     let expr;
@@ -211,7 +216,19 @@ class Grammar extends Owned {
     else throw new TypeError('Grammar.fromExpr requires Expr, Grammar, or TokenSet');
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
   }
-  bind(name, value) {
+  bind(nameOrBindings, value) {
+    if (arguments.length === 1 && typeof nameOrBindings === 'object' && nameOrBindings !== null && !(nameOrBindings instanceof String)) {
+      const entries = Object.entries(nameOrBindings);
+      const snapshot = this.clone();
+      for (const [k, v] of entries) {
+        snapshot._bindSingle(k, v);
+      }
+      handles.set(this, handles.get(snapshot));
+      return;
+    }
+    this._bindSingle(nameOrBindings, value);
+  }
+  _bindSingle(name, value) {
     const target = handle(this, Grammar);
     if (value instanceof Grammar) return invoke(() => target.bindGrammar(name, handle(value, Grammar)));
     if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));

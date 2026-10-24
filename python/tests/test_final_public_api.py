@@ -74,7 +74,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
     child = glrmask.Grammar.from_ebnf('start ::= "a"')
     with pytest.raises(TypeError):
-        _bound_snapshot(g, 'T', 7)
+        _bound_snapshot(g, 'T', 'not a binding')
     with pytest.raises(ValueError):
         _bound_snapshot(g, 'T', child)
     open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
@@ -265,3 +265,70 @@ def test_public_reprs_are_stable_and_python_quoted():
         "'child': Extern(name='child', kind='grammar')})"
     )
     assert repr(glrmask.Grammar.from_ebnf('start ::= "a"').externs) == "Externs({})"
+
+
+def token_extern_grammar():
+    return glrmask.Grammar.from_glrm(
+        "glrm 1; start root; extern token T; nt root = T;"
+    )
+
+
+def test_bind_accepts_a_token_id_for_a_token_extern():
+    v = vocab()
+    grammar = token_extern_grammar()
+    assert grammar.bind("T", 0) is None
+    assert len(grammar.externs.unbound) == 0
+    state = grammar.compile(v).start()
+    assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
+
+    module = glrmask.Module(token_extern_grammar())
+    assert module.bind("T", 0) is None
+    assert len(module.externs.unbound) == 0
+    state = module.compile(v).start()
+    assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
+
+    with pytest.raises(ValueError):
+        token_extern_grammar().bind("T", -1)
+    with pytest.raises(ValueError):
+        glrmask.Module(token_extern_grammar()).bind("T", 2**32)
+
+
+def test_grammar_copy_binds_independently():
+    grammar = token_extern_grammar()
+    copy = grammar.copy()
+    assert copy.bind("T", 0) is None
+    assert len(copy.externs.unbound) == 0
+    assert len(grammar.externs.unbound) == 1
+    assert "T" in grammar.externs.unbound
+
+
+def test_grammar_batch_bind_is_atomic():
+    grammar = glrmask.Grammar.from_glrm(
+        "glrm 1; start root; extern token a; extern token b; nt root = a b;"
+    )
+    with pytest.raises(ValueError):
+        grammar.bind(a=0, b=glrmask.Grammar.from_ebnf('start ::= "a"'))
+    assert len(grammar.externs.unbound) == 2
+    assert "a" in grammar.externs.unbound
+    assert "b" in grammar.externs.unbound
+
+    with pytest.raises(TypeError):
+        grammar.bind("a", 0, b=1)
+    with pytest.raises(TypeError):
+        grammar.bind()
+    with pytest.raises(TypeError):
+        glrmask.Module(grammar).bind()
+
+    assert grammar.bind(a=0, b=1) is None
+    assert len(grammar.externs.unbound) == 0
+
+
+def test_equality_with_other_types_is_false_not_an_error():
+    assert (glrmask.TokenSet([1]) == 1) is False
+    assert (glrmask.TokenSet([1]) != "x") is True
+    assert glrmask.TokenSet([1]) == glrmask.TokenSet([1])
+
+
+def test_internal_module_stays_importable_but_is_not_public():
+    assert "_internal" not in glrmask.__all__
+    assert hasattr(glrmask._internal, "compiler_cache_stats")

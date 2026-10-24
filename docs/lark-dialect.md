@@ -1,15 +1,7 @@
-# Lark dialect
+# Lark
 
-The Lark frontend lowers into GLRMask's shared component, lexical and exact-event
-representation. It does not have a separate masking engine or translate through
-GLRM text. It is a documented recognition dialect, not complete emulation of
-Python Lark, every lexer mode, or every llguidance/XGrammar extension.
-
-## One dialect
-
-There is a single dialect. Standard recognition syntax and GLRMask's extensions
-share it; the extensions are additional syntax that standard Lark rejects, so a
-standard grammar parses to the same result either way.
+`Grammar.from_lark` reads [Lark](https://github.com/lark-parser/lark) grammars, with a few additions for language
+models. A standard Lark grammar means the same with or without them: each addition is syntax that standard Lark rejects.
 
 ```python
 import glrmask
@@ -21,129 +13,73 @@ start: "[" INT ("," INT)* "]"
 ''')
 ```
 
-| Feature | Supported |
+## Standard Lark
+
+Supported:
+
+- Rules, terminals, literals, regular expressions, grouping and repetition. `x~3` repeats exactly three times, and
+  `x~2..5` from two to five.
+- Case-insensitive literals such as `"yes"i`, the regular-expression flags `i`, `s`, `x` and `u`, and Unicode literal
+  ranges such as `"α".."ω"`.
+- `%import common.INT`, `%import common.INT -> NUMBER` and `%import common (INT, WS)`, from a built-in copy of Lark
+  1.3.1's `common` library: numbers, names, whitespace and comments. Imports never read files or the network.
+- `%ignore`.
+
+The grammar matches the rule named `start`. `?rule`, `!rule` and `-> alias` only shape Lark's parse trees, which GLRMask
+doesn't build, so they have no effect.
+
+Not supported, and reported as errors: priorities, templates, `%declare`, `%extend`, `%override`, imports from files,
+other directives, and bare `.` (write `/./`, or `/./s` to include newline). Regular expressions have the same limits as
+in [GLRM](glrm-format.md#strings-and-regular-expressions).
+
+Each terminal takes its longest match. Python's `re` and Lark's lexers can choose differently, so the same grammar may
+split text differently in Lark.
+
+## Additions
+
+| Syntax | Meaning |
 |---|---|
-| Rules, terminals, literals, grouping, regular expressions, repetition | Yes |
-| Curated `%import common`, aliases and grouped imports | Yes |
-| Local `%ignore` with separate ignored-terminal identities | Yes |
-| Regular-body `[lazy]` | Yes |
-| Exact ID `<[123]>`, sets/ranges `<[1,3-8]>` | Yes |
-| Complement `<[^1,3-8]>`, wildcard `<[*]>` | Yes |
-| Named special token `<|name|>` | Yes, as a token extern |
-| Host-bound grammar `@name` | Yes |
-| Isolated inline JSON Schema `%json { ... }` | Yes |
+| `@name` | A grammar extern |
+| `<\|name\|>` | A token extern |
+| `<[5]>`, `<[1,3-8]>` | Token 5; tokens 1 and 3 to 8 |
+| `<[^1,3-8]>`, `<[*]>` | Any token except 1 and 3 to 8; any token |
+| `%json { ... }` | A JSON Schema, inline |
+| `name[lazy]: ...` | A terminal that ends as soon as it can |
+| `@mark(id)` | A [marker](markers.md) |
 
-## Ordinary Lark support and explicit limits
+### Externs
 
-Rules have an explicit default entry named `start`; no first-declaration fallback
-is used. Uppercase terminal definitions remain lexical definitions; helper-only
-terminals are not accidentally emitted just because they appear in an import.
-Parse-tree-only `?rule`, `!rule`, and `-> alias` syntax may be accepted and ignored,
-because this API returns masks and acceptance, not syntax trees or captures.
+```python
+call = glrmask.Grammar.from_lark('start: <|begin_call|> "<" @payload ">"')
+call.bind("begin_call", begin_call_id)  # your tokenizer's ID for <|begin_call|>
+call.bind("payload", glrmask.Grammar.from_json_schema({"type": "null"}))
+```
 
-`x~N` means exactly N repetitions. `x~M..N` uses inclusive bounds and rejects an
-inverted or overflowing bound. Unicode literal ranges such as `"α".."ω"` require
-single scalar endpoints, not one-byte endpoints. Case-insensitive `"yes"i` and
-checked regex flags `i`, `s`, `x`, `u` use the shared regular frontend. Regex syntax
-is not silently converted to a literal when parsing fails.
+`@payload` is an extern even if the grammar also has a rule called `payload`. Externs bind the same way as in any other
+grammar; see [Composing grammars](../GUIDE.md#composing-grammars). GLRMask never guesses a token ID from a name such as
+`<|begin_call|>`: you bind it.
 
-`%import common.INT`, `%import common.INT -> NUMBER`, and
-`%import common (INT, WS)` resolve from a pinned built-in set based on Lark 1.3.1.
-They do not read arbitrary files or access the network. Numeric, name, whitespace
-and comment terminals are provided; unsupported names and import paths fail.
-Backtracking/reluctant source patterns in the built-in library use explicitly
-implemented regular-language equivalents rather than a Python regex runtime.
+### Token IDs
 
-Unknown directives, `%declare`, `%extend`, `%override`, general file imports and
-templates are not silently skipped. Rule and terminal priorities are unsupported,
-including explicit zero priorities. Bare `.` is not a grammar atom; write `/./`
-or `/./s` for a Unicode scalar with the intended newline behavior.
+`<[...]>` matches one token by ID. Ranges include both ends and are ranges of IDs, not of characters. `^` and `*` are
+relative to the vocabulary, including special tokens. Every ID and range must be in the vocabulary when you compile.
+Token IDs can't appear inside a terminal or a `[lazy]` body. See [token sets](token-sets.md).
 
-GLRMask preserves its per-terminal maximal-munch lexical contract. Python regex
-ordered alternatives and different Lark lexer configurations can select different
-endpoints; identical source notation is not a promise of identical segmentation.
+### Inline JSON Schema
 
-## Whole-terminal shortest matching
+```lark
+start: "<" %json {"type": "string", "const": "a b"} ">"
+```
 
-Use the nonstandard `[lazy]` annotation for whole-terminal shortest matching:
+The schema is compiled as its own grammar, with its own whitespace rules: `%ignore` doesn't apply inside it.
+
+### `[lazy]`
 
 ```lark
 start: text "!"
 text[lazy]: /.*END/s
 ```
 
-The body must be representable as a regular terminal expression. `[lazy]` means
-prefix-minimal acceptance of the whole expression: it retains words with no
-strictly shorter accepted prefix. Native GLRM expresses the same regular byte
-language as `L - (L b/./s+)`, with parentheses around compound operands; it has no
-`shortest { ... }` expression form. `[lazy]` does not apply to arbitrary CFG rules,
-grammar calls, exact events, or a regularization that erases implicit ignore
-boundaries.
-
-Internal reluctant quantifiers such as `/a+?b.*/` are rejected, not silently treated
-as ordinary quantifiers or translated into a different whole-terminal language.
-Anchors, lookaround, backreferences and unsupported flags also fail explicitly.
-
-## Original model-token events
-
-```python
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"x", 4: b"", 5: b""})
-grammar = glrmask.Grammar.from_lark('start: <|begin|> <[^0-1]>')
-module = glrmask.Module(grammar)
-module.bind("begin", glrmask.TokenSet([1]))
-constraint = module.compile(vocab)
-state = constraint.start()
-assert not state.mask()[0] and state.mask()[1]
-state.commit_token(1)
-assert state.mask()[4] and state.mask()[5]
-```
-
-Each event atom consumes one original token ID. Ranges are inclusive numeric ID
-ranges, never spelling ranges. Wildcards and complements are relative to the
-vocabulary's finite grammar-consumable event domain, including spelling-less IDs,
-not just IDs with nonempty text. Unknown positive IDs and ranges crossing undefined
-holes are errors. An empty resulting set is the empty language, not epsilon.
-The final root's separate end-token policy can reserve IDs from ordinary content.
-
-Named specials are token externs bound by the caller; no model-name heuristics,
-metadata guessing, decoded-spelling fallback or arbitrary alias choice occurs.
-Different frameworks can use the same notation but different name-resolution rules.
-
-Exact events are parser atoms, not regex characters. They cannot occur inside a
-byte terminal, ignored expression or `[lazy]` operand. Equal spellings never erase
-ID identity; an ID can retain both ordinary-byte and exact-event interpretations
-when the grammar permits both.
-
-## Grammar and schema composition
-
-```python
-grammar = glrmask.Grammar.from_lark('start: "<" @payload ">"')
-child = glrmask.Grammar.from_json_schema({"type": "null"})
-composed = glrmask.Module(grammar)
-composed.bind("payload", child)
-```
-
-`@payload` declares a grammar-valued host requirement. A local rule named
-`payload` is a different symbol, so the two can coexist without an accidental
-collision. Bind it through a `Module`, as with a GLRM extern. A child must be
-fully bound before attachment, and qualified descendant binding is unsupported.
-
-Inline JSON Schema is an isolated child, not production text pasted into the
-parent's lexer scope:
-
-```lark
-start: "<" %json {"type":"string","const":"a b"} ">"
-```
-
-It uses the existing JSON Schema compiler, its supported schema domain and its own
-whitespace policy. Parent `%ignore` does not change JSON string contents. Tokens may
-cross the parent/child boundary mid-spelling under the usual composition semantics.
-Native GLRM intentionally has no `%json`, numeric-event or named-special literals.
-
-## Deliberately excluded features
-
-The dialect does not support capture annotations, parse-tree production, substring
-matching/generation, temperature, token or character/byte budgets, priorities, or
-special stop/suffix backtracking and capture-hiding controls. Unsupported semantic
-attributes are errors. The extensions are not permission to accept and ignore the
-rest of a foreign grammar dialect.
+A `[lazy]` terminal stops at its shortest match: here, the first `END`. Its body must be regular. Every other terminal
+still takes the longest match. Lazy quantifiers such as `/a+?/` are errors, not a way to get this; they mean something
+else.

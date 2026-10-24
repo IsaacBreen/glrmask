@@ -33,8 +33,15 @@ impl PyExtern {
         extern_repr(py, &self.name, &self.kind)
     }
 
-    fn __eq__(&self, other: &Self) -> bool {
-        self == other
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(other) => Ok(pyo3::types::PyBool::new(py, self == &*other)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            Err(_) => Ok(py.NotImplemented()),
+        }
     }
 }
 
@@ -133,8 +140,15 @@ impl PyExterns {
         Ok(format!("Externs({{{}}})", pairs.join(", ")))
     }
 
-    fn __eq__(&self, other: &Self) -> bool {
-        self.entries == other.entries
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(other) => Ok(pyo3::types::PyBool::new(py, self.entries == other.entries)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            Err(_) => Ok(py.NotImplemented()),
+        }
     }
 }
 
@@ -292,6 +306,20 @@ impl Drop for PyModule {
     }
 }
 
+fn extract_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    if !value.is_instance_of::<pyo3::types::PyInt>() {
+        return Ok(None);
+    }
+    match value.extract::<u32>() {
+        Ok(id) => Ok(Some(id)),
+        // An integer outside the u32 token-ID domain is a bad value, not a bad type.
+        Err(_) => Err(PyValueError::new_err(format!(
+            "token ID {value} is out of range; token IDs go from 0 to {}",
+            u32::MAX
+        ))),
+    }
+}
+
 fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     if let Ok(m) = value.extract::<PyRef<'_, PyModule>>() {
         return Ok(glrmask::Binding::from(m.snapshot()));
@@ -305,28 +333,100 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Binding::from(et.inner.clone()));
     }
+    if let Some(id) = extract_token_id(value)? {
+        return Ok(glrmask::Binding::from(id));
+    }
     Err(PyTypeError::new_err(
-        "Module.bind accepts Grammar, Module, Expr, or TokenSet",
+        "Module.bind accepts a Grammar, Module, Expr, TokenSet or token ID",
     ))
 }
 
-pub(super) fn bind_grammar(
-    grammar: &mut glrmask::Grammar,
-    name: &str,
-    value: &Bound<'_, PyAny>,
-) -> PyResult<()> {
+/// One value passed to `Grammar.bind`, before it is applied to the grammar.
+pub(super) enum GrammarBinding {
+    Grammar(glrmask::Grammar),
+    Expr(glrmask::Expr),
+    TokenSet(glrmask::TokenSet),
+    Token(u32),
+}
+
+impl GrammarBinding {
+    pub(super) fn bind(
+        self,
+        grammar: &mut glrmask::Grammar,
+        name: &str,
+    ) -> glrmask::Result<()> {
+        match self {
+            Self::Grammar(value) => grammar.bind(name, value),
+            Self::Expr(value) => grammar.bind(name, value),
+            Self::TokenSet(value) => grammar.bind(name, value),
+            Self::Token(value) => grammar.bind(name, value),
+        }
+    }
+}
+
+pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<GrammarBinding> {
     if let Ok(g) = value.extract::<PyRef<'_, PyGrammar>>() {
-        return grammar.bind(name, g.inner.clone()).map_err(api_error);
+        return Ok(GrammarBinding::Grammar(g.inner.clone()));
     }
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
-        return grammar.bind(name, e.inner.clone()).map_err(api_error);
+        return Ok(GrammarBinding::Expr(e.inner.clone()));
     }
     if let Ok(t) = value.extract::<PyRef<'_, PyTokenSet>>() {
-        return grammar.bind(name, t.inner.clone()).map_err(api_error);
+        return Ok(GrammarBinding::TokenSet(t.inner.clone()));
+    }
+    if let Some(id) = extract_token_id(value)? {
+        return Ok(GrammarBinding::Token(id));
     }
     Err(PyTypeError::new_err(
-        "Grammar.bind accepts Grammar, Expr, or TokenSet",
+        "Grammar.bind accepts a Grammar, Expr, TokenSet or token ID",
     ))
+}
+
+/// The positional-or-keyword forms shared by `Grammar.bind` and `Module.bind`.
+pub(super) enum BindArguments<'py> {
+    Single(String, Bound<'py, PyAny>),
+    Many(Vec<(String, Bound<'py, PyAny>)>),
+}
+
+pub(super) fn bind_arguments<'py>(
+    args: &Bound<'py, pyo3::types::PyTuple>,
+    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
+    method: &str,
+) -> PyResult<BindArguments<'py>> {
+    let has_args = !args.is_empty();
+    let has_kwargs = kwargs.map_or(false, |kw| !kw.is_empty());
+
+    if has_args && has_kwargs {
+        return Err(PyTypeError::new_err(format!(
+            "cannot mix positional and keyword arguments in {method}",
+        )));
+    }
+    if !has_args && !has_kwargs {
+        return Err(PyTypeError::new_err(format!(
+            "{method} expects either positional (name, value) or keyword bindings",
+        )));
+    }
+
+    if has_args {
+        if args.len() != 2 {
+            return Err(PyTypeError::new_err(format!(
+                "{method} positional form takes exactly 2 arguments (name, value), got {}",
+                args.len()
+            )));
+        }
+        let name: String = args.get_item(0)?.extract()?;
+        return Ok(BindArguments::Single(name, args.get_item(1)?));
+    }
+
+    let kwargs = kwargs.unwrap();
+    let mut bindings = Vec::with_capacity(kwargs.len());
+    for (key, val) in kwargs.iter() {
+        let name: String = key
+            .extract()
+            .map_err(|_| PyTypeError::new_err("binding names must be strings"))?;
+        bindings.push((name, val));
+    }
+    Ok(BindArguments::Many(bindings))
 }
 
 pub(super) fn compile_options(
@@ -354,6 +454,9 @@ impl PyModule {
         Ok(Self::from_inner(glrmask::Module::new(&grammar.inner)))
     }
 
+    /// Binds the extern `name` to `value`: a grammar, module, expression, token set or token ID.
+    ///
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -361,63 +464,33 @@ impl PyModule {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        let has_args = !args.is_empty();
-        let has_kwargs = kwargs.map_or(false, |kw| !kw.is_empty());
-
-        if has_args && has_kwargs {
-            return Err(PyTypeError::new_err(
-                "cannot mix positional and keyword arguments in Module.bind",
-            ));
-        }
-        if !has_args && !has_kwargs {
-            return Err(PyTypeError::new_err(
-                "Module.bind expects either positional (name, value) or keyword bindings",
-            ));
-        }
-
-        if has_args {
-            if args.len() != 2 {
-                return Err(PyTypeError::new_err(format!(
-                    "Module.bind positional form takes exactly 2 arguments (name, value), got {}",
-                    args.len()
-                )));
+        let request = bind_arguments(args, kwargs, "Module.bind")?;
+        let mut bindings = Vec::with_capacity(match &request {
+            BindArguments::Single(..) => 1,
+            BindArguments::Many(items) => items.len(),
+        });
+        match request {
+            BindArguments::Single(name, value) => {
+                bindings.push((name, extract_binding(&value)?));
             }
-            let name: String = args.get_item(0)?.extract()?;
-            let value = args.get_item(1)?;
-            let binding = extract_binding(&value)?;
-            let mut target = slf.try_borrow_mut()?;
-            let mut next = target.snapshot();
-            let next = py
-                .detach(move || {
+            BindArguments::Many(items) => {
+                for (name, value) in items {
+                    bindings.push((name, extract_binding(&value)?));
+                }
+            }
+        }
+        let mut target = slf.try_borrow_mut()?;
+        let mut next = target.snapshot();
+        let next = py
+            .detach(move || {
+                for (name, binding) in bindings {
                     next.bind(&name, binding)?;
-                    Ok::<_, glrmask::Error>(next)
-                })
-                .map_err(api_error)?;
-            target.replace(py, next);
-            Ok(())
-        } else {
-            let kwargs = kwargs.unwrap();
-            let mut bindings = Vec::with_capacity(kwargs.len());
-            for (key, val) in kwargs.iter() {
-                let name: String = key
-                    .extract()
-                    .map_err(|_| PyTypeError::new_err("binding names must be strings"))?;
-                let binding = extract_binding(&val)?;
-                bindings.push((name, binding));
-            }
-            let mut target = slf.try_borrow_mut()?;
-            let mut next = target.snapshot();
-            let next = py
-                .detach(move || {
-                    for (name, binding) in bindings {
-                        next.bind(&name, binding)?;
-                    }
-                    Ok::<_, glrmask::Error>(next)
-                })
-                .map_err(api_error)?;
-            target.replace(py, next);
-            Ok(())
-        }
+                }
+                Ok::<_, glrmask::Error>(next)
+            })
+            .map_err(api_error)?;
+        target.replace(py, next);
+        Ok(())
     }
 
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]

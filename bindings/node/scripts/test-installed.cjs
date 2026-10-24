@@ -75,12 +75,12 @@ if (!platformArtifact) {
   console.log(`Isolated installed package passed: ${work}`);
   return;
 }
-for (const name of ['decode.mjs', 'json.cjs']) {
+for (const name of ['generate.mjs', 'tool_calls.cjs']) {
   const source = path.join(installed, 'examples', name);
   fs.copyFileSync(source, path.join(work, name));
 }
-run(process.execPath, ['decode.mjs'], {env: runtime});
-run(process.execPath, ['json.cjs'], {env: runtime});
+run(process.execPath, ['generate.mjs'], {env: runtime});
+run(process.execPath, ['tool_calls.cjs'], {env: runtime});
 // Type declarations shipped in the thin root are checked with the repository's
 // locked TypeScript compiler and @types/node copies, so this step needs no
 // registry access.

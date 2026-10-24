@@ -66,7 +66,6 @@ __all__: list[str] = [
     "TokenTrie",
     "Vocab",
     "__version__",
-    "_internal",
 ]
 
 @final
@@ -149,17 +148,17 @@ class Vocab:
     Use each token's exact bytes, not its display form: `b" hello"`, not `"Ġhello"`. IDs need not be contiguous.
     """
     @staticmethod
-    def from_dict(token_to_id: dict[Union[str, bytes], int], *, special_tokens: Optional[Sequence[int]] = None) -> Vocab:
+    def from_dict(token_to_id: dict[Union[str, bytes], int], *, special_token_ids: Optional[Sequence[int]] = None) -> Vocab:
         """Creates a vocabulary from a `{token: id}` dict.
 
-        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_tokens` adds tokens that have no bytes.
+        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_token_ids` adds tokens that have no bytes, such as end-of-sequence or tool-call tokens.
         """
         ...
     @staticmethod
-    def from_id_to_bytes(id_to_bytes: dict[int, bytes], *, special_tokens: Optional[Sequence[int]] = None) -> Vocab:
+    def from_id_to_bytes(id_to_bytes: dict[int, bytes], *, special_token_ids: Optional[Sequence[int]] = None) -> Vocab:
         """Creates a vocabulary from an `{id: bytes}` dict.
 
-        `special_tokens` adds tokens that have no bytes.
+        `special_token_ids` adds tokens that have no bytes, such as end-of-sequence or tool-call tokens.
         """
         ...
     @staticmethod
@@ -171,7 +170,7 @@ class Vocab:
         ...
     @property
     def llama_cpp_end_token_ids(self) -> list[int]:
-        """The model's end-of-generation token IDs. Put them in a `TokenSet` after the grammar to require one."""
+        """The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one."""
         ...
     def __len__(self) -> int:
         """The number of tokens with bytes; special tokens are not counted."""
@@ -268,17 +267,17 @@ class Module:
         """Creates a module from a grammar."""
         ...
     @overload
-    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet], /) -> None:
-        """Binds the extern `name` to `value`: a grammar, module, expression or token set.
+    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet, int], /) -> None:
+        """Binds the extern `name` to `value`: a grammar, module, expression, token set or token ID.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
         """
         ...
     @overload
-    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet]) -> None:
-        """Binds the extern `name` to `value`: a grammar, module, expression or token set.
+    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet, int]) -> None:
+        """Binds the extern `name` to `value`: a grammar, module, expression, token set or token ID.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
         """
         ...
     def precompile(
@@ -391,17 +390,28 @@ class Grammar:
         The end token must be in the vocabulary.
         """
         ...
-    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet]) -> None:
-        """Binds the extern `name` to `value`: a grammar, expression or token set.
+    @overload
+    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet, int], /) -> None:
+        """Binds the extern `name` to `value`: a grammar, expression, token set or token ID.
 
-        Raises `ValueError` if `name` is undeclared or already bound, or if `value` is the wrong kind for it.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
         """
         ...
+    @overload
+    def bind(self, **bindings: Union[Grammar, Expr, TokenSet, int]) -> None:
+        """Binds the extern `name` to `value`: a grammar, expression, token set or token ID.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
+        """
+        ...
+    def copy(self) -> Grammar:
+        """A copy of the grammar. Binding the copy does not change the original."""
+        ...
     def __copy__(self) -> Grammar:
-        """A copy of the grammar."""
+        """Same as `copy()`."""
         ...
     def __deepcopy__(self, memo: dict[int, Any]) -> Grammar:
-        """A copy of the grammar."""
+        """Same as `copy()`."""
         ...
 
 @final
@@ -449,7 +459,7 @@ class ConstraintState:
         """A copy of the state, for trying tokens without changing this one."""
         ...
     def __copy__(self) -> ConstraintState:
-        """A copy of the state, for trying tokens without changing this one."""
+        """Same as `copy()`."""
         ...
     def mask(self, *, size: Optional[int] = None) -> NDArray[np.bool_]:
         """The tokens allowed next, as a Boolean array indexed by token ID.
@@ -466,7 +476,7 @@ class ConstraintState:
     def commit_token(self, token_id: int) -> bool:
         """Commits one token.
 
-        Returns `False` if it is not allowed, leaving the state unusable. To try a token safely, commit it on a clone.
+        Returns `False` if it is not allowed, leaving the state unusable. To try a token safely, commit it on a copy.
         """
         ...
     def commit_tokens(self, token_ids: Sequence[int]) -> bool:

@@ -150,8 +150,8 @@ GLRMASK_API const char *glrmask_error_message(void);
 GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
 
 /// Creates a vocabulary from `entries`, plus special tokens that have no bytes
-/// (`special_ids`).
-GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,const uint32_t* special_ids,size_t special_len,glrmask_vocab** out);
+/// (`special_token_ids`).
+GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,const uint32_t* special_token_ids,size_t n_special_token_ids,glrmask_vocab** out);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* p,glrmask_vocab** out);
 /// Frees a vocabulary handle.
@@ -164,6 +164,8 @@ GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t* ids,size_t n,gl
 GLRMASK_API glrmask_status glrmask_token_set_from_ranges(const glrmask_token_range* r,size_t n,glrmask_token_set** out);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_token_set_clone(const glrmask_token_set* p,glrmask_token_set** out);
+/// Writes whether both sets contain the same IDs.
+GLRMASK_API glrmask_status glrmask_token_set_equal(const glrmask_token_set* a,const glrmask_token_set* b,uint32_t* out);
 /// Frees a token set.
 GLRMASK_API void glrmask_token_set_free(glrmask_token_set* p);
 
@@ -193,6 +195,8 @@ GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* p,glrmas
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar* p);
 /// Writes the grammar's externs, in declaration order.
 GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar* p,glrmask_externs** out);
+/// Writes the grammar's externs that are not yet bound.
+GLRMASK_API glrmask_status glrmask_grammar_unbound_externs(const glrmask_grammar* p,glrmask_externs** out);
 /// Compiles the grammar for `vocab`. `options` may be NULL for defaults.
 GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar* p,const glrmask_vocab* v,const glrmask_compile_options* o,glrmask_constraint** out);
 /// Compiles as much as possible for `vocab` now, and returns a module that keeps

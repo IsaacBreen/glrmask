@@ -360,6 +360,18 @@ void canonical_modules() {
     CHECK(ext_unbound[0].name == "first");
     CHECK(ext_unbound[1].name == "third");
 
+    // A grammar's unbound view carries its own unbound externs.
+    auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern token one; extern token two; nt start = one two;");
+    grammar_externs.bind("one", TokenId{1});
+    auto grammar_unbound = grammar_externs.externs().unbound();
+    CHECK(grammar_unbound.size() == 1 && grammar_unbound[0].name == "two");
+    CHECK(grammar_externs.externs().size() == 2);
+
+    // TokenSet equality compares the normalized ID sets.
+    CHECK(TokenSet({1,2}) == TokenSet::from_ranges({{1,2}}));
+    CHECK(TokenSet({1,2}) != TokenSet::from_ranges({{1,3}}));
+    CHECK(!(TokenSet({1,2}) != TokenSet::from_ranges({{1,2}})));
+
     // Grammar::precompile is the module-returning mirror of Grammar::compile.
     auto open_host = host.precompile(v);
     auto precompiled_child = Grammar::from_ebnf("start ::= \"a\"").precompile(

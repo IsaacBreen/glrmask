@@ -2,129 +2,101 @@
 
 ## 0.4.0
 
-- The `end_tokens` compile option is removed. To require an end token after a
-  grammar, write `Grammar::from_expr(Expr::sequence([grammar, eos]))`. GLRMask
-  recognises this shape and compiles it with no extra work. `is_accepting()` is
-  true only after the end token is committed.
-- Add `is_terminated` to `ConstraintState` in every binding. It is true when
-  nothing more can be committed: after an end token, after a failed commit, or
-  at a complete match that allows no further input.
-- `Grammar::from_expr` and `Grammar::bind` are public in every binding.
-- `forced_tokens` returns a list of token IDs instead of a `Result`.
-- The guide gains a Design principles section explaining what the API leaves out, and why.
-- `Token` and `ExactTokens` are replaced by one value type, `TokenSet`.
-  `TokenSet::new(ids)` takes individual IDs; `TokenSet::from_ranges(ranges)`
-  accepts inclusive (`0..=9`) or half-open (`0..10`) ranges and ignores empty
-  or reversed ranges. An unbounded start means 0 and an unbounded end means
-  `u32::MAX`. Overlapping and adjacent ranges merge. A `TokenSet` no longer
-  carries vocabulary identity: every ID is checked against the compile,
-  precompile or link vocabulary.
-  Bindings expose `TokenSet(ids)` / `TokenSet.from_ranges(...)` (Python),
-  `new TokenSet(ids)` / `TokenSet.fromRanges([{start, end}])` (Node.js), and
-  `glrmask_token_set_new` / `glrmask_token_set_from_ranges` (C/C++).
-  `TokenSet` is input-only and has no accessors; `Debug`, Python `repr`/`==`,
-  Node `toString`/`equals` and C++ construction avoid materializing IDs.
-- `Vocab`'s surface is now `new(entries)`, `with_special_tokens(ids)`, `get`
-  and `iter`. `new_with_exact_token_ids`, `contains_exact_token_range`,
-  `max_token_id`, `len` and `is_empty` are no longer public. "Exact-only token"
-  is renamed "special token" throughout. Node's `VocabOptions.exactOnlyIds`
-  becomes `specialTokenIds`.
-- `Error` is a `#[non_exhaustive]` struct with `kind() -> &ErrorKind` and
-  `source_span()`; the `SourceAt` wrapper variant is removed in favour of a
-  stored optional span. `ErrorKind` is `#[non_exhaustive]`.
-- The `TokenId` alias is removed. `ExternKind` and `SourceSpan` no longer
-  implement serde. `MaskStrategy` and `BoundaryMaskStrategy` no longer
-  implement `PartialOrd`/`Ord`.
-- `ConstraintState` commits (`commit_token`, `commit_bytes`, `commit_tokens`)
-  return `false` when the commit is not allowed: unknown ID, forbidden ID,
-  bytes with no viable continuation, or a commit after an end token. C returns
-  `GLRMASK_REJECTED`. A failed commit leaves the state unusable: later commits
-  fail, the mask is empty, `is_accepting()` is false and `is_terminated()` is
-  true. Clone the state to try a token speculatively. `is_rejected` and
-  `ErrorKind::State` are removed.
-- Add `commit_tokens` / `commitTokens` / `glrmask_state_commit_tokens` to the
-  Rust, Python, Node.js, C and C++ APIs. It commits IDs in order and stops at
-  the first disallowed token.
-- `Constraint::save()` no longer embeds the vocabulary; `Constraint::load(data,
-  vocab)` verifies a stored vocabulary fingerprint covering the ID-to-bytes
-  mapping and the special token IDs. `Module::load(data)` takes no vocabulary;
-  retained precompiled work is checked against the `compile`/`precompile`
-  vocabulary. `save_without_vocab` and `load_with_vocab` are removed.
-- The public pipeline is `Grammar` → `Module` → `Constraint`, plus `Expr` for
-  composition. `Grammar` has no settings;
-  `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a
-  default `Module`.
-- `Grammar::precompile` and `Grammar::precompile_with(CompileOptions)` return a
-  `Module` with its retained work, mirroring `Module::new` followed by
-  `Module::precompile`. The bindings expose the same mirror: Python
-  `grammar.precompile(vocab, ...)`, Node.js `grammar.precompile`/`precompileSync`,
-  C `glrmask_grammar_precompile`, and C++ `Grammar::precompile`.
-- `Module` holds bindings and retained work.
-  `Module::bind` mutates in place and is atomic; each extern is bound once on
-  its declaring module, and qualified `::` paths are rejected. A bound child
-  must have no unbound externs. `precompile` retains local work while externs
-  are still open; `compile` requires every extern to be bound.
-- `MaskStrategy` (`Auto`, `ParserDwa`, `TokenTrie`, `TokenClassTrie`, with
-  aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`) replaces
-  `Optimization`; `Balanced` is removed. Explicit strategies error instead of
-  silently falling back; `Auto` may fall back to `TokenTrie`.
-- `BoundaryMaskStrategy` (`Auto`, the default, `ParserDwa`, and `TokenTrie`,
-  with aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`)
-  selects the boundary parser for composed grammars. The boundary token trigger
-  is always the LLM token set and does not derive from this setting. `Auto`
-  uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static
-  parser declines on budget; an explicit `ParserDwa` budget decline is a typed
-  compile error.
-- Strategies are compile settings, not `Module` state: `Module` no longer has
-  `mask_strategy` or `boundary_mask_strategy` getters or setters. `CompileOptions`
-  carries both, and `Module::precompile_with` mirrors `compile_with`; the
-  bindings expose the same values as Python keywords on `compile`/`precompile`,
-  Node.js `{ maskStrategy, boundaryMaskStrategy }` options, C
-  `glrmask_compile_options` fields, and C++ `CompileOptions` members. One value
-  applies to the whole compile, including every composed child.
-- Precompilation decides which static parts are built. Compilation uses every
-  static part that already exists and never downgrades one to dynamic
-  `TokenTrie` compilation. A `TokenTrie` request after a static precompile keeps
-  the precompiled parts static, compiles only the other modules dynamically, and
-  produces the same masks; the options govern only
-  the parts not yet built.
-- The bindings expose the same strategy names: Python
-  `BoundaryMaskStrategy.AUTO`/`PARSER_DWA`/`TOKEN_TRIE`, Node.js
-  `Auto`/`ParserDwa`/`TokenTrie`, and C/C++
-  `..._AUTO`/`..._PARSER_DWA`/`..._TOKEN_TRIE`, with the
-  fast-build/fast-runtime aliases retained.
-- `Grammar::externs` describes a source's declared externs and `Module::externs`
-  a module's, both in declaration order with an `unbound()` view. `Extern`
-  carries `name` and `kind`; source spans are no longer exposed.
-- Saved modules preserve cold, open, partly compiled and mixed graphs,
-  including exact vocabulary identity, bindings and retained work.
-- `Expr.choice`, `Expr.sequence` and `Expr.literal` compose grammars without
-  adding a namespace per operator; model-token spellings may cross leaves.
-- Python: `Module(grammar)`, strategy keywords on `precompile` and `compile`,
-  `bind(name, value)` and atomic `bind(**bindings)`, an `externs` `Mapping`
-  with `.unbound`, and `copy()` replacing `clone()`. C/C++ and Node.js
-  bindings expose the same model.
-- The epsilon-free grammar prepass is on by default; set
-  `GLRMASK_EPSFREE_PREPASS=0` to opt out. It fixes grammars that previously
-  declined at the build budget.
-- Grammar language: `extern` declarations are only allowed at the top level,
-  inline grammars cannot refer to outer names, `use`, `export`, `import` and
-  `super` are reserved, and `::` is invalid in extern names.
-- `Grammar` owns its source text and has no lifetime. Each format has one
-  constructor taking `impl AsRef<str>`; the `from_*_owned` constructors are gone.
-- The Lark frontend has one dialect: the exact-token, named-token, `@name`,
-  `%json` and `[lazy]` extensions are always available. `LarkOptions` and
-  `LarkProfile` are removed. A named token atom `<|name|>` declares a token
-  extern, bound like a GLRM token extern with `Module::bind(name, token_set)`.
-- Removed: `PreparedGrammar`, `link`, `requirements`,
-  `Grammar::exact`, `Optimization`, `BoundaryTriggerDetail`, `UnboundExtern`,
-  `with_options`/`set_options`, and Python `clone()`.
-- Remove native GLRM `shortest { ... }` syntax. Preserve internal prefix-minimal
-  regular languages and Lark `[lazy]`, and emit reparsable byte-correct regular
-  subtraction from the formatter.
-- Disable debug-info stripping on language-binding shared images to avoid the
-  upstream Mach-O string-table alignment issue exposed by macOS 27. Core
-  optimization and canonical performance profiles are unchanged.
+0.4 is a new API. Code written for 0.3 needs changes; this section lists them.
+
+### Grammars, modules and constraints
+
+- Four types make up the API: `Grammar` (source text, or built from an expression), `Module` (a grammar with its extern
+  bindings and any precompiled work), `Constraint` (a grammar compiled for a vocabulary) and `ConstraintState` (one sequence).
+- `Grammar` owns its source and has no lifetime parameter. `from_ebnf`, `from_lark`, `from_glrm`, `from_json_schema` and
+  `from_expr` parse the source straight away and return a `Result`.
+- `grammar.compile(&vocab)` compiles directly. Use a `Module` to compose and reuse: bind its externs, `precompile` it while
+  some are still unbound, `save` and `load` it, then `compile`.
+- `Expr::choice`, `Expr::sequence` and `Expr::literal` combine grammars, modules and token sets. Each grammar keeps its own
+  rules, including which whitespace it ignores, and one token may span several parts.
+- Removed: `PreparedGrammar`, `UnlinkedConstraint`, `BuildOptions`, `Requirement`, `BoundaryTriggerDetail`,
+  `UnboundExtern`, `link`, `requirements`, `with_options`, `set_options` and `Grammar::exact`.
+
+### Externs
+
+- A grammar declares `extern token NAME`, bound to a token ID or `TokenSet`, or `extern grammar NAME`, bound to a grammar,
+  module or expression. In Lark, `<|name|>` declares a token extern and `@name` a grammar extern.
+- `bind(name, value)` binds in place. Each extern is bound once, on the grammar or module that declares it. A value that
+  has unbound externs of its own can't be bound.
+- `externs()` lists the declared externs in order, and `externs().unbound()` the ones not yet bound.
+
+### Tokens and vocabularies
+
+- `TokenSet` replaces `Token` and `ExactTokens`. Create one from IDs or from ranges. Its IDs are checked against the
+  vocabulary when you compile.
+- Tokens with no bytes are now called special tokens: `Vocab::with_special_tokens(ids)`, Python `special_token_ids=`,
+  Node.js `specialTokenIds`.
+- `Vocab` has `new`, `with_special_tokens`, `get`, `iter`, `len` and `is_empty`. `len` counts only tokens with bytes.
+- The Rust `TokenId` alias is removed.
+
+### End tokens
+
+- There are no end-token options. To require an end token, put it after the grammar:
+  `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(TokenSet::from(eos))]))`. This costs nothing extra
+  to compile or run.
+
+### Generating
+
+- `commit_token`, `commit_bytes` and the new `commit_tokens` return `bool` instead of `Result`. A failed commit ends the
+  state: later commits fail, the mask is empty and `is_terminated()` is true. Copy the state to try a token without
+  committing to it. `is_rejected` is removed.
+- `commit_tokens` commits IDs in order and stops at the first one that isn't allowed.
+- New `is_terminated()`: whether nothing more can be committed. `is_accepting()` still says whether the input so far is a
+  complete match.
+- `forced_tokens()` returns the token IDs, not a `Result`.
+
+### Mask strategies
+
+- `MaskStrategy` replaces `Optimization`. It's a compile setting, passed in `CompileOptions` (Python: keyword arguments;
+  Node.js: the options object; C and C++: `glrmask_compile_options` and `CompileOptions`):
+  - `Auto`, the default, reuses any precompiled work; otherwise it uses `ParserDwa`, or `TokenTrie` when that would be too
+    large.
+  - `ParserDwa` is slower to compile and has the fastest masks.
+  - `TokenTrie` is the fastest to compile and has slower masks. Its settings choose the parser backend (`LrTable` or
+    `TemplateDfa`) and whether to merge equivalent tokens.
+  - `FAST_COMPILE` and `FAST_MASKS` name the two ends of the trade-off.
+- `BoundaryMaskStrategy` makes the same choice for the boundaries between composed parts.
+- A strategy you choose explicitly reports an error if it can't be used. Only `Auto` falls back.
+- Strategies apply to parts that aren't compiled yet. Precompiled parts are always reused as they are.
+
+### Saving
+
+- `Constraint::save` no longer stores the vocabulary. `Constraint::load(bytes, &vocab)` checks that the vocabulary is
+  the one it was saved with. `save_without_vocab` and `load_with_vocab` are removed.
+- `Module::save` and `Module::load(bytes)` keep bindings and precompiled work, including for modules with unbound externs.
+- Bytes saved by 0.3 can't be loaded.
+
+### Errors
+
+- `Error` has `kind()` and `source_span()`, and its message includes the line and column when they're known. `Error` and
+  `ErrorKind` are `#[non_exhaustive]`.
+- Messages are rewritten to say what went wrong and what to do about it.
+
+### Grammar languages
+
+- Lark has one dialect, with every GLRMask extension. `LarkOptions` and `LarkProfile` are removed.
+- GLRM: `extern` is allowed only at the top level, an inline grammar can't refer to names outside it, `use`, `export`,
+  `import` and `super` are reserved, and `shortest { ... }` is removed (use regular subtraction, or Lark's `[lazy]`).
+
+### Bindings
+
+- Python, Node.js, C and C++ have the same model as Rust, with names in each language's style.
+- Python: `Module(grammar)`; `bind` accepts a token ID, and `bind(**bindings)` binds several externs at once; `externs`
+  is a read-only mapping; `copy()` replaces `clone()`.
+- Node.js: `bind` accepts an object to bind several externs at once, on `Grammar` as well as `Module`.
+- C and C++: new `glrmask_grammar_unbound_externs`, `glrmask_token_set_equal` (C++ `TokenSet` `==`), and the C++
+  `MarkerId` type. The C++ CMake package accepts any 1.x version request.
+
+### Fixes
+
+- Some grammars that used to fail at the build budget now compile.
+- `TokenTrie` masks no longer hang on grammars with reduce cycles.
+- Compiling a deeply nested grammar on a thread with a small stack no longer overflows it.
 
 ## 0.3.1 — 2026-10-18
 

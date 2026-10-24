@@ -600,22 +600,22 @@ impl PyVocab {
 
     /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
     #[staticmethod]
-    #[pyo3(signature = (token_to_id, *, special_tokens = None))]
-    fn from_dict(token_to_id: &Bound<'_, PyDict>, special_tokens: Option<Vec<u32>>) -> PyResult<Self> {
+    #[pyo3(signature = (token_to_id, *, special_token_ids = None))]
+    fn from_dict(token_to_id: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
         Ok(Self {
-            inner: vocab.with_special_tokens(special_tokens.unwrap_or_default()),
+            inner: vocab.with_special_tokens(special_token_ids.unwrap_or_default()),
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
 
     /// Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.
     #[staticmethod]
-    #[pyo3(signature = (id_to_bytes, *, special_tokens = None))]
-    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>, special_tokens: Option<Vec<u32>>) -> PyResult<Self> {
+    #[pyo3(signature = (id_to_bytes, *, special_token_ids = None))]
+    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
         Ok(Self {
-            inner: vocab.with_special_tokens(special_tokens.unwrap_or_default()),
+            inner: vocab.with_special_tokens(special_token_ids.unwrap_or_default()),
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
@@ -632,7 +632,7 @@ impl PyVocab {
         })
     }
 
-    /// The model's end-of-generation token IDs. Put them in a `TokenSet` after the grammar to require one.
+    /// The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.
     #[getter]
     fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
         self.llama_cpp_end_token_ids.clone()
@@ -2022,7 +2022,6 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "Vocab",
             "Constraint",
             "ConstraintState",
-            "_internal",
         ],
     )?;
     Ok(())

@@ -74,5 +74,4 @@ __all__ = [
     "TokenTrie",
     "Vocab",
     "__version__",
-    "_internal",
 ]
