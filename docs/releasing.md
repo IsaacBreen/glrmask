@@ -49,7 +49,10 @@ GitHub Actions environment **`release`** for all three OIDC services.
    actual package version is public. Repeat the same trusted-publisher setup
    for each of the eight `@glrmask/node-<platform>` packages: npm trust is
    per package, so every platform package needs its own **Settings → Trusted
-   Publisher** entry before its first OIDC publish. Then open each package's npm **Settings → Trusted
+   Publisher** entry before its first OIDC publish. A package must exist on npm before
+   it has settings, so first run `node scripts/bootstrap-npm-platform-packages.cjs`
+   while logged in to npm (`npm login`); it publishes a `0.0.0-stage` placeholder for
+   each platform package that doesn't exist yet. Then open each package's npm **Settings → Trusted
    Publisher** and choose **GitHub Actions**. Use owner `IsaacBreen`, repository
    `glrmask`, workflow **`release.yml`**, environment **`release`**, and enable
    **Allow npm publish** (not stage-only, which would require 2FA every time).
