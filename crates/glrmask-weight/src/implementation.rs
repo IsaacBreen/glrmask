@@ -2039,7 +2039,20 @@ fn union_all_single_tsid_entries(weights: &[&Weight]) -> Option<Weight> {
     Some(builder.finish())
 }
 
+// Two-way union via range-set-blaze's `full_join`. The original hand-written merge is kept
+// below as `union_compact_entries_handwritten` (test-only) for differential testing.
 fn union_compact_entries(left: &Weight, right: &Weight) -> Weight {
+    if left.0.is_empty() {
+        return right.clone();
+    }
+    if right.0.is_empty() {
+        return left.clone();
+    }
+    combine_compact_entries(left, right, union_token_sets)
+}
+
+#[cfg(test)]
+fn union_compact_entries_handwritten(left: &Weight, right: &Weight) -> Weight {
     let left_entries = compact_entries(left);
     let right_entries = compact_entries(right);
 
@@ -2158,7 +2171,31 @@ fn active_tokens<'a>(
     })
 }
 
+// Two-way combine via range-set-blaze's `full_join`: one merge pass over both weights, calling
+// `combine` with each side's token set (or `None`) on every range covered by either side. The
+// original boundary-sweep version is kept below as `combine_compact_entries_boundary` (test-only).
 fn combine_compact_entries<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
+where
+    F: FnMut(
+        Option<&SharedTokenSet>,
+        Option<&SharedTokenSet>,
+    ) -> Option<SharedTokenSet>,
+{
+    let mut builder = CompactRangeBuilder::new();
+    for (range, (left_tokens, right_tokens)) in
+        left.0.range_values().full_join(right.0.range_values())
+    {
+        let Some(tokens) = combine(left_tokens, right_tokens) else {
+            builder.flush();
+            continue;
+        };
+        builder.push(*range.start(), *range.end(), tokens);
+    }
+    builder.finish()
+}
+
+#[cfg(test)]
+fn combine_compact_entries_boundary<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
 where
     F: FnMut(
         Option<&SharedTokenSet>,
@@ -3423,6 +3460,26 @@ impl Weight {
         if self.is_full() || other.is_full() {
             return false;
         }
+        // Disjoint unless some tsid range in both weights has overlapping token sets.
+        self.0
+            .range_values()
+            .inner_join(other.0.range_values())
+            .all(|(_, (left_tokens, right_tokens))| {
+                left_tokens.as_ref().is_disjoint(right_tokens.as_ref())
+            })
+    }
+
+    #[cfg(test)]
+    fn is_disjoint_handwritten(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return true;
+        }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return false; // Same non-empty weight → not disjoint
+        }
+        if self.is_full() || other.is_full() {
+            return false;
+        }
         let mut left_iter = self.0.range_values();
         let mut right_iter = other.0.range_values();
         let mut left_entry = left_iter.next();
@@ -3444,6 +3501,26 @@ impl Weight {
     }
 
     pub fn is_subset(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_full() {
+            return true;
+        }
+        if other.is_empty() || self.is_full() {
+            return false;
+        }
+        // Every tsid range of `self` must be covered by `other` with a token superset. The left join
+        // visits only `self`'s ranges and stops when they end, without reading the rest of `other`.
+        self.0
+            .range_values()
+            .left_join(other.0.range_values())
+            .all(|(_, (self_tokens, other_tokens))| {
+                other_tokens.is_some_and(|other_tokens| {
+                    self_tokens.as_ref().is_subset(other_tokens.as_ref())
+                })
+            })
+    }
+
+    #[cfg(test)]
+    fn is_subset_handwritten(&self, other: &Self) -> bool {
         if self.is_empty() || other.is_full() {
             return true;
         }
@@ -4193,6 +4270,98 @@ mod tests {
         let actual =
             base.with_sparse_tsid_range_overrides_intersection(&range_overrides, &domain);
         assert_eq!(actual, expected);
+    }
+
+    fn small_exhaustive_weights() -> Vec<Weight> {
+        (0u32..64)
+            .map(|code| {
+                Weight::from_per_tsid_token_sets((0u32..3).filter_map(|tsid| {
+                    let token_bits = (code >> (tsid * 2)) & 0b11;
+                    (token_bits != 0).then(|| {
+                        let tokens = (0u32..2)
+                            .filter(|token| token_bits & (1 << token) != 0)
+                            .collect::<RangeSetBlaze<_>>();
+                        (tsid, tokens)
+                    })
+                }))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn is_subset_stops_after_self() {
+        // A small weight near the start of a large one (one point range at every even TSID below
+        // 20,000). `left_join` stops after `self`'s ranges; its early stop is tested in
+        // range-set-blaze.
+        let tokens = RangeSetBlaze::from_iter([0..=9u32]);
+        let small = Weight::from_per_tsid_token_sets([(0, RangeSetBlaze::from_iter([2..=3u32]))]);
+        let large =
+            Weight::from_per_tsid_token_sets((0..20_000u32).step_by(2).map(|tsid| (tsid, tokens.clone())));
+        assert!(large.0.range_values_len() >= 10_000);
+        assert!(small.is_subset(&large));
+        assert!(!large.is_subset(&small));
+    }
+
+    #[test]
+    fn join_predicates_match_handwritten_exhaustively() {
+        let mut weights = small_exhaustive_weights();
+        weights.push(Weight::all());
+        for left in &weights {
+            for right in &weights {
+                assert_eq!(
+                    left.is_disjoint(right),
+                    left.is_disjoint_handwritten(right),
+                    "inner_join is_disjoint differs for left={left} right={right}",
+                );
+                assert_eq!(
+                    left.is_subset(right),
+                    left.is_subset_handwritten(right),
+                    "left_join is_subset differs for left={left} right={right}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_join_union_matches_handwritten_exhaustively() {
+        let weights = small_exhaustive_weights();
+        for left in &weights {
+            for right in &weights {
+                assert_eq!(
+                    union_compact_entries(left, right),
+                    union_compact_entries_handwritten(left, right),
+                    "full_join union differs for left={left} right={right}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_join_combine_matches_boundary_sweep_exhaustively() {
+        type Combine =
+            fn(Option<&SharedTokenSet>, Option<&SharedTokenSet>) -> Option<SharedTokenSet>;
+        let combines: [(&str, Combine); 3] = [
+            ("union", union_token_sets),
+            ("intersection", intersect_token_sets),
+            ("difference", difference_token_sets),
+        ];
+        let weights = small_exhaustive_weights();
+        for left in &weights {
+            for right in &weights {
+                for (name, combine) in combines {
+                    assert_eq!(
+                        combine_compact_entries(left, right, combine),
+                        combine_compact_entries_boundary(left, right, combine),
+                        "full_join {name} differs for left={left} right={right}",
+                    );
+                }
+                assert_eq!(
+                    intersect_weights(left, right),
+                    combine_compact_entries(left, right, intersect_token_sets),
+                    "streaming intersection differs for left={left} right={right}",
+                );
+            }
+        }
     }
 
     #[test]
