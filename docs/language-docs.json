@@ -16,10 +16,14 @@
     "MaskStrategy.AUTO": "Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default.",
     "MaskStrategy.PARSER_DWA": "Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.",
     "MaskStrategy.TOKEN_TRIE": "Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` instead to change its settings.",
+    "MaskStrategy.FAST_MASKS": "Another name for `PARSER_DWA`.",
+    "MaskStrategy.FAST_COMPILE": "Another name for `TOKEN_TRIE`.",
     "BoundaryMaskStrategy": "How masks are computed at grammar boundaries.",
     "BoundaryMaskStrategy.PARSER_DWA": "Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `ValueError` if it would be too large.",
     "BoundaryMaskStrategy.AUTO": "`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default.",
     "BoundaryMaskStrategy.TOKEN_TRIE": "Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.",
+    "BoundaryMaskStrategy.FAST_MASKS": "Another name for `PARSER_DWA`.",
+    "BoundaryMaskStrategy.FAST_COMPILE": "Another name for `TOKEN_TRIE`.",
     "ParserBackend": "How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`.",
     "ParserBackend.LR_TABLE": "An LR table. Faster to compile, with slower masks. The default.",
     "ParserBackend.TEMPLATE_DFA": "Template DFAs. Slower to compile, with faster masks.",
@@ -213,5 +217,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "b7ef973b2eb99dc92ec3293d66089ea878561322349fb7f0466e5259811f75e6"
+  "content_sha256": "7a77eb807da3ff497eacfcc9561617fa52e3c9b57052a3b89272c44cef0ef573"
 }
