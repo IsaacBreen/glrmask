@@ -16,7 +16,9 @@ const path = require('node:path');
 const dryRun = process.argv.includes('--dry-run');
 const root = require('../bindings/node/package.json');
 const names = Object.keys(root.optionalDependencies);
-const trust = ['--file', 'release.yml', '--repository', 'IsaacBreen/glrmask', '--environment', 'release'];
+const trust = ['--file', 'release.yml', '--repository', 'IsaacBreen/glrmask', '--environment', 'release', '--allow-publish'];
+// `npm trust` with --allow-publish needs npm 12.
+const npm12 = ['-y', 'npm@12'];
 
 function exists(name) {
   try {
@@ -29,7 +31,7 @@ function exists(name) {
 
 function trusted(name) {
   try {
-    return execFileSync('npm', ['trust', 'list', name], { encoding: 'utf8', stdio: 'pipe' }).includes('release.yml');
+    return execFileSync('npx', [...npm12, 'trust', 'list', name], { encoding: 'utf8', stdio: 'pipe' }).includes('release.yml');
   } catch {
     return false;
   }
@@ -73,7 +75,7 @@ for (const name of [root.name, ...names]) {
     continue;
   }
   try {
-    execFileSync('npm', ['trust', 'github', name, ...trust, '--yes'], { stdio: 'inherit' });
+    execFileSync('npx', [...npm12, 'trust', 'github', name, ...trust, '--yes'], { stdio: 'inherit' });
     console.log(`${name}: trusted publisher set`);
   } catch {
     console.error(`${name}: npm trust github failed`);
