@@ -47,8 +47,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install MSRV toolchain
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
       - name: Check library and published helper crates
         run: >-
           cargo check --locked -p glrmask

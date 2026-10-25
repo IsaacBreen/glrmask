@@ -2,7 +2,7 @@
 name = "glrmask-lexer"
 version = "0.2.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Part of GLRMask: lexer automata. Depend on the glrmask crate instead; this crate has no stable API."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
@@ -18,7 +18,7 @@ bincode = "1"
 glrmask-finite-automata = { version = "=0.1.2", path = "../glrmask-finite-automata" }
 glrmask-vocab = { version = "=0.2.1", path = "../glrmask-vocab", features = ["internal-api"] }
 rayon = "1"
-range-set-blaze = "0.3.0"
+range-set-blaze = "0.8.0"
 regex-syntax = "0.8"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive", "rc"] }
