@@ -2,7 +2,9 @@
 
 A `TokenSet` is a set of token IDs. In a grammar it matches exactly one token from the set. It matches the token itself,
 not its bytes: two tokens with the same bytes are different tokens, and committing text with `commit_bytes` never matches
-a token set. Token sets are how a grammar uses special tokens, such as end-of-sequence or tool-call tokens.
+a token set. Token sets are the only way to let a grammar use a special token, such as an end-of-sequence or tool-call
+token: bind one to a token extern, or put one in an expression. Grammar text can't name a special token by ID, and
+Lark's `<[*]>` and `<[^...]>` never match one.
 
 ```python
 import glrmask

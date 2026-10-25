@@ -8,7 +8,7 @@ fn lark(source:&str)->Grammar{Grammar::from_lark(source).unwrap()}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).with_special_tokens([5,7]);
-    for (source,expected) in [("start: <[1,3,5-5]>",vec![1,3,5]),("start: <[^0,3]>",vec![1,5,7]),("start: <[*]>",vec![0,1,3,5,7])]{
+    for (source,expected) in [("start: <[1]>",vec![1]),("start: <[^0]>",vec![1]),("start: <[*]>",vec![0,1]),("start: <[^0,3,5]>",vec![1])]{
         for mode in MODES{
             let c=lark(source).compile_with_build_options(&v,mode.build_options().end_tokens([10])).unwrap();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
@@ -16,9 +16,20 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
             let loaded=Constraint::load(c.save(), &v).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
+    for source in ["start: <[3]>","start: <[5]>","start: <[1,5]>","start: <[5-5]>","start: @token(7)"]{
+        let err=lark(source).compile(&v).unwrap_err().to_string();
+        assert!(err.contains("is a special token"),"{source}: {err}");
+    }
+    let ebnf_err=Grammar::from_ebnf("start ::= @token(7)").unwrap().compile(&v).unwrap_err().to_string();
+    assert!(ebnf_err.contains("is a special token"),"{ebnf_err}");
     assert!(lark("start: <[0-5]>").compile(&v).is_err());
-    // Exact-token atoms are ordinary Lark syntax in the single dialect.
-    assert!(Grammar::from_lark("start: <[1]>").unwrap().compile(&v).is_ok());
+    let mut m=Module::new(&lark("start: <|eos|>"));
+    m.bind("eos",TokenSet::new([7])).unwrap();
+    let c=m.compile(&v).unwrap();
+    assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
+    let g=Grammar::from_expr(TokenSet::new([7])).unwrap();
+    let c=g.compile(&v).unwrap();
+    assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
 }
 #[test]
 fn empty_event_set_is_not_epsilon() {

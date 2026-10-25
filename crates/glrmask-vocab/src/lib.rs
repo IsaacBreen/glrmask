@@ -106,6 +106,7 @@ pub struct Vocab {
     special_token_ids: Arc<BTreeSet<u32>>,
     compiler_cache: Arc<VocabCompilerCache>,
     event_token_ranges: Arc<[(u32, u32)]>,
+    byte_token_ranges: Arc<[(u32, u32)]>,
     max_token_byte_len: OnceLock<usize>,
 }
 
@@ -170,6 +171,7 @@ impl Clone for Vocab {
             special_token_ids: Arc::clone(&self.special_token_ids),
             compiler_cache: Arc::clone(&self.compiler_cache),
             event_token_ranges: Arc::clone(&self.event_token_ranges),
+            byte_token_ranges: Arc::clone(&self.byte_token_ranges),
             max_token_byte_len,
         }
     }
@@ -183,6 +185,7 @@ impl Vocab {
         let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
         let mut vocab = Self {
             event_token_ranges: Arc::from(Vec::new()),
+            byte_token_ranges: Arc::from(Vec::new()),
             entries,
             special_token_ids: Arc::new(BTreeSet::new()),
             compiler_cache: Arc::new(VocabCompilerCache::default()),
@@ -218,6 +221,15 @@ impl Vocab {
         .map(|range| (*range.start(), *range.end()))
         .collect::<Vec<_>>()
         .into();
+        self.byte_token_ranges = RangeSetBlaze::from_iter(
+            self.entries
+                .iter()
+                .filter_map(|(&id, bytes)| (!bytes.is_empty()).then_some(id)),
+        )
+        .ranges()
+        .map(|range| (*range.start(), *range.end()))
+        .collect::<Vec<_>>()
+        .into();
     }
 
     /// The first ID in `set` that this vocabulary does not define.
@@ -236,6 +248,13 @@ impl Vocab {
     pub fn event_token_ranges(&self) -> impl ExactSizeIterator<Item = RangeInclusive<u32>> + '_ {
         self.event_token_ranges.iter().map(|&(start, end)| start..=end)
     }
+
+    /// The IDs whose tokens have bytes, as inclusive ranges.
+    #[doc(hidden)]
+    pub fn byte_token_ranges(&self) -> impl ExactSizeIterator<Item = RangeInclusive<u32>> + '_ {
+        self.byte_token_ranges.iter().map(|&(start, end)| start..=end)
+    }
+
 
     /// Whether every ID in the inclusive range `start..=end` is defined,
     /// including special IDs.

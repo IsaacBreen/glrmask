@@ -746,6 +746,7 @@ impl Module {
         }
 
         let declared = source.declarations()?;
+        source.validate_ebnf(vocab)?;
         // A typed template decline must survive so the public boundary can
         // attempt the rescue; only real failures are rewrapped.
         let token_class_error = |e: Error| {
@@ -918,6 +919,9 @@ impl Module {
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
         let modules = self.index()?;
+        for module in &modules {
+            module.node.source.validate_ebnf(vocab)?;
+        }
         let mut expanded = HashMap::<usize, usize>::new();
         for module in &modules {
             let mut count = 1usize;

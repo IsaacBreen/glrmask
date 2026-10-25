@@ -672,7 +672,7 @@ impl Grammar {
         use range_set_blaze::RangeSetBlaze;
         let GrammarSource::Lark(source)=&self.source else{return Err(Error::Compilation("not a Lark description".into()));};
         let document=self.lark_document()?;
-        let domain=RangeSetBlaze::from_iter(vocab.event_token_ranges());
+        let domain=RangeSetBlaze::from_iter(vocab.byte_token_ranges());
         let mut values=std::collections::HashMap::new();
         for (name,set) in &document.events {
             // A named atom is a token extern; its binding supplies the IDs.
@@ -687,7 +687,12 @@ impl Grammar {
                         if !vocab.contains_token_range(start,end){return Err(Error::Compilation(format!("token range {start}..={end} includes IDs that are not in the vocabulary")));}
                     }
                     let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
-                    if *negate {&domain-&selected}else{selected}
+                    if *negate {
+                        &domain-&selected
+                    } else {
+                        crate::import::reject_special_token_ids(&selected, vocab)?;
+                        selected
+                    }
                 }
                 LarkTokenSet::Named(_)=>unreachable!("handled above"),
             }) })().map_err(|e|e.with_source_span(document.source_spans.get(name).copied()))?;
@@ -736,6 +741,13 @@ impl Grammar {
             return Err(Error::Compilation(format!(
                 "token ID {id} is not in the vocabulary",
             )));
+        }
+        Ok(())
+    }
+
+    fn validate_ebnf(&self, vocab: &Vocab) -> Result<()> {
+        if let GrammarSource::Ebnf(source) = &self.source {
+            crate::import::validate_ebnf_source(source, vocab)?;
         }
         Ok(())
     }
@@ -892,6 +904,7 @@ impl Grammar {
         let engine = options.engine()?;
         if matches!(self.source,GrammarSource::Lark(_)){return self.resolve_lark(vocab)?.compile_with_build_options(vocab,options);}
         self.validate_exact_target(vocab)?;
+        self.validate_ebnf(vocab)?;
         if let Some(name) = self.unresolved_external_names()?.first() {
             return Err(Error::Compilation(format!(
                 "extern {name:?} is not bound; bind it before compiling",
@@ -1148,6 +1161,7 @@ impl Grammar {
             cache.prepared.insert(identity,module.clone());return Ok(module);
         }
         self.validate_exact_target(vocab)?;
+        self.validate_ebnf(vocab)?;
         let declarations=self.declarations()?;
         let slot_kinds=Arc::new(declarations.kinds.clone());
         let slot_spans=Arc::new(declarations.spans.clone());
@@ -1222,7 +1236,10 @@ impl Grammar {
     // compilation. No compiled component is converted into a parser table.
     fn resolve_dynamic_source(&self, vocab: &Vocab, embedded: bool) -> Result<glrmask_grammar::NamedGrammar> {
         match &self.source {
-            GrammarSource::Ebnf(source) => crate::import::parse_ebnf_to_named(source),
+            GrammarSource::Ebnf(source) => {
+                crate::import::validate_ebnf_source(source, vocab)?;
+                crate::import::parse_ebnf_to_named(source)
+            }
             GrammarSource::Lark(_) => self.resolve_lark(vocab)?.resolve_dynamic_source(vocab,embedded),
             GrammarSource::JsonSchema(source) => {
                 let mut named = crate::import::parse_json_schema_to_named_dynamic(source)?;
@@ -1333,6 +1350,7 @@ impl Grammar {
             return self.resolve_lark(vocab)?.compile_token_trie(vocab, boundary, backend);
         }
         self.validate_exact_target(vocab)?;
+        self.validate_ebnf(vocab)?;
         let named = self.resolve_dynamic_source(vocab, false)?;
         let construction = match &self.source {
             GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
@@ -1367,6 +1385,7 @@ impl Grammar {
                 .compile_merged_token_trie(vocab, boundary, backend);
         }
         self.validate_exact_target(vocab)?;
+        self.validate_ebnf(vocab)?;
         let merge_error = |e: Error| {
             if e.is_strategy_decline() {
                 e
@@ -2147,6 +2166,7 @@ impl<'a> ConstraintSpec<'a> {
 impl<'a> ConstraintSpecBuilder<'a> {
     fn new(grammar: Grammar, vocab: &'a Vocab) -> Result<Self> {
         let (grammar, source_bindings) = grammar.into_source_only_and_bindings();
+        grammar.validate_ebnf(vocab)?;
         let declarations = grammar.declarations()?;
         let declared_externals = declarations.names.iter().cloned().collect::<BTreeSet<_>>();
         let mut token_bindings = BTreeMap::new();

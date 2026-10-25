@@ -31,6 +31,31 @@ pub(crate) fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGramm
     Ok(ebnf::parse_ebnf_to_named(source)?)
 }
 
+/// Rejects token IDs written in grammar text that name special tokens.
+/// Special tokens may only come from bound token externs and token sets.
+pub(crate) fn reject_special_token_ids(
+    selected: &range_set_blaze::RangeSetBlaze<u32>,
+    vocab: &crate::Vocab,
+) -> crate::Result<()> {
+    use range_set_blaze::RangeSetBlaze;
+    let special = RangeSetBlaze::from_iter(vocab.event_token_ranges())
+        - RangeSetBlaze::from_iter(vocab.byte_token_ranges());
+    match (selected & &special).first() {
+        Some(id) => Err(crate::Error::Compilation(format!(
+            "token ID {id} is a special token; grammar text can't name special tokens by ID, so declare a token extern and bind the token to it"
+        ))),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn validate_ebnf_source(source: &str, vocab: &crate::Vocab) -> crate::Result<()> {
+    let named = parse_ebnf_to_named(source)?;
+    let selected = range_set_blaze::RangeSetBlaze::from_iter(
+        named.inline_token_id_ranges().into_iter().map(|(start, end)| start..=end),
+    );
+    reject_special_token_ids(&selected, vocab)
+}
+
 pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(lark::parse_lark_to_named(source)?)
 }
@@ -1140,6 +1165,7 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
+        validate_ebnf_source(ebnf, vocab)?;
         with_large_import_stack(ebnf.len(), || {
             compile_from_source(
                 ebnf,
@@ -1913,6 +1939,7 @@ impl DynamicConstraint {
         ebnf: &str,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
+        validate_ebnf_source(ebnf, vocab)?;
         with_large_import_stack(ebnf.len(), || {
             compile_dynamic_from_source_with_vocab_partition(
                 ebnf,
@@ -1931,6 +1958,7 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
+        validate_ebnf_source(ebnf, vocab)?;
         with_large_import_stack(ebnf.len(), || {
             compile_dynamic_from_source(
                 ebnf,
@@ -2058,6 +2086,7 @@ impl DynamicConstraint {
     }
 
     pub(crate) fn from_ebnf_with_bounded_template_parser(source: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        validate_ebnf_source(source, vocab)?;
         compile_bounded_template_from_source(source, vocab, GlrTableConstruction::ExperimentalCoreMerged, parse_ebnf_to_named, None)
     }
 

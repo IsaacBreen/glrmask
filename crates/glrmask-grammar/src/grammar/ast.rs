@@ -201,6 +201,59 @@ pub struct NamedGrammar {
 }
 
 impl NamedGrammar {
+    /// Inclusive token-ID ranges named by inline token atoms in this grammar.
+    pub fn inline_token_id_ranges(&self) -> Vec<(u32, u32)> {
+        fn collect(expr: &GrammarExpr, ids: &mut Vec<(u32, u32)>) {
+            match expr {
+                GrammarExpr::SpecialToken(id) => ids.push((*id, *id)),
+                GrammarExpr::SpecialTokenRange(start, end) => ids.push((*start, *end)),
+                GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
+                    collect(inner, ids);
+                }
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    for part in parts {
+                        collect(part, ids);
+                    }
+                }
+                GrammarExpr::SeparatedSequence {
+                    items, separator, ..
+                } => {
+                    collect(separator, ids);
+                    for (item, _) in items {
+                        collect(item, ids);
+                    }
+                }
+                GrammarExpr::Exclude { expr, exclude } => {
+                    collect(expr, ids);
+                    collect(exclude, ids);
+                }
+                GrammarExpr::Intersect { expr, intersect } => {
+                    collect(expr, ids);
+                    collect(intersect, ids);
+                }
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    for symbol in &expr_nfa.symbols {
+                        collect(symbol, ids);
+                    }
+                }
+                GrammarExpr::Ref(_)
+                | GrammarExpr::Literal(_)
+                | GrammarExpr::Epsilon
+                | GrammarExpr::CharClass { .. }
+                | GrammarExpr::RawRegex(_)
+                | GrammarExpr::LexerDfa(_)
+                | GrammarExpr::AnyByte
+                | GrammarExpr::MarkerProbe(_) => {}
+            }
+        }
+
+        let mut ids = Vec::new();
+        for rule in &self.rules {
+            collect(&rule.expr, &mut ids);
+        }
+        ids
+    }
+
     /// Exact byte strings that are emitted by anonymous inline literal atoms in
     /// nonterminal rules. Literals nested inside a terminal expression such as
     /// an intersection remain part of that one terminal and are not returned.
