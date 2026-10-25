@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
+- The minimum supported Rust version is now 1.89.
+
 ## 0.4.0
 
 0.4 is a new API. Code written for 0.3 needs changes; this section lists them.
