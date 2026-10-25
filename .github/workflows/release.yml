@@ -186,7 +186,7 @@ jobs:
             expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
             for attempt in $(seq 1 20); do
               if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
-                got="$(printf '%s' "$got" | jq -r .)"
+                got="$(printf '%s' "$got" | jq -r 'if type == "array" then .[0] else . end')"
                 if [ "$got" != "$expected" ]; then
                   echo "Published integrity mismatch for $name@${RELEASE_VERSION}; refusing to advance the root package" >&2
                   return 1
@@ -467,7 +467,7 @@ jobs:
             expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
             for attempt in $(seq 1 20); do
               if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
-                got="$(printf '%s' "$got" | jq -r .)"
+                got="$(printf '%s' "$got" | jq -r 'if type == "array" then .[0] else . end')"
                 if [ "$got" != "$expected" ]; then
                   echo "Published integrity mismatch for $name@${RELEASE_VERSION}; refusing to advance the root package" >&2
                   return 1
