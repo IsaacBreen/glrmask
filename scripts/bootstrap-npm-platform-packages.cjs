@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Prepares npm for trusted publishing of every @glrmask/node-<platform> package:
-// publishes a 0.0.0-stage placeholder for each one that doesn't exist on npm yet,
+// publishes a 0.0.1-placeholder placeholder for each one that doesn't exist on npm yet,
 // then links each to this repository's release workflow with `npm trust github`.
 // Run once, logged in to npm (`npm login`), before the first release that
 // publishes platform packages. The first trust call asks for two-factor
@@ -41,20 +41,26 @@ for (const name of names) {
     continue;
   }
   if (dryRun) {
-    console.log(`${name}: would publish 0.0.0-stage`);
+    console.log(`${name}: would publish 0.0.1-placeholder`);
     continue;
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glrmask-npm-bootstrap-'));
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name,
-    version: '0.0.0-stage',
+    version: '0.0.1-placeholder',
     description: `Placeholder for the ${name} native binary. Install ${root.name} instead.`,
     license: root.license,
     repository: root.repository,
   }, null, 2) + '\n');
-  execFileSync('npm', ['publish', '--access', 'public', '--tag', 'stage'], { cwd: dir, stdio: 'inherit' });
+  try {
+    execFileSync('npm', ['publish', '--access', 'public', '--tag', 'placeholder'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    console.log(`${name}: published 0.0.1-placeholder`);
+  } catch (error) {
+    // npm may hold the publish for approval; a held placeholder is enough.
+    if (!String(error.stderr).includes('previously staged')) throw error;
+    console.log(`${name}: 0.0.1-placeholder already staged`);
+  }
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log(`${name}: published 0.0.0-stage`);
 }
 
 for (const name of [root.name, ...names]) {

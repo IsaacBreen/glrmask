@@ -53,7 +53,7 @@ GitHub Actions environment **`release`** for all three OIDC services.
    per package, so every platform package needs its own **Settings → Trusted
    Publisher** entry before its first OIDC publish. A package must exist on npm before
    it has settings, so first run `node scripts/bootstrap-npm-platform-packages.cjs`
-   while logged in to npm (`npm login`); it publishes a `0.0.0-stage` placeholder for
+   while logged in to npm (`npm login`); it publishes a `0.0.1-placeholder` placeholder for
    each platform package that doesn't exist yet, then sets each package's trusted
    publisher with `npm trust github`. To set one by hand instead, open the package's npm **Settings → Trusted
    Publisher** and choose **GitHub Actions**. Use owner `IsaacBreen`, repository
