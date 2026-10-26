@@ -180,10 +180,10 @@ vocab = glrmask.Vocab.from_id_to_bytes(
 
 arithmetic = glrmask.Grammar.from_glrm(r'''
     start sum
-    t NUMBER = /[0-9]+/
-    nt sum = product | sum "+" product
-    nt product = atom | product "*" atom
-    nt atom = NUMBER | "(" sum ")"
+    t NUMBER ::= /[0-9]+/
+    nt sum ::= product | sum "+" product
+    nt product ::= atom | product "*" atom
+    nt atom ::= NUMBER | "(" sum ")"
 ''')
 grammar = glrmask.Grammar.from_expr(glrmask.Expr.sequence(arithmetic, glrmask.TokenSet([eos])))
 constraint = grammar.compile(vocab)
@@ -243,7 +243,7 @@ call_format = glrmask.Grammar.from_glrm('''
     extern grammar WEATHER_ARGS
     extern grammar SEARCH_ARGS
     start call
-    nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
+    nt call ::= "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
 ''')
 
 call = call_format.copy()
@@ -359,8 +359,8 @@ regular-expression intersection and subtraction. See [GLRM](docs/glrm-format.md)
 
 ```glrm
 start value
-t INTEGER = /-?(0|[1-9][0-9]*)/
-nt value = INTEGER | "null"
+t INTEGER ::= /-?(0|[1-9][0-9]*)/
+nt value ::= INTEGER | "null"
 ```
 
 **Lark**, with GLRMask's additions: `<|name|>` for a token extern, `@name` for a grammar extern, `%json` for an inline

@@ -68,10 +68,17 @@ fn parse_glrm_with_external_terminal_bindings(
     source: &str,
     bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
-        source,
-        bindings,
-    )?)
+    #[cfg(feature = "internal-api")]
+    { return Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges_for_private_tools(source, bindings)?); }
+    #[cfg(not(feature = "internal-api"))]
+    { Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(source, bindings)?) }
+}
+
+fn parse_glrm_to_named_for_private_tools(source: &str) -> crate::Result<ast::NamedGrammar> {
+    #[cfg(feature = "internal-api")]
+    { return Ok(crate::grammar::glrm::from_glrm_for_private_tools(source)?); }
+    #[cfg(not(feature = "internal-api"))]
+    { parse_glrm_to_named(source) }
 }
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
@@ -2070,7 +2077,7 @@ impl DynamicConstraint {
                 glrm,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                parse_glrm_to_named,
+                parse_glrm_to_named_for_private_tools,
                 None,
                 &[],
             )
@@ -2082,7 +2089,7 @@ impl DynamicConstraint {
     /// static token-mask DWA, and it never approximates a recursive action
     /// relation by a finite-depth unrolling.
     pub(crate) fn from_glrm_with_bounded_template_parser(source: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        compile_bounded_template_from_source(source, vocab, GlrTableConstruction::ExperimentalCoreMerged, parse_glrm_to_named, None)
+        compile_bounded_template_from_source(source, vocab, GlrTableConstruction::ExperimentalCoreMerged, parse_glrm_to_named_for_private_tools, None)
     }
 
     pub(crate) fn from_ebnf_with_bounded_template_parser(source: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
@@ -2865,15 +2872,15 @@ mod tests {
             grammar wrapper {
                 start value;
                 extern grammar leaf;
-                nt value = "[" leaf "]";
+                nt value ::= "[" leaf "]";
             };
-            nt document = "<" wrapper ">";
+            nt document ::= "<" wrapper ">";
         "#;
         let err = Grammar::from_glrm(source).unwrap_err().to_string();
         assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
 
         let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;")
+        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s ::= `wrapper::leaf`;")
             .and_then(|g| Module::new(&g).bind("wrapper::leaf", leaf));
         assert!(bound.is_err(), "a qualified extern path must be rejected");
     }

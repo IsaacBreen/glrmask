@@ -98,7 +98,7 @@ def test_boundary_option_is_eager_and_does_not_change_masks(mode):
 def test_boundary_request_applies_to_compile_after_save_and_bind():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay"})
     grammar = glrmask.Grammar.from_glrm(
-        'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
+        'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";')
     child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     for detail in [glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS]:
         module = glrmask.Module(grammar)

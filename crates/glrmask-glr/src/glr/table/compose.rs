@@ -2025,10 +2025,10 @@ mod tests {
         stacks_finished, stacks_finished_with_provider,
     };
     use crate::grammar::ast::lower;
-    use crate::grammar::glrm::from_glrm;
+    use crate::grammar::glrm::from_glrm_for_private_tools;
 
     fn table(source: &str) -> (GLRTable, AnalyzedGrammar) {
-        let named = from_glrm(source).unwrap();
+        let named = from_glrm_for_private_tools(source).unwrap();
         let grammar = lower(&named).unwrap();
         let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
         (GLRTable::build(&analyzed), analyzed)

@@ -63,7 +63,7 @@ def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
 def test_spellingless_event_is_not_erased_from_byte_proof(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 9:b""})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
-        'extern token MARK; start root; nt root = "ab" | MARK;'
+        'extern token MARK; start root; nt root ::= "ab" | MARK;'
     ), "MARK", glrmask.TokenSet([9]))
     state = grammar.compile(vocab, **mode).start()
     assert state.mask()[9]
@@ -85,7 +85,7 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"c", 9:event_bytes})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
-        'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
+        'extern token MARK; start root; nt root ::= "ab" | "a" MARK "c";'
     ), "MARK", glrmask.TokenSet([9]))
     compiled = grammar.compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
@@ -118,7 +118,7 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"c", 9:b""})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
-        'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
+        'extern token MARK; start root; nt root ::= "ab" | "a" MARK "c";'
     ), "MARK", glrmask.TokenSet([1]))
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:

@@ -62,7 +62,7 @@ mod tests {
     }
     #[test]
     fn native_and_lark_errors_retain_original_spans() {
-        let source="start root\nnt root = \"x\"\nnt other = )";
+        let source="start root\nnt root ::= \"x\"\nnt other ::= )";
         let e=crate::grammar::glrm::from_glrm(source).unwrap_err();
         let span=e.source_span().expect("native parser has a source coordinate");
         assert_eq!(&source[span.start..span.end],")");assert_eq!(span.line,3);
@@ -81,12 +81,12 @@ mod tests {
 mod depth_tests {
     #[test]
     fn deeply_nested_source_is_an_error_not_a_stack_overflow() {
-        let native=format!("start root nt root={}\"x\"{}","(".repeat(1024),")".repeat(1024));
+        let native=format!("start root nt root::={}\"x\"{}","(".repeat(1024),")".repeat(1024));
         let lark=format!("start: {}\"x\"{}","(".repeat(1024),")".repeat(1024));
         assert!(crate::grammar::glrm::ParsedComponent::parse_glrm(&native).unwrap_err().to_string().contains("nesting"));
         assert!(crate::parse_lark_document(&lark).unwrap_err().to_string().contains("nesting"));
-        let mut scope=String::from("start root nt root=\"x\"");
-        for _ in 0..80 {scope=format!("start root grammar child {{ {scope} }} nt root=child");}
+        let mut scope=String::from("start root nt root::=\"x\"");
+        for _ in 0..80 {scope=format!("start root grammar child {{ {scope} }} nt root::=child");}
         assert!(crate::grammar::glrm::ParsedComponent::parse_glrm(&scope).unwrap_err().to_string().contains("nesting"));
     }
 }

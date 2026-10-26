@@ -4343,7 +4343,7 @@ mod tests {
         ("kb_1104_Normalized", "Kubernetes---kb_1104_Normalized.json"),
     ];
 
-    const SELECTED10_MODULE_CORE: &str = "extern grammar PROGRAMMATIC_TOOL_SUFFIX start core nt core = \"tools.\" PROGRAMMATIC_TOOL_SUFFIX | \"plain\"";
+    const SELECTED10_MODULE_CORE: &str = "extern grammar PROGRAMMATIC_TOOL_SUFFIX start core nt core ::= \"tools.\" PROGRAMMATIC_TOOL_SUFFIX | \"plain\"";
 
     /// CFA checkout holding the selected10 JSON schemas and `js.glrm`.
     /// `SELECTED10_CFA_ROOT` overrides the documented sibling checkout next to
@@ -4381,7 +4381,7 @@ mod tests {
         for index in 0..tools {
             source.push_str(&format!("extern grammar TOOL_ARGS_SLOT_{index} "));
         }
-        source.push_str("start suffix nt suffix = ");
+        source.push_str("start suffix nt suffix ::= ");
         for index in 0..tools {
             if index != 0 {
                 source.push_str(" | ");

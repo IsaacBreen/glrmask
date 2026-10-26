@@ -23,7 +23,7 @@ use crate::grammar::ast::{
     lower, resolved_named_terminal_exprs, GrammarExpr, NamedGrammar, NamedRule, Quantifier,
 };
 use crate::grammar::factoring::factor_named_grammar;
-use crate::grammar::glrm::{from_glrm, to_glrm};
+use crate::grammar::glrm::to_glrm;
 use crate::dump_json_schema_grammar_glrm;
 use crate::{DynamicConstraint, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
@@ -6461,7 +6461,7 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
 
     let dumped = to_glrm(&grammar);
     assert!(dumped.contains("@literals"), "{dumped}");
-    let reparsed = from_glrm(&dumped).unwrap();
+    let reparsed = crate::grammar::glrm::from_glrm_legacy_for_private_tools(&dumped).unwrap();
     let reparsed_lowered = lower(&reparsed).unwrap();
     let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &reparsed_lowered,

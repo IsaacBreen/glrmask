@@ -8,11 +8,11 @@ fn source(case: usize) -> Grammar<'static> {
         0 | 2 => Grammar::from_ebnf("start ::= \"abcdefghijklmnopqrstuvwx\""),
         1 => Grammar::from_ebnf("start ::= \"ab\""),
         3 => {
-            let mut g=Grammar::from_glrm("extern token EVENT start root nt root=EVENT{24}");
+            let mut g=Grammar::from_glrm("extern token EVENT start root nt root::=EVENT{24}");
             g.bind("EVENT",TokenSet::from(1000)).unwrap();g
         },
         4 => Grammar::from_ebnf("start ::= \"a\" | \"ab\""),
-        5 => Grammar::from_glrm("start root nt root=@mark(7) \"ab\" @mark(9)"),
+        5 => Grammar::from_glrm("start root nt root::=@mark(7) \"ab\" @mark(9)"),
         _ => unreachable!(),
     }
 }

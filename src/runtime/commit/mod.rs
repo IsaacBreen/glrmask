@@ -9525,7 +9525,7 @@ mod tests {
                 nt start ::= A B? | B A?;"#,
             r#"start start; ignore WS; t WS ::= " "+; t A ::= "a"+; t B ::= "a"+ "b"?;
                 nt item ::= A | B; nt start ::= item ("," item)*;"#,
-            r#"start start; t A ::= "a"; nt start ::= A? | "(" start ")";"#,
+            r#"start start; t A ::= "a"; nt start ::= A? | "(" `start` ")";"#,
         ];
         let empty = ParserGSS::from_single_stack(Vec::new(), TerminalsDisallowed::new());
         let mut exclusive = 0usize;
@@ -9614,8 +9614,7 @@ mod tests {
         ]);
         let compiled = Constraint::compile(Grammar::glrm(r#"
             start document;
-            lexer group first ::= A, C;
-            lexer group second ::= B;
+            pragma glrmask { lexer group first ::= A, C; lexer group second ::= B; }
             t A ::= "abx";
             t C ::= "abc";
             t B ::= "abcd";
@@ -9642,12 +9641,12 @@ mod tests {
         ];
         let vocab = Vocab::new(fragments.iter().enumerate()
             .map(|(id, bytes)| (id as u32, bytes.to_vec())).collect());
-        for partitions in ["", "lexer group words ::= WORD; lexer group trivia ::= WS;"] {
+        for partitions in ["", "pragma glrmask { lexer group words ::= WORD; lexer group trivia ::= WS; }"] {
             let source = format!(r#"
                 start document;
                 {partitions}
                 ignore WS;
-                t WS ::= " "+ | "//" [^\n]* "\n" | "/*" ([^*] | "*" [^/])* "*/";
+                t WS ::= " "+ | "//" b/[^\n]/* "\n" | "/*" (b/[^*]/ | "*" b/[^\x2f]/)* "*/";
                 t WORD ::= /[a-z]+/;
                 nt document ::= WORD ("+" WORD)*;
             "#);
@@ -9737,9 +9736,9 @@ mod tests {
             Grammar::glrm(
                 r#"glrm 1;
                 start start;
-                t A = /a+/;
-                t B = "b";
-                nt start = A B;
+                t A ::= /a+/;
+                t B ::= "b";
+                nt start ::= A B;
                 "#,
             ),
             &vocab,
@@ -9840,13 +9839,13 @@ mod tests {
             (15, b"!".to_vec()),
         ]);
         let child = Constraint::compile(
-            Grammar::glrm("glrm 1; start child; nt child = \"[\" \"a\" \"]\";"),
+            Grammar::glrm("glrm 1; start child; nt child ::= \"[\" \"a\" \"]\";"),
             &vocab,
         )
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document ::= \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -9907,13 +9906,13 @@ mod tests {
             (3, b"Xa!".to_vec()),
         ]);
         let child = Constraint::compile(
-            Grammar::glrm("glrm 1; start child; t A = \"a\"; nt child = A;"),
+            Grammar::glrm("glrm 1; start child; t A ::= \"a\"; nt child ::= A;"),
             &vocab,
         )
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
+                "glrm 1; start document; extern grammar child; t X ::= \"X\"; t BANG ::= \"!\"; nt document ::= X child BANG;",
             ),
             &vocab,
         )
@@ -10852,9 +10851,9 @@ nt start ::= item item? item?;
                 nt start ::= declaration expression;
                 nt declaration ::= "@" ID;
                 nt expression ::= ID OP "0";
-                t WS ::= [ \t\r\n]+;
+                t WS ::= b/[ \t\r\n]/+;
                 t OP ::= "=" | "%=";
-                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+                t ID ::= b/[A-Za-z_$]/ b/[A-Za-z0-9_$]/*;
             "#,
             &vocab,
         )
@@ -10896,15 +10895,15 @@ nt start ::= item item? item?;
                 nt start ::= declaration expression;
                 nt declaration ::= "@" ID;
                 nt expression ::= ID OP "0";
-                t WS ::= [ \t\r\n]+;
+                t WS ::= b/[ \t\r\n]/+;
                 t OP ::= "=" | "%=";
-                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+                t ID ::= b/[A-Za-z_$]/ b/[A-Za-z0-9_$]/*;
             "#,
             &vocab,
         )
         .unwrap();
         let parent = Constraint::compile(
-            Grammar::glrm("glrm 1; start document; extern grammar body; nt document = body;"),
+            Grammar::glrm("glrm 1; start document; extern grammar body; nt document ::= body;"),
             &vocab,
         )
         .unwrap();
@@ -11413,10 +11412,7 @@ nt start ::= item item? item?;
             r#"
                 start start;
                 ignore WS;
-                lexer group ws ::= WS;
-                lexer group a ::= A;
-                lexer group b ::= B;
-                lexer group c ::= C;
+                pragma glrmask { lexer group ws ::= WS; lexer group a ::= A; lexer group b ::= B; lexer group c ::= C; }
                 t WS ::= " "+;
                 t A ::= "a"+;
                 t B ::= "b";
@@ -11528,8 +11524,7 @@ nt start ::= item item? item?;
         let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
-                lexer group left ::= A;
-                lexer group right ::= B;
+                pragma glrmask { lexer group left ::= A; lexer group right ::= B; }
                 t A ::= "a";
                 t B ::= "b";
                 nt start ::= A | B;

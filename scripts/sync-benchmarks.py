@@ -100,7 +100,7 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
          f'<title id="title">{label}: time between masks</title>',
          '<desc id="description">'+series_description+' Inverse logarithmic exceedance probability and logarithmic latency axes. Lower is better. '+curve_description+'</desc>',
          f'<defs><clipPath id="plot"><rect x="{left}" y="{top}" width="{right-left}" height="{bottom-top}"/></clipPath></defs>',
-         f'<g font-family="{html.escape(spec["font_family"])}" font-size="14" fill="{text}">',
+         f'<g font-family::="{html.escape(spec["font_family"])}" font-size="14" fill="{text}">',
          f'<path d="M{left},{top} V{bottom} H{right}" fill="none" stroke="{rule}"/>']
     for value,label_y in [(1,'1 µs'),(10,'10 µs'),(100,'100 µs'),(1000,'1 ms'),(10000,'10 ms')]:
         yy=y(value)

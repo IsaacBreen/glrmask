@@ -9,11 +9,11 @@ fn main(){
   let v=Vocab::new(entries).with_special_tokens([9000]);
   for mode in modes{
    for source in [
-    "start root nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2) \"c\" @mark(3)",
-    "start root nt root=@mark(0) (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\") @mark(3)",
-    "start root t A=/a|ab/ nt root=@mark(0) A @mark(1) \"c\" @mark(2)",
-    "start root t A=(/a|ab/ - (/a|ab/ b/./s+)) nt root=@mark(0) A @mark(1) \"b\" @mark(2)",
-    "start root t WS=/ +/ ignore WS nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2)",
+    "start root nt root::=@mark(0) \"a\" @mark(1) \"b\" @mark(2) \"c\" @mark(3)",
+    "start root nt root::=@mark(0) (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\") @mark(3)",
+    "start root t A::=/a|ab/ nt root::=@mark(0) A @mark(1) \"c\" @mark(2)",
+    "start root t A::=(/a|ab/ - (/a|ab/ b/./s+)) nt root::=@mark(0) A @mark(1) \"b\" @mark(2)",
+    "start root t WS::=/ +/ ignore WS nt root::=@mark(0) \"a\" @mark(1) \"b\" @mark(2)",
    ]{
     let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
     let loaded=Constraint::load(c.save(), &vocab).unwrap();
@@ -30,7 +30,7 @@ fn main(){
      }
     }
    }
-   let mut g=Grammar::from_glrm("extern token E start root nt root=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",TokenSet::from(9000)).unwrap();
+   let mut g=Grammar::from_glrm("extern token E start root nt root::=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",TokenSet::from(9000)).unwrap();
    let c=g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();let mut state=c.start();assert!(state.commit_token(0));
    let before=state.marker_events().to_vec();let forced=state.forced_tokens();assert_eq!(forced,state.forced_canonical_reference());assert_eq!(before,state.marker_events());
    assert_eq!(forced,vec![9000,1]);for id in forced{assert!(state.commit_token(id));}assert!(state.is_accepting());queries+=1;

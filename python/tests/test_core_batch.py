@@ -23,7 +23,7 @@ def vocab():
 
 def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
     v = vocab()
-    grammar = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
+    grammar = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r::=M'))
     alias = grammar
     untouched = grammar.copy()
     assert grammar.bind("M", glrmask.TokenSet([17])) is None
@@ -42,12 +42,12 @@ def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
 
 def test_child_and_sibling_snapshots_survive_later_edits():
     v = vocab()
-    child_17 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
+    child_17 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r::=M'))
     child_17.bind("M", glrmask.TokenSet([17]))
-    child_29 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
+    child_29 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r::=M'))
     child_29.bind("M", glrmask.TokenSet([29]))
 
-    parent = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar L extern grammar R start r nt r=L R'))
+    parent = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar L extern grammar R start r nt r::=L R'))
     parent.precompile(v)
     assert parent.bind("L", child_17) is None
     assert parent.bind("R", child_29) is None
@@ -69,8 +69,8 @@ def test_child_and_sibling_snapshots_survive_later_edits():
 def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
     v = vocab()
     for value in [glrmask.TokenSet([17]), glrmask.TokenSet([17, 29])]:
-        m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
-        m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
+        m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r::=X'))
+        m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r::=X'))
         m2.precompile(v, **mode)
         m1.bind("X", value)
         m2.bind("X", value)
@@ -102,7 +102,7 @@ def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
 
 def test_independent_parallel_mutation_keeps_shared_template_open():
     v = vocab()
-    template = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
+    template = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r::=M'))
     template.precompile(v)
 
     def specialize(index):
@@ -120,7 +120,7 @@ def test_independent_parallel_mutation_keeps_shared_template_open():
 
 def test_incremental_many_bindings_and_requirements_preserve_all_snapshots():
     size = 512
-    text = "\n".join(f"extern token E{i}" for i in range(size)) + "\nstart r nt r=E0"
+    text = "\n".join(f"extern token E{i}" for i in range(size)) + "\nstart r nt r::=E0"
     g = glrmask.Module(glrmask.Grammar.from_glrm(text))
     original = g.copy()
     assert len(g.externs.unbound) == size
