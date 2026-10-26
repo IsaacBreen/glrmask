@@ -56,7 +56,7 @@ void basic() {
 
 void exact_and_unicode() {
     const Bytes first{0xc3}, last{0xa9}, whole{0xc3, 0xa9};
-    Vocab v({{0,first},{1,last},{31,whole},{32,whole},{40,Bytes{0,255}}},{99});
+    Vocab v({{0,first},{1,last},{31,whole},{32,whole},{40,Bytes{0,255}}});
     const std::string source = "start: \"" + std::string(whole.begin(), whole.end()) + "\"";
     for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_lark(source);
@@ -86,14 +86,14 @@ void exact_and_unicode() {
     auto duplicate = TokenSet({31,31,32});
     throws([]{ TokenSet::from_ranges({{2,0}}); }, GLRMASK_INVALID_ARGUMENT);
     auto empty = TokenSet::from_ranges({{5,5}});
-    Vocab maximum({}, {0xffffffff});
+    Vocab maximum({});
     auto high = TokenSet::from_ranges({{0xffffffff, 0xffffffff}});
     auto none = TokenSet(std::vector<TokenId>{});
     (void)merged; (void)duplicate; (void)high; (void)none; (void)empty;
 }
 
 void end_tokens() {
-    Vocab v({{0,"a"}}, {99});
+    Vocab v({{0,"a"}});
     for (unsigned i=0; i<3; ++i) {
         CompileOptions o;
         o.mask_strategy = static_cast<MaskStrategy>(i);
@@ -167,7 +167,7 @@ void frontends() {
         auto lm = Module(Grammar::from_lark("start: \"a\" \"b\""));
         auto l = lm.compile(v, strategy_options(i)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
     }
-    Vocab special({{0,"a"},{1,"a"}}, {99});
+    Vocab special({{0,"a"},{1,"a"}});
     for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_lark("start: <|begin|> <|body|>");
         auto m = Module(g);
@@ -191,7 +191,6 @@ void threads_and_errors() {
     std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_ARGUMENT);
-    throws([&]{ Vocab overlap({{0,"a"}}, {0}); }, GLRMASK_INVALID_ARGUMENT);
     throws([]{ Grammar::from_lark("start: ("); });
     throws([]{ Grammar::from_json_schema("{"); });
     throws([]{ Grammar::from_glrm("invalid source"); });

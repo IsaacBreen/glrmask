@@ -16,7 +16,7 @@ int main() {
         const glrmask::TokenId eos = static_cast<glrmask::TokenId>(chars.size());
         std::vector<glrmask::VocabEntry> entries;
         for (glrmask::TokenId id = 0; id < eos; ++id) entries.emplace_back(id, chars.substr(id, 1));
-        glrmask::Vocab vocab(entries, {eos});
+        glrmask::Vocab vocab(entries);
 
         // Arithmetic, then the end token.
         auto arithmetic = glrmask::Grammar::from_glrm(R"glrm(
