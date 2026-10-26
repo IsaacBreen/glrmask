@@ -27,17 +27,17 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let mut rows=Vec::<serde_json::Value>::new();
     let mut builds=Vec::<serde_json::Value>::new();
     let case_filter=std::env::var("CONTROL_CASE").ok();
-    let middle=r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#;
-    let outer=r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#;
+    let middle=r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#;
+    let outer=r#"glrm 1; start outer; extern grammar middle; nt outer ::= "X" middle "!";"#;
     for (name,leaf,flat,prefixes) in [
-        ("literal",r#"glrm 1; start leaf; nt leaf = "a";"#,
-         r#"glrm 1; start document; nt document = "X" "[" "a" "]" "!";"#,
+        ("literal",r#"glrm 1; start leaf; nt leaf ::= "a";"#,
+         r#"glrm 1; start document; nt document ::= "X" "[" "a" "]" "!";"#,
          vec!["","X","X[","X[a","X[a]","X[a]!"]),
-        ("text",r#"glrm 1; start leaf; t TEXT = /[a-zA-Z0-9 ]{1,64}/; nt leaf = TEXT;"#,
-         r#"glrm 1; start document; t TEXT = /[a-zA-Z0-9 ]{1,64}/; nt document = "X" "[" TEXT "]" "!";"#,
+        ("text",r#"glrm 1; start leaf; t TEXT ::= /[a-zA-Z0-9 ]{1,64}/; nt leaf ::= TEXT;"#,
+         r#"glrm 1; start document; t TEXT ::= /[a-zA-Z0-9 ]{1,64}/; nt document ::= "X" "[" TEXT "]" "!";"#,
          vec!["","X","X[","X[hello","X[hello]","X[hello]!"]),
-        ("nullable",r#"glrm 1; start leaf; nt leaf = ("a")?;"#,
-         r#"glrm 1; start document; nt document = "X" "[" ("a")? "]" "!";"#,
+        ("nullable",r#"glrm 1; start leaf; nt leaf ::= ("a")?;"#,
+         r#"glrm 1; start document; nt document ::= "X" "[" ("a")? "]" "!";"#,
          vec!["","X","X[","X[]","X[a","X[a]","X[a]!","X[]!"]),
     ] {
         if case_filter.as_deref().is_some_and(|filter|filter!=name) { continue; }

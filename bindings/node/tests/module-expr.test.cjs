@@ -4,8 +4,8 @@ const assert=require('node:assert/strict');
 const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,ParserBackend}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]]);
 const source=(text='a')=>Grammar.fromLark(`start: "${text}"`);
-const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
-const mark=()=>Grammar.fromGlrm('glrm 1; start start; extern token MARK; nt start = MARK;');
+const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start ::= "x" child "y";');
+const mark=()=>Grammar.fromGlrm('glrm 1; start start; extern token MARK; nt start ::= MARK;');
 const allowed=(s,id)=>(s.mask()[id>>>5] & (1<<(id&31)))!==0;
 function accept(module,v,ids){const s=module.compileSync(v).start();for(const id of ids){assert.ok(allowed(s,id));assert.ok(s.commitToken(id));}assert.ok(s.isAccepting());}
 
@@ -85,13 +85,13 @@ test('Module: rebinding error, :: error and open-child error',()=>{
   assert.throws(()=>p2.bind('foo::bar',source()),/qualified paths are not supported/);
 
   // Open-child error
-  const openChild=new Module(Grammar.fromGlrm('glrm 1; start root; extern grammar inner; nt root = inner;'));
+  const openChild=new Module(Grammar.fromGlrm('glrm 1; start root; extern grammar inner; nt root ::= inner;'));
   const p3=new Module(host());
   assert.throws(()=>p3.bind('child',openChild),/unbound externs/);
 });
 
 test('Module: externs order and unbound Map-like snapshot',()=>{
-  const multi=Grammar.fromGlrm('glrm 1; start root; extern token first; extern grammar second; extern token third; nt root = first second third;');
+  const multi=Grammar.fromGlrm('glrm 1; start root; extern token first; extern grammar second; extern token third; nt root ::= first second third;');
   const mm=new Module(multi);
   assert.equal(mm.externs.size,3);
   assert.equal(mm.externs.unbound.size,3);
@@ -114,7 +114,7 @@ test('Module: externs order and unbound Map-like snapshot',()=>{
 });
 
 test('Module: atomic multi-bind',()=>{
-  const multi=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  const multi=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root ::= a b;');
   const m=new Module(multi);
   assert.equal(m.externs.unbound.size,2);
 
@@ -131,7 +131,7 @@ test('Module: atomic multi-bind',()=>{
 
 test('Grammar: clone is independent and multi-bind is atomic',()=>{
   const v=vocab();
-  const g=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  const g=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root ::= a b;');
   const copy=g.clone();
   copy.bind('a',1);
   assert.equal(g.externs.unbound.size,2);
@@ -140,7 +140,7 @@ test('Grammar: clone is independent and multi-bind is atomic',()=>{
   assert.throws(()=>g.compileSync(v),/extern "a" is unbound/);
   assert.throws(()=>copy.compileSync(v),/extern "b" is unbound/);
 
-  const m=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  const m=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root ::= a b;');
   assert.throws(()=>m.bind({a:new TokenSet([1]),b:'not_a_valid_binding'}));
   assert.equal(m.externs.unbound.size,2);
   assert.ok(m.externs.unbound.has('a'));
@@ -186,7 +186,7 @@ test('Expr: choice, sequence, literal and plain string errors',()=>{
 
   // Literal
   const lit=Expr.literal('xay');
-  const mLit=new Module(Grammar.fromGlrm('glrm 1; start root; extern grammar child; nt root = child;'));
+  const mLit=new Module(Grammar.fromGlrm('glrm 1; start root; extern grammar child; nt root ::= child;'));
   mLit.bind('child',lit);
   accept(mLit,v,[4]);
 
@@ -204,13 +204,13 @@ test('Module: asynchronous precompile rejects a stale completion atomically',asy
 });
 
 test('Grammar.clone and Module.clone return independent copies', () => {
-  const g1 = Grammar.fromGlrm('glrm 1; start root; extern token a; nt root = a;');
+  const g1 = Grammar.fromGlrm('glrm 1; start root; extern token a; nt root ::= a;');
   const g2 = g1.clone();
   g2.bind('a', 1);
   assert.equal(g1.externs.unbound.size, 1);
   assert.equal(g2.externs.unbound.size, 0);
 
-  const m1 = new Module(Grammar.fromGlrm('glrm 1; start root; extern token a; nt root = a;'));
+  const m1 = new Module(Grammar.fromGlrm('glrm 1; start root; extern token a; nt root ::= a;'));
   const m2 = m1.clone();
   m2.bind('a', 1);
   assert.equal(m1.externs.unbound.size, 1);

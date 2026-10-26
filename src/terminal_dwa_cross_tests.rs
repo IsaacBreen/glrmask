@@ -147,11 +147,13 @@ nt S ::= QUOTE IDENT;
     fn partitioned_epsilon_ti_matches_strict_reference() {
         let grammar = r#"
 start S;
+pragma glrmask {
 lexer group a ::= A;
 lexer group b ::= B;
 lexer group c ::= C;
+}
 t A ::= "x";
-t B ::= [xy] & [xz];
+t B ::= b/[xy]/ & b/[xz]/;
 t C ::= "z";
 nt S ::= A | B | C;
 "#;
@@ -180,8 +182,10 @@ nt S ::= A | B | C;
     fn partitioned_epsilon_p8_global_token_position_matches_strict_reference() {
         let grammar = r#"
 start S;
+pragma glrmask {
 lexer group quote ::= QUOTE;
 lexer group ident ::= IDENT;
+}
 t QUOTE ::= "\"";
 t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
 nt S ::= QUOTE IDENT;

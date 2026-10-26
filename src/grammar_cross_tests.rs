@@ -135,7 +135,9 @@ fn lexer_groups_round_trip_and_control_tokenizer_partitions() {
     let grammar = crate::grammar::glrm::from_glrm(
         r#"
 start s;
+pragma glrmask {
 lexer group words ::= A, B;
+}
 t A ::= "a";
 t B ::= "ab";
 t C ::= "z";
@@ -155,7 +157,7 @@ nt s ::= A | B | C;
 
     let dumped = crate::grammar::glrm::to_glrm(&grammar);
     assert!(dumped.contains("lexer group words ::= A, B;"), "{dumped}");
-    let reparsed = crate::grammar::glrm::from_glrm(&dumped).unwrap();
+    let reparsed = crate::grammar::glrm::from_glrm_for_private_tools(&dumped).unwrap();
     assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
 
     let lowered = lower(&grammar).unwrap();

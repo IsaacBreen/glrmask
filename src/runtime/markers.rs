@@ -466,9 +466,9 @@ mod tests {
     fn passive_probe_admission_and_masks_match_erased_markers_in_all_modes() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         for mode in MaskMode::ALL {
-            let marked = Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
+            let marked = Grammar::from_glrm("start root\nnt root ::= @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
                 .compile_with_build_options(&vocab, mode.build_options()).unwrap();
-            let ordinary = Grammar::from_glrm("start root\nnt root = \"a\" \"b\"\n").unwrap()
+            let ordinary = Grammar::from_glrm("start root\nnt root ::= \"a\" \"b\"\n").unwrap()
                 .compile_with_build_options(&vocab, mode.build_options()).unwrap();
             assert_eq!(marked.marker_ids(), [0, 7, 42], "{mode:?}");
             let mut state = marked.start(); let mut reference = ordinary.start();
@@ -491,13 +491,13 @@ mod tests {
             b"(", b")", b"(x)", b"((x))", b" ", b"  ", b"a b", b":", b"a:a", b"aaaa", b"aaabbb"];
         let vocab = Vocab::new(pieces.iter().enumerate().map(|(i,b)| (i as u32,b.to_vec())).collect());
         let sources = [
-            "start root\nnt root = (@mark(1) \"a\" @mark(2) \"b\" @mark(3))*\n",
-            "start root\nnt root = \"x\" | \"(\" @mark(1) root @mark(2) \")\"\n",
-            "start root\nnt root = \"a\" @mark(1) root \"b\" @mark(2) | eps\n",
-            "start root\nnt root = (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\")*\n",
-            "start root\nignore WS\nt WS = \" \"\nnt root = (\"a\" @mark(1) \"b\" @mark(2))*\n",
-            "start root\nt WORD = /[a-c]+/\nnt root = @mark(1) WORD @mark(2) \":\" WORD @mark(3)\n",
-            "start root\nnt root = @mark(1)* (\"a\" @mark(2))* @mark(3)\n",
+            "start root\nnt root ::= (@mark(1) \"a\" @mark(2) \"b\" @mark(3))*\n",
+            "start root\nnt root ::= \"x\" | \"(\" @mark(1) root @mark(2) \")\"\n",
+            "start root\nnt root ::= \"a\" @mark(1) root \"b\" @mark(2) | eps\n",
+            "start root\nnt root ::= (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\")*\n",
+            "start root\nignore WS\nt WS ::= \" \"\nnt root ::= (\"a\" @mark(1) \"b\" @mark(2))*\n",
+            "start root\nt WORD ::= /[a-c]+/\nnt root ::= @mark(1) WORD @mark(2) \":\" WORD @mark(3)\n",
+            "start root\nnt root ::= @mark(1)* (\"a\" @mark(2))* @mark(3)\n",
         ];
         let mut comparisons = 0usize;
         for mode in MaskMode::ALL {

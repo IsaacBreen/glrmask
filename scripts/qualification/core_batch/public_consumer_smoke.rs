@@ -2,7 +2,7 @@ use glrmask::{Grammar, Token, Vocab};
 
 fn main() -> glrmask::Result<()> {
     let vocab = Vocab::new(vec![(0, b"!".to_vec()), (1, b"a".to_vec())]);
-    let mut grammar = Grammar::from_glrm("extern token MARK\nstart root\nnt root = MARK");
+    let mut grammar = Grammar::from_glrm("extern token MARK\nstart root\nnt root ::= MARK");
     let original = grammar.clone();
     grammar.bind("MARK", TokenSet::from(0))?;
     assert_eq!(original.requirements()?.len(), 1);
@@ -19,7 +19,7 @@ fn main() -> glrmask::Result<()> {
     prepared.bind("MARK", TokenSet::from(0))?;
     let closed = prepared.link()?;
     assert_eq!(closed.start().forced_tokens()?, vec![0]);
-    let regex = Grammar::from_glrm("start root\nt A = (/a|ab/ - (/a|ab/ b/./s+))\nnt root = A");
+    let regex = Grammar::from_glrm("start root\nt A ::= (/a|ab/ - (/a|ab/ b/./s+))\nnt root ::= A");
     let c = regex.compile(&vocab)?;
     let mut s = c.start();
     s.commit_bytes(b"a")?;

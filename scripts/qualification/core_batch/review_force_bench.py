@@ -48,12 +48,12 @@ rows=[]
 for mode_name in ["FAST_BUILD","BALANCED","FAST_RUNTIME"]:
     mode=getattr(g.Optimization,mode_name)
     for name,source,prefix in [
-        ("broad_identifier",'start root t W=/[a-z0-9]+/ nt root=W',[]),
-        ("deterministic_bytes_aliases",'start root nt root="abcdefghijklmnopqrstuvwxyz"',[]),
-        ("two_singleton_chars",'start root nt root="!?"',[]),
-        ("long_singleton_chain",'start root nt root="!!!!!!!!!!!!!!!!!!!!!!!!"',[]),
-        ("accepting_prefix",'start root nt root="a" "b"?', [97]),
-        ("nested_inline",'grammar CHILD { start inner nt inner="!?" } start root nt root=CHILD "!"',[]),
+        ("broad_identifier",'start root t W::=/[a-z0-9]+/ nt root::=W',[]),
+        ("deterministic_bytes_aliases",'start root nt root::="abcdefghijklmnopqrstuvwxyz"',[]),
+        ("two_singleton_chars",'start root nt root::="!?"',[]),
+        ("long_singleton_chain",'start root nt root::="!!!!!!!!!!!!!!!!!!!!!!!!"',[]),
+        ("accepting_prefix",'start root nt root::="a" "b"?', [97]),
+        ("nested_inline",'grammar CHILD { start inner nt inner::="!?" } start root nt root::=CHILD "!"',[]),
         ("exact_event",None,[]),
     ]:
         desc=g.Grammar.exact(g.TokenSet([args.vocab_size+3])) if source is None else g.Grammar.from_glrm(source)

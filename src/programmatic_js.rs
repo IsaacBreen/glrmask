@@ -258,7 +258,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     source.replace_range(..start.len(), &format!("start {start_rule};"));
     source.push_str(extra_rules);
 
-    let mut grammar = crate::grammar::glrm::from_glrm(&source)?;
+    let mut grammar = crate::grammar::glrm::from_glrm_for_private_tools(&source)?;
     reserve_tools_identifier(&mut grammar)?;
     // The generic reachability pass follows grammar references from `start`,
     // while `ignore IGNORE` is metadata. Temporarily root IGNORE through a
@@ -293,7 +293,7 @@ fn condition_source() -> crate::Result<String> {
 fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String> {
     use crate::grammar::ast::{GrammarExpr, NamedRule};
 
-    let mut grammar = crate::grammar::glrm::from_glrm(JAVASCRIPT_GLRM)?;
+    let mut grammar = crate::grammar::glrm::from_glrm_for_private_tools(JAVASCRIPT_GLRM)?;
     // `tools` is a reserved namespace in programmatic-tool mode. Without this
     // subtraction, `tools.foo(...)` can take the ordinary IDENTIFIER/call path
     // and bypass the schema dispatcher entirely.

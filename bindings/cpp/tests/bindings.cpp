@@ -67,7 +67,7 @@ void exact_and_unicode() {
         CHECK(s.commit_bytes(first)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
         CHECK(s.commit_bytes(last)); CHECK(s.is_accepting());
 
-        auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root = T;)");
+        auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root ::= T;)");
         auto em = Module(host);
         em.bind("T", TokenSet({31}));
         auto exact = em.compile(v, strategy_options(i));
@@ -110,7 +110,7 @@ void end_tokens() {
 
 void composition_and_persistence() {
     Vocab v({{0,"x"},{1,"a"},{2,"b"},{3,"y"},{4,"xay"},{5,"xby"}});
-    auto host = Grammar::from_glrm(R"(glrm 1; start root; extern grammar child; nt root = "x" child "y";)");
+    auto host = Grammar::from_glrm(R"(glrm 1; start root; extern grammar child; nt root ::= "x" child "y";)");
     auto host_mod = Module(host);
     auto ext = host_mod.externs();
     CHECK(ext.size()==1 && ext[0].name=="child");
@@ -131,7 +131,7 @@ void composition_and_persistence() {
     throws([&]{ left.bind("foo::bar", b); });
 
     // Open-child error
-    auto open_g = Grammar::from_glrm(R"(glrm 1; start root; extern grammar open_slot; nt root = open_slot;)");
+    auto open_g = Grammar::from_glrm(R"(glrm 1; start root; extern grammar open_slot; nt root ::= open_slot;)");
     auto open_mod = Module(open_g);
     auto parent_mod = Module(host);
     throws([&]{ parent_mod.bind("child", open_mod); });
@@ -278,7 +278,7 @@ void artifacts(const std::filesystem::path& directory, bool check) {
 
 void canonical_modules() {
     auto v = Vocab({{0,"x"},{1,"a"},{2,"y"},{3,"xay"},{4,"b"}});
-    auto host = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";");
+    auto host = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"y\";");
     auto parent = Module(host); parent.precompile(v);
     auto original = parent; // copy constructor is a cheap snapshot
 
@@ -323,7 +323,7 @@ void canonical_modules() {
         Expr::choice({Grammar::from_lark("start: \"a\""), Grammar::from_lark("start: \"b\"")}),
         Grammar::from_lark("start: \"y\"")
     });
-    auto host2 = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = child;");
+    auto host2 = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start ::= child;");
     auto m_expr = Module(host2);
     m_expr.bind("child", expr);
     auto c = m_expr.compile(v); auto s = c.start(); CHECK(s.commit_token(3)); CHECK(s.is_accepting());
@@ -336,7 +336,7 @@ void canonical_modules() {
     auto s_lit = c_lit.start(); CHECK(s_lit.commit_token(3)); CHECK(s_lit.is_accepting());
 
     // Externs ordering and unbound view
-    auto multi = Grammar::from_glrm("glrm 1; start start; extern token first; extern grammar second; extern token third; nt start = first second third;");
+    auto multi = Grammar::from_glrm("glrm 1; start start; extern token first; extern grammar second; extern token third; nt start ::= first second third;");
     auto multi_mod = Module(multi);
     auto ext_all = multi_mod.externs();
     CHECK(ext_all.size() == 3);
@@ -351,7 +351,7 @@ void canonical_modules() {
     CHECK(ext_unbound[1].name == "third");
 
     // A grammar's unbound view carries its own unbound externs.
-    auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern token one; extern token two; nt start = one two;");
+    auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern token one; extern token two; nt start ::= one two;");
     grammar_externs.bind("one", TokenId{1});
     auto grammar_unbound = grammar_externs.externs().unbound();
     CHECK(grammar_unbound.size() == 1 && grammar_unbound[0].name == "two");

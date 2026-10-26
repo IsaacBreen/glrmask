@@ -18,8 +18,8 @@ MODES = [
 
 
 TOKENS = {0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 7: b"a", 63: b"", 127: b""}
-HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
-MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
+HOST = 'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";'
+MARK = 'glrm 1; start start; extern token MARK; nt start ::= MARK;'
 
 
 def vocab(entries=None):

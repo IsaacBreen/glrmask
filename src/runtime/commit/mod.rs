@@ -9727,9 +9727,9 @@ mod tests {
             Grammar::glrm(
                 r#"glrm 1;
                 start start;
-                t A = /a+/;
-                t B = "b";
-                nt start = A B;
+                t A ::= /a+/;
+                t B ::= "b";
+                nt start ::= A B;
                 "#,
             ),
             &vocab,
@@ -9830,13 +9830,13 @@ mod tests {
             (15, b"!".to_vec()),
         ]);
         let child = Constraint::compile(
-            Grammar::glrm("glrm 1; start child; nt child = \"[\" \"a\" \"]\";"),
+            Grammar::glrm("glrm 1; start child; nt child ::= \"[\" \"a\" \"]\";"),
             &vocab,
         )
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document ::= \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -9897,13 +9897,13 @@ mod tests {
             (3, b"Xa!".to_vec()),
         ]);
         let child = Constraint::compile(
-            Grammar::glrm("glrm 1; start child; t A = \"a\"; nt child = A;"),
+            Grammar::glrm("glrm 1; start child; t A ::= \"a\"; nt child ::= A;"),
             &vocab,
         )
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
+                "glrm 1; start document; extern grammar child; t X ::= \"X\"; t BANG ::= \"!\"; nt document ::= X child BANG;",
             ),
             &vocab,
         )
@@ -10894,7 +10894,7 @@ nt start ::= item item? item?;
         )
         .unwrap();
         let parent = Constraint::compile(
-            Grammar::glrm("glrm 1; start document; extern grammar body; nt document = body;"),
+            Grammar::glrm("glrm 1; start document; extern grammar body; nt document ::= body;"),
             &vocab,
         )
         .unwrap();
@@ -11403,10 +11403,12 @@ nt start ::= item item? item?;
             r#"
                 start start;
                 ignore WS;
+                pragma glrmask {
                 lexer group ws ::= WS;
                 lexer group a ::= A;
                 lexer group b ::= B;
                 lexer group c ::= C;
+                }
                 t WS ::= " "+;
                 t A ::= "a"+;
                 t B ::= "b";
@@ -11518,8 +11520,10 @@ nt start ::= item item? item?;
         let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
+                pragma glrmask {
                 lexer group left ::= A;
                 lexer group right ::= B;
+                }
                 t A ::= "a";
                 t B ::= "b";
                 nt start ::= A | B;

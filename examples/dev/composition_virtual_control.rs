@@ -21,7 +21,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     for (name, source, json, prefixes) in [
         ("virtual_uri",r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#,true,
          vec!["","X","X\"","X\"x:","X\"x:hello","X\"x:hello\"","X\"x:hello\"!"]),
-        ("epsilon",r#"start payload; lexer group a ::= A; lexer group b ::= B; t A ::= "a"+; t B ::= "ab"+; nt payload ::= A | B;"#,false,
+        ("epsilon",r#"start payload; pragma glrmask { lexer group a ::= A; lexer group b ::= B; } t A ::= "a"+; t B ::= "ab"+; nt payload ::= A | B;"#,false,
          vec!["","X","Xa","Xab","Xaa","Xab!"]),
     ] {
         let file=cache.join(format!("{name}.bin"));
@@ -30,7 +30,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
             let start=Instant::now();
             let leaf=Constraint::compile(if json {Grammar::json_schema(source)} else {Grammar::glrm(source)},&vocab)?;
             let parent=Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#),&vocab)?;
+                r#"glrm 1; start root; extern grammar payload; nt root ::= "X" payload "!";"#),&vocab)?;
             let components_ms=start.elapsed().as_secs_f64()*1000.;
             let start=Instant::now();let bound=parent.bind_grammar_dynamic_boundary("payload",leaf)?;
             let link_ms=start.elapsed().as_secs_f64()*1000.;

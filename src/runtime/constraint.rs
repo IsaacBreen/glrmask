@@ -15300,7 +15300,7 @@ WS: /[ \t]+/
         assert_matches_reference(&mut schema, "schema");
 
         let placeholder = Grammar::from_glrm(
-            r#"glrm 1; start start; extern grammar child; nt start = "a" child | "b";"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "a" child | "b";"#,
         ).unwrap()
         .prepare(&vocab)
         .expect("placeholder prepare");
@@ -15316,7 +15316,7 @@ WS: /[ \t]+/
         // parser terminal space spans parent and child leaves, so the two
         // widths differ by construction. This must not trip a width assertion.
         let mut host = crate::Module::new(&Grammar::from_glrm(
-            r#"glrm 1; start start; extern grammar child; nt start = "a" child "b";"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "a" child "b";"#,
         ).unwrap());
         host.bind("child", Grammar::from_ebnf(r#"start ::= "ab""#).unwrap())
             .unwrap();
@@ -15327,7 +15327,7 @@ WS: /[ \t]+/
         // is an event adapter, so the tokenizer sees fewer terminals than the
         // composed parser.
         let mut host = crate::Module::new(&Grammar::from_glrm(
-            r#"glrm 1; start root; extern token T; nt root = T;"#,
+            r#"glrm 1; start root; extern token T; nt root ::= T;"#,
         ).unwrap());
         host.bind("T", crate::TokenSet::new([1])).unwrap();
         let mut composed = host.compile(&vocab).expect("composed token-set compile");

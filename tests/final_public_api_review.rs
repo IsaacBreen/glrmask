@@ -39,9 +39,9 @@ fn compare_prefixes(actual: &Constraint, expected: &Constraint, ids: &[u32], dep
         }
     }
 }
-const TOKEN: &str = "glrm 1; start start; extern token MARK; nt start = MARK;";
-const OUTER: &str = "glrm 1; start start; extern grammar middle; nt start = \"x\" middle \"y\";";
-const BOTH: &str = "glrm 1; start start; extern token MARK; extern grammar child; nt start = \"x\" MARK child \"y\";";
+const TOKEN: &str = "glrm 1; start start; extern token MARK; nt start ::= MARK;";
+const OUTER: &str = "glrm 1; start start; extern grammar middle; nt start ::= \"x\" middle \"y\";";
+const BOTH: &str = "glrm 1; start start; extern token MARK; extern grammar child; nt start ::= \"x\" MARK child \"y\";";
 
 #[test]
 fn review_token_validates_membership_without_claiming_vocabulary_identity() {
@@ -119,7 +119,7 @@ fn review_token_and_grammar_binding_order_and_roundtrips_agree() {
 #[test]
 fn review_multiple_exact_slots_remain_distinct_after_partial_save() {
     let v = vocab();
-    let source = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start = A B;").unwrap();
+    let source = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start ::= A B;").unwrap();
     let original = source.prepare(&v).unwrap();
     let partial = original.bind_snapshot("A", glrmask::TokenSet::from(7)).unwrap();
     assert!(partial.link().is_err());
@@ -187,7 +187,7 @@ fn review_prepared_binding_checks_kinds_and_rejects_duplicate_names() {
 #[test]
 fn review_repeated_same_open_child_keeps_per_slot_bindings_independent() {
     let v = vocab();
-    let outer = Grammar::from_glrm("glrm 1; start start; extern grammar left; extern grammar right; nt start = left right;").unwrap();
+    let outer = Grammar::from_glrm("glrm 1; start start; extern grammar left; extern grammar right; nt start ::= left right;").unwrap();
     let child = Grammar::from_glrm(TOKEN).unwrap();
     let child_open = child.prepare(&v).unwrap();
     let open = outer.bind_snapshot("left", &child).unwrap().bind_snapshot("right", &child).unwrap()
@@ -207,7 +207,7 @@ fn review_one_token_crosses_parent_child_return_and_sibling() {
     let v = vocab();
     let left = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().prepare(&v).unwrap();
     let right = Grammar::from_ebnf(r#"start ::= "z""#).unwrap().prepare(&v).unwrap();
-    let parent = Grammar::from_glrm("glrm 1; start start; extern grammar left; extern grammar right; nt start = \"x\" left \"b\" right \"y\";").unwrap();
+    let parent = Grammar::from_glrm("glrm 1; start start; extern grammar left; extern grammar right; nt start ::= \"x\" left \"b\" right \"y\";").unwrap();
     let actual = parent.prepare(&v).unwrap().bind_snapshot("left", &left).unwrap().bind_snapshot("right", &right).unwrap().link().unwrap();
     let expected = Grammar::from_ebnf(r#"start ::= "xabzy""#).unwrap().compile(&v).unwrap();
     assert!(allowed(&actual.start().mask(), 10));
@@ -217,7 +217,7 @@ fn review_one_token_crosses_parent_child_return_and_sibling() {
 #[test]
 fn review_nullable_child_preserves_cross_boundary_mask_after_load() {
     let v = vocab();
-    let nullable = Grammar::from_glrm("glrm 1; start start; nt start = eps;").unwrap().prepare(&v).unwrap();
+    let nullable = Grammar::from_glrm("glrm 1; start start; nt start ::= eps;").unwrap().prepare(&v).unwrap();
     let m = Grammar::from_glrm(OUTER).unwrap().prepare(&v).unwrap().bind_snapshot("middle", &nullable).unwrap();
     let actual = PreparedGrammar::load(m.save(), &vocab()).unwrap().link().unwrap();
     let expected = Grammar::from_ebnf(r#"start ::= "xy""#).unwrap().compile(&v).unwrap();
@@ -285,7 +285,7 @@ fn review_optimization_choices_preserve_semantics_with_exact_bindings() {
 #[test]
 fn review_parent_and_child_open_tokens_have_distinct_private_placeholders() {
     let v = vocab();
-    let parent = Grammar::from_glrm("glrm 1; start start; extern token MARK; extern grammar child; nt start = MARK child;").unwrap();
+    let parent = Grammar::from_glrm("glrm 1; start start; extern token MARK; extern grammar child; nt start ::= MARK child;").unwrap();
     let child = Grammar::from_glrm(TOKEN).unwrap();
     // Both component compilers independently choose the same first unused ID.
     // Public linking must use typed slot/terminal identity, not token-ID identity.
@@ -306,7 +306,7 @@ fn review_empty_byte_exact_tokens_preserve_mask_and_commit_on_valid_prefixes() {
         if *id == 63 { bytes.clear(); }
     }
     let v = Vocab::new(entries);
-    let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = \"x\" MARK \"y\";").unwrap();
+    let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start ::= \"x\" MARK \"y\";").unwrap();
     let expected = source.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().compile(&v).unwrap();
     let actual = source.prepare(&v).unwrap().bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().link().unwrap();
     compare_prefixes(&actual, &expected, &[0, 1, 3, 4, 7, 63], 3);
@@ -319,7 +319,7 @@ fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
         if *id == 63 { bytes.clear(); }
     }
     let v = Vocab::new(entries);
-    let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK \"b\" | \"a\" \"y\";").unwrap();
+    let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start ::= MARK \"b\" | \"a\" \"y\";").unwrap();
     let expected = source.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().compile(&v).unwrap();
     // The parent is packed before the exact-token adapter is linked. A second
     // serialization must preserve each packed pool ID, not deduplicate the

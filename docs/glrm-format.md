@@ -5,9 +5,9 @@ version header is needed.
 
 ```glrm
 start value
-internal t DIGIT = /[0-9]/
-t INTEGER = DIGIT+
-nt value = INTEGER | "(" value ")"
+internal t DIGIT ::= /[0-9]/
+t INTEGER ::= DIGIT+
+nt value ::= INTEGER | "(" value ")"
 ```
 
 ## Declarations
@@ -15,19 +15,19 @@ nt value = INTEGER | "(" value ")"
 | Example | Declares |
 |---|---|
 | `start value` | The rule the grammar matches. Every grammar has exactly one. |
-| `t INTEGER = /[0-9]+/` | A terminal: a regular language the lexer matches as one unit, taking the longest match. |
-| `internal t DIGIT = /[0-9]/` | A regular helper for other terminals. Rules and `ignore` can't use it. |
-| `nt value = INTEGER \| "(" value ")"` | A rule. Its body can use terminals, rules, literals and regular expressions. |
+| `t INTEGER ::= /[0-9]+/` | A terminal: a regular language the lexer matches as one unit, taking the longest match. |
+| `internal t DIGIT ::= /[0-9]/` | A regular helper for other terminals. Rules and `ignore` can't use it. |
+| `nt value ::= INTEGER \| "(" value ")"` | A rule. Its body can use terminals, rules, literals and regular expressions. |
 | `ignore SPACE` | A terminal skipped wherever it can appear between others. |
 | `extern token END_CALL` | A token set, bound from your code. |
 | `extern grammar PAYLOAD` | A grammar, bound from your code. |
-| `grammar item { start v nt v = "item" }` | An inline grammar, with its own names, start rule and ignored terminals. |
+| `grammar item { start v nt v ::= "item" }` | An inline grammar, with its own names, start rule and ignored terminals. |
 
-Rules are defined with `=`. A grammar that uses `::=` is read as the legacy dialect, which this page doesn't cover.
+Every definition uses `::=`.
 
 A rule whose language happens to be regular is still a rule, not a terminal.
 
-Names match `[A-Za-z_][A-Za-z0-9_]*`. Put a keyword in backticks to use it as a name: ``nt `start` = "a"``. `use`,
+Names match `[A-Za-z_][A-Za-z0-9_]*`. Put a keyword in backticks to use it as a name: ``nt `start` ::= "a"``. `use`,
 `export`, `import` and `super` are reserved.
 
 Comments are `// ...` and `/* ... */`.
@@ -65,7 +65,7 @@ Classes and `.` only work inside `/.../`.
 | `"," ~+ ("a"? "b"?)` | The same, with at least one item |
 
 `&` and `-` work on regular languages: terminals, helpers, literals and regular expressions. On a rule, `-` removes
-matching top-level alternatives instead: `nt without_x = value - "x"` drops the alternative `"x"` of `value`, but `x`
+matching top-level alternatives instead: `nt without_x ::= value - "x"` drops the alternative `"x"` of `value`, but `x`
 can still appear inside a nested `value`.
 
 An empty alternative or body is an error; write `eps` where you mean it.
@@ -78,9 +78,9 @@ A terminal takes the longest match. To make one end as soon as it can, subtract 
 
 ```glrm
 start response
-internal t BODY = /.*END/s
-t THROUGH_END = BODY - (BODY b/./s+)
-nt response = THROUGH_END "!"
+internal t BODY ::= /.*END/s
+t THROUGH_END ::= BODY - (BODY b/./s+)
+nt response ::= THROUGH_END "!"
 ```
 
 `THROUGH_END` stops at the first `END`. Use `b/./s+`, not `/./s+`, so the suffix can be any bytes. Lark's `[lazy]` does
@@ -91,12 +91,12 @@ the same.
 ```glrm
 grammar item {
     start value
-    nt value = "item"
+    nt value ::= "item"
 }
 extern grammar PAYLOAD
 extern token END_CALL
 start response
-nt response = item PAYLOAD item END_CALL
+nt response ::= item PAYLOAD item END_CALL
 ```
 
 Externs are declared at the top level and bound from your code; see [Composing grammars](../GUIDE.md#composing-grammars).
@@ -107,9 +107,9 @@ An inline grammar can't refer to names outside it. GLRM has no syntax for token 
 
 ```glrm
 start root
-t SPACE = /[ \t]+/
+t SPACE ::= /[ \t]+/
 ignore SPACE
-nt root = "hello" "world"
+nt root ::= "hello" "world"
 ```
 
 An ignored terminal can't match the empty string or be used in a rule. A grammar's ignored terminals don't apply inside
@@ -119,7 +119,7 @@ a bound or inline grammar.
 
 ```glrm
 start framed
-nt framed = fa {
+nt framed ::= fa {
     start q0
     accept q2
     edge q0 -> q1: "("

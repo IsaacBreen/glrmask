@@ -2489,7 +2489,7 @@ fn collapse_dynamic_alternatives(
     for index in 0..alternatives.len() {
         source.push_str(&format!("extern alternative_{index};\n"));
     }
-    source.push_str("nt start = ");
+    source.push_str("nt start ::= ");
     for index in 0..alternatives.len() {
         if index != 0 {
             source.push_str(" | ");
@@ -3493,9 +3493,9 @@ mod tests {
             (3, b"<a>".to_vec()), (4, b"a>".to_vec()), (5, b"<a".to_vec()),
             (6, b"b".to_vec()), (7, b"ab".to_vec()), (8, b"<ab>".to_vec()),
         ]);
-        let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root = \"<\" child \">\";")
+        let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root ::= \"<\" child \">\";")
             .prepare(&vocab).unwrap();
-        let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
+        let child = Grammar::glrm("glrm 1; start value; nt value ::= \"a\" | \"ab\";")
             .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
         let parent = PreparedGrammar::load(parent.save(), &vocab).unwrap();
         let child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
@@ -3617,7 +3617,7 @@ mod tests {
             (2, b"[".to_vec()), (3, b"a".to_vec()), (4, b"]".to_vec()),
         ]);
         let mut component = Grammar::glrm(
-            r#"glrm 1; start value; nt value = "[" "a"? "]";"#,
+            r#"glrm 1; start value; nt value ::= "[" "a"? "]";"#,
         ).compile(&vocab).unwrap();
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(&mut component, &vocab);
         let expected = crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(&component, &vocab)
@@ -3647,7 +3647,7 @@ mod tests {
     #[test]
     fn immutable_template_certificate_reuse_invalidates_unchanged_resave_cache() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]);
-        let component = Grammar::glrm(r#"glrm 1; start value; nt value = "a";"#)
+        let component = Grammar::glrm(r#"glrm 1; start value; nt value ::= "a";"#)
             .compile(&vocab).unwrap();
         let mut loaded = RuntimeConstraint::load(component.save(), &vocab).unwrap();
         let expected = crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(&loaded, &vocab)
@@ -3775,7 +3775,7 @@ mod tests {
     fn vocab_partition_rejects_bound_subgrammar_instead_of_ignoring_it() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let grammar = Grammar::glrm(
-            "glrm 1; extern grammar child; start root; nt root = child;",
+            "glrm 1; extern grammar child; start root; nt root ::= child;",
         )
         .bind_grammar("child", Grammar::ebnf(r#"start ::= "a""#))
         .unwrap();
@@ -4170,7 +4170,7 @@ mod tests {
         assert_eq!(optimized_child.inner.token_bytes_count(), vocab.len());
 
         let parent = Grammar::glrm(
-            "glrm 1; start start; extern grammar child; nt start = child \"x\";",
+            "glrm 1; start start; extern grammar child; nt start ::= child \"x\";",
         );
         let ordinary = ConstraintSpec::builder(parent.clone(), &vocab)
             .unwrap()
@@ -4202,7 +4202,7 @@ mod tests {
     fn first_save_priming_threshold_tracks_large_composition_cache() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let mut constraint = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
+            Grammar::glrm("glrm 1;\nstart start;\nt A ::= \"a\";\nnt start ::= A;\n"),
             &vocab,
         )
         .unwrap();
@@ -4333,7 +4333,7 @@ mod tests {
             (2, b"xy".to_vec()),
         ]);
         let parent = Grammar::glrm(
-            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
         );
         let static_child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
             .unwrap();
@@ -4398,7 +4398,7 @@ mod tests {
             (5, b"xyz".to_vec()),
         ]);
         let one_slot = Grammar::glrm(
-            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
         );
         let static_parent = RuntimeConstraint::compile(one_slot.clone(), &vocab).unwrap();
         let dynamic_parent = native_dynamic_fixture(one_slot, &vocab).unwrap();
@@ -4465,7 +4465,7 @@ mod tests {
 
         let two_slots = Grammar::glrm(
             "glrm 1; start start; extern grammar left; extern grammar right; \
-             nt start = \"x\" left right;",
+             nt start ::= \"x\" left right;",
         );
         let open = RuntimeConstraint::compile(two_slots, &vocab).unwrap();
         let partially_bound = open.bind_grammar("left", &static_child).unwrap();
@@ -4500,7 +4500,7 @@ mod tests {
         let open = native_dynamic_fixture(
             Grammar::glrm(
                 "glrm 1; start start; extern grammar left; extern grammar right; \
-                 nt start = \"x\" left right;",
+                 nt start ::= \"x\" left right;",
             ),
             &vocab,
         )
@@ -4531,7 +4531,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
             ),
             &vocab,
         )
@@ -4612,7 +4612,7 @@ mod tests {
         .unwrap();
         let parent = native_dynamic_fixture(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
             ),
             &vocab,
         )
@@ -4658,7 +4658,7 @@ mod tests {
         .unwrap();
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
             ),
             &vocab,
         )
@@ -4719,7 +4719,7 @@ mod tests {
         .unwrap();
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child \"z\";",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"z\";",
             ),
             &vocab,
         )
@@ -4788,7 +4788,7 @@ mod tests {
 
         let inner_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start inner; extern grammar leaf; nt inner = "<" leaf ">";"#,
+                r#"glrm 1; start inner; extern grammar leaf; nt inner ::= "<" leaf ">";"#,
             ),
             &vocab,
         )
@@ -4812,7 +4812,7 @@ mod tests {
 
         let outer = RuntimeConstraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start document; extern grammar inner; nt document = inner "!";"#,
+                r#"glrm 1; start document; extern grammar inner; nt document ::= inner "!";"#,
             ),
             &vocab,
         )
@@ -4860,7 +4860,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
             ),
             &vocab,
         )
@@ -4920,7 +4920,7 @@ mod tests {
         // after `a`/`b` without relying on duplicate child call sites.
         let parent = Grammar::glrm(
             "glrm 1; start document; extern grammar child; \
-             nt document = child \"!\" | \"a\" \"b\" \"c\" \"?\";",
+             nt document ::= child \"!\" | \"a\" \"b\" \"c\" \"?\";",
         );
         let composed = ConstraintSpec::builder(parent, &vocab)
             .unwrap()
@@ -5024,7 +5024,7 @@ mod tests {
         ]);
         let mut parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" \"q\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" \"q\" child;",
             ),
             &vocab,
         )
@@ -5060,13 +5060,13 @@ mod tests {
             (7, b"X[a]!".to_vec()),
         ]);
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            Grammar::glrm("glrm 1; start leaf; nt leaf ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5076,7 +5076,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document ::= \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5085,7 +5085,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         let monolithic = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            Grammar::glrm("glrm 1; start document; nt document ::= \"X\" \"[\" \"a\" \"]\" \"!\";"),
             &vocab,
         )
         .unwrap();
@@ -5199,13 +5199,13 @@ mod tests {
             (7, b"X[a]!".to_vec()),
         ]);
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            Grammar::glrm("glrm 1; start leaf; nt leaf ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5216,7 +5216,7 @@ mod tests {
         assert!(middle.uses_compact_segmented_parser_runtime());
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document ::= \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5227,7 +5227,7 @@ mod tests {
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
         let monolithic = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            Grammar::glrm("glrm 1; start document; nt document ::= \"X\" \"[\" \"a\" \"]\" \"!\";"),
             &vocab,
         )
         .unwrap();
@@ -5262,7 +5262,7 @@ mod tests {
         .unwrap();
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern grammar child; nt document ::= \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -5315,7 +5315,7 @@ mod tests {
 
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar payload; nt document = \"X\" payload \"!\";",
+                "glrm 1; start document; extern grammar payload; nt document ::= \"X\" payload \"!\";",
             ),
             &vocab,
         )
@@ -5334,7 +5334,7 @@ mod tests {
         // syntax than the JSON frontend's already constructed representation.
         let child_named = crate::import::parse_json_schema_to_named(schema).unwrap();
         let named = crate::grammar::glrm::from_glrm_with_named_subgrammars_and_external_terminals(
-            r#"start document extern grammar payload nt document = "X" payload "!""#,
+            r#"start document extern grammar payload nt document ::= "X" payload "!""#,
             &[("payload", child_named)], &[],
         ).unwrap();
         let inline = crate::import::compile_from_named_grammar(named, &vocab,
@@ -5387,13 +5387,13 @@ mod tests {
             (7, b"X[a]!".to_vec()),
         ]);
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            Grammar::glrm("glrm 1; start leaf; nt leaf ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5403,7 +5403,7 @@ mod tests {
 
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document ::= \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5474,7 +5474,7 @@ mod tests {
         assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
 
         let monolithic = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            Grammar::glrm("glrm 1; start document; nt document ::= \"X\" \"[\" \"a\" \"]\" \"!\";"),
             &vocab,
         )
         .unwrap();
@@ -5551,12 +5551,12 @@ mod tests {
             (5, b"a!".to_vec()),
         ]);
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            Grammar::glrm("glrm 1; start leaf; nt leaf ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf?;"),
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle ::= leaf?;"),
             &vocab,
         )
         .unwrap();
@@ -5567,7 +5567,7 @@ mod tests {
 
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document ::= \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5579,7 +5579,7 @@ mod tests {
         let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let monolithic = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\"? \"!\";"),
+            Grammar::glrm("glrm 1; start document; nt document ::= \"X\" \"a\"? \"!\";"),
             &vocab,
         )
         .unwrap();
@@ -5611,7 +5611,7 @@ mod tests {
             (4, b"!".to_vec()),
         ]);
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            Grammar::glrm("glrm 1; start leaf; nt leaf ::= \"a\";"),
             &vocab,
         )
         .unwrap();
@@ -5620,7 +5620,7 @@ mod tests {
         let leaf_tokenizer_reset = leaf.runtime_commit_initial_state();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";",
             ),
             &vocab,
         )
@@ -5633,7 +5633,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+                "glrm 1; start document; extern grammar middle; nt document ::= \"X\" middle \"!\";",
             ),
             &vocab,
         )
@@ -5807,13 +5807,13 @@ mod tests {
                 .unwrap() as u32
         };
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; t A = \"a\"; nt leaf = A;"),
+            Grammar::glrm("glrm 1; start leaf; t A ::= \"a\"; nt leaf ::= A;"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; t L = \"[\"; t R = \"]\"; nt middle = L leaf R;",
+                "glrm 1; start middle; extern grammar leaf; t L ::= \"[\"; t R ::= \"]\"; nt middle ::= L leaf R;",
             ),
             &vocab,
         )
@@ -5823,7 +5823,7 @@ mod tests {
             .unwrap();
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+                "glrm 1; start document; extern grammar middle; t X ::= \"X\"; t BANG ::= \"!\"; nt document ::= X middle BANG;",
             ),
             &vocab,
         )
@@ -5904,18 +5904,18 @@ mod tests {
         };
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar left; extern grammar right; t LT = \"<\"; t GT = \">\"; nt document = LT left right GT;",
+                "glrm 1; start document; extern grammar left; extern grammar right; t LT ::= \"<\"; t GT ::= \">\"; nt document ::= LT left right GT;",
             ),
             &vocab,
         )
         .unwrap();
         let left = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start left; t A = \"a\"; nt left = A;"),
+            Grammar::glrm("glrm 1; start left; t A ::= \"a\"; nt left ::= A;"),
             &vocab,
         )
         .unwrap();
         let right = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start right; t B = \"b\"; nt right = B;"),
+            Grammar::glrm("glrm 1; start right; t B ::= \"b\"; nt right ::= B;"),
             &vocab,
         )
         .unwrap();
@@ -5994,18 +5994,18 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar left; extern grammar right; nt document = \"<\" left right \">\";",
+                "glrm 1; start document; extern grammar left; extern grammar right; nt document ::= \"<\" left right \">\";",
             ),
             &vocab,
         )
         .unwrap();
         let left = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start left; nt left = \"a\";"),
+            Grammar::glrm("glrm 1; start left; nt left ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let right = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start right; nt right = \"b\";"),
+            Grammar::glrm("glrm 1; start right; nt right ::= \"b\";"),
             &vocab,
         )
         .unwrap();
@@ -6121,12 +6121,12 @@ mod tests {
                 .unwrap() as u32
         };
         let leaf = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start leaf; t A = \"a\"; nt leaf = A?;"),
+            Grammar::glrm("glrm 1; start leaf; t A ::= \"a\"; nt leaf ::= A?;"),
             &vocab,
         )
         .unwrap();
         let middle_parent = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf;"),
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle ::= leaf;"),
             &vocab,
         )
         .unwrap();
@@ -6137,7 +6137,7 @@ mod tests {
         assert!(middle.composition_start_nullable().unwrap());
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+                "glrm 1; start document; extern grammar middle; t X ::= \"X\"; t BANG ::= \"!\"; nt document ::= X middle BANG;",
             ),
             &vocab,
         )
@@ -6205,7 +6205,7 @@ mod tests {
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
                 "glrm 1; start start; extern grammar left; extern grammar right; \
-                 nt start = \"x\" left right;",
+                 nt start ::= \"x\" left right;",
             ),
             &vocab,
         )
@@ -6289,9 +6289,9 @@ mod tests {
                     glrm 1;
                     start document;
                     ignore PARENT_WS;
-                    t PARENT_WS = " "+;
+                    t PARENT_WS ::= " "+;
                     extern grammar child;
-                    nt document = "X" child "!";
+                    nt document ::= "X" child "!";
                 "#,
             ),
             &vocab,
@@ -6303,8 +6303,8 @@ mod tests {
                     glrm 1;
                     start child;
                     ignore CHILD_WS;
-                    t CHILD_WS = "\t"+;
-                    nt child = "a";
+                    t CHILD_WS ::= "\t"+;
+                    nt child ::= "a";
                 "#,
             ),
             &vocab,
@@ -6329,14 +6329,14 @@ mod tests {
                     glrm 1;
                     start document;
                     ignore PARENT_WS;
-                    t PARENT_WS = " "+;
-                    g child = {
+                    t PARENT_WS ::= " "+;
+                    g child ::= {
                         start child;
                         ignore CHILD_WS;
-                        t CHILD_WS = "\t"+;
-                        nt child = "a";
+                        t CHILD_WS ::= "\t"+;
+                        nt child ::= "a";
                     };
-                    nt document = "X" child "!";
+                    nt document ::= "X" child "!";
                 "#,
             ),
             &vocab,
@@ -6422,14 +6422,14 @@ mod tests {
                     glrm 1;
                     start document;
                     extern grammar child;
-                    nt document = "X" child "!" "?";
+                    nt document ::= "X" child "!" "?";
                 "#,
             ),
             &vocab,
         )
         .unwrap();
         let child = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start child; nt child = \"a\";"),
+            Grammar::glrm("glrm 1; start child; nt child ::= \"a\";"),
             &vocab,
         )
         .unwrap();
@@ -6438,8 +6438,8 @@ mod tests {
                 r#"
                     glrm 1;
                     start document;
-                    g child = { start child; nt child = "a"; };
-                    nt document = "X" child "!" "?";
+                    g child ::= { start child; nt child ::= "a"; };
+                    nt document ::= "X" child "!" "?";
                 "#,
             ),
             &vocab,
@@ -6474,7 +6474,7 @@ mod tests {
             (0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec()),
         ]);
         let parent = native_dynamic_fixture(
-            Grammar::glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child;"),
+            Grammar::glrm("glrm 1; start start; extern grammar child; nt start ::= \"x\" child;"),
             &vocab,
         ).unwrap();
         let child = native_dynamic_fixture(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
@@ -6510,7 +6510,7 @@ mod tests {
         ]);
         let parent = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+                "glrm 1; start start; extern grammar child; nt start ::= \"x\" child;",
             ),
             &vocab,
         )
@@ -6580,7 +6580,7 @@ mod final_unlinked_optimization_tests {
             (2, b"xy".to_vec()),
         ]);
         let host = Grammar::glrm(
-            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
         )
         .prepare(&vocab)
         .unwrap();
@@ -6646,7 +6646,7 @@ mod cached_parent_main_tests {
                     glrm 1;
                     extern grammar payload;
                     start document;
-                    nt document = "x" | "<" payload ">";
+                    nt document ::= "x" | "<" payload ">";
                 "#,
             ),
             &vocab,
@@ -6664,12 +6664,12 @@ mod cached_parent_main_tests {
         assert!(!accepts(&parent, b"<a>"));
 
         let child_a = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start value; nt value = \"a\";"),
+            Grammar::glrm("glrm 1; start value; nt value ::= \"a\";"),
             &vocab,
         )
         .unwrap();
         let child_b = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start value; nt value = \"b\";"),
+            Grammar::glrm("glrm 1; start value; nt value ::= \"b\";"),
             &vocab,
         )
         .unwrap();
@@ -6703,19 +6703,19 @@ mod cached_parent_main_tests {
                     extern grammar left;
                     extern grammar right;
                     start document;
-                    nt document = "<" left right ">";
+                    nt document ::= "<" left right ">";
                 "#,
             ),
             &vocab,
         )
         .unwrap();
         let a = RuntimeConstraint::compile(
-            Grammar::glrm(r#"glrm 1; start value; nt value = "a";"#),
+            Grammar::glrm(r#"glrm 1; start value; nt value ::= "a";"#),
             &vocab,
         )
         .unwrap();
         let b = RuntimeConstraint::compile(
-            Grammar::glrm(r#"glrm 1; start value; nt value = "b";"#),
+            Grammar::glrm(r#"glrm 1; start value; nt value ::= "b";"#),
             &vocab,
         )
         .unwrap();
@@ -6730,7 +6730,7 @@ mod cached_parent_main_tests {
 
         let unresolved_child = RuntimeConstraint::compile(
             Grammar::glrm(
-                "glrm 1; extern grammar leaf; start value; nt value = leaf;",
+                "glrm 1; extern grammar leaf; start value; nt value ::= leaf;",
             ),
             &vocab,
         )
@@ -6757,7 +6757,7 @@ mod cached_parent_main_tests {
         let vocab = vocab();
         let open = native_dynamic_fixture(
             Grammar::glrm(
-                "glrm 1; extern grammar payload; start document; nt document = payload;",
+                "glrm 1; extern grammar payload; start document; nt document ::= payload;",
             ),
             &vocab,
         )
@@ -6770,7 +6770,7 @@ mod cached_parent_main_tests {
                 .iter()
                 .any(|slot| slot.name == "payload")));
         let child = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1; start value; nt value = \"a\";"),
+            Grammar::glrm("glrm 1; start value; nt value ::= \"a\";"),
             &vocab,
         )
         .unwrap();
@@ -6882,7 +6882,7 @@ mod final_boundary_option_tests {
     #[test]
     fn deferred_trigger_metadata_is_built_at_link_and_explicit_none_overrides() {
         let v = vocab();
-        let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#).unwrap()
+        let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#).unwrap()
             .prepare_with(&v, BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Exact)).unwrap();
         assert!(matches!(parent.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
         let parent = PreparedGrammar::load(parent.save(), &v).unwrap();
@@ -6899,7 +6899,7 @@ mod final_boundary_option_tests {
     #[test]
     fn persisted_child_request_is_scoped_to_the_child() {
         let v = vocab();
-        let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#).unwrap()
+        let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#).unwrap()
             .prepare(&v).unwrap();
         let child = Grammar::from_ebnf(r#"start ::= "y""#).unwrap().prepare_with(&v,
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
@@ -7425,7 +7425,7 @@ mod mask_strategy_configuration_tests {
     fn composed_module(child: &Grammar) -> Module {
         let mut parent = Module::new(
             &Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
+                r#"glrm 1; start start; extern grammar child; nt start ::= "x" child "y";"#,
             )
             .unwrap(),
         );
@@ -7516,10 +7516,10 @@ mod mask_strategy_configuration_tests {
             (8, b"".to_vec()),
         ];
         let vocab = Vocab::new(tokens.to_vec());
-        let child = Grammar::from_glrm("start root t A = /a?/ nt root = A").unwrap();
+        let child = Grammar::from_glrm("start root t A ::= /a?/ nt root ::= A").unwrap();
         let mut parent = Module::new(
             &Grammar::from_glrm(
-                r#"glrm 1; start root; extern grammar C; nt root = "x" C "y";"#,
+                r#"glrm 1; start root; extern grammar C; nt root ::= "x" C "y";"#,
             )
             .unwrap(),
         );
@@ -7599,12 +7599,12 @@ mod mask_strategy_configuration_tests {
         ]);
         let leaf = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap();
         let mut middle = Module::new(
-            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "(" leaf ")";"#)
+            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root ::= "(" leaf ")";"#)
                 .unwrap(),
         );
         middle.bind("leaf", leaf).unwrap();
         let mut top = Module::new(
-            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle "y";"#)
+            &Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root ::= "x" middle "y";"#)
                 .unwrap(),
         );
         top.bind("middle", middle).unwrap();
@@ -7658,7 +7658,7 @@ mod mask_strategy_configuration_tests {
         let build = || {
             let mut parent = Module::new(
                 &Grammar::from_glrm(
-                    r#"glrm 1; start root; extern grammar L; extern grammar J; nt root = "x" L "y" | J;"#,
+                    r#"glrm 1; start root; extern grammar L; extern grammar J; nt root ::= "x" L "y" | J;"#,
                 )
                 .unwrap(),
             );

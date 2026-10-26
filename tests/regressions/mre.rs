@@ -627,7 +627,9 @@ fn bounded_analysis_byte_classes_must_not_merge_distinct_vocab_tokens() {
     let vocab = Vocab::new(entries);
     let grammar = r#"
 start S;
+pragma glrmask {
 lexer group x ::= X;
+}
 t X ::= /./;
 nt S ::= X X "!";
 "#;

@@ -159,7 +159,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
             }
         })
         .collect::<String>();
-    let source = format!("start root; nt root = {literal:?};");
+    let source = format!("start root; nt root ::= {literal:?};");
     let vocab = Vocab::new(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),

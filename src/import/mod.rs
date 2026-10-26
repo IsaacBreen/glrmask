@@ -77,17 +77,20 @@ pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGramm
 }
 
 pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm(source)?)
+    Ok(crate::grammar::glrm::from_glrm_for_private_tools(source)?)
 }
 
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
     bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
-        source,
-        bindings,
-    )?)
+    match crate::grammar::glrm::from_glrm_with_external_terminal_ranges(source, bindings) {
+        Ok(named) => Ok(named),
+        Err(_) => Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges_for_private_tools(
+            source,
+            bindings,
+        )?),
+    }
 }
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
@@ -2882,15 +2885,15 @@ mod tests {
             grammar wrapper {
                 start value;
                 extern grammar leaf;
-                nt value = "[" leaf "]";
+                nt value ::= "[" leaf "]";
             };
-            nt document = "<" wrapper ">";
+            nt document ::= "<" wrapper ">";
         "#;
         let err = Grammar::from_glrm(source).unwrap_err().to_string();
         assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
 
         let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;")
+        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s ::= `wrapper::leaf`;")
             .and_then(|g| Module::new(&g).bind("wrapper::leaf", leaf));
         assert!(bound.is_err(), "a qualified extern path must be rejected");
     }

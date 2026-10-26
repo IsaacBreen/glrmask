@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- GLRM definitions now use `::=` instead of `=`, as in `nt sum ::= product | sum "+" product`. A grammar containing `::=` no longer switches to the old dialect, so `@token(...)` and `@tokens(...)` aren't available in GLRM.
+
 ## 0.5.0
 
 - `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.

@@ -10,7 +10,7 @@ def _bound_snapshot(source, name, value):
 import pytest
 import glrmask
 
-ONE = "glrm 1; start start; extern token T; nt start = T;"
+ONE = "glrm 1; start start; extern token T; nt start ::= T;"
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
@@ -66,7 +66,7 @@ def test_range_construction_normalizes():
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
-    source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
+    source = "glrm 1; start start; extern token A; extern token B; nt start ::= A B;"
     module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", glrmask.TokenSet(range(10, 31))), "B", glrmask.TokenSet.from_ranges([range(20, 41), range(70, 81)]))
     c = module.compile(v, **mode)
     for first in (10, 20, 30):
@@ -118,7 +118,7 @@ def pointwise_token_grammar(ids):
     ids = list(ids)
     names = [f"E{i}" for i in range(len(ids))]
     source = ("glrm 1; start item; " + " ".join(f"extern token {name};" for name in names)
-              + " nt item = " + " | ".join(names) + ";")
+              + " nt item ::= " + " | ".join(names) + ";")
     grammar = glrmask.Grammar.from_glrm(source)
     for name, token in zip(names, ids):
         grammar = _bound_snapshot(grammar, name, glrmask.TokenSet([token]))
@@ -136,7 +136,7 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
     selections = {"A": [range(1, 4), range(6, 10)], "B": [range(3, 8)]}
     for expression in ["A B", "(A | B) A", '\"a\" A \"b\" | \"ab\" B',
                        "A? B+", "(A B)*"]:
-        source = "glrm 1; start start; extern token A; extern token B; nt start = " + expression + ";"
+        source = "glrm 1; start start; extern token A; extern token B; nt start ::= " + expression + ";"
         compact = glrmask.Module(glrmask.Grammar.from_glrm(source))
         pointwise = glrmask.Module(glrmask.Grammar.from_glrm(source.replace("extern token A;", "extern grammar A;").replace("extern token B;", "extern grammar B;")))
         if deferred:
@@ -172,7 +172,7 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa", 4: b"ba",
                                       5: b"x", 6: b"a", 7: b"", 8: b"b", 9: b"c",
                                       10: b"bb", 11: b"x"})
-    grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
+    grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start ::= (A | B) (A | "a");')
     grammar = _bound_snapshot(grammar, "A", glrmask.TokenSet(range(6)) if compact else glrmask.TokenSet([0]))
     grammar = _bound_snapshot(grammar, "B", glrmask.TokenSet(range(3, 10)) if compact else glrmask.TokenSet([1]))
     constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
@@ -192,7 +192,7 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
                                       4: b"ba", 5: b"x", 6: b"a", 7: b"",
                                       8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm(
-        'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
+        'glrm 1; start start; extern token A; extern token B; nt start ::= (A | B) (A | "a");')
     module = _bound_snapshot(_bound_snapshot(grammar, "A", glrmask.TokenSet(a)), "B", glrmask.TokenSet(b))
     constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()

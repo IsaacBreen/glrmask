@@ -98,14 +98,14 @@ fn main() {
     let filter = args.get(3).map(String::as_str).unwrap_or("");
     let vocab = read_vocab(&args[1]);
     println!("metric,case,prefix,samples,p50_us,p90_us,p99_us,max_us,allowed,mask_hash");
-    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";";
-    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";";
+    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";";
+    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer ::= \"X\" middle \"!\";";
     for (fixture, leaf_source, prefixes) in [
-        ("literal", r#"glrm 1; start leaf; nt leaf = "a";"#, vec![
+        ("literal", r#"glrm 1; start leaf; nt leaf ::= "a";"#, vec![
             ("root", &b""[..]), ("outer", &b"X"[..]), ("leaf", &b"X["[..]),
             ("return", &b"X[a"[..]), ("outer_return", &b"X[a]"[..]), ("done", &b"X[a]!"[..]),
         ]),
-        ("text", r#"glrm 1; start leaf; t TEXT = /[a-zA-Z0-9 ]{1,64}/; nt leaf = TEXT;"#, vec![
+        ("text", r#"glrm 1; start leaf; t TEXT ::= /[a-zA-Z0-9 ]{1,64}/; nt leaf ::= TEXT;"#, vec![
             ("root", &b""[..]), ("outer", &b"X"[..]), ("leaf", &b"X["[..]),
             ("text", &b"X[hello"[..]), ("outer_return", &b"X[hello]"[..]), ("done", &b"X[hello]!"[..]),
         ]),

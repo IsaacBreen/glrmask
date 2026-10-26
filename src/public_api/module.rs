@@ -1486,7 +1486,7 @@ mod precompile_boundary_tests {
         }
     }
 
-    const PARENT: &str = r#"glrm 1; start start; extern grammar child; nt start = "x" child | "y" child "x";"#;
+    const PARENT: &str = r#"glrm 1; start start; extern grammar child; nt start ::= "x" child | "y" child "x";"#;
     const CHILD: &str = r#"start ::= "y" | "x" "y" | "xy""#;
 
     fn assembly(precompile_parent: bool, precompile_child: bool) -> (Module, Module, Module) {
@@ -1608,7 +1608,7 @@ mod grammar_precompile_tests {
         ])
     }
 
-    const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
+    const HOST: &str = "glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"y\";";
 
     #[test]
     fn grammar_precompile_returns_a_module_that_retains_its_work() {
@@ -1715,35 +1715,35 @@ mod boundary_gate_tests {
         let vocab = vocab();
         let child = Module::new(&Grammar::from_lark("start: \"y\"?").unwrap());
         let simple = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             child.clone(),
             &vocab,
         );
         assert_gate_agrees(&simple, "nullable child");
 
         let postamble = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "x" child "y";"#,
             child.clone(),
             &vocab,
         );
         assert_gate_agrees(&postamble, "parent postamble");
 
         let mid_token = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= child;"#,
             Module::new(&Grammar::from_ebnf(r#"start ::= "x""#).unwrap()),
             &vocab,
         );
         assert_gate_agrees(&mid_token, "child ends mid-token");
 
         let after_prefix = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = "a" child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "a" child;"#,
             Module::new(&Grammar::from_ebnf(r#"start ::= "b""#).unwrap()),
             &vocab,
         );
         assert_gate_agrees(&after_prefix, "bound slot after prefix");
 
         let recursive = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = list; nt list = "x" child list | "z";"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= list; nt list ::= "x" child list | "z";"#,
             child.clone(),
             &vocab,
         );
@@ -1751,13 +1751,13 @@ mod boundary_gate_tests {
 
         let nested_child = {
             let mut middle = Module::new(&Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+                r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             ).unwrap());
             middle.bind("child", child).unwrap();
             middle
         };
         let nested = compile_linked(
-            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             nested_child,
             &vocab,
         );
@@ -1795,7 +1795,7 @@ mod boundary_strategy_tests {
         let child = Module::new(&Grammar::from_ebnf(r#"start ::= "y" "z""#).unwrap());
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+                r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             ).unwrap());
             parent.bind("child", child.clone()).unwrap();
             parent
@@ -1833,7 +1833,7 @@ mod boundary_error_tests {
         };
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+                r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             ).unwrap());
             parent
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))
@@ -1864,7 +1864,7 @@ mod boundary_error_tests {
         };
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+                r#"glrm 1; start start; extern grammar child; nt start ::= "x" child;"#,
             ).unwrap());
             parent
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))

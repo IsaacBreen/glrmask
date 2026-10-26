@@ -17,7 +17,7 @@ def source(text):
 def test_open_precompiled_parent_late_children_and_copy_independence():
     v = vocab()
     parent = glrmask.Module(glrmask.Grammar.from_glrm(
-        "glrm 1; start s; extern grammar LEFT; extern grammar RIGHT; nt s=LEFT RIGHT;"
+        "glrm 1; start s; extern grammar LEFT; extern grammar RIGHT; nt s::=LEFT RIGHT;"
     ))
     assert parent.precompile(v) is None
     persisted = parent.save()
@@ -54,7 +54,7 @@ def test_python_compile_options_do_not_discard_work(options):
 def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     v = vocab()
     grammar_slot = glrmask.Module(glrmask.Grammar.from_glrm(
-        "glrm 1; start s; extern grammar EVENT; nt s=EVENT;"
+        "glrm 1; start s; extern grammar EVENT; nt s::=EVENT;"
     ))
     grammar_slot.bind("EVENT", glrmask.TokenSet([5]))
     state = glrmask.Module.load(grammar_slot.save()).compile(v).start()
@@ -62,7 +62,7 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     assert state.commit_token(5)
     assert state.is_accepting()
     token_slot = glrmask.Module(glrmask.Grammar.from_glrm(
-        "glrm 1; start s; extern token EVENT; nt s=EVENT;"
+        "glrm 1; start s; extern token EVENT; nt s::=EVENT;"
     ))
     with pytest.raises(ValueError):
         token_slot.bind("EVENT", source("a"))

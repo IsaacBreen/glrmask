@@ -1657,7 +1657,7 @@ fn special_token_commit_profiling_entry_points_preserve_semantics() {
             glrm 1;
             start start;
             extern token SPECIAL;
-            nt start = SPECIAL;
+            nt start ::= SPECIAL;
         "#).unwrap();
     grammar.bind("SPECIAL", glrmask::TokenSet::new(vec![100])).unwrap();
     let constraint = with_stable_ti_env(|| {
