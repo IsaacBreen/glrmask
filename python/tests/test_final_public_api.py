@@ -57,6 +57,7 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
         "bind_grammar",
     ]:
         assert not hasattr(glrmask.Constraint, name), name
+    assert not hasattr(glrmask.Grammar, "from_ebnf")
 
 
 def test_json_schema_constructor_accepts_text_and_objects():
@@ -72,7 +73,7 @@ def test_json_schema_constructor_accepts_text_and_objects():
 def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     v = vocab()
     g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
-    child = glrmask.Grammar.from_ebnf('start ::= "a"')
+    child = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(TypeError):
         _bound_snapshot(g, 'T', 'not a binding')
     with pytest.raises(ValueError):
@@ -96,7 +97,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
     v = vocab()
-    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a"'), glrmask.TokenSet([130]))).compile(v)
+    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     s = c.start()
     with pytest.raises(ValueError):
         s.fill_mask(np.zeros(1, dtype=np.int32))
@@ -114,7 +115,7 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
 def test_description_owns_source_bindings_after_collection():
     v = vocab()
     parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
-    child_source = glrmask.Grammar.from_ebnf('start ::= "a"')
+    child_source = glrmask.Grammar.from_lark('start: "a"')
     a = _bound_snapshot(parent, 'C', child_source)
     del parent, child_source, v
     gc.collect()
@@ -123,7 +124,7 @@ def test_description_owns_source_bindings_after_collection():
 
 def test_artifact_ownership_and_existing_vocab_validation():
     v = vocab()
-    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a"'), glrmask.TokenSet([130]))).compile(v)
+    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     raw = c.save()
     assert isinstance(raw, bytes)
     del c
@@ -164,7 +165,7 @@ def test_token_set_and_sparse_membership_validation():
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
         assert np.flatnonzero(c.start().mask()).tolist() == [id]
-    text = glrmask.Grammar.from_ebnf('s ::= "a"')
+    text = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(ValueError):
         _bound_snapshot(g, "item", text)
     general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
@@ -173,7 +174,6 @@ def test_token_set_and_sparse_membership_validation():
 
 def test_source_constructors_reject_invalid_source_at_construction():
     for factory, source in [
-        (glrmask.Grammar.from_ebnf, "start ::= ("),
         (glrmask.Grammar.from_lark, "start: ("),
         (glrmask.Grammar.from_json_schema, "{"),
         (glrmask.Grammar.from_glrm, "invalid source"),
@@ -207,7 +207,7 @@ def test_token_trie_settings_value_semantics_and_validation():
     assert len({default, glrmask.TokenTrie(), native}) == 2
 
     v = vocab()
-    grammar = glrmask.Grammar.from_ebnf('start ::= "a"')
+    grammar = glrmask.Grammar.from_lark('start: "a"')
     compiled = grammar.compile(v, mask_strategy=native)
     assert compiled.start().mask()[0]
     for bad in ["token-trie", 2, object()]:
@@ -224,7 +224,7 @@ def test_version_metadata_and_module_attributes_agree():
 
     assert glrmask.__version__ == importlib.metadata.version("glrmask")
     v = vocab()
-    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    g = glrmask.Grammar.from_lark('start: "a"')
     c = g.compile(v)
     assert type(v).__module__ == "glrmask"
     assert type(c).__module__ == "glrmask"
@@ -233,7 +233,7 @@ def test_version_metadata_and_module_attributes_agree():
 
 def test_module_load_takes_only_bytes_and_from_expr_is_positional():
     v = vocab()
-    module = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    module = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     data = module.save()
     assert glrmask.Module.load(data) is not None
     with pytest.raises(TypeError):
@@ -264,7 +264,7 @@ def test_public_reprs_are_stable_and_python_quoted():
         "Externs({'TOK': Extern(name='TOK', kind='token'), "
         "'child': Extern(name='child', kind='grammar')})"
     )
-    assert repr(glrmask.Grammar.from_ebnf('start ::= "a"').externs) == "Externs({})"
+    assert repr(glrmask.Grammar.from_lark('start: "a"').externs) == "Externs({})"
 
 
 def token_extern_grammar():
@@ -307,7 +307,7 @@ def test_grammar_batch_bind_is_atomic():
         "glrm 1; start root; extern token a; extern token b; nt root = a b;"
     )
     with pytest.raises(ValueError):
-        grammar.bind(a=0, b=glrmask.Grammar.from_ebnf('start ::= "a"'))
+        grammar.bind(a=0, b=glrmask.Grammar.from_lark('start: "a"'))
     assert len(grammar.externs.unbound) == 2
     assert "a" in grammar.externs.unbound
     assert "b" in grammar.externs.unbound

@@ -7,8 +7,8 @@
     "rust": "cargo add glrmask"
   },
   "quickstarts": {
-    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
-    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
+    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
+    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
   },
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
   "python_symbols": {
@@ -37,7 +37,6 @@
     "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict.\n\n`special_token_ids` adds tokens that have no bytes, such as end-of-sequence or tool-call tokens.",
     "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, become special tokens.",
     "Vocab.llama_cpp_end_token_ids": "The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.",
-    "Vocab.__len__": "The number of tokens with bytes; special tokens are not counted.",
     "Extern": "An extern declared by a grammar: a named slot to bind later.",
     "Extern.name": "The extern's name.",
     "Extern.kind": "What the extern can be bound to: `\"token\"` or `\"grammar\"`.",
@@ -70,7 +69,6 @@
     "Module.save": "Saves the module, including precompiled work, as bytes.\n\nThe vocabulary is not included. Bytes saved by one GLRMask version may not load in another.",
     "Module.load": "Loads a module saved with `save()`.",
     "Grammar": "A grammar, written as source text or built from an `Expr`.",
-    "Grammar.from_ebnf": "Creates a grammar from EBNF source.",
     "Grammar.from_glrm": "Creates a grammar from GLRM, GLRMask's native format.",
     "Grammar.from_json_schema": "Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.\n\nStandard keywords that GLRMask does not support are an error. Unknown keywords and `format` are ignored.",
     "Grammar.from_lark": "Creates a grammar from Lark source.\n\nA token name such as `<|end|>` declares a token extern, which must be bound before compiling.",
@@ -131,7 +129,6 @@
         "Vocab.llama_cpp_end_token_ids": "EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.",
         "Vocab.tokens": "Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.",
         "Vocab.token_ranges": "Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides.",
-        "Vocab.__len__": "Counts byte-backed entries; exact-only control IDs are excluded.",
         "Requirement": "An unresolved typed slot. Paths distinguish the same local name in different attached children.",
         "Requirement.name": "Qualified path joined with `::`.",
         "Requirement.path": "Path segments from the assembly root to the unresolved slot.",
@@ -139,7 +136,6 @@
         "Requirement.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
         "Requirement.__repr__": "",
         "Grammar": "Reusable source grammar with mutable bindings. `bind` changes this handle; clones and already attached children keep independent snapshots. Parsing and vocabulary checks can be deferred until preparation or compilation.",
-        "Grammar.from_ebnf": "Parsing and compilation errors can be deferred until `prepare` or `compile`.",
         "Grammar.from_glrm": "GLRM supports typed external slots; fill them with `bind` before compiling a runnable root.",
         "Grammar.from_json_schema": "Accepts JSON text or a JSON-serializable object. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened. Validate generated values separately when full schema conformance matters.",
         "Grammar.from_lark": "The default `recognition` profile and the `llm` extension profile differ in accepted syntax. Named token atoms require explicit `token_names` mappings; they are never inferred from tokenizer spellings.",
@@ -202,8 +198,8 @@
         "auto.AutoSchemaShape.json_bytes": ""
       },
       "quickstarts": {
-        "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
-        "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
+        "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
+        "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
       }
     }
   },

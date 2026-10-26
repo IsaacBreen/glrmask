@@ -86,8 +86,6 @@ impl NativeVocab {
     pub fn clone(&self) -> napi::Result<Self> { call(|| Ok(Self { inner: Handle::new(live(&self.inner)?.clone()) })) }
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
-    #[napi(getter)]
-    pub fn size(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.iter().len() as f64)) }
 }
 
 #[napi]
@@ -144,7 +142,6 @@ impl NativeGrammar {
     pub fn from_source(format: String, source: String) -> napi::Result<Self> {
         call(|| {
             let grammar = match format.as_str() {
-                "ebnf" => g::Grammar::from_ebnf(source)?,
                 "glrm" => g::Grammar::from_glrm(source)?,
                 "json-schema" => g::Grammar::from_json_schema(source)?,
                 "lark" => g::Grammar::from_lark(source)?,

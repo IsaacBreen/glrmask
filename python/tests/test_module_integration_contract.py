@@ -11,7 +11,7 @@ def vocab():
 
 
 def source(text):
-    return glrmask.Grammar.from_ebnf(f'start ::= "{text}"')
+    return glrmask.Grammar.from_lark(f'start: "{text}"')
 
 
 def test_open_precompiled_parent_late_children_and_copy_independence():

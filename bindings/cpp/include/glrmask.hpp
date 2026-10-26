@@ -294,8 +294,6 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
         glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), &p)); return Grammar(p);
     }
 public:
-    /// Creates a grammar from EBNF source.
-    static Grammar from_ebnf(std::string_view text) { return source(GLRMASK_EBNF, text); }
     /// Creates a grammar from GLRM, GLRMask's native format.
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
     /// Creates a grammar from a JSON Schema document.

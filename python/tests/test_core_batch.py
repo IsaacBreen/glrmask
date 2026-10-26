@@ -89,7 +89,7 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
     v = vocab()
-    state = glrmask.Grammar.from_ebnf('r ::= "ab"').compile(v, **mode).start()
+    state = glrmask.Grammar.from_lark('start: "ab"').compile(v, **mode).start()
     assert state.forced_tokens() == [2]  # longest spelling of the forced bytes
     assert state.commit_token(0)
     assert state.forced_tokens() == [1]

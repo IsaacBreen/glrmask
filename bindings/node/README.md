@@ -38,7 +38,7 @@ const vocab = new Vocab([
   [1, Buffer.from(' ')],
   [2, Buffer.from('world')],
 ]);
-const grammar = Grammar.fromEbnf('start ::= "hello" " " "world"');
+const grammar = Grammar.fromLark('start: "hello" " " "world"');
 const constraint = await grammar.compile(vocab);
 const state = constraint.start();
 const mask = new Uint32Array(constraint.maskLength);
@@ -70,7 +70,7 @@ const vocab = new Vocab([
 ], { specialTokenIds: [3] });
 ```
 
-`vocab.size` counts the tokens with bytes. `new TokenSet(ids)` is a set of token IDs, and
+`new TokenSet(ids)` is a set of token IDs, and
 `TokenSet.fromRanges([{start, end}])` builds one from ranges that exclude `end`. See [token
 sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
@@ -78,7 +78,6 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 | Factory | Input |
 | --- | --- |
-| `Grammar.fromEbnf(source)` | EBNF |
 | `Grammar.fromGlrm(source)` | [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) |
 | `Grammar.fromJsonSchema(schema)` | JSON Schema, as JSON text or a value |
 | `Grammar.fromLark(source)` | [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) |
@@ -114,7 +113,7 @@ not yet bound.
 `Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
 
 ```js
-const reply = Expr.choice(Grammar.fromEbnf('start ::= "yes"'), Grammar.fromEbnf('start ::= "no"'));
+const reply = Expr.choice(Grammar.fromLark('start: "yes"'), Grammar.fromLark('start: "no"'));
 const grammar = Grammar.fromExpr(Expr.sequence(Expr.literal('Answer: '), reply));
 ```
 

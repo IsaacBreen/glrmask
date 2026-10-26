@@ -6,8 +6,8 @@
 
 int main() {
     glrmask::Vocab vocab({{0, "hello"}, {1, " "}, {2, "world"}});
-    auto grammar = glrmask::Grammar::from_ebnf(
-        R"(start ::= "hello" " " "world")");
+    auto grammar = glrmask::Grammar::from_lark(
+        R"(start: "hello" " " "world")");
     auto constraint = grammar.compile(vocab);
     auto state = constraint.start();
     std::vector<glrmask::TokenId> mask(constraint.mask_len());

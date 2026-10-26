@@ -79,7 +79,6 @@ enum {
 };
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
-    GLRMASK_EBNF=0,         ///< EBNF.
     GLRMASK_GLRM=1,         ///< GLRM, GLRMask's native format.
     GLRMASK_JSON_SCHEMA=2,  ///< JSON Schema.
     GLRMASK_LARK=3          ///< Lark.

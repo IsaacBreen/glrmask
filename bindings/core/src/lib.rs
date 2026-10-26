@@ -180,7 +180,7 @@ mod tests {
     fn state_retains_owner_and_clones_independently() {
         let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())], vec![]).unwrap();
         for mode in 0..3 {
-            let grammar = glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"").unwrap();
+            let grammar = glrmask::Grammar::from_lark("start: \"a\" \"b\"").unwrap();
             let module = glrmask::Module::new(&grammar);
             let options = compile_options(
                 mask_strategy(mode).unwrap(),

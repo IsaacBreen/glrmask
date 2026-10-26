@@ -27,7 +27,7 @@ CompileOptions strategy_options(unsigned mode, BoundaryMaskStrategy boundary = B
     return options;
 }
 Vocab vocabulary() { return Vocab({{0,"a"},{1,"b"},{31,"ab"},{32,"a"},{65,"z"}}); }
-auto simple() { return Grammar::from_ebnf(R"(start ::= "a" "b")"); }
+auto simple() { return Grammar::from_lark(R"(start: "a" "b")"); }
 
 void basic() {
     for (unsigned i=0; i<3; ++i) {
@@ -57,9 +57,9 @@ void basic() {
 void exact_and_unicode() {
     const Bytes first{0xc3}, last{0xa9}, whole{0xc3, 0xa9};
     Vocab v({{0,first},{1,last},{31,whole},{32,whole},{40,Bytes{0,255}}},{99});
-    const std::string source = "start ::= \"" + std::string(whole.begin(), whole.end()) + "\"";
+    const std::string source = "start: \"" + std::string(whole.begin(), whole.end()) + "\"";
     for (unsigned i=0; i<3; ++i) {
-        auto g = Grammar::from_ebnf(source);
+        auto g = Grammar::from_lark(source);
         auto m = Module(g);
         auto c = m.compile(v, strategy_options(i));
         auto s = c.start();
@@ -98,7 +98,7 @@ void end_tokens() {
         CompileOptions o;
         o.mask_strategy = static_cast<MaskStrategy>(i);
         auto m = Module(Grammar::from_expr(Expr::sequence({
-            Grammar::from_ebnf(R"(start ::= "a")"), TokenSet({99})
+            Grammar::from_lark(R"(start: "a")"), TokenSet({99})
         })));
         auto s = m.compile(v, o).start();
         CHECK(!allowed(s.mask(),99)); CHECK(s.commit_token(0)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),99));
@@ -117,8 +117,8 @@ void composition_and_persistence() {
     CHECK(ext[0].kind==ExternKind::Grammar);
     CHECK(host_mod.externs().unbound().size()==1);
 
-    auto a = Grammar::from_ebnf(R"(start ::= "a")");
-    auto b = Grammar::from_ebnf(R"(start ::= "b")");
+    auto a = Grammar::from_lark(R"(start: "a")");
+    auto b = Grammar::from_lark(R"(start: "b")");
     auto left = Module(host), right = Module(host);
     left.bind("child", a); right.bind("child", b);
     CHECK(left.externs().unbound().empty());
@@ -200,12 +200,11 @@ void threads_and_errors() {
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_ARGUMENT);
     throws([&]{ Vocab overlap({{0,"a"}}, {0}); }, GLRMASK_INVALID_ARGUMENT);
-    throws([]{ Grammar::from_ebnf("start ::= ("); });
     throws([]{ Grammar::from_lark("start: ("); });
     throws([]{ Grammar::from_json_schema("{"); });
     throws([]{ Grammar::from_glrm("invalid source"); });
     glrmask_grammar* invalid_source = nullptr;
-    CHECK(glrmask_grammar_from_source(GLRMASK_EBNF, "start ::= (", 11, &invalid_source) == GLRMASK_ENGINE_ERROR);
+    CHECK(glrmask_grammar_from_source(GLRMASK_LARK, "start: (", 9, &invalid_source) == GLRMASK_ENGINE_ERROR);
     CHECK(invalid_source == nullptr);
 }
 
@@ -292,7 +291,7 @@ void canonical_modules() {
     auto parent = Module(host); parent.precompile(v);
     auto original = parent; // copy constructor is a cheap snapshot
 
-    auto child = Module(Grammar::from_ebnf("start ::= \"a\""));
+    auto child = Module(Grammar::from_lark("start: \"a\""));
     CHECK(BoundaryMaskStrategy::FastCompile == BoundaryMaskStrategy::TokenTrie);
     CHECK(BoundaryMaskStrategy::FastMasks == BoundaryMaskStrategy::ParserDwa);
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::TokenTrie) == GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE);
@@ -316,22 +315,22 @@ void canonical_modules() {
     auto state = loaded.compile(v, child_options).start(); loaded.dispose(); parent.dispose(); child.dispose();
     CHECK(state.commit_token(3)); CHECK(state.is_accepting());
 
-    bool failed = false; try { original.bind("missing", Grammar::from_ebnf("start ::= \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
+    bool failed = false; try { original.bind("missing", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
     CHECK(original.externs().unbound().at(0).name=="child");
 
     // Qualified paths rejected
-    failed = false; try { original.bind("child::nested", Grammar::from_ebnf("start ::= \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
+    failed = false; try { original.bind("child::nested", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
 
     // Rebinding error
     auto test_mod = Module(host);
-    test_mod.bind("child", Grammar::from_ebnf("start ::= \"a\""));
-    failed = false; try { test_mod.bind("child", Grammar::from_ebnf("start ::= \"b\"")); } catch(const Error&) { failed=true; } CHECK(failed);
+    test_mod.bind("child", Grammar::from_lark("start: \"a\""));
+    failed = false; try { test_mod.bind("child", Grammar::from_lark("start: \"b\"")); } catch(const Error&) { failed=true; } CHECK(failed);
 
     // Expressions
     auto expr = Expr::sequence({
-        Grammar::from_ebnf("start ::= \"x\""),
-        Expr::choice({Grammar::from_ebnf("start ::= \"a\""), Grammar::from_ebnf("start ::= \"b\"")}),
-        Grammar::from_ebnf("start ::= \"y\"")
+        Grammar::from_lark("start: \"x\""),
+        Expr::choice({Grammar::from_lark("start: \"a\""), Grammar::from_lark("start: \"b\"")}),
+        Grammar::from_lark("start: \"y\"")
     });
     auto host2 = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = child;");
     auto m_expr = Module(host2);
@@ -354,7 +353,7 @@ void canonical_modules() {
     CHECK(ext_all[1].name == "second" && ext_all[1].kind == ExternKind::Grammar);
     CHECK(ext_all[2].name == "third" && ext_all[2].kind == ExternKind::Token);
 
-    multi_mod.bind("second", Grammar::from_ebnf("start ::= \"a\""));
+    multi_mod.bind("second", Grammar::from_lark("start: \"a\""));
     auto ext_unbound = multi_mod.externs().unbound();
     CHECK(ext_unbound.size() == 2);
     CHECK(ext_unbound[0].name == "first");
@@ -374,9 +373,9 @@ void canonical_modules() {
 
     // Grammar::precompile is the module-returning mirror of Grammar::compile.
     auto open_host = host.precompile(v);
-    auto precompiled_child = Grammar::from_ebnf("start ::= \"a\"").precompile(
+    auto precompiled_child = Grammar::from_lark("start: \"a\"").precompile(
         v, strategy_options(static_cast<unsigned>(MaskStrategy::ParserDwa)));
-    CHECK(precompiled_child.save().size() > Module(Grammar::from_ebnf("start ::= \"a\"")).save().size());
+    CHECK(precompiled_child.save().size() > Module(Grammar::from_lark("start: \"a\"")).save().size());
     open_host.bind("child", precompiled_child);
     auto precompiled_state = open_host.compile(
         v, strategy_options(static_cast<unsigned>(MaskStrategy::TokenTrie))).start();
@@ -388,9 +387,9 @@ void canonical_modules() {
         .mask_strategy = MaskStrategy::TokenTrie,
         .token_trie = {.parser_backend = ParserBackend::LrTable,
                        .merge_equivalent_tokens = true}};
-    auto merged_lr = Grammar::from_ebnf("start ::= \"a\"").compile(v, designated);
+    auto merged_lr = Grammar::from_lark("start: \"a\"").compile(v, designated);
     CHECK(allowed(merged_lr.start().mask(), 1));
-    auto designated_native = Grammar::from_ebnf("start ::= \"a\"").compile(
+    auto designated_native = Grammar::from_lark("start: \"a\"").compile(
         v, CompileOptions{.mask_strategy = MaskStrategy::TokenTrie,
                           .token_trie = {.parser_backend = ParserBackend::TemplateDfa,
                                          .merge_equivalent_tokens = true}});
@@ -401,7 +400,7 @@ void canonical_modules() {
     wrong.mask_strategy = MaskStrategy::Auto;
     wrong.token_trie.merge_equivalent_tokens = true;
     bool rejected = false;
-    try { Grammar::from_ebnf("start ::= \"a\"").compile(v, wrong); }
+    try { Grammar::from_lark("start: \"a\"").compile(v, wrong); }
     catch (const Error& error) {
         rejected = true;
         CHECK(error.status() == GLRMASK_INVALID_ARGUMENT);

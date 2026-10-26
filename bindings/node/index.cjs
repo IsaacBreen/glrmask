@@ -164,7 +164,6 @@ class Vocab extends Owned {
     const special = o.specialTokenIds === undefined ? [] : ids(o.specialTokenIds);
     super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes, special)));
   }
-  get size() { return invoke(() => handle(this, Vocab).size); }
   clone() { return wrap(Vocab, invoke(() => handle(this, Vocab).clone())); }
 }
 
@@ -192,7 +191,6 @@ class TokenSet extends Owned {
 }
 
 class Grammar extends Owned {
-  static fromEbnf(source) { return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('ebnf', string(source)))); }
   static fromGlrm(source) { return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('glrm', string(source)))); }
   static fromJsonSchema(schema) {
     const source = typeof schema === 'string' ? schema : JSON.stringify(schema);

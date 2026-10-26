@@ -11,7 +11,7 @@ t ARGS = /[^<]+/
 ```
 
 `@mark(id)` goes anywhere in a rule body. The ID is any unsigned 32-bit number you choose; it has nothing to do with
-token IDs. The same ID can appear in several places. Markers work in GLRM, Lark and EBNF, but not inside a terminal or
+token IDs. The same ID can appear in several places. Markers work in GLRM and Lark, but not inside a terminal or
 a regular expression.
 
 Markers never change what the grammar allows, and a grammar with no markers pays nothing for them.

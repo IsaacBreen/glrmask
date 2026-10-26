@@ -14,7 +14,7 @@ def test_supported_python_version():
 def test_basic_masking_lifecycle():
     """Verify core grammar compilation and state lifecycle on active Python runtime."""
     v = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
-    g = glrmask.Grammar.from_ebnf('start ::= "hello" " " "world"')
+    g = glrmask.Grammar.from_lark('start: "hello" " " "world"')
     c = g.compile(v)
     s = c.start()
 
@@ -30,7 +30,7 @@ def test_basic_masking_lifecycle():
 def test_forcing_tokens_query():
     """Verify forced_tokens query runs and releases interpreter without race/hang."""
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
-    g = glrmask.Grammar.from_ebnf('start ::= "a" "b"')
+    g = glrmask.Grammar.from_lark('start: "a" "b"')
     c = g.compile(v)
     s = c.start()
     # Both tokens are forced along this unique completion. Querying must not

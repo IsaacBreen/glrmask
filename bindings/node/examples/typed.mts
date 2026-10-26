@@ -2,7 +2,7 @@
 import { Grammar, MaskStrategy, Vocab, type Constraint, type ConstraintState } from '@glrmask/node';
 
 const vocab = new Vocab([[0, new TextEncoder().encode('yes')], [1, new TextEncoder().encode('no')]]);
-const grammar = Grammar.fromEbnf('start ::= "yes" | "no"');
+const grammar = Grammar.fromLark('start: "yes" | "no"');
 const constraint: Constraint = await grammar.compile(vocab, { maskStrategy: MaskStrategy.TokenTrie });
 const state: ConstraintState = constraint.start();
 const mask: Uint32Array = state.mask();

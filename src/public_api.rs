@@ -601,7 +601,8 @@ impl Grammar {
         grammar
     }
 
-    /// Creates a grammar from EBNF source.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn from_ebnf(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref())));
         grammar.component()?;

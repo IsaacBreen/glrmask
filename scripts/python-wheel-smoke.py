@@ -34,8 +34,8 @@ vocab = glrmask.Vocab.from_dict(
         b"world": 2,
     }
 )
-constraint = glrmask.Grammar.from_ebnf(
-    'start ::= "hello" " " "world"'
+constraint = glrmask.Grammar.from_lark(
+    'start: "hello" " " "world"'
 ).compile(vocab)
 state = constraint.start()
 
@@ -119,7 +119,7 @@ control_constraint = control_module.compile(llama_vocab)
 assert control_constraint.start().mask(size=6).tolist() == [False, False, True, False, False, False]
 
 llama_constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(
-    glrmask.Grammar.from_ebnf('start ::= "a"'),
+    glrmask.Grammar.from_lark('start: "a"'),
     glrmask.TokenSet(llama_vocab.llama_cpp_end_token_ids),
 )).compile(llama_vocab)
 llama_state = llama_constraint.start()

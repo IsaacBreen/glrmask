@@ -50,7 +50,7 @@ def link_module(module, vocab, **options):
         module = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet(end)))
     return module.compile(vocab, **options)
 
-def grammar_from_ebnf(source): return GrammarCalls(glrmask.Grammar.from_ebnf(source))
+def grammar_from_lark(source): return GrammarCalls(glrmask.Grammar.from_lark(source))
 def grammar_from_glrm(source): return GrammarCalls(glrmask.Grammar.from_glrm(source))
 def grammar_from_json_schema(source): return GrammarCalls(glrmask.Grammar.from_json_schema(source))
 
@@ -136,7 +136,7 @@ def representations(constraint, vocab):
 @pytest.mark.parametrize("mode", MODES)
 def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
     words, vocab = words_and_vocab()
-    grammar = grammar_from_ebnf('start ::= "(" start ")" start | ""')
+    grammar = grammar_from_lark('start: "(" start ")" start | ""')
     reference = compile_grammar(grammar, vocab, **mode)
     candidate = compile_grammar(
         grammar,
@@ -228,7 +228,7 @@ def test_python_template_validation_is_early_and_does_not_retain_python_callback
 def test_python_prepared_composition_uses_native_defaults(mode):
     tokens = {0: b"a", 1: b"aa", 2: b"b"}
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
-    body = grammar_from_ebnf('start ::= "a"')
+    body = grammar_from_lark('start: "a"')
     # Standalone representations and composed representations are both native;
     # executable roots are not implicitly converted into reusable components.
     strategy = mode.get("mask_strategy")
@@ -276,7 +276,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
 def test_python_precompiled_nullable_composition_preserves_crossings_and_root_end(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay",
                                           4: b"xy", 5: b"xx", 6: b""})
-    child = grammar_from_ebnf('start ::= "a"?').prepare(vocab)
+    child = grammar_from_lark('start: "a"?').prepare(vocab)
     parent = grammar_from_glrm(
         'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
     linked = link_module(_bound_snapshot(parent, "C", child), vocab, **mode,
@@ -296,7 +296,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
 
 def test_python_backend_selection_does_not_accept_untyped_flags():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
-    grammar = grammar_from_ebnf('start ::= "a"')
+    grammar = grammar_from_lark('start: "a"')
     for value in ["TEMPLATE_DFA", True, 1, object()]:
         with pytest.raises(TypeError):
             compile_grammar(grammar, vocab, parser_backend=value)
@@ -304,7 +304,7 @@ def test_python_backend_selection_does_not_accept_untyped_flags():
 
 def test_python_explicit_lr_merged_request_is_supported():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
-    grammar = grammar_from_ebnf('start ::= "a"')
+    grammar = grammar_from_lark('start: "a"')
     compiled = compile_grammar(
         grammar, vocab,
         parser_backend=glrmask._internal.ParserBackend.LR_TABLE,

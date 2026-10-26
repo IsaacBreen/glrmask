@@ -220,6 +220,7 @@ required-features = ["internal-api"]
 [[test]]
 name = "lark_compatibility"
 path = "tests/lark_compatibility.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "prepared_components"
@@ -232,10 +233,12 @@ path = "tests/token_range_bindings.rs"
 [[test]]
 name = "final_public_api_review"
 path = "tests/final_public_api_review.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "final_public_api"
 path = "tests/final_public_api.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "integration"
@@ -248,10 +251,12 @@ path = "tests/end_tokens.rs"
 [[test]]
 name = "is_terminated"
 path = "tests/is_terminated.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "glrm_v1"
 path = "tests/glrm_v1.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "forcing_semantics"
@@ -520,10 +525,12 @@ required-features = ["internal-api"]
 [[test]]
 name = "public_optimization_modes"
 path = "tests/public_optimization_modes.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "mask_strategy_modes"
 path = "tests/mask_strategy_modes.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "core_batch"
@@ -532,6 +539,7 @@ path = "tests/core_batch.rs"
 [[test]]
 name = "marker_events"
 path = "tests/marker_events.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "marker_commit"
@@ -549,14 +557,17 @@ required-features = ["internal-api"]
 [[test]]
 name = "module_expr_core"
 path = "tests/module_expr_core.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "module_lifecycle_contract"
 path = "tests/module_lifecycle_contract.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "public_thread_safety"
 path = "tests/public_thread_safety.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "seed3229_token_commit_stall"

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Removed EBNF as a grammar format; use Lark or GLRM. In C, `GLRMASK_EBNF` is gone and the other format constants keep their values.
+- Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_len()` for the mask's length.
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
 - The minimum supported Rust version is now 1.89.
 - Grammar text can no longer allow a special token. In Lark, `<[*]>` and `<[^...]>` match only tokens with bytes, and

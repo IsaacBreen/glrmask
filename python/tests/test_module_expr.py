@@ -14,7 +14,7 @@ def vocab(changed=False):
 
 
 def source(text='a'):
-    return g.Grammar.from_ebnf(f'start ::= "{text}"')
+    return g.Grammar.from_lark(f'start: "{text}"')
 
 
 def accepts(module, v, ids):

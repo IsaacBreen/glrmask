@@ -132,7 +132,7 @@ GLRMask has four core types:
 import glrmask
 
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
-grammar = glrmask.Grammar.from_ebnf('start ::= "hello" " " "world"')
+grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
 for token_id, expected in [(0, [True, False, False]),
@@ -152,7 +152,7 @@ fn main() -> glrmask::Result<()> {
     let vocab = Vocab::new(vec![
         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
     ]);
-    let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#)?;
+    let grammar = Grammar::from_lark(r#"start: "hello" " " "world""#)?;
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
     for token_id in 0..3 {
@@ -372,8 +372,6 @@ nt value = INTEGER | "null"
 
 **Lark**, with GLRMask's additions: `<|name|>` for a token extern, `@name` for a grammar extern, `%json` for an inline
 JSON Schema and `[lazy]` for a terminal that ends as soon as it can. See [Lark](docs/lark-dialect.md).
-
-**EBNF**, in the `rule ::= ...` form.
 
 Features GLRMask doesn't support, such as Lark priorities, are errors. They are never silently ignored.
 

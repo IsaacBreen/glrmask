@@ -14,7 +14,7 @@ const strategies=[
 ];
 const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
-const simple=()=>Grammar.fromEbnf('start ::= "a" "b"');
+const simple=()=>Grammar.fromLark('start: "a" "b"');
 const allowed=(m,id)=>(m[Math.floor(id/32)] & (1<<(id%32)))!==0;
 const closed=fn=>assert.throws(fn,e=>e instanceof GlrMaskError && e.code==='GLRMASK_CLOSED');
 
@@ -39,7 +39,7 @@ for(const {label:maskStrategy,options} of strategies) {
   });
   test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,()=>{
     const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],{specialTokenIds:[99]});
-    const c=Grammar.fromEbnf('start ::= "é"').compileSync(v,{...options}),s=c.start();
+    const c=Grammar.fromLark('start: "é"').compileSync(v,{...options}),s=c.start();
     assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
@@ -52,7 +52,7 @@ for(const {label:maskStrategy,options} of strategies) {
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
     const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
-    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromEbnf('start ::= "a"'),new TokenSet([99]))).compileSync(v,{...options}).start();
+    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromLark('start: "a"'),new TokenSet([99]))).compileSync(v,{...options}).start();
     assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.equal(s.commitToken(99),false);
@@ -91,7 +91,6 @@ test('token sets normalize ranges and expose no inspection accessors',()=>{
   assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),RangeError);
   assert.throws(()=>TokenSet.fromRanges([{start:5,end:5}]),RangeError);
   const high=new Vocab([],{specialTokenIds:[0xffffffff]});
-  assert.equal(high.size,0);
   assert.equal(TokenSet.fromRanges([{start:0xffffffff,end:4294967296}]).toString(),'TokenSet[4294967295..=4294967295]');
 });
 
@@ -104,7 +103,7 @@ test('async work snapshots sources and vocabulary before disposal',async()=>{
 
 test('an active JS timer continues during native compilation',{timeout:60000},async()=>{
   const values=Array.from({length:2000},(_,i)=>JSON.stringify(`prefix_${i.toString().padStart(4,'0')}_suffix`));
-  const g=Grammar.fromEbnf('start ::= '+values.join(' | '));
+  const g=Grammar.fromLark('start: '+values.join(' | '));
   const v=new Vocab(Array.from({length:128},(_,i)=>[i,Buffer.from([i])]));
   let beats=0;const interval=setInterval(()=>beats++,1);
   try {await g.compile(v,{maskStrategy:MaskStrategy.ParserDwa});} finally {clearInterval(interval);}
@@ -143,12 +142,12 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
-  assert.throws(()=>Grammar.fromEbnf('this is not a grammar'),GlrMaskError);
+  assert.throws(()=>Grammar.fromLark('this is not a grammar'),GlrMaskError);
 });
 
 test('raw native arguments reject truncation and unsafe typed-array backing',()=>{
   const v=raw.NativeVocab.fromEntries([0,1,31],[b('a'),b('b'),b('ab')],[]);
-  const g=raw.NativeGrammar.fromSource('ebnf','start ::= "a" "b"');const s=g.compileSync(v,0,0).start();
+  const g=raw.NativeGrammar.fromSource('lark','start: "a" "b"');const s=g.compileSync(v,0,0).start();
   const initial=s.mask();
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
     const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_ARGUMENT/.test(String(e));
@@ -180,7 +179,7 @@ test('garbage collection cannot invalidate a retained state or materialized mask
 
 test('isTerminated tracks commit admission',()=>{
   const v=new Vocab([[0,b('a')]]);
-  const s=Grammar.fromEbnf('start ::= "a"').compileSync(v).start();
+  const s=Grammar.fromLark('start: "a"').compileSync(v).start();
   assert.equal(s.isTerminated(),false);
   assert.equal(s.commitToken(0),true);assert.equal(s.isTerminated(),true);
   assert.equal(s.commitToken(0),false);assert.equal(s.isTerminated(),true);
@@ -206,7 +205,6 @@ test('named Lark special tokens use explicit mappings, not byte aliases',async()
 });
 
 test('source constructors reject invalid source',()=>{
-  assert.throws(()=>Grammar.fromEbnf('start ::= ('));
   assert.throws(()=>Grammar.fromLark('start: ('));
   assert.throws(()=>Grammar.fromJsonSchema('{'));
   assert.throws(()=>Grammar.fromGlrm('invalid source'));

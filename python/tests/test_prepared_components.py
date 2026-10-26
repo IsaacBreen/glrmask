@@ -18,7 +18,7 @@ def vocab():
 def test_atomic_kwargs_bind():
     m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
     # Valid atomic keyword bind
-    m.bind(A=glrmask.TokenSet([1]), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+    m.bind(A=glrmask.TokenSet([1]), B=glrmask.Grammar.from_lark('start: "b"'))
     assert len(m.externs.unbound) == 0
 
     # Failed atomic keyword bind: second argument is invalid
@@ -34,7 +34,7 @@ def test_atomic_kwargs_bind():
 
     # Mixing positional and keyword arguments is a TypeError
     with pytest.raises(TypeError, match="mix"):
-        m2.bind("A", glrmask.TokenSet([1]), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+        m2.bind("A", glrmask.TokenSet([1]), B=glrmask.Grammar.from_lark('start: "b"'))
 
     # Zero arguments is a TypeError
     with pytest.raises(TypeError):
@@ -51,7 +51,7 @@ def test_rebinding_error():
 def test_qualified_paths_rejected():
     m = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     with pytest.raises(ValueError, match="qualified paths are not supported"):
-        m.bind("child::sub", glrmask.Grammar.from_ebnf('start ::= "a"'))
+        m.bind("child::sub", glrmask.Grammar.from_lark('start: "a"'))
 
 
 def test_open_child_rejected():
@@ -62,7 +62,7 @@ def test_open_child_rejected():
         parent.bind("child", open_child)
     # Expr.choice / sequence with open child raises ValueError immediately
     with pytest.raises(ValueError, match="unbound externs"):
-        glrmask.Expr.choice(open_child, glrmask.Grammar.from_ebnf('start ::= "a"'))
+        glrmask.Expr.choice(open_child, glrmask.Grammar.from_lark('start: "a"'))
     with pytest.raises(ValueError, match="unbound externs"):
         glrmask.Expr.sequence(open_child)
 
@@ -122,7 +122,7 @@ def test_copy_independence():
 
 def test_compile_options_and_save_load_roundtrip():
     v = vocab()
-    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    g = glrmask.Grammar.from_lark('start: "a"')
     m = glrmask.Module(g)
     m.precompile(
         v,
@@ -169,7 +169,7 @@ def test_expr_literal_str_rejection_and_empty_choice():
 
 def test_grammar_compile_sugar():
     v = vocab()
-    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    g = glrmask.Grammar.from_lark('start: "a"')
     sugar_constraint = g.compile(
         v,
         mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),

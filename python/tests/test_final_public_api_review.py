@@ -54,7 +54,7 @@ def test_public_types_exist_without_exposing_backend_selection():
 def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     v = vocab()
     parent = glrmask.Grammar.from_glrm(HOST)
-    child = glrmask.Grammar.from_ebnf('start ::= "a"')
+    child = glrmask.Grammar.from_lark('start: "a"')
     c = _bound_snapshot(parent, "child", child).compile(v)
     state = c.start()
     mask = np.asarray(state.mask())
@@ -75,7 +75,7 @@ def test_module_save_load_remains_open_and_immutable():
     artifact = host.save()
     assert isinstance(artifact, bytes)
     loaded = glrmask.Module.load(artifact)
-    child = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     bound = _bound_snapshot(loaded, "child", child).compile(v)
     assert bound.start().mask()[4]
     for open_mod in [host, loaded]:
@@ -144,7 +144,7 @@ def test_precompiled_module_with_precompiled_child():
 
 def test_state_retains_constraint_after_python_owner_is_collected():
     v = vocab()
-    constraint = glrmask.Grammar.from_ebnf('start ::= "a"').compile(v)
+    constraint = glrmask.Grammar.from_lark('start: "a"').compile(v)
     state = constraint.start()
     del constraint, v
     gc.collect()
@@ -180,7 +180,7 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
 def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
     mode = getattr(glrmask.MaskStrategy, mode_name)
-    child_mod = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    child_mod = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     child = glrmask.Grammar.from_expr(glrmask.Expr.sequence(child_mod, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
     child = glrmask.Constraint.load(child.save(), v)
     own_state = child.start()

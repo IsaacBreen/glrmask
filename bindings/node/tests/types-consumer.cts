@@ -2,7 +2,7 @@ import api = require('@glrmask/node');
 const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {specialTokenIds:[99]});
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
-const g: api.Grammar = api.Grammar.fromEbnf('start ::= "a"');
+const g: api.Grammar = api.Grammar.fromLark('start: "a"');
 const trie: api.TokenTrie = {kind: 'token-trie', parserBackend: api.ParserBackend.LrTable, mergeEquivalentTokens: true};
 const c = api.Grammar.fromExpr(api.Expr.sequence(g, new api.TokenSet([99]))).compileSync(v, {maskStrategy: trie});
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);

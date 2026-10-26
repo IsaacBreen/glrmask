@@ -299,7 +299,7 @@ impl PyTokenSet {
 }
 
 #[derive(Clone, Copy)]
-enum SourceKind { Ebnf, Glrm, JsonSchema, Lark }
+enum SourceKind { Glrm, JsonSchema, Lark }
 
 /// Reusable source grammar without compilation settings or bindings.
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
@@ -311,7 +311,6 @@ pub(super) struct PyGrammar {
 impl PyGrammar {
     fn new(source: String, kind: SourceKind) -> PyResult<Self> {
         let inner = match kind {
-            SourceKind::Ebnf => glrmask::Grammar::from_ebnf(source),
             SourceKind::Glrm => glrmask::Grammar::from_glrm(source),
             SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(source),
             SourceKind::Lark => glrmask::Grammar::from_lark(source),
@@ -332,7 +331,7 @@ impl Drop for PyGrammar {
     fn drop(&mut self) {
         let inner = std::mem::replace(
             &mut self.inner,
-            glrmask::Grammar::ebnf(""),
+            glrmask::Grammar::lark(""),
         );
         let _ = Python::try_attach(move |py| py.detach(move || drop(inner)));
     }
@@ -340,11 +339,6 @@ impl Drop for PyGrammar {
 
 #[pymethods]
 impl PyGrammar {
-    #[staticmethod]
-    fn from_ebnf(source: String) -> PyResult<Self> {
-        Self::new(source, SourceKind::Ebnf)
-    }
-
     /// GLRM supports typed external declarations; bind them via `Module(g).bind(...)` before compiling.
     #[staticmethod]
     fn from_glrm(source: String) -> PyResult<Self> {

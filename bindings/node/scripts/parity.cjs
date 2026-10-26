@@ -16,7 +16,7 @@ function run(args) {
   return result.stdout;
 }
 const vocab=new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')],[31,Buffer.from('ab')],[32,Buffer.from('a')],[65,Buffer.from('z')]]);
-const grammar=api.Grammar.fromEbnf('start ::= "a" "b"');
+const grammar=api.Grammar.fromLark('start: "a" "b"');
 const modes=[...new Set(Object.values(api.MaskStrategy))];
 const expected=JSON.parse(run(['--parity']));
 const actual=modes.map((maskStrategy,mode)=>{

@@ -25,7 +25,7 @@ MODES = [
 def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"(", 2: b")", 7: b"()", 15: b"(", 20: b"x", 25: b""})
-    grammar = glrmask.Grammar.from_ebnf('start ::= "(" start ")" start | ""')
+    grammar = glrmask.Grammar.from_lark('start: "(" start ")" start | ""')
     reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab)
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),

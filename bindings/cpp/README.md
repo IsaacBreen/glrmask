@@ -38,8 +38,8 @@ GLRMask has four core types:
 
 int main() {
     glrmask::Vocab vocab({{0, "hello"}, {1, " "}, {2, "world"}});
-    auto grammar = glrmask::Grammar::from_ebnf(
-        R"(start ::= "hello" " " "world")");
+    auto grammar = glrmask::Grammar::from_lark(
+        R"(start: "hello" " " "world")");
     auto constraint = grammar.compile(vocab);
     auto state = constraint.start();
     std::vector<glrmask::TokenId> mask(constraint.mask_len());
@@ -81,7 +81,6 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 | Factory | Input |
 | --- | --- |
-| `Grammar::from_ebnf(source)` | EBNF |
 | `Grammar::from_glrm(source)` | [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) |
 | `Grammar::from_json_schema(source)` | JSON Schema, as JSON text |
 | `Grammar::from_lark(source)` | [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) |
@@ -114,7 +113,7 @@ lists the declared externs, and `externs().unbound()` the ones not yet bound.
 
 ```cpp
 auto reply = glrmask::Expr::choice({
-    glrmask::Grammar::from_ebnf(R"(start ::= "yes")"), glrmask::Grammar::from_ebnf(R"(start ::= "no")")});
+    glrmask::Grammar::from_lark(R"(start: "yes")"), glrmask::Grammar::from_lark(R"(start: "no")")});
 auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({glrmask::Expr::literal("Answer: "), reply}));
 ```
 

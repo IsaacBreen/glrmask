@@ -23,7 +23,7 @@ GLRMask has four core types:
 import glrmask
 
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
-grammar = glrmask.Grammar.from_ebnf('start ::= "hello" " " "world"')
+grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
 for token_id, expected in [(0, [True, False, False]),
@@ -328,10 +328,6 @@ class Module:
 @final
 class Grammar:
     """A grammar, written as source text or built from an `Expr`."""
-    @staticmethod
-    def from_ebnf(source: str) -> Grammar:
-        """Creates a grammar from EBNF source."""
-        ...
     @staticmethod
     def from_glrm(source: str) -> Grammar:
         """Creates a grammar from GLRM, GLRMask's native format."""

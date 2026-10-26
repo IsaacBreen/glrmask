@@ -3,7 +3,7 @@ import pytest
 import glrmask
 from glrmask._glrmask import DynamicConstraint
 
-SOURCE = 'start ::= "(" start ")" start | ""'
+SOURCE = 'start: "(" start ")" start | ""'
 TOKENS = {0: b"(", 2: b")", 7: b"()", 15: b"(", 20: b"x", 25: b"", 26: b""}
 
 
@@ -16,7 +16,7 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE", "1")
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    compiled = DynamicConstraint.from_ebnf(SOURCE, vocab, vocab_partition=partition)
+    compiled = DynamicConstraint.from_lark(SOURCE, vocab, vocab_partition=partition)
     raw = bytes(compiled.save())
     expected = 17
     assert version(raw) == expected
@@ -62,7 +62,7 @@ MODES = [
 @pytest.mark.parametrize("mode", MODES)
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
@@ -85,7 +85,7 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
 @pytest.mark.parametrize("partition", [False, True])
 def test_dynamic_profiled_wrapper_preserves_empty_eos(partition):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    raw, _, _ = glrmask._internal.compile_ebnf_serialized_profiled(
+    raw, _, _ = glrmask._internal.compile_lark_serialized_profiled(
         SOURCE, vocab, end_token_ids=[26], vocab_partition=partition)
     constraint = DynamicConstraint.load(bytes(raw), vocab)
     for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:

@@ -9,8 +9,8 @@ int main(void) {
     CHECK(glrmask_abi_version()==2);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,NULL,0,&vocab)==GLRMASK_INVALID_ARGUMENT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,NULL,0,&vocab)==GLRMASK_OK);
-    const char source[]="start ::= \"a\"";
-    CHECK(glrmask_grammar_from_source(GLRMASK_EBNF,source,strlen(source),&grammar)==GLRMASK_OK);
+    const char source[]="start: \"a\"";
+    CHECK(glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&grammar)==GLRMASK_OK);
     glrmask_compile_options options=glrmask_default_compile_options();
     CHECK(options.mask_strategy==GLRMASK_MASK_STRATEGY_AUTO);CHECK(options.boundary_mask_strategy==GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO);
     CHECK(options.token_trie.parser_backend==GLRMASK_PARSER_BACKEND_LR_TABLE);
@@ -74,7 +74,7 @@ int main(void) {
     CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
-    CHECK(glrmask_grammar_from_source(GLRMASK_EBNF,bad_utf8,1,&grammar)==GLRMASK_INVALID_ARGUMENT);CHECK(grammar==NULL);
+    CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_ARGUMENT);CHECK(grammar==NULL);
     CHECK(glrmask_constraint_load(NULL,1,NULL,&constraint)==GLRMASK_INVALID_ARGUMENT);CHECK(constraint==NULL);
     puts("C ABI regression checks passed");return 0;
 }
