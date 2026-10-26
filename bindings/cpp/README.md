@@ -60,17 +60,17 @@ int main() {
 
 ## Vocabularies and token sets
 
-`Vocab(entries, special_token_ids)` takes `{id, bytes}` entries, with each token's exact bytes as `Bytes` or a
+`Vocab(entries)` takes `{id, bytes}` entries, with each token's exact bytes as `Bytes` or a
 `std::string_view`. Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character
-or contain NUL. IDs need not be contiguous, and two tokens may have the same bytes. `special_token_ids` adds tokens that
-have no bytes, such as end-of-sequence or tool-call tokens. An ID can't appear twice.
+or contain NUL. IDs need not be contiguous, and two tokens may have the same bytes. An ID can't appear twice. Leave out
+tokens with no bytes, such as end-of-sequence or tool-call tokens; a token set can still allow them.
 
 ```cpp
 glrmask::Vocab vocab({
     {0, glrmask::Bytes{0xc3}},
     {1, glrmask::Bytes{0xa9}},
     {2, "é"},
-}, {3});
+});
 ```
 
 `TokenSet(ids)` is a set of token IDs, and

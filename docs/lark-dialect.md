@@ -61,8 +61,8 @@ grammar; see [Composing grammars](../GUIDE.md#composing-grammars). GLRMask never
 ### Token IDs
 
 `<[...]>` matches one token by ID. Ranges include both ends and are ranges of IDs, not of characters. `^` and `*` are
-relative to the vocabulary's tokens with bytes: they never match a special token. Every ID and range must be in the
-vocabulary when you compile, and none can be a special token; to allow one, declare it with `<|name|>` and bind it.
+relative to the vocabulary's tokens with bytes: they never match a special token. Every ID must be a token with bytes
+in the vocabulary, so none can be a special token; to allow one, declare it with `<|name|>` and bind it.
 Token IDs can't appear inside a terminal or a `[lazy]` body. See [token sets](token-sets.md).
 
 ### Inline JSON Schema

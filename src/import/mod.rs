@@ -56,6 +56,22 @@ pub(crate) fn validate_ebnf_source(source: &str, vocab: &crate::Vocab) -> crate:
     reject_special_token_ids(&selected, vocab)
 }
 
+pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate::Result<()> {
+    let comp = crate::grammar::glrm::ParsedComponent::parse_glrm_for_tools(source)?;
+    let ranges = comp.inline_token_ranges();
+    for &(start, end) in &ranges {
+        if !vocab.contains_token_range(start, end) {
+            return Err(crate::Error::Compilation(format!(
+                "token range {start}..={end} includes IDs that are not in the vocabulary"
+            )));
+        }
+    }
+    let selected = range_set_blaze::RangeSetBlaze::from_iter(
+        ranges.iter().map(|&(a, b)| a..=b),
+    );
+    reject_special_token_ids(&selected, vocab)
+}
+
 pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(lark::parse_lark_to_named(source)?)
 }
@@ -2082,6 +2098,7 @@ impl DynamicConstraint {
     /// static token-mask DWA, and it never approximates a recursive action
     /// relation by a finite-depth unrolling.
     pub(crate) fn from_glrm_with_bounded_template_parser(source: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        validate_glrm_source(source, vocab)?;
         compile_bounded_template_from_source(source, vocab, GlrTableConstruction::ExperimentalCoreMerged, parse_glrm_to_named, None)
     }
 

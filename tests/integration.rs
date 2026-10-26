@@ -1507,22 +1507,34 @@ fn ebnf_and_lark_accept_special_token_atoms() {
 #[test]
 fn byte_less_special_token_extends_mask_token_space() {
     let vocab = Vocab::new(Vec::new());
-    let constraint = with_stable_ti_env(|| {
+    let res = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(r#"
                 start start;
                 nt start ::= @token(100);
             "#), &vocab)
-        .unwrap()
     });
+    assert!(res.is_err());
+}
 
-    assert_eq!(constraint.mask_len(), 4);
-    let mut state = constraint.start();
-    assert_eq!(allowed(&state.mask()), vec![100]);
-    assert!(state.commit_token(100));
-    assert!(state.is_accepting());
+#[test]
+fn legacy_glrm_token_id_validation() {
+    let vocab = Vocab::new(vec![(1, b"a".to_vec()), (2, vec![])]);
+    assert!(Constraint::compile(glrmask::Grammar::glrm(r#"
+        start start;
+        nt start ::= @token(1);
+    "#), &vocab).is_ok());
 
-    let mut unknown = constraint.start();
-    assert!(!unknown.commit_token(101));
+    let err_empty = Constraint::compile(glrmask::Grammar::glrm(r#"
+        start start;
+        nt start ::= @token(2);
+    "#), &vocab).unwrap_err().to_string();
+    assert!(err_empty.contains("is a special token"), "{err_empty}");
+
+    let err_missing = Constraint::compile(glrmask::Grammar::glrm(r#"
+        start start;
+        nt start ::= @token(3);
+    "#), &vocab).unwrap_err().to_string();
+    assert!(err_missing.contains("includes IDs that are not in the vocabulary"), "{err_missing}");
 }
 
 #[test]
@@ -1581,7 +1593,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
 
 #[test]
 fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (100, b"[100]".to_vec())]);
     let grammar = r#"
         start start;
         t END ::= @token(100);
@@ -1641,12 +1653,15 @@ fn special_token_commit_unions_special_and_byte_paths() {
 #[test]
 fn special_token_commit_profiling_entry_points_preserve_semantics() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let mut grammar = glrmask::Grammar::from_glrm(r#"
+            glrm 1;
+            start start;
+            extern token SPECIAL;
+            nt start = SPECIAL;
+        "#).unwrap();
+    grammar.bind("SPECIAL", glrmask::TokenSet::new(vec![100])).unwrap();
     let constraint = with_stable_ti_env(|| {
-        Constraint::compile(glrmask::Grammar::glrm(r#"
-                start start;
-                nt start ::= @token(100);
-            "#), &vocab)
-        .unwrap()
+        Constraint::compile(grammar, &vocab).unwrap()
     });
 
     let mut timed = constraint.start();
@@ -1681,11 +1696,12 @@ fn special_token_cannot_be_configured_as_ignore_terminal() {
 
 #[test]
 fn special_token_atoms_compose_in_parser_choices_and_repetition() {
+    let vocab = Vocab::new(vec![(100, b"A".to_vec()), (101, b"B".to_vec())]);
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(r#"
                 start start;
                 nt start ::= (@token(100) | @token(101))+;
-            "#), &Vocab::new(Vec::new()))
+            "#), &vocab)
         .unwrap()
     });
 

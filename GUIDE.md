@@ -175,8 +175,7 @@ import glrmask
 
 chars = b"0123456789+*()"
 eos = len(chars)
-vocab = glrmask.Vocab.from_id_to_bytes(
-    {i: bytes([c]) for i, c in enumerate(chars)}, special_token_ids=[eos])
+vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([c]) for i, c in enumerate(chars)})
 
 arithmetic = glrmask.Grammar.from_glrm(r'''
     start sum
@@ -214,8 +213,7 @@ token without committing to it, copy the state first.
 `1+23` is too. `is_terminated()` says whether nothing more can be committed.
 
 GLRMask has no end-token setting. To require an end-of-sequence token, put it after the grammar, as above. It's allowed
-once the grammar is complete, and nothing is allowed after it. If the token has no bytes, add it as a special token:
-`special_token_ids` in Python, `with_special_tokens` in Rust, `specialTokenIds` in Node.js.
+once the grammar is complete, and nothing is allowed after it. The token doesn't need to be in the vocabulary.
 
 ### Forced tokens
 
@@ -300,11 +298,9 @@ expression can be bound to a grammar extern directly.
 
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
 `TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges exclude their end in Python and
-Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. Every ID must be in the vocabulary when you compile.
+Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. An ID doesn't need to be in the vocabulary.
 
-Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. Add them to the vocabulary so
-that token sets can use them; they never match text. Two tokens with the same bytes are still different tokens to a
-token set. See [token sets](docs/token-sets.md).
+Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](docs/token-sets.md).
 
 ## Mask strategies
 

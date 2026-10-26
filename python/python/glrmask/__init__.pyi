@@ -156,7 +156,7 @@ class Vocab:
     def from_llama_cpp(llm: Any, /) -> Vocab:
         """Creates a vocabulary from a llama-cpp-python `Llama` model.
 
-        Tokens with no text, such as control and end-of-generation tokens, become special tokens.
+        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.
         """
         ...
     @property

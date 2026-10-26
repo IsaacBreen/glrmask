@@ -1,16 +1,16 @@
 ## Vocabularies and token sets
 
-`new Vocab(entries, options?)` takes `[id, bytes]` pairs, with each token's exact bytes as a `Uint8Array` or `Buffer`.
+`new Vocab(entries)` takes `[id, bytes]` pairs, with each token's exact bytes as a `Uint8Array` or `Buffer`.
 Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character. IDs need not be
-contiguous, and two tokens may have the same bytes. `specialTokenIds` adds tokens that have no bytes, such as
-end-of-sequence or tool-call tokens. An ID can't appear twice.
+contiguous, and two tokens may have the same bytes. An ID can't appear twice. Leave out tokens with no bytes, such as
+end-of-sequence or tool-call tokens; a token set can still allow them.
 
 ```js
 const vocab = new Vocab([
   [0, Uint8Array.of(0xc3)],
   [1, Uint8Array.of(0xa9)],
   [2, Buffer.from('é')],
-], { specialTokenIds: [3] });
+]);
 ```
 
 `new TokenSet(ids)` is a set of token IDs, and

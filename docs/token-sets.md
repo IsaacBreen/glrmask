@@ -10,7 +10,7 @@ Lark's `<[*]>` and `<[^...]>` never match one.
 import glrmask
 
 begin_call = 128
-vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(128)}, special_token_ids=[begin_call])
+vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(128)})
 grammar = glrmask.Grammar.from_glrm('''
     extern token BEGIN_CALL
     start reply

@@ -158,4 +158,54 @@ impl ParsedComponent {
         }
         lower_parsed_grammar(scope,&slots)
     }
+
+    pub fn inline_token_ranges(&self) -> Vec<(u32, u32)> {
+        fn collect_expr(expr: &GrammarExpr, ranges: &mut Vec<(u32, u32)>) {
+            match expr {
+                GrammarExpr::SpecialToken(id) => ranges.push((*id, *id)),
+                GrammarExpr::SpecialTokenRange(start, end) => ranges.push((*start, *end)),
+                GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
+                    collect_expr(inner, ranges);
+                }
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    for part in parts {
+                        collect_expr(part, ranges);
+                    }
+                }
+                GrammarExpr::Exclude { expr, exclude } => {
+                    collect_expr(expr, ranges);
+                    collect_expr(exclude, ranges);
+                }
+                GrammarExpr::Intersect { expr, intersect } => {
+                    collect_expr(expr, ranges);
+                    collect_expr(intersect, ranges);
+                }
+                GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                    for (item, _) in items {
+                        collect_expr(item, ranges);
+                    }
+                    collect_expr(separator, ranges);
+                }
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    for symbol in &expr_nfa.symbols {
+                        collect_expr(symbol, ranges);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn collect_scope(scope: &ParsedGlrmScope, ranges: &mut Vec<(u32, u32)>) {
+            for rule in &scope.rules {
+                collect_expr(&rule.expr, ranges);
+            }
+            for sub in &scope.subgrammars {
+                if let ParsedSubgrammarBody::Inline(child) = &sub.body {
+                    collect_scope(child, ranges);
+                }
+            }
+        }
+        let mut ranges = Vec::new();
+        collect_scope(&self.scope, &mut ranges);
+        ranges
+    }
 }

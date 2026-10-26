@@ -35,7 +35,7 @@
     "Vocab": "A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.",
     "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is.",
     "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict.",
-    "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, become special tokens.",
+    "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.",
     "Vocab.llama_cpp_end_token_ids": "The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.",
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "The extern's name.",
@@ -204,8 +204,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "eeafde0c3d78b6b5ab1b9fd24c6948d3ceb5d47e95d8a47b51aa84866c1d3861",
-    "bindings/node/README.md": "8ef9ec06b92a25bef6163f5a32a36627a775ec6eba302287b01c68288d74b0d7",
+    "bindings/cpp/README.md": "f0bac8dbeba59d7e6ab5b745b812f56ff48081a81b1959730dc1776b3941b681",
+    "bindings/node/README.md": "dde14f080fd4632981a1e9bb013fa379a9d0fe58ab4ef7661cd9afbf0c35c61e",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -213,5 +213,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "9cd4b92faa1f1b321818cd8186d66d42ec24ad670ae1314a8229895428922571"
+  "content_sha256": "d0e66465df133e0b1997d47894d0c56d7695b5d2cddc8b1851b50f76774bada1"
 }

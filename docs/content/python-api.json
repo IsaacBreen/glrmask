@@ -22,7 +22,7 @@
   "Vocab": "A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.",
   "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is.",
   "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict.",
-  "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, become special tokens.",
+  "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.",
   "Vocab.llama_cpp_end_token_ids": "The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.",
   "Extern": "A named placeholder in a grammar.",
   "Extern.name": "The extern's name.",

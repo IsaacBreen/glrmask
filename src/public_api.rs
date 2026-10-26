@@ -729,7 +729,22 @@ impl Grammar {
         }).as_ref().map_err(Clone::clone)
     }
 
-    fn validate_exact_target(&self, _vocab:&Vocab) -> Result<()> {
+    fn validate_exact_target(&self, vocab: &Vocab) -> Result<()> {
+        if matches!(self.source, GrammarSource::Glrm(_)) {
+            let comp = self.component()?;
+            let ranges = comp.inline_token_ranges();
+            for &(start, end) in &ranges {
+                if !vocab.contains_token_range(start, end) {
+                    return Err(Error::Compilation(format!(
+                        "token range {start}..={end} includes IDs that are not in the vocabulary"
+                    )));
+                }
+            }
+            let selected = range_set_blaze::RangeSetBlaze::from_iter(
+                ranges.iter().map(|&(a, b)| a..=b),
+            );
+            crate::import::reject_special_token_ids(&selected, vocab)?;
+        }
         Ok(())
     }
 
@@ -5239,7 +5254,7 @@ mod tests {
 
     #[test]
     fn recursive_special_token_routes_through_active_child_leaf_and_returns_to_parent() {
-        let vocab = Vocab::new(vec![(0, b"X".to_vec()), (1, b"!".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"X".to_vec()), (1, b"!".to_vec()), (100, b"[100]".to_vec())]);
         let child = RuntimeConstraint::compile(
             Grammar::glrm("start child; nt child ::= @token(100);"),
             &vocab,
