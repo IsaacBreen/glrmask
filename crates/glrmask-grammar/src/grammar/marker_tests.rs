@@ -70,5 +70,5 @@ fn ebnf_and_lark_support_the_same_marker_atom() {
     assert_eq!(flat.terminals.iter().filter(|t| matches!(t, Terminal::MarkerProbe { .. })).count(), 2);
     let lark = "start: @mark(7) \"a\" @mark(8)";
     let err = crate::parse_lark_document(lark).unwrap_err();
-    assert!(err.to_string().contains("markers (`@mark`) aren't supported"));
+    assert!(err.to_string().contains("`@mark` isn't supported"));
 }

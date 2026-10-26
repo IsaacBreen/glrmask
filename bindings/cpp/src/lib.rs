@@ -135,7 +135,7 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
         let ranges = input(r, n)?;
         for r in ranges {
             if r.start > r.end {
-                return Err(Error::invalid("token range start exceeds end"));
+                return Err(Error::invalid("token range start is after its end"));
             }
         }
         Ok(glrmask_token_set(

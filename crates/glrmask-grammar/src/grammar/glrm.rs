@@ -2893,7 +2893,7 @@ impl GlrmParser {
             Tok::At => {
                 if matches!(self.token_at(1), Tok::Ident(name) if name == "mark") {
                     #[cfg(not(feature = "internal-api"))]
-                    return Err(err("markers (`@mark`) aren't supported"));
+                    return Err(err("`@mark` isn't supported"));
                     #[cfg(feature = "internal-api")]
                     {
                         self.advance(); self.advance(); self.consume(&Tok::LParen)?;

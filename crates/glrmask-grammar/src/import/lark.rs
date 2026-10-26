@@ -413,7 +413,7 @@ impl<'a> Lexer<'a> {
                 Some(b'@') => {
                     self.pos += 1;
                     if self.input[self.pos..].starts_with(b"mark(") {
-                        return Err(GlrMaskError::GrammarParse("markers (`@mark`) aren't supported".into()));
+                        return Err(GlrMaskError::GrammarParse("`@mark` isn't supported".into()));
                     } else { tokens.push(self.lex_at_reference()?); }
                 }
                 Some(b'<') => tokens.push(self.lex_event_set()?),
