@@ -6,8 +6,7 @@ const g: api.Grammar = api.Grammar.fromLark('start: "a"');
 const trie: api.TokenTrie = {kind: 'token-trie', parserBackend: api.ParserBackend.LrTable, mergeEquivalentTokens: true};
 const c = api.Grammar.fromExpr(api.Expr.sequence(g, new api.TokenSet([99]))).compileSync(v, {maskStrategy: trie});
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);
-const accepted: boolean = s.isAccepting(); const markers: api.MarkerEvent[] = s.markerEvents();
-const offset: bigint|undefined = markers[0]?.byteOffset;
+const accepted: boolean = s.isAccepting();
 const saved: Uint8Array = c.saveSync(); api.Constraint.loadSync(saved, v);
 
 // @ts-expect-error Mask words must be unsigned 32-bit values.
@@ -19,7 +18,7 @@ g.compileSync(v, {optimisation: 'auto'});
 // @ts-expect-error States are obtained from a compiled Constraint, not constructed.
 new api.ConstraintState();
 s[Symbol.dispose](); c.dispose();
-void [range, accepted, offset];
+void [range, accepted];
 
 const precompiled: api.Module = g.precompileSync(v, {maskStrategy: api.MaskStrategy.ParserDwa});
 const precompiledAsync: Promise<api.Module> = g.precompile(v);

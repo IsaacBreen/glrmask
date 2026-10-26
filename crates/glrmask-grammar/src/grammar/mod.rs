@@ -9,5 +9,5 @@ pub(crate) mod terminal_choice_promotion;
 
 pub(crate) mod right_linear;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "internal-api"))]
 mod marker_tests;

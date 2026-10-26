@@ -24,7 +24,6 @@ enum Token {
     Terminal(String),
     Literal(String),
     Special(u32),
-    Marker(u32),
     EventSet(LarkTokenSet),
     External(String),
     JsonSchema(std::ops::Range<usize>),
@@ -211,8 +210,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
-        let marker = self.input[self.pos..].starts_with(b"mark(");
-        let prefix: &[u8] = if marker { b"mark(" } else { b"token(" };
+        let prefix: &[u8] = b"token(";
         if !self.input[self.pos..].starts_with(prefix) {
             return Err(GlrMaskError::GrammarParse(
                 "expected @token(<token-id>)".into(),
@@ -237,7 +235,7 @@ impl<'a> Lexer<'a> {
             ));
         }
         self.pos += 1;
-        Ok(if marker { Token::Marker(token_id) } else { Token::Special(token_id) })
+        Ok(Token::Special(token_id))
     }
 
     fn lex_event_set(&mut self) -> Result<Token,GlrMaskError> {
@@ -415,7 +413,7 @@ impl<'a> Lexer<'a> {
                 Some(b'@') => {
                     self.pos += 1;
                     if self.input[self.pos..].starts_with(b"mark(") {
-                        tokens.push(self.lex_special_token()?);
+                        return Err(GlrMaskError::GrammarParse("markers (`@mark`) aren't supported".into()));
                     } else { tokens.push(self.lex_at_reference()?); }
                 }
                 Some(b'<') => tokens.push(self.lex_event_set()?),
@@ -1294,7 +1292,6 @@ impl Parser {
                 | Some(Token::Terminal(_))
                 | Some(Token::Literal(_))
                 | Some(Token::Special(_))
-                | Some(Token::Marker(_))
                 | Some(Token::EventSet(_))
                 | Some(Token::External(_))
                 | Some(Token::JsonSchema(_))
@@ -1346,7 +1343,6 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
-            Some(Token::Marker(id)) => Ok(GrammarExpr::marker(id)),
             Some(Token::Special(token_id)) => {
                 let name=format!("$lark_event_{}",self.events.len());
                 self.remember_source_span(&name,position);

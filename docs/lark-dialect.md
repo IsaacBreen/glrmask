@@ -45,7 +45,6 @@ split text differently in Lark.
 | `<[^1,3-8]>`, `<[*]>` | Any token except 1 and 3 to 8; any token |
 | `%json { ... }` | A JSON Schema, inline |
 | `name[lazy]: ...` | A terminal that ends as soon as it can |
-| `@mark(id)` | A [marker](markers.md) |
 
 ### Externs
 

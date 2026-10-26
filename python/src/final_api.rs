@@ -244,7 +244,7 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
 #[pymethods]
 impl PyTokenSet {
     #[new]
-    #[pyo3(signature = (ids))]
+    #[pyo3(signature = (ids, /))]
     fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
         let ids = ids
             .try_iter()?
@@ -257,6 +257,7 @@ impl PyTokenSet {
 
     /// Creates a set from Python ranges with step 1 and exclusive stops; overlapping or adjacent ranges merge, and an empty or reversed range contributes nothing.
     #[staticmethod]
+    #[pyo3(signature = (ranges, /))]
     fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
         let ranges = ranges
             .try_iter()?
@@ -341,6 +342,7 @@ impl Drop for PyGrammar {
 impl PyGrammar {
     /// GLRM supports typed external declarations; bind them via `Module(g).bind(...)` before compiling.
     #[staticmethod]
+    #[pyo3(signature = (source, /))]
     fn from_glrm(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Glrm)
     }
@@ -349,6 +351,7 @@ impl PyGrammar {
     /// `format` is treated as an annotation only (as in JSON Schema 2020-12) and
     /// unrecognised keywords are ignored.
     #[staticmethod]
+    #[pyo3(signature = (schema, /))]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
         let source = match schema.extract::<String>() {
             Ok(source) => source,
@@ -364,6 +367,7 @@ impl PyGrammar {
 
     /// Named token atoms declare token externs; bind each through `Module.bind`.
     #[staticmethod]
+    #[pyo3(signature = (source, /))]
     fn from_lark(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Lark)
     }

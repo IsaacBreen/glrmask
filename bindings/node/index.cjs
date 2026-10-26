@@ -398,7 +398,6 @@ class Constraint extends Owned {
   get maskLength() { return invoke(() => handle(this, Constraint).maskLen); }
   clone() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
-  markerIds() { return invoke(() => handle(this, Constraint).markerIds()); }
   saveSync() { return invoke(() => handle(this, Constraint).saveSync()); }
   async save() { return invokeAsync(() => handle(this, Constraint).save()); }
   static loadSync(data, vocab) {
@@ -427,7 +426,6 @@ class ConstraintState extends Owned {
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }
   isTerminated() { return invoke(() => handle(this, ConstraintState).isTerminated()); }
   forcedTokens() { return invoke(() => handle(this, ConstraintState).forcedTokens()); }
-  markerEvents() { return invoke(() => handle(this, ConstraintState).markerEvents()); }
 }
 
 module.exports = Object.freeze({

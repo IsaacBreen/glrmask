@@ -15,7 +15,6 @@ pub struct glrmask_constraint(Arc<g::Constraint>);
 pub struct glrmask_state(core::State);
 pub struct glrmask_bytes(Vec<u8>);
 pub struct glrmask_u32s(Vec<u32>);
-pub struct glrmask_events(Vec<glrmask_marker_event>);
 
 pub struct glrmask_extern_item {
     pub name: String,
@@ -24,13 +23,12 @@ pub struct glrmask_extern_item {
 pub struct glrmask_externs(Vec<glrmask_extern_item>);
 
 #[repr(C)] pub struct glrmask_vocab_entry { pub id: u32, pub bytes: *const u8, pub bytes_len: usize }
-#[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_range { pub first: u32, pub last: u32 }
+#[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_range { pub start: u32, pub end: u32 }
 #[repr(C)] pub struct glrmask_extern {
     pub name: *const c_char,
     pub name_len: usize,
     pub kind: u32,
 }
-#[repr(C)] pub struct glrmask_marker_event { pub id: u32, pub byte_offset: u64 }
 
 const REJECTED: i32 = 6;
 
@@ -117,7 +115,6 @@ free!(glrmask_state_free, glrmask_state);
 free!(glrmask_bytes_free, glrmask_bytes);
 free!(glrmask_u32s_free, glrmask_u32s);
 free!(glrmask_externs_free, glrmask_externs);
-free!(glrmask_events_free, glrmask_events);
 
 clone_handle!(glrmask_vocab_clone, glrmask_vocab);
 clone_handle!(glrmask_token_set_clone, glrmask_token_set);
@@ -134,9 +131,17 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { produce(out, || Ok(glrmask_token_set(g::TokenSet::new(input(ids, n)?.iter().copied())))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_from_ranges(r: *const glrmask_token_range, n: usize, out: *mut *mut glrmask_token_set) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_token_set(
-        g::TokenSet::from_ranges(input(r, n)?.iter().map(|r| r.first..=r.last)),
-    ))) })
+    ffi(|| unsafe { produce(out, || {
+        let ranges = input(r, n)?;
+        for r in ranges {
+            if r.start > r.end {
+                return Err(Error::invalid("token range start exceeds end"));
+            }
+        }
+        Ok(glrmask_token_set(
+            g::TokenSet::from_ranges(ranges.iter().map(|r| r.start..r.end)),
+        ))
+    }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_equal(a: *const glrmask_token_set, b: *const glrmask_token_set, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(a)?.0 == read(b)?.0); Ok(()) })
@@ -200,9 +205,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_mask_len(p: *const glrmask_constraint, out: *mut usize) -> i32 {
     ffi(|| unsafe { *write(out)? = read(p)?.0.mask_len(); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_marker_ids(p: *const glrmask_constraint, out: *mut *mut glrmask_u32s) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.marker_ids().to_vec()))) })
-}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p: *const glrmask_constraint, out: *mut *mut glrmask_bytes) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_bytes(read(p)?.0.save()))) })
 }
@@ -244,9 +246,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_tokens(p: *const glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.forced_tokens()?))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_marker_events(p: *const glrmask_state, out: *mut *mut glrmask_events) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_events(read(p)?.0.marker_events()?.into_iter().map(|e| glrmask_marker_event { id: e.id, byte_offset: e.byte_offset }).collect()))) })
-}
 
 macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $fn(p:*const $handle,out:*mut *const $ty,n:*mut usize)->i32 {
@@ -255,7 +254,6 @@ macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
 };}
 data!(glrmask_bytes_data, glrmask_bytes, u8);
 data!(glrmask_u32s_data, glrmask_u32s, u32);
-data!(glrmask_events_data, glrmask_events, glrmask_marker_event);
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_len(p: *const glrmask_externs, out: *mut usize) -> i32 {
     ffi(|| unsafe { *write(out)? = read(p)?.0.iter().len(); Ok(()) })

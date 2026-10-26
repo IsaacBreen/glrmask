@@ -127,11 +127,11 @@ class TokenSet:
 
     In a grammar, it matches any one of its tokens. Every ID must be in the vocabulary.
     """
-    def __new__(cls, ids: Iterable[int]) -> TokenSet:
+    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
         """Creates a set from `ids`."""
         ...
     @staticmethod
-    def from_ranges(ranges: Iterable[range]) -> TokenSet:
+    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
         """Creates a set from `range` objects, which must have step 1."""
         ...
     def __repr__(self) -> str:
@@ -162,7 +162,7 @@ class Vocab:
         """
         ...
     @staticmethod
-    def from_llama_cpp(llm: Any) -> Vocab:
+    def from_llama_cpp(llm: Any, /) -> Vocab:
         """Creates a vocabulary from a llama-cpp-python `Llama` model.
 
         Tokens with no text, such as control and end-of-generation tokens, become special tokens.
@@ -329,18 +329,18 @@ class Module:
 class Grammar:
     """A grammar, written as source text or built from an `Expr`."""
     @staticmethod
-    def from_glrm(source: str) -> Grammar:
+    def from_glrm(source: str, /) -> Grammar:
         """Creates a grammar from GLRM, GLRMask's native format."""
         ...
     @staticmethod
-    def from_json_schema(schema: Any) -> Grammar:
+    def from_json_schema(schema: Any, /) -> Grammar:
         """Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.
 
         Standard keywords that GLRMask does not support are an error. Unknown keywords and `format` are ignored.
         """
         ...
     @staticmethod
-    def from_lark(source: str) -> Grammar:
+    def from_lark(source: str, /) -> Grammar:
         """Creates a grammar from Lark source.
 
         A token name such as `<|end|>` declares a token extern, which must be bound before compiling.
@@ -413,9 +413,6 @@ class Constraint:
 
     Share one between threads, and call `start` for each sequence.
     """
-    def marker_ids(self) -> list[int]:
-        """The IDs of the grammar's markers, in ascending order."""
-        ...
     def start(self) -> ConstraintState:
         """Starts a new sequence."""
         ...
@@ -442,12 +439,6 @@ class ConstraintState:
 
     Copy it to try tokens without changing the original.
     """
-    def marker_events(self) -> list[tuple[int, int]]:
-        """The markers passed by the most recent commit, or by `start()`, as `(marker_id, byte_offset)` pairs in byte order.
-
-        A marker means some parse reached that point. That parse may still fail later.
-        """
-        ...
     def copy(self) -> ConstraintState:
         """A copy of the state, for trying tokens without changing this one."""
         ...
@@ -460,25 +451,25 @@ class ConstraintState:
         `size` sets the array length, for example to match your logits; it must cover every token ID. All entries are `False` when nothing can follow: the sequence is complete, or a commit failed.
         """
         ...
-    def fill_mask(self, bitmask: NDArray[np.int32]) -> None:
+    def fill_mask(self, bitmask: NDArray[np.int32], /) -> None:
         """Writes the mask into `bitmask`, a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set. Extra words are set to zero.
         """
         ...
-    def commit_token(self, token_id: int) -> bool:
+    def commit_token(self, token_id: int, /) -> bool:
         """Commits one token.
 
         Returns `False` if it is not allowed, leaving the state unusable. To try a token safely, commit it on a copy.
         """
         ...
-    def commit_tokens(self, token_ids: Sequence[int]) -> bool:
+    def commit_tokens(self, token_ids: Sequence[int], /) -> bool:
         """Commits the tokens in order.
 
         Returns `False` at the first token that is not allowed, leaving the state unusable.
         """
         ...
-    def commit_bytes(self, data: bytes) -> bool:
+    def commit_bytes(self, data: bytes, /) -> bool:
         """Commits raw bytes instead of a token.
 
         Returns `False` if they are not allowed, leaving the state unusable. Bytes never match a token set; commit those tokens with `commit_token`.

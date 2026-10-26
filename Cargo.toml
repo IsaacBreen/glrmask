@@ -19,7 +19,7 @@ workspace = true
 
 [features]
 default = []
-internal-api = []
+internal-api = ["glrmask-grammar/internal-api"]
 # Runs tests that take over ~10 s; they are ignored by default.
 slow-tests = [
     "glrmask-glr/slow-tests",
@@ -39,7 +39,7 @@ glrmask-weight = { version = "=0.2.0", path = "crates/glrmask-weight", features 
 glrmask-weighted-automata = { version = "=0.2.0", path = "crates/glrmask-weighted-automata" }
 glrmask-vocab = { version = "=0.2.1", path = "crates/glrmask-vocab", features = ["internal-api"] }
 glrmask-lexer = { version = "=0.2.1", path = "crates/glrmask-lexer", features = ["internal-api"] }
-glrmask-grammar = { version = "=0.2.1", path = "crates/glrmask-grammar", features = ["internal-api"] }
+glrmask-grammar = { version = "=0.2.1", path = "crates/glrmask-grammar" }
 glrmask-glr = { version = "=0.2.1", path = "crates/glrmask-glr", features = ["internal-api"] }
 glrmask-json-schema = { version = "=0.2.1", path = "crates/glrmask-json-schema", features = ["internal-api"] }
 glrmask-artifact = { version = "=0.2.1", path = "crates/glrmask-artifact", features = ["internal-api"] }
@@ -162,6 +162,7 @@ path = "examples/dev/exact_token_range_bench.rs"
 [[example]]
 name = "marker_bench"
 path = "examples/dev/marker_bench.rs"
+required-features = ["internal-api"]
 
 [[example]]
 name = "parser_grammar_constructor"
@@ -544,6 +545,7 @@ required-features = ["internal-api"]
 [[test]]
 name = "marker_commit"
 path = "tests/marker_commit.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "json_schema_policy"

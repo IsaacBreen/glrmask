@@ -82,14 +82,14 @@ void exact_and_unicode() {
         cm.bind("T", TokenSet({99}));
         auto control = cm.compile(v, strategy_options(i)).start(); CHECK(control.commit_token(99)); CHECK(control.is_accepting());
     }
-    auto merged = TokenSet::from_ranges({{31,32},{32,32}});
+    auto merged = TokenSet::from_ranges({{31,33}});
     auto duplicate = TokenSet({31,31,32});
-    auto reversed = TokenSet::from_ranges({{2,0}});
+    throws([]{ TokenSet::from_ranges({{2,0}}); }, GLRMASK_INVALID_ARGUMENT);
     auto empty = TokenSet::from_ranges({{5,5}});
     Vocab maximum({}, {0xffffffff});
     auto high = TokenSet::from_ranges({{0xffffffff, 0xffffffff}});
     auto none = TokenSet(std::vector<TokenId>{});
-    (void)merged; (void)duplicate; (void)high; (void)none; (void)reversed; (void)empty;
+    (void)merged; (void)duplicate; (void)high; (void)none; (void)empty;
 }
 
 void end_tokens() {
@@ -161,17 +161,9 @@ void composition_and_persistence() {
     }
 }
 
-void markers_and_frontends() {
+void frontends() {
     auto v = vocabulary();
     for (unsigned i=0; i<3; ++i) {
-        auto g = Grammar::from_glrm(R"(glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);)");
-        auto m = Module(g);
-        auto c = m.compile(v, strategy_options(i)); CHECK(c.marker_ids()==std::vector<TokenId>({10,20,30}));
-        auto s = c.start(); CHECK(s.marker_events().size()==1 && s.marker_events()[0].byte_offset==0);
-        CHECK(s.commit_token(31)); const auto events = s.marker_events();
-        CHECK(events.size()==2 && events[0].id==20 && events[0].byte_offset==1 && events[1].id==30 && events[1].byte_offset==2);
-        CHECK(ConstraintState(s).marker_events().size()==2);
-        auto load = Constraint::load(c.save(), v); CHECK(load.marker_ids()==c.marker_ids());
         auto lm = Module(Grammar::from_lark("start: \"a\" \"b\""));
         auto l = lm.compile(v, strategy_options(i)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
     }
@@ -367,9 +359,9 @@ void canonical_modules() {
     CHECK(grammar_externs.externs().size() == 2);
 
     // TokenSet equality compares the normalized ID sets.
-    CHECK(TokenSet({1,2}) == TokenSet::from_ranges({{1,2}}));
-    CHECK(TokenSet({1,2}) != TokenSet::from_ranges({{1,3}}));
-    CHECK(!(TokenSet({1,2}) != TokenSet::from_ranges({{1,2}})));
+    CHECK(TokenSet({1,2}) == TokenSet::from_ranges({{1,3}}));
+    CHECK(TokenSet({1,2}) != TokenSet::from_ranges({{1,2}}));
+    CHECK(!(TokenSet({1,2}) != TokenSet::from_ranges({{1,3}})));
 
     // Grammar::precompile is the module-returning mirror of Grammar::compile.
     auto open_host = host.precompile(v);
@@ -423,7 +415,7 @@ int main(int argc, char** argv) {
         exact_and_unicode();
         end_tokens();
         composition_and_persistence();
-        markers_and_frontends();
+        frontends();
         threads_and_errors();
         std::cout << "C++ binding regression groups: 7 passed\n"; return 0;
     } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

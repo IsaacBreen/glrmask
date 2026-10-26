@@ -174,13 +174,6 @@ including bound grammars. Precompiled work is never thrown away. Each precompile
 request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with
 precompiled parts use `TemplateDfa`.
 
-## Markers
-
-`@mark(id)` in a GLRM rule marks a point in the grammar. After each commit, `state.marker_events()` lists the markers
-the commit passed, with their byte offsets. `constraint.marker_ids()` lists the grammar's marker IDs. A marker means
-some parse reached that point; that parse may still fail later. Markers never change what's allowed. See
-[markers](docs/markers.md).
-
 ## Errors
 
 Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
@@ -195,7 +188,7 @@ an annotation, and `oneOf` requires exactly one match. A schema feature GLRMask 
 has one layout, the one Python's `json.dumps` writes by default: no whitespace outside strings except a space after each
 `,` and `:`, as in `{"a": [1, 2]}`.
 
-**GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, markers, scoped grammars, and
+**GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, scoped grammars, and
 regular-expression intersection and subtraction. See [GLRM](docs/glrm-format.md).
 
 ```glrm

@@ -70,8 +70,6 @@ fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
     assert_eq!(size_of::<glrmask_compile_options>(), 24);
     assert_eq!(size_of::<glrmask_extern>(), 24);
-    assert_eq!(size_of::<glrmask_marker_event>(), 16);
-    assert_eq!(offset_of!(glrmask_marker_event, byte_offset), 8);
     assert_eq!(offset_of!(glrmask_extern, kind), 16);
 }
 

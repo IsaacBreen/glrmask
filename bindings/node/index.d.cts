@@ -86,13 +86,6 @@ export interface Externs extends ReadonlyMap<string, Extern> {
   readonly unbound: Externs;
 }
 
-/** A marker passed by a commit. */
-export interface MarkerEvent {
-  /** The marker's ID. */
-  readonly id: number;
-  /** Where the marker is, in bytes from the start of the sequence. */
-  readonly byteOffset: bigint;
-}
 /** Options for `new Vocab`. */
 export interface VocabOptions {
   /** Tokens that have no bytes, such as end-of-sequence or tool-call tokens. They can be used in token sets but never match text. */
@@ -273,8 +266,6 @@ export declare class Constraint implements Disposable {
   clone(): Constraint;
   /** Starts a new sequence. */
   start(): ConstraintState;
-  /** The IDs of the grammar's markers, in ascending order. */
-  markerIds(): Uint32Array;
   /** Like `saveSync`, but returns a promise and doesn't block the event loop. */
   save(): Promise<Uint8Array>;
   /** Saves the constraint as bytes, without the vocabulary.
@@ -337,10 +328,6 @@ export declare class ConstraintState implements Disposable {
    *
    * Stops where more than one token could follow, or after 10,000 tokens or bytes. When forced text could be tokenized in several ways, the longest token is chosen at each step. */
   forcedTokens(): Uint32Array;
-  /** The markers passed by the most recent commit, or by `start`, in byte order.
-   *
-   * A marker means some parse reached that point. That parse may still fail later. */
-  markerEvents(): MarkerEvent[];
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
   /** Same as `dispose()`, for `using` declarations. */

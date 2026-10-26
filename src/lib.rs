@@ -73,6 +73,8 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub(crate) use public_api::with_deep_stack;
 
 pub use runtime::{Constraint, ConstraintState};
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab};
 pub use error::{Error, ErrorKind, Result};

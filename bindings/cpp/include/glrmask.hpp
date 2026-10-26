@@ -16,12 +16,8 @@
 namespace glrmask {
 /// An original model token ID.
 using TokenId = std::uint32_t;
-/// A marker ID, from `@mark(id)` in the grammar.
-using MarkerId = std::uint32_t;
-/// Token IDs from `first` to `last`, inclusive.
+/// A range of token IDs. `start` is included and `end` is not.
 using TokenRange = glrmask_token_range;
-/// A marker passed by a commit.
-using MarkerEvent = glrmask_marker_event;
 /// A byte buffer.
 using Bytes = std::vector<std::uint8_t>;
 
@@ -249,7 +245,7 @@ class TokenSet : public detail::Owned<glrmask_token_set, glrmask_token_set_free,
 public:
     /// Creates a set from `ids`.
     explicit TokenSet(const std::vector<TokenId>& ids) : Base(create_ids(ids)) {}
-    /// Creates a set from inclusive `ranges`.
+    /// Builds a token set from half-open ranges: each range includes `start` and excludes `end`.
     static TokenSet from_ranges(const std::vector<TokenRange>& ranges) {
         glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_from_ranges(ranges.data(), ranges.size(), &p)); return TokenSet(p);
     }
@@ -504,8 +500,6 @@ public:
     ConstraintState start() const;
     /// The number of `uint32_t` words in a mask.
     std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_len(native_handle(), &n)); return n; }
-    /// The IDs of the grammar's markers, in ascending order.
-    std::vector<MarkerId> marker_ids() const { glrmask_u32s* p = nullptr; detail::check(glrmask_constraint_marker_ids(native_handle(), &p)); return detail::take_ids(p); }
     /// Saves the constraint as bytes, without the vocabulary.
     ///
     /// Bytes saved by one GLRMask version may not load in another.
@@ -573,7 +567,7 @@ public:
     ///
     /// Returns `false` at the first token that is not allowed, leaving the state
     /// unusable.
-    bool commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
+    [[nodiscard]] bool commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
     /// Commits raw bytes instead of a token.
     ///
     /// Returns `false` if they are not allowed, leaving the state unusable. Bytes
@@ -582,27 +576,17 @@ public:
     /// Commits raw bytes instead of a token.
     ///
     /// Returns `false` if they are not allowed, leaving the state unusable.
-    bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
+    [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
     /// Commits raw bytes instead of a token.
     ///
     /// Returns `false` if they are not allowed, leaving the state unusable.
-    bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
+    [[nodiscard]] bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
     /// The tokens that must come next, without committing them.
     ///
     /// Stops where more than one token could follow, or after 10,000 tokens or
     /// bytes. When forced text could be tokenized in several ways, the longest
     /// token is chosen at each step.
     std::vector<TokenId> forced_tokens() const { glrmask_u32s* p = nullptr; detail::check(glrmask_state_forced_tokens(native_handle(), &p)); return detail::take_ids(p); }
-    /// The markers passed by the most recent commit, or by `start`, in byte order.
-    ///
-    /// A marker means some parse reached that point. That parse may still fail
-    /// later.
-    std::vector<MarkerEvent> marker_events() const {
-        glrmask_events* raw = nullptr; detail::check(glrmask_state_marker_events(native_handle(), &raw));
-        std::unique_ptr<glrmask_events, decltype(&glrmask_events_free)> owner(raw, glrmask_events_free);
-        const MarkerEvent* data = nullptr; std::size_t len = 0; detail::check(glrmask_events_data(raw, &data, &len));
-        return len ? std::vector<MarkerEvent>(data, data + len) : std::vector<MarkerEvent>{};
-    }
 };
 
 inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& options) const {

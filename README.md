@@ -209,7 +209,7 @@ complete match, and `is_terminated()` whether nothing more can be committed.
 `ParserDwa`, or `TokenTrie` when that would be too large. `BoundaryMaskStrategy` makes the same choice where a grammar
 meets a bound extern. Every strategy produces the same masks.
 
-The [full guide](GUIDE.md) covers generation, composition, token sets, strategies, markers and errors.
+The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.
 
 ## How it works
 

@@ -16,9 +16,11 @@ use glrmask_parser_dwa::__private::templates::native::{NativeTableIndex, Program
 use crate::compiler::glr::table::AdmissionPolicy;
 
 /// A marker ID, from `@mark(id)` in the grammar.
+#[doc(hidden)]
 pub type MarkerId = u32;
 
 /// A marker passed by a commit.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarkerEvent {
     /// The marker's ID.
@@ -267,6 +269,8 @@ impl MarkerQueries {
 
 impl Constraint {
     /// The IDs of the grammar's markers, in ascending order.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn marker_ids(&self) -> &[MarkerId] {
         self.marker_queries.as_deref().map_or(&[], |queries| queries.ids.as_ref())
     }
@@ -432,6 +436,8 @@ impl super::ConstraintState<'_> {
     ///
     /// A marker means some parse reached that point. That parse may still fail
     /// later.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn marker_events(&self) -> &[MarkerEvent] {
         self.markers.as_deref().map_or(&[], |markers| markers.events.as_slice())
     }

@@ -2892,11 +2892,16 @@ impl GlrmParser {
             }
             Tok::At => {
                 if matches!(self.token_at(1), Tok::Ident(name) if name == "mark") {
-                    self.advance(); self.advance(); self.consume(&Tok::LParen)?;
-                    let id = u32::try_from(self.expect_int()?)
-                        .map_err(|_| err("marker ID does not fit in u32"))?;
-                    self.consume(&Tok::RParen)?;
-                    return Ok(GrammarExpr::marker(id));
+                    #[cfg(not(feature = "internal-api"))]
+                    return Err(err("markers (`@mark`) aren't supported"));
+                    #[cfg(feature = "internal-api")]
+                    {
+                        self.advance(); self.advance(); self.consume(&Tok::LParen)?;
+                        let id = u32::try_from(self.expect_int()?)
+                            .map_err(|_| err("marker ID does not fit in u32"))?;
+                        self.consume(&Tok::RParen)?;
+                        return Ok(GrammarExpr::marker(id));
+                    }
                 }
                 if self.version == GlrmVersion::V1 {
                     return Err(err("GLRM has no @token(id) syntax; declare 'extern token NAME;' and bind it"));

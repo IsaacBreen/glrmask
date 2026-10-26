@@ -202,3 +202,17 @@ test('Module: asynchronous precompile rejects a stale completion atomically',asy
   parent.bind('child',source());
   await assert.rejects(pending,/changed during precompile/);accept(parent,v,[4]);
 });
+
+test('Grammar.clone and Module.clone return independent copies', () => {
+  const g1 = Grammar.fromGlrm('glrm 1; start root; extern token a; nt root = a;');
+  const g2 = g1.clone();
+  g2.bind('a', 1);
+  assert.equal(g1.externs.unbound.size, 1);
+  assert.equal(g2.externs.unbound.size, 0);
+
+  const m1 = new Module(Grammar.fromGlrm('glrm 1; start root; extern token a; nt root = a;'));
+  const m2 = m1.clone();
+  m2.bind('a', 1);
+  assert.equal(m1.externs.unbound.size, 1);
+  assert.equal(m2.externs.unbound.size, 0);
+});

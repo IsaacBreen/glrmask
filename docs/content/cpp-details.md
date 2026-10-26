@@ -14,7 +14,7 @@ glrmask::Vocab vocab({
 ```
 
 `TokenSet(ids)` is a set of token IDs, and
-`TokenSet::from_ranges({{first, last}})` builds one from ranges that include `last`. See [token
+`TokenSet::from_ranges({{start, end}})` builds one from ranges that include `start` but not `end`. See [token
 sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Grammars
@@ -97,8 +97,7 @@ so copy it first to try a token without committing to it. Commit special tokens 
 bytes never match them.
 
 `is_accepting()` says whether the input so far is a complete match, and `is_terminated()` whether nothing more can be
-committed. `forced_tokens()` returns the tokens that must come next. `marker_events()` lists the markers the last commit
-passed, each with an `id` and a `byte_offset`.
+committed. `forced_tokens()` returns the tokens that must come next.
 
 [examples/generate.cpp](https://github.com/IsaacBreen/glrmask/blob/main/bindings/cpp/examples/generate.cpp) is a
 complete generation loop.

@@ -621,6 +621,7 @@ impl PyVocab {
     ///
     /// Tokens with no text, such as control and end-of-generation tokens, become special tokens.
     #[staticmethod]
+    #[pyo3(signature = (llm, /))]
     fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
         Ok(Self {
@@ -791,11 +792,6 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Sorted, distinct application marker IDs, independent of model token IDs.
-    fn marker_ids(&self) -> Vec<u32> {
-        self.inner.marker_ids().to_vec()
-    }
-
     /// Serializes without the vocabulary; load with the exact original token-ID/byte mapping.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.detach(|| self.inner.save());
@@ -977,18 +973,21 @@ pub struct PyDynamicConstraintState {
 
 #[pymethods]
 impl PyDynamicConstraintState {
+    #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
     /// Commits one model token event; returns false when it is disallowed.
+    #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
     /// Commits model token IDs in order; returns false at the first disallowed event.
+    #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
@@ -1048,6 +1047,7 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
+    #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         self.inner
@@ -1115,13 +1115,6 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    /// Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.
-    fn marker_events(&self) -> Vec<(u32, u64)> {
-        self.inner.with_dependent(|_, state| {
-            state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
-        })
-    }
-
     /// Independent snapshot at the current prefix.
     fn copy(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
@@ -1151,6 +1144,7 @@ impl PyConstraintState {
     }
 
     /// Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.
+    #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -1169,18 +1163,21 @@ impl PyConstraintState {
     }
 
     /// Commits one model token event; returns false when it is disallowed.
+    #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
     /// Commits model token IDs in order; returns false at the first disallowed event.
+    #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
     }
 
     /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
+    #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))

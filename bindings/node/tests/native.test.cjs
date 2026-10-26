@@ -71,14 +71,6 @@ for(const {label:maskStrategy,options} of strategies) {
     const saving=c.save();c.dispose();assert.ok((await saving).length>0);
     assert.throws(()=>Constraint.loadSync(Buffer.from('not an artifact')));
   });
-  test(`${maskStrategy}: markers use exact BigInt byte offsets and survive snapshots`,async()=>{
-    const v=vocab(),g=Grammar.fromGlrm('glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);');
-    const c=await g.compile(v,{...options});assert.deepEqual(Array.from(c.markerIds()),[10,20,30]);
-    const s=c.start();assert.deepEqual(s.markerEvents(),[{id:10,byteOffset:0n}]);
-    assert.ok(s.commitToken(31));const expected=[{id:20,byteOffset:1n},{id:30,byteOffset:2n}];
-    assert.deepEqual(s.markerEvents(),expected);assert.deepEqual(s.clone().markerEvents(),expected);
-    assert.deepEqual((await Constraint.load(await c.save(),v)).markerIds(),c.markerIds());
-  });
 }
 
 test('token sets normalize ranges and expose no inspection accessors',()=>{

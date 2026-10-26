@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- In C and C++, token ranges are now `{start, end}` with `end` excluded, as in Rust, Python and Node.js. They used to be `{first, last}` with `last` included.
+- Removed markers (`@mark(id)`, `marker_events()` and `marker_ids()`) from this release. They will return in a later one.
 - Removed EBNF as a grammar format; use Lark or GLRM. In C, `GLRMASK_EBNF` is gone and the other format constants keep their values.
 - Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_len()` for the mask's length.
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.

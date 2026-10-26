@@ -66,9 +66,6 @@ pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec
     }).collect()
 }
 
-#[napi(object)]
-pub struct NativeMarkerEvent { pub id: u32, pub byte_offset: BigInt }
-
 #[napi]
 pub struct NativeVocab { inner: Handle<g::Vocab> }
 #[napi]
@@ -226,8 +223,6 @@ impl NativeConstraint {
     #[napi(getter)]
     pub fn mask_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_len() as f64)) }
     #[napi]
-    pub fn marker_ids(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.marker_ids().to_vec().into())) }
-    #[napi]
     pub fn save_sync(&self) -> napi::Result<Buffer> {
         call(|| Ok(live(&self.inner)?.save().into()))
     }
@@ -269,12 +264,6 @@ impl NativeState {
     pub fn is_terminated(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_terminated()) }
     #[napi]
     pub fn forced_tokens(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.forced_tokens()?.into())) }
-    #[napi]
-    pub fn marker_events(&self) -> napi::Result<Vec<NativeMarkerEvent>> {
-        call(|| Ok(live(&self.inner)?.marker_events()?.into_iter().map(|e| NativeMarkerEvent {
-            id: e.id, byte_offset: BigInt { sign_bit: false, words: vec![e.byte_offset] },
-        }).collect()))
-    }
 }
 
 pub struct CompileTask { module: g::Module, vocab: g::Vocab, options: g::CompileOptions }

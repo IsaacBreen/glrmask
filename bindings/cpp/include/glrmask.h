@@ -100,12 +100,14 @@ typedef struct glrmask_state glrmask_state;
 typedef struct glrmask_bytes glrmask_bytes;
 typedef struct glrmask_u32s glrmask_u32s;
 typedef struct glrmask_externs glrmask_externs;
-typedef struct glrmask_events glrmask_events;
 
 /// One vocabulary entry: a token ID and its exact bytes.
 typedef struct { uint32_t id; const uint8_t *bytes; size_t bytes_len; } glrmask_vocab_entry;
-/// Token IDs from `first` to `last`, inclusive.
-typedef struct { uint32_t first; uint32_t last; } glrmask_token_range;
+/** A range of token IDs. `start` is included and `end` is not. */
+typedef struct {
+    uint32_t start; /**< First token ID in the range. */
+    uint32_t end;   /**< One past the last token ID. */
+} glrmask_token_range;
 /// Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
 typedef struct {
     uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value; 0 is an LR table.
@@ -125,9 +127,6 @@ typedef struct {
     const char *name; size_t name_len;  ///< Declared name (borrowed).
     uint32_t kind;                      ///< GLRMASK_EXTERN_TOKEN or GLRMASK_EXTERN_GRAMMAR.
 } glrmask_extern;
-/// A marker passed by a commit: its ID and byte offset from the start of the
-/// sequence.
-typedef struct { uint32_t id; uint64_t byte_offset; } glrmask_marker_event;
 /// One part of an expression; `kind` is a `GLRMASK_OPERAND_*` value.
 typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
 /// The kinds of expression part: grammar, module, expression, token ID, token set.
@@ -262,8 +261,6 @@ GLRMASK_API void glrmask_constraint_free(glrmask_constraint* p);
 GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* p,glrmask_state** out);
 /// Writes the number of `uint32_t` words in a mask.
 GLRMASK_API glrmask_status glrmask_constraint_mask_len(const glrmask_constraint* p,size_t* out);
-/// Writes the grammar's marker IDs, in ascending order.
-GLRMASK_API glrmask_status glrmask_constraint_marker_ids(const glrmask_constraint* p,glrmask_u32s** out);
 /// Saves the constraint as bytes, without the vocabulary.
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* p,glrmask_bytes** out);
 /// Loads a constraint saved with `glrmask_constraint_save`. `vocab` must be the
@@ -303,9 +300,6 @@ GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* p,const uin
 /// Writes the tokens that must come next, without committing them. Stops where
 /// more than one token could follow, or after 10,000 tokens or bytes.
 GLRMASK_API glrmask_status glrmask_state_forced_tokens(const glrmask_state* p,glrmask_u32s** out);
-/// Writes the markers passed by the most recent commit, or by
-/// `glrmask_constraint_start`, in byte order.
-GLRMASK_API glrmask_status glrmask_state_marker_events(const glrmask_state* p,glrmask_events** out);
 
 /// Points `*out_data` at the contents, valid until the buffer is freed.
 GLRMASK_API glrmask_status glrmask_bytes_data(const glrmask_bytes* p,const uint8_t** out_data,size_t* out_len);
@@ -315,10 +309,6 @@ GLRMASK_API void glrmask_bytes_free(glrmask_bytes* p);
 GLRMASK_API glrmask_status glrmask_u32s_data(const glrmask_u32s* p,const uint32_t** out_data,size_t* out_len);
 /// Frees a u32 buffer.
 GLRMASK_API void glrmask_u32s_free(glrmask_u32s* p);
-/// Points `*out_data` at the contents, valid until the buffer is freed.
-GLRMASK_API glrmask_status glrmask_events_data(const glrmask_events* p,const glrmask_marker_event** out_data,size_t* out_len);
-/// Frees a marker-event buffer.
-GLRMASK_API void glrmask_events_free(glrmask_events* p);
 
 /// Writes the number of externs.
 GLRMASK_API glrmask_status glrmask_externs_len(const glrmask_externs* p,size_t* out);
