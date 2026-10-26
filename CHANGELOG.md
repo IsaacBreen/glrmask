@@ -7,6 +7,7 @@
 - Grammar text can no longer allow a special token. In Lark, `<[*]>` and `<[^...]>` match only tokens with bytes, and
   naming a special token by ID, with `<[...]>` or `@token(...)` in Lark or `@token(...)` in EBNF, is a compile error.
   Declare a token extern instead (`<|name|>` in Lark) and bind the token to it.
+- Committing empty input to a failed state now returns `false`.
 
 ## 0.4.0
 
