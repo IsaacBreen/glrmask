@@ -4775,8 +4775,8 @@ mod tests {
             let scenario_started = Instant::now();
             let mut st_dyn = dynamic.start();
             let mut st_static = static_comp.start();
-            let mut check = |st_dyn: &mut crate::runtime::ConstraintState<'_>,
-                             st_static: &mut crate::runtime::ConstraintState<'_>,
+            let mut check = |st_dyn: &mut crate::runtime::ConstraintState,
+                             st_static: &mut crate::runtime::ConstraintState,
                              scenario: usize,
                              consumed: usize| {
                 let mask_dyn = st_dyn.mask();
@@ -5003,8 +5003,8 @@ mod tests {
             format!("{hash:016x}")
         };
         let record = |consumed: usize,
-                          st_dyn: &mut crate::runtime::ConstraintState<'_>,
-                          st_static: &mut crate::runtime::ConstraintState<'_>,
+                          st_dyn: &mut crate::runtime::ConstraintState,
+                          st_static: &mut crate::runtime::ConstraintState,
                           positions: &mut Vec<serde_json::Value>| {
             let mask_dyn = st_dyn.mask();
             let mask_static = st_static.mask();
@@ -5187,8 +5187,8 @@ mod tests {
         let mut first: Option<String> = None;
         let mut st_dyn = dynamic.start();
         let mut st_other = other.start();
-        let mut check = |st_dyn: &mut crate::runtime::ConstraintState<'_>,
-                         st_other: &mut crate::runtime::ConstraintState<'_>,
+        let mut check = |st_dyn: &mut crate::runtime::ConstraintState,
+                         st_other: &mut crate::runtime::ConstraintState,
                          step_index: usize,
                          first: &mut Option<String>| {
             let mask_dyn = st_dyn.mask();

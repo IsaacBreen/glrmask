@@ -482,13 +482,13 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
     }
 }
 
-pub(super) fn fill(state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
+pub(super) fn fill(state: &ConstraintState, buf: &mut [u32]) -> Result<bool, String> {
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
     fill_with_vocab(state, buf, vocab)
 }
 
 pub(super) fn fill_with_vocab(
-    state: &ConstraintState<'_>, buf: &mut [u32], vocab: &DynamicMaskVocab,
+    state: &ConstraintState, buf: &mut [u32], vocab: &DynamicMaskVocab,
 ) -> Result<bool, String> {
     with_provider(state, vocab.max_token_byte_len(), |provider| {
         fill_recursive_mask_using_vocab(state, buf, provider, vocab)
@@ -496,7 +496,7 @@ pub(super) fn fill_with_vocab(
 }
 
 pub(super) fn fill_with_vocab_factory<V, F>(
-    state: &ConstraintState<'_>, buf: &mut [u32], domain: PureMaskByteDomain, factory: F,
+    state: &ConstraintState, buf: &mut [u32], domain: PureMaskByteDomain, factory: F,
 ) -> Result<bool, String>
 where
     V: std::ops::Deref<Target = DynamicMaskVocab>,
@@ -508,14 +508,14 @@ where
 }
 
 fn with_provider(
-    state: &ConstraintState<'_>, max_token_len: usize,
+    state: &ConstraintState, max_token_len: usize,
     evaluate: impl FnOnce(&mut RecursiveConfigTransitions<'_, '_>) -> Result<bool, String>,
 ) -> Result<bool, String> {
     with_provider_and_baseline(state, max_token_len, None, evaluate)
 }
 
 pub(super) fn fill_with_vocab_additive(
-    state: &ConstraintState<'_>, buf: &mut [u32], vocab: &DynamicMaskVocab, already: &[u32],
+    state: &ConstraintState, buf: &mut [u32], vocab: &DynamicMaskVocab, already: &[u32],
 ) -> Result<bool, String> {
     with_provider_and_baseline(state, vocab.max_token_byte_len(), Some(already), |provider| {
         fill_recursive_mask_using_vocab(state, buf, provider, vocab)
@@ -523,7 +523,7 @@ pub(super) fn fill_with_vocab_additive(
 }
 
 pub(super) fn fill_with_vocab_factory_additive<V, F>(
-    state: &ConstraintState<'_>, buf: &mut [u32], domain: PureMaskByteDomain,
+    state: &ConstraintState, buf: &mut [u32], domain: PureMaskByteDomain,
     already: &[u32], factory: F,
 ) -> Result<bool, String>
 where V: std::ops::Deref<Target = DynamicMaskVocab>, F: FnOnce() -> Result<V, String> {
@@ -533,12 +533,12 @@ where V: std::ops::Deref<Target = DynamicMaskVocab>, F: FnOnce() -> Result<V, St
 }
 
 fn with_provider_and_baseline(
-    state: &ConstraintState<'_>, max_token_len: usize, already: Option<&[u32]>,
+    state: &ConstraintState, max_token_len: usize, already: Option<&[u32]>,
     evaluate: impl FnOnce(&mut RecursiveConfigTransitions<'_, '_>) -> Result<bool, String>,
 ) -> Result<bool, String> {
     let profile = crate::env::var_os("GLRMASK_PROFILE_RECURSIVE_PHASES").is_some();
     let setup_start = profile.then(std::time::Instant::now);
-    let routing = RecursiveFullWalkTransitions::new_for_parser_routing(state.constraint)
+    let routing = RecursiveFullWalkTransitions::new_for_parser_routing(&state.constraint)
         .ok_or_else(|| "recursive composition has no valid scoped lexer/parser layout".to_owned())?;
     let mut scans = routing.leaves.iter()
         .map(|leaf| DynamicNfaScanCache::new(leaf.constraint, None)).collect::<Vec<_>>();
@@ -599,7 +599,7 @@ mod epsilon_reset_boundary_tests {
     use crate::{Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
-    fn mask_with_budget(state: &ConstraintState<'_>, budget: u8) -> (Vec<u32>, usize) {
+    fn mask_with_budget(state: &ConstraintState, budget: u8) -> (Vec<u32>, usize) {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
         let mut mask = vec![u32::MAX; state.constraint.mask_len() + 2];
         let mut proved = 0;
@@ -686,7 +686,7 @@ mod closed_admission_support_tests {
     use crate::{Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
-    fn mask_with_policy(state: &ConstraintState<'_>, direct: bool) -> (Vec<u32>, usize) {
+    fn mask_with_policy(state: &ConstraintState, direct: bool) -> (Vec<u32>, usize) {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
         let mut mask = vec![u32::MAX; state.constraint.mask_len() + 2];
         let mut queries = 0;

@@ -572,5 +572,9 @@ path = "tests/public_thread_safety.rs"
 required-features = ["internal-api"]
 
 [[test]]
+name = "owned_constraint_state"
+path = "tests/owned_constraint_state.rs"
+
+[[test]]
 name = "seed3229_token_commit_stall"
 path = "tests/seed3229_token_commit_stall.rs"

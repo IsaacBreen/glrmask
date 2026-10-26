@@ -10,6 +10,7 @@
 - Rust: `ConstraintState::mask_len` is new, matching the other bindings.
 - Rust: `Grammar::bind` takes any `Binding`, like `Module::bind`, and its name is a `&str`. Binding a `Module` into a `Grammar` is an error.
 - Rust `Vocab::new` panics on a duplicate token ID, and Python's `Vocab` factories raise `ValueError`. The other bindings already rejected duplicates.
+- Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
 
 ## 0.5.0
 

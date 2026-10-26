@@ -515,10 +515,10 @@ impl CommitBuffers {
 }
 
 /// A constraint's state during generation.
-pub struct ConstraintState<'a> {
+pub struct ConstraintState {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
-    pub(crate) constraint: &'a Constraint,
+    pub(crate) constraint: Constraint,
     pub(crate) state: ParserStateMap,
     pub(crate) buffers: CommitBuffers,
     /// Monotonically increasing counter, bumped on every commit.
@@ -531,23 +531,23 @@ pub struct ConstraintState<'a> {
     pub(crate) mask_scratch: Arc<Mutex<MaskScratch>>,
 }
 
-impl<'a> Clone for ConstraintState<'a> {
+impl Clone for ConstraintState {
     /// A copy of the state. It shares the compiled constraint.
     fn clone(&self) -> Self {
         ConstraintState {
             terminated: self.terminated,
             markers: self.markers.clone(),
-            constraint: self.constraint,
+            constraint: self.constraint.clone(),
             state: self.state.clone(),
-            buffers: CommitBuffers::for_constraint(self.constraint),
+            buffers: CommitBuffers::for_constraint(&self.constraint),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Arc::new(Mutex::new(MaskScratch::for_constraint(self.constraint))),
+            mask_scratch: Arc::new(Mutex::new(MaskScratch::for_constraint(&self.constraint))),
         }
     }
 }
 
-impl<'a> std::fmt::Debug for ConstraintState<'a> {
+impl std::fmt::Debug for ConstraintState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConstraintState")
             .field("terminated", &self.terminated)
@@ -557,16 +557,16 @@ impl<'a> std::fmt::Debug for ConstraintState<'a> {
     }
 }
 
-impl<'a> ConstraintState<'a> {
-    pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
-        assert!(std::ptr::eq(self.constraint, source.constraint));
+impl ConstraintState {
+    pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState) {
+        assert!(Arc::ptr_eq(&self.constraint.data, &source.constraint.data));
         self.terminated = source.terminated;
         self.markers = source.markers.clone();
         self.state = source.state.clone();
-        self.buffers = CommitBuffers::for_constraint(self.constraint);
+        self.buffers = CommitBuffers::for_constraint(&self.constraint);
         self.generation = source.generation;
         self.mask_cache = Mutex::new(None);
-        self.mask_scratch = Arc::new(Mutex::new(MaskScratch::for_constraint(self.constraint)));
+        self.mask_scratch = Arc::new(Mutex::new(MaskScratch::for_constraint(&self.constraint)));
     }
 
     pub(crate) fn reserve_linear_stack_hot_path(&mut self) {
@@ -585,7 +585,7 @@ impl<'a> ConstraintState<'a> {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
         }
-        frontier_is_accepting(self.constraint, &self.state, self.terminated)
+        frontier_is_accepting(&self.constraint, &self.state, self.terminated)
     }
 
     /// Whether nothing more can be committed.
@@ -602,14 +602,14 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
         !self.state.iter().any(|(&tokenizer_state, gss)| {
-            super::commit::entry_can_continue(self.constraint, tokenizer_state, gss)
+            super::commit::entry_can_continue(&self.constraint, tokenizer_state, gss)
         })
     }
 
     /// Whether the parser frontier is a complete grammar match, ignoring any
     /// end-token policy.
     pub(crate) fn frontier_complete(&self) -> bool {
-        frontier_is_accepting(self.constraint, &self.state, false)
+        frontier_is_accepting(&self.constraint, &self.state, false)
     }
 
     pub(crate) fn parser_root_count(&self) -> usize {

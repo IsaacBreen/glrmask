@@ -79,8 +79,8 @@ fn choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {
 
 #[allow(clippy::too_many_arguments)]
 fn check_position(
-    st_static: &mut glrmask::ConstraintState<'_>,
-    st_dynamic: &mut glrmask::ConstraintState<'_>,
+    st_static: &mut glrmask::ConstraintState,
+    st_dynamic: &mut glrmask::ConstraintState,
     scenario: usize,
     consumed: usize,
     what: &str,

@@ -1026,6 +1026,10 @@ pub(crate) fn install_precomputed_boundary_candidate_ids(
     ids: &[u32],
     widened: bool,
 ) -> Result<(), String> {
+    // This mutation must not install a lazy summary in another Constraint
+    // handle cloned from the same compiled data. Detach before fingerprinting,
+    // since that query can itself populate deferred caches.
+    std::sync::Arc::make_mut(&mut constraint.data);
     let fp = fingerprint_for_constraint(constraint, vocab)
         .map_err(|reason| format!("cannot fingerprint precomputed boundary summary: {reason:?}"))?;
     let mut ids = ids.to_vec();

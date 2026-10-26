@@ -6223,7 +6223,7 @@ fn compile_prepared_with_profile_and_table_construction(
             prepared_grammar.ignore_terminal, false, true,
         ).expect("source compiler must produce a finite template parser before Constraint materialization");
         drop(table);
-        let mut constraint = Constraint {
+        let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
@@ -6348,7 +6348,7 @@ fn compile_prepared_with_profile_and_table_construction(
             composition_link_metadata_materialized: true,
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
-        };
+        });
         if build_packed_parser_dwa {
             let packed_started_at = crate::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
                 .is_some()

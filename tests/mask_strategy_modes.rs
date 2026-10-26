@@ -48,8 +48,8 @@ fn assert_same_masks(a: &glrmask::Constraint, b: &glrmask::Constraint) {
 }
 
 fn compare_exhaustive(
-    a: &glrmask::ConstraintState<'_>,
-    d: &glrmask::ConstraintState<'_>,
+    a: &glrmask::ConstraintState,
+    d: &glrmask::ConstraintState,
     depth: usize,
     label: &str,
 ) {

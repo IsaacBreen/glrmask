@@ -47,7 +47,7 @@ fn bytes_vocab() -> Vocab {
     Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect())
 }
 
-fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
+fn unique_stack_count(state: &ConstraintState) -> usize {
     let mut stacks = state
         .debug_parser_stacks()
         .into_iter()
