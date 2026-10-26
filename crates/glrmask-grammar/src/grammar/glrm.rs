@@ -818,8 +818,9 @@ fn escape_regex_for_slash(pat: &str) -> String {
 
 #[cfg(any(test, feature = "internal-api"))]
 fn parse_root_scope_for_private_tools(input: &str) -> Result<ParsedGlrmScope, GlrMaskError> {
-    let mut parser = GlrmParser::from_source(input)?;
-    match parser.parse_root_scope() {
+    let modern = GlrmParser::from_source(input)
+        .and_then(|mut parser| parser.parse_root_scope());
+    match modern {
         Ok(scope) => Ok(scope),
         // This path is explicitly internal test/tool-only. The public GLRM parser never falls back.
         Err(_) => GlrmParser::from_source_legacy(input)?.parse_root_scope(),
@@ -829,11 +830,7 @@ fn parse_root_scope_for_private_tools(input: &str) -> Result<ParsedGlrmScope, Gl
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub fn from_glrm_for_private_tools(input: &str) -> Result<NamedGrammar, GlrMaskError> {
-    let mut scope = match GlrmParser::from_source(input)?.parse_root_scope() {
-        Ok(scope) => scope,
-        // Explicitly opt in here: this function is only exposed to private test/tool builds.
-        Err(_) => GlrmParser::from_source_legacy(input)?.parse_root_scope()?,
-    };
+    let mut scope = parse_root_scope_for_private_tools(input)?;
     if contains_external_subgrammar(&scope) {
         return Err(err("external subgrammars require from_glrm_with_external_subgrammars and explicit bindings"));
     }
