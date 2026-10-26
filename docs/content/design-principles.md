@@ -6,11 +6,11 @@ GLRMask has a deliberately small API. These principles explain what it leaves ou
 
 GLRMask has no end-token option. What a model's end token means depends on your application: stop generating, call a tool, or start the next turn. GLRMask doesn't decide that for you.
 
-To require an end token after a grammar, put it in the grammar: `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(eos_id)]))`. GLRMask recognises this shape and compiles it with no extra work, so it is as fast as the grammar on its own.
+To require an end token after a grammar, put it in the grammar: `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(eos_id)]))`.
 
 ### Masks are optional
 
-You never need a mask to drive a state. Commits check every input, `is_accepting` says whether the input so far is complete, and `is_terminated` says whether anything more can be committed. A mask is how you sample only allowed tokens, if you want to.
+You never need a mask to drive a state. Commits check every input, `is_accepting` says whether the input so far is complete, and `is_terminated` says whether no more input can be accepted. A mask is how you sample only allowed tokens, if you want to.
 
 Without masks, you can use rejection sampling: clone the state, commit the sampled token, and if the commit fails, sample again from the clone.
 
