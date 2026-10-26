@@ -2603,7 +2603,7 @@ mod tests {
             (7, b" provider assertion\"".to_vec()),
             (8, b" validation of assertion\"".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start start;
                 fa assurance_body ::= {

@@ -23585,7 +23585,7 @@ mod tests {
             (4, b"Xa".to_vec()),
             (5, b"b!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -23659,7 +23659,7 @@ mod tests {
             (3, b"!".to_vec()), (4, b"Xa".to_vec()), (5, b"b!".to_vec()),
             (6, b"Xab!".to_vec()), (7, b"XX".to_vec()), (8, b"c".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"start document; t SUB ::= @token(999); nt document ::= "X" SUB "!";"#,
             &vocab,
         ).unwrap();
@@ -23729,7 +23729,7 @@ mod tests {
             (4, b"Xa".to_vec()),
             (5, b"b!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -23805,7 +23805,7 @@ mod tests {
         // A later static-boundary link is allowed to reconstruct compiler-only
         // flattened views on demand from the retained recursive component tree.
         // The fast dynamic build itself must never pay this cost.
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t OUTER ::= @token(998);
@@ -23817,7 +23817,7 @@ mod tests {
         let static_outer = outer_parent
             .compose_linked_children_for_test(&[("OUTER", &fast)], &vocab)
             .unwrap();
-        let dynamic_outer = Constraint::from_glrm_grammar(
+        let dynamic_outer = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t OUTER ::= @token(998);
@@ -23851,7 +23851,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start outer;
                 t INNER ::= @token(998);
@@ -23863,7 +23863,7 @@ mod tests {
         let outer = outer_parent
             .compose_linked_children_for_test(&[("INNER", &inner)], &vocab)
             .unwrap();
-        let document_parent = Constraint::from_glrm_grammar(
+        let document_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t OUTER ::= @token(999);
@@ -24071,7 +24071,7 @@ mod tests {
             (5, b">,<".to_vec()),
             (6, b">".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(998);
@@ -24198,7 +24198,7 @@ table: &child_tables[index],
     #[test]
     fn contextual_sharing_rejects_ambiguity_with_no_stack_provenance() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t P ::= "p";
@@ -24283,7 +24283,7 @@ table: &child_tables[index],
             (3, b"!".to_vec()),
             (4, b"?".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t BANG ::= "!";
@@ -24376,7 +24376,7 @@ table: &child_tables[index],
             &vocab,
         )
         .unwrap();
-        let middle_parent = Constraint::from_glrm_grammar(
+        let middle_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start call;
                 t LEFT ::= @token(998);
@@ -24408,7 +24408,7 @@ table: &child_tables[index],
             );
         }
 
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t CALL ::= @token(1000);
@@ -24421,7 +24421,7 @@ table: &child_tables[index],
             .compose_linked_children_for_test_flattened(&[("CALL", &middle)], &vocab)
             .unwrap();
         let loaded_middle = Constraint::load(middle.save(), &vocab).unwrap();
-        let outer_loaded = Constraint::from_glrm_grammar(
+        let outer_loaded = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t CALL ::= @token(1000);
@@ -24851,7 +24851,7 @@ table: &child_tables[index],
     #[test]
     fn compiled_parser_dwas_reconcile_and_union_with_one_to_many_start_mapping() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25084,7 +25084,7 @@ table: &child_table,
             (6, b">".to_vec()),
         ]);
         let compile_parent = || {
-            Constraint::from_glrm_grammar(
+            Constraint::from_glrm_grammar_for_private_tools(
                 r#"
                     start document;
                     t SUB ::= @token(999);
@@ -25165,7 +25165,7 @@ table: &child_table,
             (4, b"ab".to_vec()),
             (5, b"cd".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25264,7 +25264,7 @@ table: &child_table,
             (5, b"b".to_vec()),
             (6, b">".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25316,7 +25316,7 @@ table: &child_table,
             // Composition must still remove its exact-token path.
             (3, b"<placeholder>".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(3);
@@ -25355,7 +25355,7 @@ table: &child_table,
             (9, b">b!".to_vec()),
             (10, b">a!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25405,7 +25405,7 @@ table: &child_table,
             (6, b"a".to_vec()),
             (7, b"!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25455,7 +25455,7 @@ table: &child_table,
             (6, b" a".to_vec()),
             (7, b"a!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -25533,7 +25533,7 @@ table: &child_table,
             (2, b"!".to_vec()),
             (3, b"<END>".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25542,7 +25542,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child = Constraint::from_glrm_grammar(
+        let child = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start child;
                 t END ::= @token(3);
@@ -25551,7 +25551,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let monolithic = Constraint::from_glrm_grammar(
+        let monolithic = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t END ::= @token(3);
@@ -25609,7 +25609,7 @@ table: &child_table,
             (8, b"t".to_vec()),
             (9, b"ab".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;
@@ -25791,7 +25791,7 @@ table: &child_table,
             (6, b" a".to_vec()),
             (7, b"a!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -25900,7 +25900,7 @@ table: &child_table,
     #[test]
     fn compact_dynamic_scoped_ignore_parser_preserves_both_entry_scopes() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;
@@ -25996,7 +25996,7 @@ table: &child_table,
             (11, b"Xa \t!".to_vec()),
             (12, b"\tX a!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;
@@ -26395,7 +26395,7 @@ table: &child_table,
             (11, b"X\tb!".to_vec()),
             (12, b"Xa\tc!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;
@@ -26569,7 +26569,7 @@ table: &child_table,
             (15, b"Xaa!".to_vec()),
             (16, b"Xaba!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -26754,7 +26754,7 @@ table: &child_table,
             (9, b" ".to_vec()),
             (10, b"\n\n".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;
@@ -26896,7 +26896,7 @@ table: &child_table,
             (4, b"X".to_vec()),
             (5, b"a!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -26963,7 +26963,7 @@ table: &child_table,
             (9, b">".to_vec()),
             (10, b"< X a a ! >".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -27056,7 +27056,7 @@ table: &child_table,
         // The compiled child no longer carries runtime controls. Reusing it in
         // an outer composition must retain the same globally erased ignore and
         // compile the new call/return controls away again.
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start outer;
                 ignore WS;
@@ -27119,7 +27119,7 @@ table: &child_table,
             (2, b"!".to_vec()),
             (3, b"Xaa!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27174,7 +27174,7 @@ table: &child_table,
             (9, b"a>".to_vec()),
             (10, b"b>".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(998);
@@ -27227,7 +27227,7 @@ table: &child_table,
             (8, b"c".to_vec()),
             (9, b"]".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t FIRST ::= @token(997);
@@ -27326,7 +27326,7 @@ table: &child_table,
             (2, b"a".to_vec()),
             (3, b"!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_with_end_tokens(
+        let parent = Constraint::from_glrm_grammar_with_end_tokens_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27397,7 +27397,7 @@ table: &child_table,
             (1, b"X".to_vec()),
             (2, b"a".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27415,7 +27415,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let monolithic = Constraint::from_glrm_grammar(
+        let monolithic = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t DONE ::= @token(1000);
@@ -27450,7 +27450,7 @@ table: &child_table,
     fn nullable_child_to_named_special_is_masked() {
         const SPECIAL_TOKEN: u32 = 1000;
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27469,7 +27469,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let monolithic = Constraint::from_glrm_grammar(
+        let monolithic = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t DONE ::= @token(1000);
@@ -27511,7 +27511,7 @@ table: &child_table,
             (2, b"a".to_vec()),
             (3, b"!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_with_end_tokens(
+        let parent = Constraint::from_glrm_grammar_with_end_tokens_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27550,7 +27550,7 @@ table: &child_table,
             (2, b"!".to_vec()),
             (3, b"Xa".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27568,7 +27568,7 @@ table: &child_table,
             &[END_TOKEN],
         )
         .unwrap();
-        let monolithic = Constraint::from_glrm_grammar(
+        let monolithic = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t END ::= @token(100);
@@ -27596,7 +27596,7 @@ table: &child_table,
             assert!(expected.is_accepting());
         }
 
-        let outer = Constraint::from_glrm_grammar(
+        let outer = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start outer;
                 t INNER ::= @token(100);
@@ -27624,7 +27624,7 @@ table: &child_table,
             (3, b"a".to_vec()),
             (4, b"!".to_vec()),
         ]);
-        let nullable_parent = Constraint::from_glrm_grammar(
+        let nullable_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start middle;
                 t CHILD ::= @token(998);
@@ -27653,7 +27653,7 @@ table: &child_table,
         let middle = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t MIDDLE ::= @token(999);
@@ -27686,7 +27686,7 @@ table: &child_table,
     #[test]
     fn composed_constraint_matches_monolithic_when_tokens_do_not_cross_boundaries() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27765,7 +27765,7 @@ table: &child_table,
     #[test]
     fn composed_constraint_reuses_one_child_across_distinct_placeholders() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(998);
@@ -27902,7 +27902,7 @@ table: &child_table,
             (4, b"yz".to_vec()),
             (5, b"xyz".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -27996,7 +27996,7 @@ table: &child_table,
     #[test]
     fn segmented_parser_links_preserve_nullable_child_local_coordinates() {
         let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -28069,7 +28069,7 @@ table: &child_table,
             (6, b"a".to_vec()),
             (7, b"b".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -28137,7 +28137,7 @@ table: &child_table,
             (9, b"c".to_vec()),
             (10, b"d".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(998);
@@ -28241,7 +28241,7 @@ table: &child_table,
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -28351,7 +28351,7 @@ table: &child_table,
             (3, b"a".to_vec()),
             (4, b"!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -28421,7 +28421,7 @@ table: &child_table,
         )
         .unwrap();
 
-        let arg_a_parent = Constraint::from_glrm_grammar(
+        let arg_a_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start args;
                 t EXPR ::= @token(996);
@@ -28437,7 +28437,7 @@ table: &child_table,
             .compose_linked_children_for_test_dynamic(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
-        let arg_b_parent = Constraint::from_glrm_grammar(
+        let arg_b_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start args;
                 t EXPR ::= @token(996);
@@ -28453,7 +28453,7 @@ table: &child_table,
             .compose_linked_children_for_test_dynamic(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
-        let dispatch_parent = Constraint::from_glrm_grammar(
+        let dispatch_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start call;
                 t ARGA ::= @token(997);
@@ -28478,7 +28478,7 @@ table: &child_table,
         // whole-start alternative. Contextual structural sharing can prove an
         // interior quotient for that overlap. The resulting table must still
         // remain a valid child for a *later* composition level.
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t CALL ::= @token(999);
@@ -28576,7 +28576,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let middle_parent = Constraint::from_glrm_grammar(
+        let middle_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start middle;
                 t LEAF ::= @token(998);
@@ -28588,7 +28588,7 @@ table: &child_table,
         let middle = middle_parent
             .compose_linked_children_for_test(&[("LEAF", &leaf)], &vocab)
             .unwrap();
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t MIDDLE ::= @token(999);
@@ -28639,7 +28639,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let middle_parent = Constraint::from_glrm_grammar(
+        let middle_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start middle;
                 t LEAF ::= @token(998);
@@ -28655,7 +28655,7 @@ table: &child_table,
         let middle = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(middle.composition_start_nullable().unwrap());
 
-        let outer_parent = Constraint::from_glrm_grammar(
+        let outer_parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t MIDDLE ::= @token(999);
@@ -28783,7 +28783,7 @@ table: &child_table,
             (10, b"gx".to_vec()),
             (11, b"gy".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -28792,7 +28792,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let mid = Constraint::from_glrm_grammar(
+        let mid = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start m;
                 t SUB2 ::= @token(998);
@@ -29203,7 +29203,7 @@ table: &child_table,
             (10, b"gx".to_vec()),
             (11, b"gy".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -29212,7 +29212,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let mid = Constraint::from_glrm_grammar(
+        let mid = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start m;
                 t SUB2 ::= @token(998);
@@ -29469,7 +29469,7 @@ table: &child_table,
             (2, b"x".to_vec()),
             (3, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -29628,7 +29628,7 @@ table: &child_table,
             (9, b"yy".to_vec()),
             (10, b"yz".to_vec()),
         ]);
-        let root = Constraint::from_glrm_grammar(
+        let root = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -29639,7 +29639,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_a = Constraint::from_glrm_grammar(
+        let child_a = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start a;
                 t SUB_A ::= @token(996);
@@ -29657,7 +29657,7 @@ table: &child_table,
         )
         .unwrap();
         // Composed child for the third bind (two slots, one filler).
-        let parent_b = Constraint::from_glrm_grammar(
+        let parent_b = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start bp;
                 t SB1 ::= @token(995);
@@ -30082,7 +30082,7 @@ table: &child_table,
             (8, b"Ry".to_vec()),
             (9, b"yy".to_vec()),
         ]);
-        let root = Constraint::from_glrm_grammar(
+        let root = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB_A ::= @token(999);
@@ -30092,7 +30092,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_a = Constraint::from_glrm_grammar(
+        let child_a = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start a;
                 t SUB_INNER ::= @token(996);
@@ -30486,7 +30486,7 @@ table: &child_table,
             (7, b"yx".to_vec()),
             (8, b"yy".to_vec()),
         ]);
-        let root = Constraint::from_glrm_grammar(
+        let root = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB_A ::= @token(999);
@@ -30496,7 +30496,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_a = Constraint::from_glrm_grammar(
+        let child_a = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start a;
                 t SUB_INNER ::= @token(996);
@@ -30808,7 +30808,7 @@ table: &child_table,
             (10, b"yz".to_vec()),
             (11, b"zx".to_vec()),
         ]);
-        let root = Constraint::from_glrm_grammar(
+        let root = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB_A ::= @token(999);
@@ -30818,7 +30818,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_a = Constraint::from_glrm_grammar(
+        let child_a = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start a;
                 t SUB_INNER ::= @token(996);
@@ -30827,7 +30827,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_c = Constraint::from_glrm_grammar(
+        let child_c = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start c;
                 t SUB_D ::= @token(995);
@@ -31206,7 +31206,7 @@ table: &child_table,
             (9, b"Ry".to_vec()),
             (10, b"yy".to_vec()),
         ]);
-        let root = Constraint::from_glrm_grammar(
+        let root = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -31218,7 +31218,7 @@ table: &child_table,
             &vocab,
         )
         .unwrap();
-        let child_a = Constraint::from_glrm_grammar(
+        let child_a = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start a;
                 ignore WS;
@@ -31566,7 +31566,7 @@ table: &child_table,
             (2, b"x".to_vec()),
             (3, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -31681,7 +31681,7 @@ table: &child_table,
             (6, b"Ry".to_vec()),
             (7, b"yy".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -31971,7 +31971,7 @@ table: &child_table,
             (2, b"x".to_vec()),
             (3, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -32071,7 +32071,7 @@ table: &child_table,
             (3, b"y".to_vec()),
             (4, b"a".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -32144,7 +32144,7 @@ table: &child_table,
             (8, b"c".to_vec()),
             (9, b"d".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(998);
@@ -32323,7 +32323,7 @@ table: &child_table,
             (4, b"!".to_vec()),
             (5, b"X \ta\t !".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore PARENT_WS;

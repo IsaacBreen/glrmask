@@ -82,18 +82,18 @@ impl ProgrammaticJsCompiler {
     pub fn compile_parent(vocab: &Vocab) -> crate::Result<Constraint> {
         let placeholder_token_id =
             crate::import::external_placeholder_token_id_avoiding(vocab, std::iter::empty())?;
-        Constraint::from_glrm_grammar(&programmatic_parent_source(placeholder_token_id)?, vocab)
+        Constraint::from_glrm_grammar_for_private_tools(&programmatic_parent_source(placeholder_token_id)?, vocab)
     }
 
     /// Compile the reusable opaque-runtime-value expression subgrammar.
     pub fn compile_dynamic_value(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&dynamic_value_source()?, vocab)
+        Constraint::from_glrm_grammar_for_private_tools(&dynamic_value_source()?, vocab)
     }
 
     /// Compile the reusable unrestricted JavaScript condition subgrammar used
     /// only as the test of schema-aware conditional expressions.
     pub fn compile_condition(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&condition_source()?, vocab)
+        Constraint::from_glrm_grammar_for_private_tools(&condition_source()?, vocab)
     }
 
     /// Assemble a reusable compiler from independently compiled shared parts.
@@ -258,7 +258,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     source.replace_range(..start.len(), &format!("start {start_rule};"));
     source.push_str(extra_rules);
 
-    let mut grammar = crate::grammar::glrm::from_glrm_for_private_tools(&source)?;
+    let mut grammar = crate::import::parse_glrm_to_named_for_private_tools(&source)?;
     reserve_tools_identifier(&mut grammar)?;
     // The generic reachability pass follows grammar references from `start`,
     // while `ignore IGNORE` is metadata. Temporarily root IGNORE through a
@@ -293,7 +293,7 @@ fn condition_source() -> crate::Result<String> {
 fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String> {
     use crate::grammar::ast::{GrammarExpr, NamedRule};
 
-    let mut grammar = crate::grammar::glrm::from_glrm_for_private_tools(JAVASCRIPT_GLRM)?;
+    let mut grammar = crate::import::parse_glrm_to_named_for_private_tools(JAVASCRIPT_GLRM)?;
     // `tools` is a reserved namespace in programmatic-tool mode. Without this
     // subtraction, `tools.foo(...)` can take the ordinary IDENTIFIER/call path
     // and bypass the schema dispatcher entirely.

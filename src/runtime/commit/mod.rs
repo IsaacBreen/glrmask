@@ -10542,7 +10542,7 @@ mod tests {
 
     #[test]
     fn special_token_advance_matches_normalized_duplicate_key_state() {
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start start;
                 t A ::= "a";
@@ -10835,7 +10835,7 @@ nt start ::= item item? item?;
             (5, b"%".to_vec()),
             (6, b"0".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start start;
                 ignore WS;
@@ -10879,7 +10879,7 @@ nt start ::= item item? item?;
             (5, b"%".to_vec()),
             (6, b"0".to_vec()),
         ]);
-        let body = Constraint::from_glrm_grammar(
+        let body = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start start;
                 ignore WS;

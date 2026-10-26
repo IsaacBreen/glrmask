@@ -77,10 +77,28 @@ pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGramm
 }
 
 pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(crate::grammar::glrm::from_glrm(source)?)
+}
+
+/// Legacy fixture loader for in-repo tools and tests only. Phase 2 converts the
+/// remaining fixtures and deletes this path; no public path calls it.
+pub(crate) fn parse_glrm_to_named_for_private_tools(
+    source: &str,
+) -> crate::Result<ast::NamedGrammar> {
     Ok(crate::grammar::glrm::from_glrm_for_private_tools(source)?)
 }
 
 fn parse_glrm_with_external_terminal_bindings(
+    source: &str,
+    bindings: &[(&str, &[(u32, u32)])],
+) -> crate::Result<ast::NamedGrammar> {
+    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
+        source,
+        bindings,
+    )?)
+}
+
+fn parse_glrm_with_external_terminal_bindings_for_private_tools(
     source: &str,
     bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
@@ -1525,6 +1543,25 @@ impl Constraint {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
+    /// Compile legacy GLRM fixture text for in-repo tools and tests only.
+    /// Phase 2 converts the remaining fixtures and deletes this path.
+    pub(crate) fn from_glrm_grammar_for_private_tools(
+        glrm: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        with_large_import_stack(glrm.len(), || {
+            let named =
+                parse_glrm_with_external_terminal_bindings_for_private_tools(glrm, &[])?;
+            compile_from_named_grammar(
+                named,
+                vocab,
+                "glrm",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                &[],
+            )
+        })
+    }
+
     /// Compile a GLRM grammar and declare model end-token IDs.
     pub(crate) fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
@@ -1532,6 +1569,26 @@ impl Constraint {
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_bindings_and_end_tokens(glrm, vocab, &[], end_token_ids)
+    }
+
+    /// Compile legacy GLRM fixture text with end-token IDs, for tests only.
+    /// Phase 2 converts the remaining fixtures and deletes this path.
+    pub(crate) fn from_glrm_grammar_with_end_tokens_for_private_tools(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        with_large_import_stack(glrm.len(), || {
+            let named =
+                parse_glrm_with_external_terminal_bindings_for_private_tools(glrm, &[])?;
+            compile_from_named_grammar(
+                named,
+                vocab,
+                "glrm",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                end_token_ids,
+            )
+        })
     }
 
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
@@ -2076,7 +2133,6 @@ impl DynamicConstraint {
     pub(crate) fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
-
 
     /// Compile GLRM using the grammar-specific vocabulary quotient for local
     /// dynamic mask generation.
@@ -2652,7 +2708,7 @@ mod tests {
         ]);
         let vocab = Vocab::new(entries);
 
-        Constraint::from_glrm_grammar(
+        Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t LEFT ::= @token(1000000);
@@ -2992,7 +3048,7 @@ mod tests {
     #[test]
     fn glrm_external_subgrammar_allocator_avoids_child_special_tokens() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"!".to_vec())]);
-        let child = Constraint::from_glrm_grammar(
+        let child = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start child;
                 t MARK ::= @token(2);

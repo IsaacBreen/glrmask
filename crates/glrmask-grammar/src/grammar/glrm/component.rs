@@ -12,9 +12,6 @@ pub struct ParsedComponent {
 impl ParsedComponent {
     pub fn parse_glrm(source: &str) -> Result<Self, GlrMaskError> {
         let mut parser=GlrmParser::from_source(source)?;
-        if parser.version!=GlrmVersion::V1 {
-            return Err(parser.locate(err("legacy GLRM syntax is not supported by Grammar; use '=' declarations and explicit typed externs"),0));
-        }
         parser.strict_native=true;
         Self::from_scope(parser.parse_root_scope()?)
     }

@@ -4167,7 +4167,7 @@ mod tests {
             (4, b"m".to_vec()),
             (5, b"g".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -4176,7 +4176,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let mid = Constraint::from_glrm_grammar(
+        let mid = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start m;
                 t SUB2 ::= @token(998);
@@ -4344,7 +4344,7 @@ mod tests {
             (3, b"a".to_vec()),
             (4, b"!".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;

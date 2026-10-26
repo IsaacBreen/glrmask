@@ -240,7 +240,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
         }
     }
     if grammar.rules.iter().any(|rule| contains_special(&rule.expr)) {
-        return Err(err("cannot dump bound exact-token IDs as GLRM v1; source-level external terminal names are not retained in NamedGrammar"));
+        return Err(err("cannot dump bound exact-token IDs as GLRM; source-level external terminal names are not retained in NamedGrammar"));
     }
 
     let mut pending=grammar.rules.iter().map(|r|&r.expr).collect::<Vec<_>>();
@@ -2255,7 +2255,7 @@ impl GlrmParser {
                     }
                     "lexer" => {
                         if self.version == GlrmVersion::V1 {
-                            return Err(err("GLRM v1 lexer groups must be inside 'pragma glrmask { ... }'"));
+                            return Err(err("lexer groups must be inside `pragma glrmask { ... }`"));
                         }
                         self.advance();
                         self.parse_lexer_group(
@@ -2271,7 +2271,7 @@ impl GlrmParser {
                     }
                     "fa" | "nfa" => {
                         if self.version == GlrmVersion::V1 {
-                            return Err(err("GLRM v1 FA syntax is a declaration body, for example 'nt name ::= fa { ... };'"));
+                            return Err(err("an `fa { ... }` must be a whole definition body, as in `nt name ::= fa { ... }`"));
                         }
                         self.advance();
                         rules.push(self.parse_expr_nfa_rule()?);
@@ -2441,7 +2441,7 @@ impl GlrmParser {
             GrammarExpr::ExprNFA(Box::new(self.parse_legacy_expr_nfa_body(is_terminal)?))
         } else {
             if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
-                return Err(err("GLRM v1 declaration bodies cannot be empty; use 'eps' explicitly"));
+                return Err(err("a definition body can't be empty; write `eps` for the empty string"));
             }
             self.parse_nt_expr(is_terminal || self.version==GlrmVersion::V1)?
         };
@@ -2480,7 +2480,7 @@ impl GlrmParser {
 
         while !matches!(self.peek(), Tok::RBrace) {
             match self.peek().clone() {
-                Tok::Eof => return Err(err("unterminated GLRM v1 FA body")),
+                Tok::Eof => return Err(err("unterminated `fa { ... }` body")),
                 Tok::Ident(ref keyword)
                     if keyword == "start" && !matches!(self.token_at(1), Tok::ThinArrow) =>
                 {
@@ -2504,7 +2504,7 @@ impl GlrmParser {
                 {
                     self.advance();
                     if matches!(self.peek(), Tok::Semi) {
-                        return Err(err("GLRM v1 FA must declare at least one accept state"));
+                        return Err(err("an `fa` must have at least one `accept` state"));
                     }
                     loop {
                         let id = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
@@ -2525,7 +2525,7 @@ impl GlrmParser {
                     let to = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
                     self.consume(&Tok::Colon)?;
                     if !self.can_start_nt_atom() {
-                        return Err(err("GLRM v1 FA edge expression cannot be empty; use 'eps'"));
+                        return Err(err("an `fa` edge label can't be empty; write `eps` for an empty edge"));
                     }
                     let symbol = self.parse_nt_expr(allow_raw_regex)?;
                     if matches!(symbol, GrammarExpr::Epsilon) {
@@ -2536,7 +2536,7 @@ impl GlrmParser {
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                other => return Err(err(&format!("unexpected token {other:?} in GLRM v1 FA body"))),
+                other => return Err(err(&format!("unexpected token {other:?} in `fa {{ ... }}` body"))),
             }
         }
         self.consume(&Tok::RBrace)?;
@@ -2706,7 +2706,7 @@ impl GlrmParser {
 
     fn parse_nt_expr_inner(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
-            return Err(err("GLRM v1 expressions cannot contain empty alternatives or groups; use 'eps' explicitly"));
+            return Err(err("an alternative or group can't be empty; write `eps` for the empty string"));
         }
         // Legacy GLRM permits an implicit empty alternative for compatibility.
         let first = if self.can_start_nt_atom() {
@@ -2721,7 +2721,7 @@ impl GlrmParser {
         while matches!(self.peek(), Tok::Pipe) {
             self.advance(); // consume `|`
             if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
-                return Err(err("GLRM v1 expressions cannot contain empty alternatives; use 'eps' explicitly"));
+                return Err(err("an alternative can't be empty; write `eps` for the empty string"));
             }
             let alt = if self.can_start_nt_atom() {
                 self.parse_nt_exclude(allow_raw_regex)?

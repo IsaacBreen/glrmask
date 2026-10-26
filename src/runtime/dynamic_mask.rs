@@ -10617,7 +10617,7 @@ mod tests {
         let vocab = Vocab::new(entries);
         for separated in [false, true] {
             let groups = if separated {
-                "lexer group a ::= A; lexer group b ::= B; lexer group ws ::= WS;"
+                "pragma glrmask { lexer group a ::= A; lexer group b ::= B; lexer group ws ::= WS; }"
             } else { "" };
             for pair in [
                 "t A ::= 'a'+; t B ::= 'a'+ 'b';",
@@ -12192,10 +12192,12 @@ nt start ::= A B;
         let grammar = r#"
 start start;
 ignore WS;
+pragma glrmask {
 lexer group ws ::= WS;
 lexer group a ::= A;
 lexer group b ::= B;
 lexer group c ::= C;
+}
 t WS ::= " "+;
 t A ::= "a"+;
 t B ::= "b";

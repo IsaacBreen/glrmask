@@ -4127,7 +4127,7 @@ mod tests {
             (8, b"ab".to_vec()),
             (9, b"cd".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start doc;
                 t PA ::= "a";
@@ -5591,7 +5591,7 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -6098,7 +6098,7 @@ mod tests {
             (3, b"La".to_vec()), (4, b"ax".to_vec()), (5, b"Lx".to_vec()),
             (6, b"Lax".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(r#"
+        let parent = Constraint::from_glrm_grammar_for_private_tools(r#"
             start document; t SUB ::= @token(999);
             nt document ::= "L" SUB "x";
         "#, &vocab).unwrap();
@@ -6202,7 +6202,7 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -6354,7 +6354,7 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -6560,7 +6560,7 @@ mod tests {
             (10, b"gx".to_vec()),
             (11, b"gy".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -6569,7 +6569,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let mid = Constraint::from_glrm_grammar(
+        let mid = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start m;
                 t SUB2 ::= @token(998);

@@ -1352,7 +1352,7 @@ mod tests {
             (3, b"ab".to_vec()),
             (4, b" a".to_vec()),
         ]);
-        let plain = Constraint::from_glrm_grammar(
+        let plain = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -1363,7 +1363,7 @@ mod tests {
         .unwrap();
         assert_indexed_initial_seed_matches_bruteforce(&plain);
 
-        let ignored = Constraint::from_glrm_grammar(
+        let ignored = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -1420,7 +1420,7 @@ mod tests {
             (2, b"mx".to_vec()),
             (3, b"g".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(998);
@@ -1441,7 +1441,7 @@ mod tests {
             (2, b"mx".to_vec()),
             (3, b"g".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(998);
@@ -1481,7 +1481,7 @@ mod tests {
             (3, b"X".to_vec()),
             (4, b"a".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -1508,7 +1508,7 @@ mod tests {
             (3, b"\t".to_vec()),
             (4, b"a".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 ignore WS;
@@ -1536,7 +1536,7 @@ mod tests {
             (3, b"a".to_vec()),
             (4, b"b".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -1556,7 +1556,7 @@ mod tests {
             (1, "éx".as_bytes().to_vec()),
             (2, b"x".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -1584,7 +1584,7 @@ mod tests {
             (5, b"}".to_vec()),
             (6, b"p(".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar(
+        let parent = Constraint::from_glrm_grammar_for_private_tools(
             r#"
                 start document;
                 t SUB ::= @token(999);
@@ -1650,7 +1650,7 @@ mod preparation_tests {
     fn fixture() -> (Constraint, crate::Vocab) {
         let vocab=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),
             (2,b"ax".to_vec()),(3,b"b".to_vec()),(4,b"ba".to_vec())]);
-        let component=Constraint::from_glrm_grammar(r#"
+        let component=Constraint::from_glrm_grammar_for_private_tools(r#"
             start document; t SUB ::= @token(999);
             nt document ::= "a" SUB | "b" SUB;
         "#,&vocab).unwrap();
