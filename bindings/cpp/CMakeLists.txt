@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(glrmask VERSION 0.4.0 LANGUAGES C CXX)
+project(glrmask VERSION 0.5.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 option(GLRMASK_SHARED "Use the Rust shared library instead of the static library" OFF)

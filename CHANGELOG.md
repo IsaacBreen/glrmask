@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.
 - `special_token_ids` and `Vocab::with_special_tokens` are removed. A token ID that isn't in the vocabulary never matches text, and a token set can still allow it.

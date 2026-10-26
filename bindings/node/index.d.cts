@@ -1,5 +1,5 @@
 /// <reference lib="esnext.disposable" />
-/** The GLRMask version, for example "0.4.0". */
+/** The GLRMask version, for example "0.5.0". */
 export declare const version: string;
 
 /** How masks are computed. */

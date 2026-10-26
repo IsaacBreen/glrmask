@@ -1,6 +1,6 @@
 [package]
 name = "glrmask-json-schema"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Part of GLRMask: JSON Schema to grammar conversion. Depend on the glrmask crate instead; this crate has no stable API."
@@ -13,8 +13,8 @@ internal-api = []
 
 [dependencies]
 derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }
-glrmask-grammar = { version = "=0.2.1", path = "../glrmask-grammar", features = ["internal-api"] }
-glrmask-lexer = { version = "=0.2.1", path = "../glrmask-lexer", features = ["internal-api"] }
+glrmask-grammar = { version = "=0.3.0", path = "../glrmask-grammar", features = ["internal-api"] }
+glrmask-lexer = { version = "=0.3.0", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 regex = "1"
 regex-syntax = "0.8"

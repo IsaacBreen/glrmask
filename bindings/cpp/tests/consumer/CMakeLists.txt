@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(glrmask_external_consumer LANGUAGES C CXX)
-find_package(glrmask 0.4 CONFIG REQUIRED)
+find_package(glrmask 0.5 CONFIG REQUIRED)
 enable_testing()
 add_executable(cpp_consumer main.cpp)
 target_link_libraries(cpp_consumer PRIVATE glrmask::glrmask)

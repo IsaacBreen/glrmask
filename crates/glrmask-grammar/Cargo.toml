@@ -1,6 +1,6 @@
 [package]
 name = "glrmask-grammar"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Part of GLRMask: grammars and the Lark and GLRM front ends. Depend on the glrmask crate instead; this crate has no stable API."
@@ -12,8 +12,8 @@ default = []
 internal-api = []
 
 [dependencies]
-glrmask-finite-automata = { version = "=0.1.2", path = "../glrmask-finite-automata" }
-glrmask-lexer = { version = "=0.2.1", path = "../glrmask-lexer", features = ["internal-api"] }
+glrmask-finite-automata = { version = "=0.2.0", path = "../glrmask-finite-automata" }
+glrmask-lexer = { version = "=0.3.0", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 rustc-hash = "1"
 range-set-blaze = "0.8.0"
