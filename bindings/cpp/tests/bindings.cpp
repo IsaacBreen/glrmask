@@ -194,7 +194,7 @@ void threads_and_errors() {
     auto v = vocabulary(); auto c = simple().compile(v); std::atomic<bool> okay{true}; std::vector<std::thread> threads;
     for (int i=0; i<4; ++i) threads.emplace_back([&]{ try { for (int j=0; j<8; ++j) { auto s = c.start(); CHECK(s.commit_token(31)); if (!s.is_accepting()) okay=false; } } catch(...) { okay=false; } });
     for (auto& thread : threads) thread.join(); CHECK(okay);
-    std::size_t ignored = 0; CHECK(glrmask_vocab_len(nullptr, &ignored)==GLRMASK_INVALID_ARGUMENT);
+    std::size_t ignored = 0; CHECK(glrmask_constraint_mask_len(nullptr, &ignored)==GLRMASK_INVALID_ARGUMENT);
     const std::string main_error = glrmask_error_message();
     std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
     CHECK(main_error==glrmask_error_message());

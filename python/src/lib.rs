@@ -586,9 +586,6 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Number of byte-backed entries; special IDs are not counted.
-    fn __len__(&self) -> usize { self.inner.len() }
-
     fn __repr__(&self) -> String {
         let tokens = self.inner.len();
         if tokens == 1 {

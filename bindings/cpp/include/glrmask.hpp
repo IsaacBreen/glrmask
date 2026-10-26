@@ -284,7 +284,6 @@ public:
     /// bytes.
     explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special_token_ids = {}) : Base(create(entries, special_token_ids)) {}
     /// The number of tokens with bytes; special tokens are not counted.
-    std::size_t size() const { std::size_t n = 0; detail::check(glrmask_vocab_len(native_handle(), &n)); return n; }
 };
 
 /// A grammar, written as source text or built from an `Expr`.

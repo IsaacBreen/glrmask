@@ -156,8 +156,6 @@ GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* p,glrmask_vocab** out);
 /// Frees a vocabulary handle.
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* p);
-/// Writes the number of tokens with bytes; special tokens are not counted.
-GLRMASK_API glrmask_status glrmask_vocab_len(const glrmask_vocab* p,size_t* out);
 /// Creates a token set from `ids`.
 GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t* ids,size_t n,glrmask_token_set** out);
 /// Creates a token set from inclusive `ranges`.

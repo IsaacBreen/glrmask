@@ -73,7 +73,7 @@ glrmask::Vocab vocab({
 }, {3});
 ```
 
-`vocab.size()` counts the tokens with bytes. `TokenSet(ids)` is a set of token IDs, and
+`TokenSet(ids)` is a set of token IDs, and
 `TokenSet::from_ranges({{first, last}})` builds one from ranges that include `last`. See [token
 sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 

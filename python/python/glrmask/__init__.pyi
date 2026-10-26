@@ -172,9 +172,6 @@ class Vocab:
     def llama_cpp_end_token_ids(self) -> list[int]:
         """The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one."""
         ...
-    def __len__(self) -> int:
-        """The number of tokens with bytes; special tokens are not counted."""
-        ...
 
 @final
 class Extern:

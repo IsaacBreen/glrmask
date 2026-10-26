@@ -305,11 +305,13 @@ impl Vocab {
     }
 
     /// The number of tokens with bytes; special tokens are not counted.
+    #[doc(hidden)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether no token has bytes.
+    #[doc(hidden)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

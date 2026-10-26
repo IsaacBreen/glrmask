@@ -130,9 +130,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
         Ok(glrmask_vocab(core::vocab(entries, input(special_token_ids, n_special_token_ids)?.to_vec())?))
     }) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_len(p: *const glrmask_vocab, out: *mut usize) -> i32 {
-    ffi(|| unsafe { *write(out)? = read(p)?.0.iter().len(); Ok(()) })
-}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_new(ids: *const u32, n: usize, out: *mut *mut glrmask_token_set) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_token_set(g::TokenSet::new(input(ids, n)?.iter().copied())))) })
 }
