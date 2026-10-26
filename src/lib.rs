@@ -12,6 +12,8 @@
 //! cargo add glrmask
 //! ```
 //!
+//! GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust version; a patch release won't.
+//!
 //! # Usage
 //!
 //! GLRMask has four core types:

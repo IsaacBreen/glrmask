@@ -127,6 +127,7 @@
         "Vocab.llama_cpp_end_token_ids": "EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.",
         "Vocab.tokens": "Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.",
         "Vocab.token_ranges": "Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides.",
+        "Vocab.__len__": "Counts byte-backed entries; exact-only control IDs are excluded.",
         "Requirement": "An unresolved typed slot. Paths distinguish the same local name in different attached children.",
         "Requirement.name": "Qualified path joined with `::`.",
         "Requirement.path": "Path segments from the assembly root to the unresolved slot.",
@@ -134,6 +135,7 @@
         "Requirement.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
         "Requirement.__repr__": "",
         "Grammar": "Reusable source grammar with mutable bindings. `bind` changes this handle; clones and already attached children keep independent snapshots. Parsing and vocabulary checks can be deferred until preparation or compilation.",
+        "Grammar.from_ebnf": "Parsing and compilation errors can be deferred until `prepare` or `compile`.",
         "Grammar.from_glrm": "GLRM supports typed external slots; fill them with `bind` before compiling a runnable root.",
         "Grammar.from_json_schema": "Accepts JSON text or a JSON-serializable object. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened. Validate generated values separately when full schema conformance matters.",
         "Grammar.from_lark": "The default `recognition` profile and the `llm` extension profile differ in accepted syntax. Named token atoms require explicit `token_names` mappings; they are never inferred from tokenizer spellings.",
@@ -155,6 +157,7 @@
         "PreparedGrammar.save": "Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once.",
         "PreparedGrammar.load": "Rejects malformed or incompatible artifacts. An optional vocabulary must match the saved token-ID/byte mapping and lets the loaded graph share its caches.",
         "Constraint": "Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.",
+        "Constraint.marker_ids": "Sorted, distinct application marker IDs, independent of model token IDs.",
         "Constraint.start": "",
         "Constraint.mask_len": "Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`.",
         "Constraint.save": "Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.",
@@ -168,6 +171,7 @@
         "ConstraintState.is_accepting": "The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.",
         "ConstraintState.is_rejected": "The prefix cannot be extended to a valid match.",
         "ConstraintState.forced_tokens": "Read-only library-canonical prefix of genuinely forced text. Uses longest admitted nonempty spelling and the lowest original-ID alias; exact events retain their IDs. Stops at root acceptance, unstable tokenization, intermediate exact-event opportunities, or proof limits. May construct full masks; typed resource failures raise errors.",
+        "ConstraintState.marker_events": "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.",
         "auto": "Adaptive JSON Schema policy inspection and persisted tier selection. For ordinary compilation, prefer `Grammar.compile(..., optimization=Optimization.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer’s partial assertion support.",
         "auto.AUTO_POLICY_NAME": "Policy identifier stored on `AutoConstraint` instances.",
         "auto.AutoSchemaShape": "Source-shape counts used by the policy, not a schema validation result. `json_bytes` measures normalized JSON serialized with sorted keys and compact separators.",
@@ -194,14 +198,14 @@
         "auto.AutoSchemaShape.json_bytes": ""
       },
       "quickstarts": {
-        "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
-        "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
+        "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
+        "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
       }
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "49e7b366ebaff7c322ec0404138fe922e282e3498e0e943d9a3a5bb7a83b7ec2",
-    "bindings/node/README.md": "e6b518d7387b990d3e00a9cbbac60ea3c2a83e72025bb1e00429b3275c0ab7c8",
+    "bindings/cpp/README.md": "eeafde0c3d78b6b5ab1b9fd24c6948d3ceb5d47e95d8a47b51aa84866c1d3861",
+    "bindings/node/README.md": "8ef9ec06b92a25bef6163f5a32a36627a775ec6eba302287b01c68288d74b0d7",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -209,5 +213,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "7a77eb807da3ff497eacfcc9561617fa52e3c9b57052a3b89272c44cef0ef573"
+  "content_sha256": "f5fc43768a175df8cca0f74806836e38a127719eaac3aa6bc6f72e17096d9aeb"
 }
