@@ -1,6 +1,7 @@
 //! Original UTF-8 source coordinates, independent of transformed grammar nodes.
 /// A location in grammar source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SourceSpan {
     /// Byte offset of the first byte.
     pub start: usize,
@@ -10,6 +11,12 @@ pub struct SourceSpan {
     pub line: usize,
     /// Column of `start`, counting characters from 1.
     pub column: usize,
+}
+impl SourceSpan {
+    #[doc(hidden)]
+    pub const fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
+        Self { start, end, line, column }
+    }
 }
 impl std::fmt::Display for SourceSpan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
