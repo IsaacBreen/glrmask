@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 use glrmask::test_modes::MaskMode;
 use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 

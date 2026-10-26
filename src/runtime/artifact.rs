@@ -10385,6 +10385,39 @@ pub(crate) struct LateGrammarSlot {
 /// sequence.
 #[derive(Debug, Clone)]
 pub struct Constraint {
+    pub(crate) data: Arc<ConstraintData>,
+}
+
+impl Constraint {
+    pub(crate) fn from_data(data: ConstraintData) -> Self {
+        Self { data: Arc::new(data) }
+    }
+
+    pub(crate) fn as_data(&self) -> &ConstraintData {
+        &self.data
+    }
+}
+
+impl std::ops::Deref for Constraint {
+    type Target = ConstraintData;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for Constraint {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.data)
+    }
+}
+
+/// Inner compiled data shared by handles. Hidden from the documented API;
+/// its visibility allows the public Deref target to be named by rustc.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ConstraintData {
     /// Final generation policy, not part of the embeddable compiled body.
     /// The outer root artifact stores these separately from compiler data.
     pub(crate) end_tokens: Arc<[u32]>,
@@ -10774,7 +10807,7 @@ pub struct Constraint {
 // implementing Serde, so `Constraint::save`/`Constraint::load` remain the only
 // public persistence contract.
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(remote = "Constraint")]
+#[serde(remote = "ConstraintData")]
 pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) end_tokens: Arc<[u32]>,

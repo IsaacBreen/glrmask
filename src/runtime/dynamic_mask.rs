@@ -872,7 +872,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         constraint: &Constraint,
         _vocab: &DynamicMaskVocab,
     ) -> Result<u32, String> {
-        debug_assert!(std::ptr::eq(constraint, self.constraint));
+        debug_assert!(std::sync::Arc::ptr_eq(&constraint.data, &self.constraint.data));
         Ok(self.leaves[0].reset)
     }
 
@@ -938,7 +938,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         lexer_state: u32,
         parser_node: u32,
     ) -> bool {
-        debug_assert!(std::ptr::eq(constraint, self.constraint));
+        debug_assert!(std::sync::Arc::ptr_eq(&constraint.data, &self.constraint.data));
         let Some((index, _, _)) = self.leaf_local(lexer_state) else { return false; };
         if self.leaves[index].reset == lexer_state {
             return true;
@@ -970,7 +970,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
 
     #[inline(always)]
     fn terminal_is_ignore(&self, constraint: &Constraint, terminal: TerminalID) -> bool {
-        debug_assert!(std::ptr::eq(constraint, self.constraint));
+        debug_assert!(std::sync::Arc::ptr_eq(&constraint.data, &self.constraint.data));
         let Some(index) = self.leaves.partition_point(|leaf| leaf.terminal_offset <= terminal)
             .checked_sub(1) else { return false; };
         let leaf = &self.leaves[index];
@@ -1003,7 +1003,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         parser_node: u32,
         terminal: TerminalID,
     ) -> SmallVec<[(u32, u32); 4]> {
-        debug_assert!(std::ptr::eq(constraint, self.constraint));
+        debug_assert!(std::sync::Arc::ptr_eq(&constraint.data, &self.constraint.data));
         let key = (parser_node, terminal);
         if let Some(cached) = self.parser_advance_cache.get(&key) {
             return cached.clone();
@@ -3822,7 +3822,7 @@ mod joint_root_scheduling_tests {
 /// Every declined proof or exhausted cache falls back to ordinary traversal.
 /// Dense and lazy lexer providers share the same authoritative byte executor.
 fn try_full_walk_mask(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     root_branches: &DynamicBranches,
@@ -3846,7 +3846,7 @@ fn root_output_scope_enabled() -> bool {
 }
 
 fn try_full_walk_mask_in_output_scope(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     root_branches: &DynamicBranches,
@@ -3902,7 +3902,7 @@ fn try_full_walk_mask_in_output_scope(
             scratch.fill(0);
             let blocked = branch
                 .initial_prune_guard
-                .blocked_output_mask(state.constraint, buf.len())?;
+                .blocked_output_mask(&state.constraint, buf.len())?;
             let mut one = DynamicBranches::new();
             let mut unguarded = branch.clone();
             unguarded.initial_prune_guard = InitialPruneGuard::Passed;
@@ -4438,7 +4438,7 @@ fn full_walk_hot_lane_two_escape<T: FullWalkTransitionTable>(
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     root_lexer: u32,
@@ -4562,7 +4562,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                             initial_lexer_state,
                             transitions,
                             parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             &mut pair_union_cache,
                         ))
                     }
@@ -4574,7 +4574,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                         initial_lexer_state,
                         transitions,
                         parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         &mut pair_union_cache,
                     ))
                 }
@@ -4585,7 +4585,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                     initial_lexer_state,
                     transitions,
                     parser_cache,
-                    state.constraint,
+                    &state.constraint,
                     &mut pair_union_cache,
                 ))
             } else {
@@ -4634,7 +4634,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                 if condition_active {
                     if transitions.token_boundary_allowed(
                         parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         initial_lexer_state,
                         lexer,
                         parser,
@@ -4682,7 +4682,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                     } else {
                         let value = transitions.token_boundary_allowed(
                             parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             initial_lexer_state,
                             lexer,
                             parser,
@@ -4696,13 +4696,13 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                 } else if lexer == HOT_EDGE_LEXER_TWO_DISTINCT || lexer == HOT_EDGE_LEXER_TWO {
                     transitions.token_boundary_allowed(
                         parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         initial_lexer_state,
                         two.0.0,
                         two.0.1,
                     ) || transitions.token_boundary_allowed(
                         parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         initial_lexer_state,
                         two.1.0,
                         two.1.1,
@@ -4742,7 +4742,7 @@ fn try_full_walk_mask_with_table_dispatch<
     T: FullWalkTransitionTable,
     const HOT_SINGLE_ROOT: bool,
 >(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     root_branches: &DynamicBranches,
@@ -4775,7 +4775,7 @@ fn try_full_walk_mask_with_table<
     const HOT_SINGLE_ROOT: bool,
     const DEFER_FIRST_MATCH_FINALIZER: bool,
 >(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     root_branches: &DynamicBranches,
@@ -4783,7 +4783,7 @@ fn try_full_walk_mask_with_table<
     transitions: &mut T,
 ) -> Result<bool, String> {
 
-    let initial_lexer_state = transitions.walk_initial_state(state.constraint, vocab)?;
+    let initial_lexer_state = transitions.walk_initial_state(&state.constraint, vocab)?;
 
     let all_words = vocab.all_original_token_words();
     let copy_len = buf.len().min(all_words.len());
@@ -4814,7 +4814,7 @@ fn try_full_walk_mask_with_table<
             .possible_future_terminals_iter(source)
             .eq(std::iter::once(terminal))
         && parser_cache
-            .admitted(state.constraint, root_parser_nodes[0])
+            .admitted(&state.constraint, root_parser_nodes[0])
             .contains(terminal as usize)
     {
         state
@@ -4854,7 +4854,7 @@ fn try_full_walk_mask_with_table<
             return None;
         }
         let parser_node = root_parser_nodes[0];
-        let admitted = parser_cache.admitted(state.constraint, parser_node);
+        let admitted = parser_cache.admitted(&state.constraint, parser_node);
         let mut terminals = admitted
             .iter_ones()
             .filter_map(|terminal| TerminalID::try_from(terminal).ok());
@@ -4888,7 +4888,7 @@ fn try_full_walk_mask_with_table<
     {
         let parser_node = root_parser_nodes[0];
         let lexer_state = root_branches[0].tokenizer_config;
-        let admitted = parser_cache.admitted(state.constraint, parser_node).clone();
+        let admitted = parser_cache.admitted(&state.constraint, parser_node).clone();
 
         // The config walker is not limited to virtual residuals: ordinary
         // epsilon-NFA configurations can also denote a broad regular language
@@ -5178,7 +5178,7 @@ fn try_full_walk_mask_with_table<
         && let Some(safe_plus) = vocab.llg_slice_by_cache_id(0)
         && vocab.llg_master_trie().is_some()
     {
-        let admitted = parser_cache.admitted(state.constraint, parser_node).clone();
+        let admitted = parser_cache.admitted(&state.constraint, parser_node).clone();
         let mut proved = None::<(u32, TerminalID)>;
         'sources: for branch in root_branches {
             let Some(source) = branch.exact_tokenizer_state else {
@@ -5882,7 +5882,7 @@ fn try_full_walk_mask_with_table<
                             initial_lexer_state,
                             transitions,
                             &mut parser_cache,
-                            state.constraint,
+                            &state.constraint,
                         );
                         first_match_side =
                             (!full_walk_many_state_is_empty(&advanced)).then_some(advanced);
@@ -5904,7 +5904,7 @@ fn try_full_walk_mask_with_table<
                             let terminal = first_match_terminal
                                 .expect("direct first-match terminal disappeared");
                             if let Some(next_parser) =
-                                parser_cache.advance(state.constraint, scalar_parser, terminal)
+                                parser_cache.advance(&state.constraint, scalar_parser, terminal)
                             {
                                 let future = target_coordinate
                                     .has_future(&state.constraint.tokenizer)
@@ -5925,7 +5925,7 @@ fn try_full_walk_mask_with_table<
                                 full_walk_many_state_push_branch(
                                     &mut first_match_side,
                                     FullWalkBranch {
-                                        lexer_state: parser_cache.initial_lexer(state.constraint, transitions, initial_lexer_state, next_parser),
+                                        lexer_state: parser_cache.initial_lexer(&state.constraint, transitions, initial_lexer_state, next_parser),
                                         parser_node: next_parser,
                                         prune_guard,
                                     },
@@ -6078,7 +6078,7 @@ fn try_full_walk_mask_with_table<
                         if !condition_active
                             || transitions.token_boundary_allowed(
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 initial_lexer_state,
                                 target,
                                 scalar_parser,
@@ -6140,7 +6140,7 @@ fn try_full_walk_mask_with_table<
                                 initial_lexer_state,
                                 transitions,
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 FULL_WALK_LEXER_TWO_DISTINCT,
                                 &mut scalar_lexer,
                                 &mut scalar_parser,
@@ -6154,7 +6154,7 @@ fn try_full_walk_mask_with_table<
                                     initial_lexer_state,
                                     transitions,
                                     &mut parser_cache,
-                                    state.constraint,
+                                    &state.constraint,
                                 )
                             } else {
                                 full_walk_scalar_finalizer(
@@ -6163,7 +6163,7 @@ fn try_full_walk_mask_with_table<
                                     initial_lexer_state,
                                     transitions,
                                     &mut parser_cache,
-                                    state.constraint,
+                                    &state.constraint,
                                 )
                             };
                             match outcome {
@@ -6263,7 +6263,7 @@ fn try_full_walk_mask_with_table<
                     initial_lexer_state,
                     transitions,
                     &mut parser_cache,
-                    state.constraint,
+                    &state.constraint,
                 ) {
                         FullWalkTwoStepOutcome::Dead => {
                             scalar_lexer = FULL_WALK_LEXER_DEAD;
@@ -6334,7 +6334,7 @@ fn try_full_walk_mask_with_table<
                         initial_lexer_state,
                         transitions,
                         &mut parser_cache,
-                        state.constraint,
+                        &state.constraint,
                     ) {
                         FullWalkTwoStepOutcome::Dead => {
                             scalar_lexer = FULL_WALK_LEXER_DEAD;
@@ -6412,7 +6412,7 @@ fn try_full_walk_mask_with_table<
                         initial_lexer_state,
                         transitions,
                         &mut parser_cache,
-                        state.constraint,
+                        &state.constraint,
                     )
                 } else { FullWalkManyState::Branches(FullWalkBranches::new()) };
                 let next_id = if product_transition_cache_capacity != 0 {
@@ -6423,7 +6423,7 @@ fn try_full_walk_mask_with_table<
                         initial_lexer_state,
                         transitions,
                         &mut parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         &mut owned_next,
                         condition_walk_enabled,
                     )
@@ -6552,7 +6552,7 @@ fn try_full_walk_mask_with_table<
                 if trie.node(child).child_len != 0
                     && many_transition_cache.as_mut().unwrap().admits_stable_alphabet(
                         current_many_id, trie.subtree_bytes(child), initial_lexer_state,
-                        transitions, &mut parser_cache, state.constraint,
+                        transitions, &mut parser_cache, &state.constraint,
                     )
                 {
                     let original_count = vocab.subtree_original_tokens_for(trie, child).len();
@@ -6594,7 +6594,7 @@ fn try_full_walk_mask_with_table<
                             FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
                                 transitions.token_boundary_allowed(
                                     &mut parser_cache,
-                                    state.constraint,
+                                    &state.constraint,
                                     initial_lexer_state,
                                     branch.lexer_state,
                                     branch.parser_node,
@@ -6605,19 +6605,19 @@ fn try_full_walk_mask_with_table<
                                 parser_node,
                             } => transitions.token_boundary_allowed(
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 initial_lexer_state,
                                 lexers.0,
                                 *parser_node,
                             ) || transitions.token_boundary_allowed(
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 initial_lexer_state,
                                 lexers.1,
                                 *parser_node,
                             ) || transitions.token_boundary_allowed(
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 initial_lexer_state,
                                 lexers.2,
                                 *parser_node,
@@ -6629,7 +6629,7 @@ fn try_full_walk_mask_with_table<
                 } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                     parser_transparent || transitions.token_boundary_allowed(
                             &mut parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             initial_lexer_state,
                             scalar_lexer,
                             scalar_parser,
@@ -6637,13 +6637,13 @@ fn try_full_walk_mask_with_table<
                 } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                     transitions.token_boundary_allowed(
                         &mut parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         initial_lexer_state,
                         current_two.0.0,
                         current_two.0.1,
                     ) || transitions.token_boundary_allowed(
                         &mut parser_cache,
-                        state.constraint,
+                        &state.constraint,
                         initial_lexer_state,
                         current_two.1.0,
                         current_two.1.1,
@@ -6654,13 +6654,13 @@ fn try_full_walk_mask_with_table<
                     {
                         many_transition_cache.as_mut().unwrap().token_boundary_allowed(
                             current_many_id, transitions, &mut parser_cache,
-                            state.constraint, initial_lexer_state,
+                            &state.constraint, initial_lexer_state,
                         )
                     } else { match &current_many {
                         FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
                             transitions.token_boundary_allowed(
                                 &mut parser_cache,
-                                state.constraint,
+                                &state.constraint,
                                 initial_lexer_state,
                                 branch.lexer_state,
                                 branch.parser_node,
@@ -6671,19 +6671,19 @@ fn try_full_walk_mask_with_table<
                             parser_node,
                         } => transitions.token_boundary_allowed(
                             &mut parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             initial_lexer_state,
                             lexers.0,
                             *parser_node,
                         ) || transitions.token_boundary_allowed(
                             &mut parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             initial_lexer_state,
                             lexers.1,
                             *parser_node,
                         ) || transitions.token_boundary_allowed(
                             &mut parser_cache,
-                            state.constraint,
+                            &state.constraint,
                             initial_lexer_state,
                             lexers.2,
                             *parser_node,
@@ -8410,11 +8410,11 @@ pub(crate) fn or_blocked_internal_tokens_for_exclusions(
     Ok(())
 }
 
-fn update_special_token_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
+fn update_special_token_mask(state: &ConstraintState, buf: &mut [u32]) {
     for special in &state.constraint.special_token_terminals {
         if state.constraint.is_late_grammar_placeholder_terminal(special.terminal_id) { continue; }
         if super::commit::advance_special_terminal_paths(
-            state.constraint, &state.state, special.terminal_id,
+            &state.constraint, &state.state, special.terminal_id,
         ).is_some_and(|gss| !gss.is_empty()) {
             special.or_mask(buf);
         }
@@ -8897,13 +8897,13 @@ impl DynamicMaskLookupScratch {
 }
 
 fn dynamic_mask_lookup_query(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
 ) -> Option<(u64, DynamicMaskLookupScratch)> {
     dynamic_mask_lookup_query_for_vocab(state, state.constraint.dynamic_mask_vocab_for_runtime())
 }
 
 fn dynamic_mask_lookup_query_for_vocab(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     vocab: &DynamicMaskVocab,
 ) -> Option<(u64, DynamicMaskLookupScratch)> {
     let mut remaining = DYNAMIC_MASK_CACHE_MAX_STACKS;
@@ -9011,7 +9011,7 @@ fn dynamic_mask_lookup_query_for_vocab(
                 .direct_regular_admissible_terminals(gss)
                 .unwrap_or_else(|| {
                     let candidates = BitSet::all(state.constraint.parser_terminal_count() as usize);
-                    super::commit::exact_admitted_terminals_for_candidates(state.constraint, gss, &candidates)
+                    super::commit::exact_admitted_terminals_for_candidates(&state.constraint, gss, &candidates)
                 });
             let mut terminals = admitted.iter_ones();
             terminals
@@ -9067,11 +9067,11 @@ fn dynamic_mask_lookup_query_for_vocab(
     Some((hash, scratch))
 }
 
-fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStateKey> {
+fn dynamic_mask_state_key(state: &ConstraintState) -> Option<DynamicMaskStateKey> {
     dynamic_mask_lookup_query(state).map(|(_, scratch)| scratch.to_owned_state_key())
 }
 
-pub(crate) fn dynamic_mask_state_has_cached_result(state: &ConstraintState<'_>) -> bool {
+pub(crate) fn dynamic_mask_state_has_cached_result(state: &ConstraintState) -> bool {
     if !dynamic_mask_cache_enabled() {
         return false;
     }
@@ -9090,7 +9090,7 @@ pub(crate) fn dynamic_mask_state_has_cached_result(state: &ConstraintState<'_>) 
 /// transitions; epsilon/virtual leaves delegate to the ordinary config lexer
 /// executor through a scoped adapter over this same vocabulary traversal.
 pub(crate) fn try_fill_recursive_mask_shared(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     buf: &mut [u32],
 ) -> Result<bool, String> {
     if !state.constraint.uses_compact_segmented_parser_runtime() {
@@ -9108,10 +9108,10 @@ pub(crate) fn try_fill_recursive_mask_shared(
 /// transition provider and the hot full-walk implementation. The persistent
 /// cache belongs to this immutable vocabulary/binding, never to a global ID set.
 fn try_fill_recursive_mask_with_vocab(
-    state: &ConstraintState<'_>, mask: &mut [u32], vocab: &DynamicMaskVocab,
+    state: &ConstraintState, mask: &mut [u32], vocab: &DynamicMaskVocab,
 ) -> Result<bool, String> {
     with_recursive_vocab_mask_cache(state, mask, vocab, |mask| {
-        let filled = if let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) {
+        let filled = if let Some(mut transitions) = RecursiveFullWalkTransitions::new(&state.constraint) {
             fill_recursive_mask_using_vocab(state, mask, &mut transitions, vocab)?
         } else {
             recursive_provider::fill_with_vocab(state, mask, vocab)?
@@ -9121,7 +9121,7 @@ fn try_fill_recursive_mask_with_vocab(
 }
 
 fn with_recursive_vocab_mask_cache(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     mask: &mut [u32],
     vocab: &DynamicMaskVocab,
     evaluate: impl FnOnce(&mut [u32]) -> Result<bool, String>,
@@ -9157,7 +9157,7 @@ fn with_recursive_vocab_mask_cache(
 }
 
 fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     buf: &mut [u32],
     transitions: &mut T,
 ) -> Result<bool, String> {
@@ -9166,7 +9166,7 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
 }
 
 fn prepare_recursive_mask_roots<T: FullWalkTransitionTable>(
-    state: &ConstraintState<'_>, transitions: &mut T,
+    state: &ConstraintState, transitions: &mut T,
 ) -> Result<DynamicBranches, String> {
     let mut roots = DynamicBranches::new();
     for (&lexer_state, gss) in state.state.iter() {
@@ -9195,7 +9195,7 @@ fn prepare_recursive_mask_roots<T: FullWalkTransitionTable>(
 }
 
 fn fill_recursive_mask_using_vocab<T: FullWalkTransitionTable>(
-    state: &ConstraintState<'_>, buf: &mut [u32], transitions: &mut T,
+    state: &ConstraintState, buf: &mut [u32], transitions: &mut T,
     vocab: &DynamicMaskVocab,
 ) -> Result<bool, String> {
     let roots = prepare_recursive_mask_roots(state, transitions)?;
@@ -9203,7 +9203,7 @@ fn fill_recursive_mask_using_vocab<T: FullWalkTransitionTable>(
 }
 
 fn fill_recursive_mask_using_roots<T: FullWalkTransitionTable>(
-    state: &ConstraintState<'_>, buf: &mut [u32], transitions: &mut T,
+    state: &ConstraintState, buf: &mut [u32], transitions: &mut T,
     vocab: &DynamicMaskVocab, roots: &DynamicBranches,
 ) -> Result<bool, String> {
     let required = state.constraint.mask_len();
@@ -9297,7 +9297,7 @@ impl PureMaskByteDomain {
 /// byte language before asking for an expensive vocabulary. A live first byte
 /// retains the provider caches and uses the existing shared byte walker.
 fn fill_pure_byte_mask_using_factory<T, V, F>(
-    state: &ConstraintState<'_>, buf: &mut [u32], transitions: &mut T,
+    state: &ConstraintState, buf: &mut [u32], transitions: &mut T,
     domain: PureMaskByteDomain, factory: F,
 ) -> Result<bool, String>
 where
@@ -9365,14 +9365,14 @@ where
 }
 
 fn fill_pure_byte_mask_with_factory<V, F>(
-    state: &ConstraintState<'_>, buf: &mut [u32],
+    state: &ConstraintState, buf: &mut [u32],
     domain: PureMaskByteDomain, factory: F,
 ) -> Result<bool, String>
 where
     V: std::ops::Deref<Target = DynamicMaskVocab>,
     F: FnOnce() -> Result<V, String>,
 {
-    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) {
+    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(&state.constraint) {
         fill_pure_byte_mask_using_factory(state, buf, &mut transitions, domain, factory)
     } else {
         recursive_provider::fill_with_vocab_factory(state, buf, domain, factory)
@@ -9380,9 +9380,9 @@ where
 }
 
 fn fill_recursive_mask_additive_vocab(
-    state: &ConstraintState<'_>, buf: &mut [u32], vocab: &DynamicMaskVocab, already: &[u32],
+    state: &ConstraintState, buf: &mut [u32], vocab: &DynamicMaskVocab, already: &[u32],
 ) -> Result<bool, String> {
-    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) {
+    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(&state.constraint) {
         transitions.pre_admitted_original_mask = Some(already);
         fill_recursive_mask_using_vocab(state, buf, &mut transitions, vocab)
     } else {
@@ -9391,11 +9391,11 @@ fn fill_recursive_mask_additive_vocab(
 }
 
 fn fill_recursive_mask_additive_factory<V, F>(
-    state: &ConstraintState<'_>, buf: &mut [u32], domain: PureMaskByteDomain,
+    state: &ConstraintState, buf: &mut [u32], domain: PureMaskByteDomain,
     already: &[u32], factory: F,
 ) -> Result<bool, String>
 where V: std::ops::Deref<Target = DynamicMaskVocab>, F: FnOnce() -> Result<V, String> {
-    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) {
+    if let Some(mut transitions) = RecursiveFullWalkTransitions::new(&state.constraint) {
         transitions.pre_admitted_original_mask = Some(already);
         fill_pure_byte_mask_using_factory(state, buf, &mut transitions, domain, factory)
     } else {
@@ -9582,7 +9582,7 @@ impl PreparedMaskVocabulary {
         Ok(Arc::clone(views.entry(key.to_vec()).or_insert(built)))
     }
 
-    fn or_mask_with_pre_admission(&self, state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
+    fn or_mask_with_pre_admission(&self, state: &ConstraintState, buf: &mut [u32]) -> Result<bool, String> {
         if !state.constraint.uses_compact_segmented_parser_runtime() { return Ok(false); }
         let pending = self.original_ids.iter().copied().filter(|&id| {
             buf.get(id as usize / 32).is_none_or(|&w| w & (1 << (id % 32)) == 0)
@@ -9592,16 +9592,16 @@ impl PreparedMaskVocabulary {
         let filled = if let Some(vocab) = self.cached_vocab(&self.original_ids)? {
             fill_recursive_mask_additive_vocab(state, &mut scratch, &vocab, buf)?
         } else if self.policy == PreparedVocabularyPolicy::DeadHeadPreflight
-            && let Some(mut domain) = PureMaskByteDomain::for_ids(state.constraint, &pending)
+            && let Some(mut domain) = PureMaskByteDomain::for_ids(&state.constraint, &pending)
         {
             // Only pending heads need the preflight, but the shared canonical
             // vocabulary may contain longer already-admitted byte strings.
             domain.max_token_len = self.max_original_byte_len;
             fill_recursive_mask_additive_factory(state, &mut scratch, domain, buf, || {
-                self.resolve_vocab(state.constraint, &self.original_ids)
+                self.resolve_vocab(&state.constraint, &self.original_ids)
             })?
         } else {
-            let vocab = self.resolve_vocab(state.constraint, &self.original_ids)?;
+            let vocab = self.resolve_vocab(&state.constraint, &self.original_ids)?;
             fill_recursive_mask_additive_vocab(state, &mut scratch, &vocab, buf)?
         };
         if !filled { return Ok(false); }
@@ -9611,7 +9611,7 @@ impl PreparedMaskVocabulary {
         Ok(true)
     }
 
-    pub(crate) fn or_mask(&self, state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
+    pub(crate) fn or_mask(&self, state: &ConstraintState, buf: &mut [u32]) -> Result<bool, String> {
         static PRUNED: OnceLock<bool> = OnceLock::new();
         if *PRUNED.get_or_init(|| env_flag("GLRMASK_BOUNDARY_PRUNED_FIXED_VOCABULARY", true)) {
             self.or_mask_with_pre_admission(state, buf)
@@ -9620,7 +9620,7 @@ impl PreparedMaskVocabulary {
         }
     }
 
-    fn or_mask_filtered(&self, state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
+    fn or_mask_filtered(&self, state: &ConstraintState, buf: &mut [u32]) -> Result<bool, String> {
         if !state.constraint.uses_compact_segmented_parser_runtime() { return Ok(false); }
         let key = self.original_ids.iter().copied().filter(|&id| {
             buf.get(id as usize / 32).is_none_or(|w| w & (1 << (id % 32)) == 0)
@@ -9635,15 +9635,15 @@ impl PreparedMaskVocabulary {
             nodes.set(vocab.trie.node_count());
             try_fill_recursive_mask_with_vocab(state, &mut mask, &vocab)?
         } else if self.policy == PreparedVocabularyPolicy::DeadHeadPreflight
-            && let Some(domain) = PureMaskByteDomain::for_ids(state.constraint, &key)
+            && let Some(domain) = PureMaskByteDomain::for_ids(&state.constraint, &key)
         {
             fill_pure_byte_mask_with_factory(state, &mut mask, domain, || {
-                let vocab = self.resolve_vocab(state.constraint, &key)?;
+                let vocab = self.resolve_vocab(&state.constraint, &key)?;
                 nodes.set(vocab.trie.node_count());
                 Ok(vocab)
             })?
         } else {
-            let vocab = self.resolve_vocab(state.constraint, &key)?;
+            let vocab = self.resolve_vocab(&state.constraint, &key)?;
             nodes.set(vocab.trie.node_count());
             try_fill_recursive_mask_with_vocab(state, &mut mask, &vocab)?
         };
@@ -9662,7 +9662,7 @@ impl PreparedMaskVocabulary {
 }
 
 
-pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
+pub(crate) fn fill_mask_dynamic(state: &ConstraintState, buf: &mut [u32]) {
     crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
         "fill_mask_dynamic",
         state.constraint.uses_dynamic_runtime(),
@@ -9676,7 +9676,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 }
 
 pub(crate) fn fill_mask_dynamic_bounded(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     buf: &mut [u32],
     timeout_ms: u64,
 ) -> Result<(), String> {
@@ -9703,7 +9703,7 @@ pub(crate) fn fill_mask_dynamic_bounded(
 /// OR the complete exact dynamic language into an existing static/component
 /// baseline. The baseline does not prune traversal: the strict walker still
 /// visits the complete vocabulary and combines the exact result afterward.
-pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
+pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState, buf: &mut [u32]) {
     crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
         "or_mask_dynamic_additions",
         state.constraint.uses_dynamic_runtime(),
@@ -9720,7 +9720,7 @@ pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [
 /// into `buf`. `candidate_mask` filters the result after traversal; it never
 /// restricts which vocabulary prefixes/endpoints the strict walker visits.
 pub(crate) fn or_mask_dynamic_candidate_additions(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     buf: &mut [u32],
     candidate_mask: &[u32],
 ) {
@@ -9738,7 +9738,7 @@ pub(crate) fn or_mask_dynamic_candidate_additions(
 
 #[inline]
 fn fill_mask_dynamic_impl(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     buf: &mut [u32],
     deadline: Option<Instant>,
     additive_static_baseline: bool,
@@ -9803,7 +9803,7 @@ fn fill_mask_dynamic_impl(
     let exact_initial_tsid = state.constraint.tokenizer.initial_state();
     let initial_tsid = vocab.mask_runtime_state(exact_initial_tsid);
     let mut root_branches = DynamicBranches::new();
-    let mut lexer_scan_cache = DynamicNfaScanCache::new_for_mask(state.constraint, vocab, deadline);
+    let mut lexer_scan_cache = DynamicNfaScanCache::new_for_mask(&state.constraint, vocab, deadline);
     let trie = vocab.trie.as_ref();
     if profile {
         eprintln!(
@@ -9964,7 +9964,7 @@ fn fill_mask_dynamic_impl(
                             let candidates =
                                 BitSet::all(state.constraint.parser_terminal_count() as usize);
                             super::commit::exact_admitted_terminals_for_candidates(
-                                state.constraint,
+                                &state.constraint,
                                 &parser_gss,
                                 &candidates,
                             )
@@ -10059,7 +10059,7 @@ fn fill_mask_dynamic_impl(
                     })
                 });
                 let post_first = sole_future.and_then(|terminal| {
-                    parser_child(state.constraint, &stacks, terminal).map(|child| {
+                    parser_child(&state.constraint, &stacks, terminal).map(|child| {
                         let admitted = admitted_for(&child);
                         (
                             terminal,
@@ -10142,7 +10142,7 @@ fn fill_mask_dynamic_impl(
                 );
             }
             let shared_root_admission = root_admission_memo(
-                state.constraint, &stacks, &root_branches,
+                &state.constraint, &stacks, &root_branches,
             );
             // Project fresh starts and resets, but preserve an existing
             // continuation root's exact raw coordinate. That coordinate enables
@@ -10160,11 +10160,11 @@ fn fill_mask_dynamic_impl(
                 && vocab.mask_runtime_tokenizer().is_none()
             {
                 let row_candidates = lexer_scan_cache.parser_projection_enabled
-                    .then(|| parser_row_projection_candidates(state.constraint, &stacks))
+                    .then(|| parser_row_projection_candidates(&state.constraint, &stacks))
                     .flatten();
                 let (mut admitted, exact_admission) = row_candidates.unwrap_or_else(|| {
                     let admitted = parser_admission_with_root_memo(
-                        state.constraint, &stacks, &shared_root_admission,
+                        &state.constraint, &stacks, &shared_root_admission,
                     );
                     (admitted, true)
                 });
@@ -10255,7 +10255,7 @@ fn fill_mask_dynamic_impl(
                 {
                     continue;
                 }
-                let Some(advanced) = parser_child(state.constraint, &branch.gss, terminal) else {
+                let Some(advanced) = parser_child(&state.constraint, &branch.gss, terminal) else {
                     continue;
                 };
                 let sibling_exists = snapshot
@@ -10582,7 +10582,7 @@ mod tests {
         mask.get(word).is_some_and(|word| word & (1u32 << bit) != 0)
     }
 
-    fn direct_mask(state: &ConstraintState<'_>) -> Vec<u32> {
+    fn direct_mask(state: &ConstraintState) -> Vec<u32> {
         let mut mask = vec![0u32; state.constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut mask);
         mask
@@ -10650,7 +10650,7 @@ mod tests {
 
     /// Check the independent oracle, natural probation/store path, and a
     /// genuine cached hit. A hit must not run the vocabulary walker again.
-    fn assert_recursive_persistent_roundtrip(state: &ConstraintState<'_>) {
+    fn assert_recursive_persistent_roundtrip(state: &ConstraintState) {
         let mut expected = vec![0; state.constraint.mask_len()];
         state.fill_recursive_mask_by_exact_full_walk(&mut expected);
         let mut output = vec![u32::MAX; expected.len() + 3];
@@ -11738,7 +11738,7 @@ mod tests {
         assert_eq!(hits, iters);
     }
 
-    fn assert_dynamic_parity(state: &ConstraintState<'_>) {
+    fn assert_dynamic_parity(state: &ConstraintState) {
         assert_eq!(state.mask(), direct_mask(state));
     }
 
@@ -12371,7 +12371,7 @@ nt start ::= A B C | B A C | A C | B C;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
-        fn visit(state: ConstraintState<'_>, depth: usize) {
+        fn visit(state: ConstraintState, depth: usize) {
             assert_dynamic_parity(&state);
             if depth == 3 {
                 return;
@@ -12406,7 +12406,7 @@ nt start ::= A A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
-        fn visit(state: ConstraintState<'_>, depth: usize) {
+        fn visit(state: ConstraintState, depth: usize) {
             assert_dynamic_parity(&state);
             if depth == 3 {
                 return;

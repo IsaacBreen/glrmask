@@ -5,7 +5,7 @@ const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn vocab(parts: &[&[u8]]) -> Vocab {
     Vocab::new(parts.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect())
 }
-fn events(state: &glrmask::ConstraintState<'_>) -> Vec<(u32,u64)> {
+fn events(state: &glrmask::ConstraintState) -> Vec<(u32,u64)> {
     state.marker_events().iter().map(|e| (e.id,e.byte_offset)).collect()
 }
 fn compile(source: &str, vocab: &Vocab, mode: MaskMode) -> Constraint {

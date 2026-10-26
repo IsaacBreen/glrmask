@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ConstraintState` no longer borrows its `Constraint`, so a state can outlive the variable it came from, live in a struct or async task, or move between threads. `Constraint` is now a cheap handle to shared data, and cloning it is cheap.
+
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
 - The minimum supported Rust version is now 1.89.
 - Grammar text can no longer allow a special token. In Lark, `<[*]>` and `<[^...]>` match only tokens with bytes, and

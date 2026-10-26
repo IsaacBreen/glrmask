@@ -54,18 +54,18 @@ fn singleton(mask: &[u32]) -> Option<u32> {
     iter.next().is_none().then_some(first)
 }
 
-fn same_spelling_policy(states: &[ConstraintState<'_>]) -> bool {
+fn same_spelling_policy(states: &[ConstraintState]) -> bool {
     let Some(first) = states.first() else { return false; };
     states[1..].iter().all(|state| {
-        let a = first.constraint;
-        let b = state.constraint;
+        let a = &first.constraint;
+        let b = &state.constraint;
         std::ptr::eq(a, b) || (a.end_tokens.as_ref() == b.end_tokens.as_ref()
             && a.token_bytes_count() == b.token_bytes_count()
             && a.token_bytes_iter().all(|(id, bytes)| b.token_bytes_for_id(id) == Some(bytes)))
     })
 }
 
-fn masks(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> (Vec<Vec<u32>>, Vec<u32>) {
+fn masks(states: &[ConstraintState], dynamic: Option<bool>) -> (Vec<Vec<u32>>, Vec<u32>) {
     let individual = states.iter().map(|state| {
         if state.state.is_empty() { return Vec::new(); }
         state.mask_for_forced(dynamic.unwrap_or_else(|| state.constraint.uses_dynamic_runtime()))
@@ -140,15 +140,15 @@ fn byte_successor(
 }
 
 fn byte_prefix(
-    states: &[ConstraintState<'_>], max_bytes: usize, budget: &mut Budget,
+    states: &[ConstraintState], max_bytes: usize, budget: &mut Budget,
 ) -> Vec<u8> {
     byte_prefix_with_bounds(states, max_bytes, budget, true)
 }
 
 fn byte_prefix_with_bounds(
-    states: &[ConstraintState<'_>], max_bytes: usize, budget: &mut Budget, physical_bounds: bool,
+    states: &[ConstraintState], max_bytes: usize, budget: &mut Budget, physical_bounds: bool,
 ) -> Vec<u8> {
-    let constraints = states.iter().map(|state| state.constraint).collect::<Vec<_>>();
+    let constraints = states.iter().map(|state| &state.constraint).collect::<Vec<_>>();
     let mut frontier = states.iter().map(|state| state.state.clone()).collect::<Vec<_>>();
     let mut scratch = constraints.iter().map(|c| CommitBuffers::for_constraint(c)).collect::<Vec<_>>();
     let mut prefix = Vec::new();
@@ -197,7 +197,7 @@ fn canonical_token(constraint: &Constraint, mask: &[u32], remaining: &[u8]) -> O
 }
 
 fn commit_selected(
-    states: &mut Vec<ConstraintState<'_>>, individual: &[Vec<u32>], id: u32, dynamic: Option<bool>,
+    states: &mut Vec<ConstraintState>, individual: &[Vec<u32>], id: u32, dynamic: Option<bool>,
 ) -> bool {
     for (state, mask) in states.iter_mut().zip(individual) {
         if !bit(mask, id) { state.state.clear(); continue; }
@@ -210,14 +210,14 @@ fn commit_selected(
     !states.is_empty()
 }
 
-pub(crate) fn force(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
+pub(crate) fn force(states: &[ConstraintState], dynamic: Option<bool>) -> Vec<u32> {
     force_result(states, dynamic)
 }
 
 /// Public-query adapter for the canonical reference implementation. A proof or
 /// resource limit returns the empty prefix.
 pub(crate) fn force_result(
-    states: &[ConstraintState<'_>], dynamic: Option<bool>,
+    states: &[ConstraintState], dynamic: Option<bool>,
 ) -> Vec<u32> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(states, dynamic))
         .unwrap_or_default()
@@ -226,7 +226,7 @@ pub(crate) fn force_result(
 /// Strict token-ID forcing: no canonical spelling selection. Each next ID is
 /// the only one admitted by the union's authoritative token mask, then committed
 /// through every applicable owner. Stop at any accepting boundary or ambiguity.
-pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
+pub(crate) fn force_token_ids(states: &[ConstraintState], dynamic: Option<bool>) -> Vec<u32> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
         let mut states = states.to_vec();
         states.retain(|state| !state.state.is_empty());
@@ -242,7 +242,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bo
     }).unwrap_or_default()
 }
 
-fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
+fn force_inner(states: &[ConstraintState], dynamic: Option<bool>) -> Vec<u32> {
     if states.is_empty() || states.iter().any(ConstraintState::frontier_complete) || !same_spelling_policy(states) {
         return Vec::new();
     }
@@ -254,7 +254,7 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
     while !states.is_empty() && output.len() < MAX_OUTPUT_IDS && output_bytes < MAX_OUTPUT_BYTES {
         if states.iter().any(ConstraintState::frontier_complete) { break; }
         let (individual, mask) = masks(&states, dynamic);
-        let constraints = states.iter().map(|s| s.constraint).collect::<Vec<_>>();
+        let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
         let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
         for (&c, s) in constraints.iter().zip(&mut frontiers) { expand_runtime_product_states(c, s); }
         let event = match event_possible(&constraints, &frontiers, &mut budget) {
@@ -277,14 +277,14 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
         let mut current_mask = mask;
         while offset < prefix.len() {
             if states.iter().any(ConstraintState::is_accepting) || output.len() >= MAX_OUTPUT_IDS { return output; }
-            let Some((id, width)) = canonical_token(states[0].constraint, &current_mask, &prefix[offset..]) else { return output; };
+            let Some((id, width)) = canonical_token(&states[0].constraint, &current_mask, &prefix[offset..]) else { return output; };
             if !commit_selected(&mut states, &current_masks, id, dynamic) { return output; }
             output.push(id);
             output_bytes += width;
             offset += width;
             if offset < prefix.len() {
                 // The full ID successor, not a byte-shadow cursor, owns the next proof.
-                let constraints = states.iter().map(|s| s.constraint).collect::<Vec<_>>();
+                let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
                 let mut next = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
                 for (&c, s) in constraints.iter().zip(&mut next) { expand_runtime_product_states(c, s); }
                 if !matches!(event_possible(&constraints, &next, &mut budget), Ok(false)) { return output; }

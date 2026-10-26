@@ -19093,7 +19093,7 @@ fn build_composed_constraint_unfinalized(
     let phase_started_at = Instant::now();
     let token_bytes = vocab.entries_arc();
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
-    let constraint = Constraint {
+    let constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
         runtime_backend: ConstraintRuntimeBackend::Static,
@@ -19217,7 +19217,7 @@ fn build_composed_constraint_unfinalized(
         composition_link_metadata_materialized: true,
         deferred_table_rules_blob: None,
         deferred_table_rules: Default::default(),
-    };
+    });
     if compose_profile_enabled() {
         eprintln!(
             "[glrmask/profile][constraint_unfinalized_build] relation_clone_ms={relation_clone_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} token_bytes_ms={token_bytes_ms:.3} total_ms={:.3}",
@@ -22360,10 +22360,13 @@ fn compose_constraints_owned_parent_legacy_impl(
         let boundary_runtime = boundary_runtime_result?;
         let (segmented_components, deterministic_root_dispatch, segment_publish_ms) = segmented_result?;
 
+        let overlay_state_count = result.constraint.table.num_states as usize;
+        let overlay_terminal_offsets = result.terminal_offsets.clone();
+        let overlay_tokenizer_state_offsets = result.tokenizer_state_offsets.clone();
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
             crate::runtime::StaticDynamicOverlayMetadata {
-                terminal_offsets: result.terminal_offsets.clone(),
-                tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
+                terminal_offsets: overlay_terminal_offsets.clone(),
+                tokenizer_state_offsets: overlay_tokenizer_state_offsets.clone(),
                 repair_terminals: Vec::new(),
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
@@ -23067,12 +23070,13 @@ fn compose_constraints_owned_parent_legacy_impl(
             "segmented boundary raw-state map must cover the private TSID coordinate",
         );
         let internal_token_to_originals = boundary_id_map.vocab_tokens.internal_to_originals;
+        let overlay_state_count = result.constraint.table.num_states as usize;
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
             crate::runtime::StaticDynamicOverlayMetadata {
                 terminal_offsets: result.terminal_offsets.clone(),
                 tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
                 repair_terminals: Vec::new(),
-                non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
+                non_parent_only_parser_states: vec![false; overlay_state_count],
                 segmented_parser_components: Vec::new(),
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
@@ -26122,7 +26126,7 @@ table: &child_table,
     }
 
     #[inline(never)]
-    fn scoped_oracle_test_start(source: &Constraint) -> Box<crate::ConstraintState<'_>> {
+    fn scoped_oracle_test_start(source: &Constraint) -> Box<crate::ConstraintState> {
         Box::new(source.start())
     }
 

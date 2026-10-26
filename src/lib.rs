@@ -431,11 +431,11 @@ pub mod __private {
     /// The reference is a separate oracle constraint, never retained inside
     /// the table-free candidate. Do not call this inside performance intervals.
     pub fn compare_parser_states_debug(
-        reference: &ConstraintState<'_>, candidate: &ConstraintState<'_>,
+        reference: &ConstraintState, candidate: &ConstraintState,
     ) -> Option<serde_json::Value> {
         use crate::compiler::glr::parser::ParserGSS;
         use std::collections::BTreeMap;
-        fn canonical(state: &ConstraintState<'_>) -> BTreeMap<u32, ParserGSS> {
+        fn canonical(state: &ConstraintState) -> BTreeMap<u32, ParserGSS> {
             let mut map = BTreeMap::<u32, ParserGSS>::new();
             for (&key, gss) in state.state.iter() {
                 map.entry(key).and_modify(|prior| *prior = prior.merge(gss)).or_insert_with(|| gss.clone());
@@ -1051,7 +1051,7 @@ pub mod __private {
     }
 
     pub trait ConstraintStateExt {
-        fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>);
+        fn copy_snapshot_from(&mut self, source: &ConstraintState);
         fn commit_token_timed_ns(&mut self, token_id: u32) -> std::result::Result<u64, String>;
         fn commit_token_profiled(
             &mut self,
@@ -1074,8 +1074,8 @@ pub mod __private {
         fn parser_root_count(&self) -> usize;
     }
 
-    impl ConstraintStateExt for ConstraintState<'_> {
-        fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
+    impl ConstraintStateExt for ConstraintState {
+        fn copy_snapshot_from(&mut self, source: &ConstraintState) {
             ConstraintState::copy_snapshot_from(self, source);
         }
 

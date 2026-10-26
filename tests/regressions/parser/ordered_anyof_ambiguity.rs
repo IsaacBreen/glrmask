@@ -130,7 +130,7 @@ fn example_from_capability_mask(spec: &FamilySpec, capability_mask: usize) -> St
     format!("{{{}}}", fields.join(", "))
 }
 
-fn stack_count(state: &ConstraintState<'_>) -> usize {
+fn stack_count(state: &ConstraintState) -> usize {
     state
         .debug_parser_stacks()
         .iter()
@@ -138,7 +138,7 @@ fn stack_count(state: &ConstraintState<'_>) -> usize {
         .sum()
 }
 
-fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
+fn unique_stack_count(state: &ConstraintState) -> usize {
     let mut stacks = state
         .debug_parser_stacks()
         .into_iter()
@@ -175,7 +175,7 @@ fn measure_max_unique_stack_count(constraint: &Constraint, text: &str) -> usize 
     max_unique_stacks
 }
 
-fn max_stack_depth(state: &ConstraintState<'_>) -> usize {
+fn max_stack_depth(state: &ConstraintState) -> usize {
     state
         .debug_parser_stacks()
         .iter()

@@ -53,7 +53,7 @@ fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn unique_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
+fn unique_parser_stack_count(state: &glrmask::ConstraintState) -> usize {
     let mut stacks = state
         .debug_parser_stacks()
         .into_iter()

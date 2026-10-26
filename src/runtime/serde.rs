@@ -194,14 +194,14 @@ fn serialize_constraint<S>(constraint: &&Constraint, serializer: S) -> Result<S:
 where
     S: serde::Serializer,
 {
-    ConstraintSerde::serialize(constraint, serializer)
+    ConstraintSerde::serialize(constraint.as_data(), serializer)
 }
 
 fn deserialize_constraint<'de, D>(deserializer: D) -> Result<Constraint, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    ConstraintSerde::deserialize(deserializer)
+    ConstraintSerde::deserialize(deserializer).map(Constraint::from_data)
 }
 
 // Keep the large runtime object out of the core visitor and the nested Rayon
@@ -212,7 +212,7 @@ fn deserialize_boxed_constraint<'de, D>(deserializer: D) -> Result<Box<Constrain
 where
     D: serde::Deserializer<'de>,
 {
-    ConstraintSerde::deserialize(deserializer).map(Box::new)
+    ConstraintSerde::deserialize(deserializer).map(|data| Box::new(Constraint::from_data(data)))
 }
 
 struct DeserializedConstraint(Constraint);
@@ -222,7 +222,7 @@ impl<'de> serde::Deserialize<'de> for DeserializedConstraint {
     where
         D: serde::Deserializer<'de>,
     {
-        ConstraintSerde::deserialize(deserializer).map(Self)
+        ConstraintSerde::deserialize(deserializer).map(|data| Self(Constraint::from_data(data)))
     }
 }
 
@@ -233,7 +233,7 @@ impl serde::Serialize for SerializedConstraint<'_> {
     where
         S: serde::Serializer,
     {
-        ConstraintSerde::serialize(self.0, serializer)
+        ConstraintSerde::serialize(self.0.as_data(), serializer)
     }
 }
 
@@ -4328,6 +4328,7 @@ fn restore_segmented_runtime_v24(
     )?;
 
     let global_terminal_count = constraint.table.num_terminals;
+    let global_state_count = constraint.table.num_states as usize;
     let overlay = constraint
         .static_dynamic_overlay
         .as_mut()
@@ -4401,7 +4402,6 @@ fn restore_segmented_runtime_v24(
             })
         });
     if has_legacy_boundary {
-        let global_state_count = constraint.table.num_states as usize;
         for component in &mut overlay.segmented_parser_components {
             let Some(shard) = component.boundary.as_mut() else {
                 continue;

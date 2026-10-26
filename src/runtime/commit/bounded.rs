@@ -32,11 +32,11 @@ struct View<'a> {
     generation:u64,
 }
 impl<'a> View<'a> {
-    fn of(state:&'a ConstraintState<'_>)->Self {
-        Self {constraint:state.constraint,state:&state.state,terminated:state.terminated,
+    fn of(state:&'a ConstraintState)->Self {
+        Self {constraint:&state.constraint,state:&state.state,terminated:state.terminated,
             cache:Some(&state.mask_cache),generation:state.generation}
     }
-    fn stopping(self)->bool {frontier_is_accepting(self.constraint,self.state,self.terminated)}
+    fn stopping(self)->bool {frontier_is_accepting(&self.constraint,self.state,self.terminated)}
 }
 
 struct Witnesses {
@@ -467,7 +467,7 @@ fn resource_guard<T>(f:impl FnOnce()->crate::Result<T>)->crate::Result<T> {
     glrmask_invariant::__private::catch_compilation_resource_limit(f).map_err(state_error)?
 }
 
-impl ConstraintState<'_> {
+impl ConstraintState {
     /// Private exact cardinality query. No full mask is built for an over-limit
     /// result; sparse original IDs are still counted individually.
     pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
@@ -485,13 +485,13 @@ impl ConstraintState<'_> {
 
 /// Read-only locally inevitable IDs, preserving all correlated successors.
 /// Probe before allocating the mutable private cursor; most states are choices.
-pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u32>> {
+pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> {
     resource_guard(|| {
         if states.is_empty() || states.iter().any(|s| s.frontier_complete()){return Ok(Vec::new());}
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
         let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
-            .map(|s|Cursor {constraint:s.constraint,state:s.state.clone(),buffers:CommitBuffers::for_mask_only_shadow()})
+            .map(|s|Cursor {constraint:&s.constraint,state:s.state.clone(),buffers:CommitBuffers::for_mask_only_shadow()})
             .collect::<Vec<_>>();
         let mut output=Vec::new();
         loop {
@@ -504,7 +504,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u3
             }
             if !live{return Ok(output);}
             output.push(id);
-            if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(s.constraint,&s.state,false)){break;}
+            if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(&s.constraint,&s.state,false)){break;}
             let mut witnesses=Witnesses::new(1);
             let mut over_limit=false;
             for cursor in &mut cursors {
@@ -519,7 +519,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u3
 }
 
 
-pub(crate) fn mask_for_states_at_most(states:&[ConstraintState<'_>],max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
+pub(crate) fn mask_for_states_at_most(states:&[ConstraintState],max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
     resource_guard(|| {
         let BoundedIds::Exact(ids)=probe_views(states.iter().map(View::of),max_allowed)? else{return Ok(None)};
         let width=states.iter().map(|s|s.constraint.mask_len()).max().unwrap_or(0);
@@ -538,7 +538,7 @@ mod tests {
         mask.iter().enumerate().flat_map(|(wi,&word)| (0..32).filter_map(move |bit|
             (word&(1<<bit)!=0).then_some((wi*32+bit) as u32))).collect()
     }
-    fn inspect(state:&ConstraintState<'_>,context:&str) {
+    fn inspect(state:&ConstraintState,context:&str) {
         // Cold queries must be evaluated BEFORE asking the full mask oracle.
         let initial=state.state.clone();let accepting=state.is_accepting();
         let limits=[0,1,2,3,8,usize::MAX];
@@ -694,7 +694,7 @@ mod differential_tests {
         mask.iter().enumerate().flat_map(|(word,&bits)| (0..32).filter_map(move |bit|
             (bits&(1u32<<bit)!=0).then_some((word*32+bit) as u32))).collect()
     }
-    fn check(state:&ConstraintState<'_>,tag:&str) {
+    fn check(state:&ConstraintState,tag:&str) {
         let expected=state.clone().mask();let ids=allowed(&expected);
         let cached_before=state.mask_cache.lock().unwrap().as_ref().map(|c|(c.generation,c.mask.clone()));
         for k in [0,1,2,3,ids.len().saturating_sub(1),ids.len(),ids.len()+1,usize::MAX] {

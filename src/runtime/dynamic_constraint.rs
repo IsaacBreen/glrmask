@@ -989,7 +989,7 @@ impl DynamicConstraint {
                 .collect::<Vec<u32>>().into()
         };
         
-        Constraint {
+        Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
@@ -1104,7 +1104,7 @@ impl DynamicConstraint {
             composition_link_metadata_materialized: true,
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
-        }
+        })
     }
 
     pub(crate) fn from_template_runtime_parts(
@@ -1520,6 +1520,10 @@ impl DynamicConstraint {
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
             .then(|| constraint.save_body_external_artifact());
+        // A transferred constraint is usually uniquely owned. Unwrap without
+        // cloning the large compiled body, retaining the old move semantics.
+        let constraint = Arc::try_unwrap(constraint.data)
+            .unwrap_or_else(|shared| (*shared).clone());
         DynamicConstraintTransferAlternativeV5 {
             table: CompactTransferTable {
                 table: constraint.table.into_lr(),
@@ -3643,7 +3647,7 @@ impl DynamicConstraint {
     }
 
     /// Create a fresh state for one generated sequence.
-    pub fn start(&self) -> DynamicConstraintState<'_> {
+    pub fn start(&self) -> DynamicConstraintState {
         DynamicConstraintState {
             alternatives: std::iter::once(&self.inner)
                 .chain(self.alternatives.iter())
@@ -3656,8 +3660,8 @@ impl DynamicConstraint {
 
 /// Mutable per-sequence state for a [`DynamicConstraint`].
 #[derive(Clone)]
-pub struct DynamicConstraintState<'a> {
-    alternatives: Vec<ConstraintState<'a>>,
+pub struct DynamicConstraintState {
+    alternatives: Vec<ConstraintState>,
     mask_len: usize,
 }
 
@@ -3738,10 +3742,10 @@ mod parser_replacement_compile_tests {
     }
 }
 
-impl<'a> DynamicConstraintState<'a> {
+impl DynamicConstraintState {
     fn retain_committing(
         &mut self,
-        mut commit: impl FnMut(&mut ConstraintState<'a>) -> Result<(), String>,
+        mut commit: impl FnMut(&mut ConstraintState) -> Result<(), String>,
     ) -> Result<(), String> {
         self.alternatives.retain_mut(|state| commit(state).is_ok());
         if self.alternatives.is_empty() {

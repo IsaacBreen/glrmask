@@ -418,11 +418,11 @@ impl CommitObserver for LiveMarkers<'_> {
     }
 }
 
-impl super::ConstraintState<'_> {
+impl super::ConstraintState {
     pub(crate) fn initialize_markers(&mut self) {
         let Some(queries) = self.constraint.marker_queries.as_deref() else { return; };
         let mut markers = Box::new(MarkerState::new(queries));
-        LiveMarkers { queries, state: &mut markers, base: 0 }.frontier(self.constraint, &self.state, 0);
+        LiveMarkers { queries, state: &mut markers, base: 0 }.frontier(&self.constraint, &self.state, 0);
         markers.finish(queries, 0, true);
         self.markers = Some(markers);
     }
@@ -443,12 +443,12 @@ mod tests {
     use crate::ConstraintState;
     use crate::{Grammar, Vocab};
 
-    fn observations(state: &ConstraintState<'_>) -> Vec<u32> {
+    fn observations(state: &ConstraintState) -> Vec<u32> {
         let mut events = Vec::new();
         if let Some(queries) = &state.constraint.marker_queries {
             for (&lexer, stack) in state.state.iter() {
-                if crate::runtime::commit::runtime_tokenizer_is_reset_state(state.constraint, lexer) {
-                    queries.observe_gss(state.constraint, stack, 0, &mut events);
+                if crate::runtime::commit::runtime_tokenizer_is_reset_state(&state.constraint, lexer) {
+                    queries.observe_gss(&state.constraint, stack, 0, &mut events);
                 }
             }
         }

@@ -111,11 +111,11 @@ fn allowed(mask: &[u32]) -> Vec<usize> {
         .collect()
 }
 
-fn assert_allowed(state: &ConstraintState<'_>, expected: &[usize]) {
+fn assert_allowed(state: &ConstraintState, expected: &[usize]) {
     assert_eq!(allowed(&state.mask()), expected);
 }
 
-fn commit_each_token(state: &mut ConstraintState<'_>, tokens: &[u32]) {
+fn commit_each_token(state: &mut ConstraintState, tokens: &[u32]) {
     for &token in tokens {
         assert!(state.commit_token(token));
     }
@@ -356,7 +356,7 @@ fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     (max_paths, max_stacks)
 }
 
-fn stack_count(state: &ConstraintState<'_>) -> usize {
+fn stack_count(state: &ConstraintState) -> usize {
     state
         .debug_parser_stacks()
         .iter()
@@ -364,7 +364,7 @@ fn stack_count(state: &ConstraintState<'_>) -> usize {
         .sum()
 }
 
-fn unique_parser_path_count(state: &ConstraintState<'_>) -> usize {
+fn unique_parser_path_count(state: &ConstraintState) -> usize {
     let mut paths = state
         .debug_parser_stacks()
         .into_iter()
@@ -2434,7 +2434,7 @@ mod historical_public_nonstall_regressions;
 #[test]
 fn every_failed_commit_returns_err_and_kills_the_state() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
-    let dead = |state: &ConstraintState<'_>| {
+    let dead = |state: &ConstraintState| {
         assert!(state.mask().iter().all(|word| *word == 0), "dead state must have an empty mask");
         assert!(!state.is_accepting(), "dead state must not be accepting");
     };

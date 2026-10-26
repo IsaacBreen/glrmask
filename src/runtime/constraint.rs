@@ -3935,7 +3935,7 @@ impl Constraint {
         let mut state = ConstraintState {
             terminated: false,
             markers: None,
-            constraint: self,
+            constraint: self.clone(),
             state: self.initial_state_map(),
             buffers: Default::default(),
             generation: 0,
@@ -12416,8 +12416,8 @@ impl Constraint {
         self.state_internal_tsid_offsets.push(0);
         for tsids in relation {
             self.state_internal_tsids.extend_from_slice(&tsids);
-            self.state_internal_tsid_offsets
-                .push(self.state_internal_tsids.len() as u32);
+            let offset = self.state_internal_tsids.len() as u32;
+            self.state_internal_tsid_offsets.push(offset);
         }
     }
 
@@ -12442,7 +12442,7 @@ impl Constraint {
         for product_state in 0..product_states {
             let start = self.runtime_product_source_offsets[product_state] as usize;
             let end = self.runtime_product_source_offsets[product_state + 1] as usize;
-            let Some(states) = self.runtime_product_source_states.get(start..end) else {
+            let Some(states) = self.runtime_product_source_states.get(start..end).map(|s| s.to_vec()) else {
                 self.runtime_product_state_by_source_subset.clear();
                 self.runtime_source_state_offset = None;
                 return;
@@ -12619,7 +12619,7 @@ impl Constraint {
     }
 
     /// Starts a new sequence.
-    pub fn start(&self) -> ConstraintState<'_> {
+    pub fn start(&self) -> ConstraintState {
         if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();
         if self.tokenizer_has_epsilon_transitions && !self.tokenizer.has_packed_runtime_metadata() {
@@ -12629,7 +12629,7 @@ impl Constraint {
         let mut state = ConstraintState {
             terminated: false,
             markers: None,
-            constraint: self,
+            constraint: self.clone(),
             state,
             buffers: Default::default(),
             generation: 0,
@@ -12642,12 +12642,12 @@ impl Constraint {
         state
     }
 
-    pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
+    pub(crate) fn start_dynamic(&self) -> ConstraintState {
         crate::runtime::initialize_hot_path_config();
         let mut state = ConstraintState {
             terminated: false,
             markers: None,
-            constraint: self,
+            constraint: self.clone(),
             state: self.initial_state_map(),
             buffers: crate::runtime::state::CommitBuffers::for_constraint(self),
             generation: 0,
@@ -14540,7 +14540,7 @@ impl Constraint {
 
 }
 
-impl<'a> ConstraintState<'a> {
+impl ConstraintState {
     /// Fill a mask directly from the lexer and parser stack, without using the
     /// parser DWA.
     pub(crate) fn fill_mask_dynamic(&self, buf: &mut [u32]) {

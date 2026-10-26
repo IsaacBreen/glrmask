@@ -9,11 +9,11 @@ fn allows(mask: &[u32], id: u32) -> bool {
 }
 /// A rejected state cannot accept and has no allowed tokens. A live accepting
 /// state legitimately has an empty mask when the grammar is complete.
-fn assert_live(state: &glrmask::ConstraintState<'_>) {
+fn assert_live(state: &glrmask::ConstraintState) {
     assert!(state.is_accepting() || !state.mask().iter().all(|word| *word == 0),
         "a successful commit left a rejected state");
 }
-fn replay(state: &glrmask::ConstraintState<'_>, ids: &[u32]) {
+fn replay(state: &glrmask::ConstraintState, ids: &[u32]) {
     let before=state.mask();let mut next=state.clone();
     for &id in ids {
         assert!(!next.is_accepting(), "forced beyond an accepting boundary");

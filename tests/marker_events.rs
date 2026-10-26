@@ -116,7 +116,7 @@ fn malformed_marker_envelopes_fail_without_panics() {
     }
 }
 
-fn batch(state: &glrmask::ConstraintState<'_>) -> Vec<(u32, u64)> {
+fn batch(state: &glrmask::ConstraintState) -> Vec<(u32, u64)> {
     state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
 }
 

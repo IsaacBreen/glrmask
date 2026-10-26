@@ -1125,7 +1125,7 @@ fn token_in_mask(mask: &[u32], token_id: u32) -> bool {
 }
 
 fn snapshot_mask_membership(
-    state: &ConstraintState<'_>,
+    state: &ConstraintState,
     token_id: u32,
     assertion_flags: u8,
 ) -> Option<bool> {
@@ -8550,7 +8550,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
     Ok(())
 }
 
-impl<'a> ConstraintState<'a> {
+impl ConstraintState {
     /// Run one commit. A failed commit rejects the state: the frontier becomes
     /// empty, the mask is empty, and every later commit errors.
     fn commit_transaction<T>(
@@ -8581,7 +8581,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn commit_token_actual_inner(&mut self, token_id: u32) -> Result<(), String> {
-        let constraint = self.constraint;
+        let constraint = &self.constraint;
         let Some(markers) = self.markers.as_deref_mut() else {
             return commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         };
@@ -8602,22 +8602,22 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn commit_bytes_actual_inner(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let constraint = self.constraint;
+        let constraint = self.constraint.clone();
         let Some(markers) = self.markers.as_deref_mut() else {
-            return commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+            return commit_bytes_impl(&constraint, &mut self.state, bytes, &mut self.buffers);
         };
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
         let next = base.checked_add(bytes.len() as u64).ok_or("marker byte position overflow")?;
-        let result = commit_bytes_impl_observed(constraint, &mut self.state, bytes, &mut self.buffers,
+        let result = commit_bytes_impl_observed(&constraint, &mut self.state, bytes, &mut self.buffers,
             &mut LiveMarkers { queries, state: markers, base });
         markers.finish(queries, next, result.is_ok());
         result
     }
 
     pub(crate) fn knows_token_id(&self, token_id: u32) -> bool {
-        token_bytes_for_id(self.constraint, token_id).is_some()
+        token_bytes_for_id(&self.constraint, token_id).is_some()
             || self.constraint.has_special_token_id(token_id)
     }
 
@@ -8842,7 +8842,7 @@ impl<'a> ConstraintState<'a> {
             self.constraint.parser_terminal_count() as usize,
         );
         let mut admitted = exact_admitted_terminals_for_candidates(
-            self.constraint,
+            &self.constraint,
             left_gss,
             &candidates,
         );
@@ -9207,13 +9207,13 @@ impl<'a> ConstraintState<'a> {
         // a poisoned mutex or a cached mask that was computed mid-unwind.
         self.mask_cache = std::sync::Mutex::new(None);
         self.mask_scratch = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::runtime::state::MaskScratch::for_constraint(self.constraint)));
+            crate::runtime::state::MaskScratch::for_constraint(&self.constraint)));
     }
 
     fn commit_token_raw_inner(&mut self, token_id: u32) -> Result<(), String> {
         if let Some(result) = self.commit_end_token(token_id) { return result; }
-        let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id);
+        let constraint = self.constraint.clone();
+        let bytes = token_bytes_for_id(&constraint, token_id);
         if !self.knows_token_id(token_id) {
             self.reject_after_failed_commit();
             return Err(format!(
@@ -9228,7 +9228,7 @@ impl<'a> ConstraintState<'a> {
         let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
-            constraint,
+            &constraint,
             token_id,
             bytes,
             was_in_mask,
@@ -9241,8 +9241,8 @@ impl<'a> ConstraintState<'a> {
 
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
         if let Some(result) = self.commit_end_token(token_id) { return result; }
-        let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id);
+        let constraint = self.constraint.clone();
+        let bytes = token_bytes_for_id(&constraint, token_id);
         if !self.knows_token_id(token_id) {
             self.reject_after_failed_commit();
             return Err(format!(
@@ -9261,7 +9261,7 @@ impl<'a> ConstraintState<'a> {
         let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
-            constraint,
+            &constraint,
             token_id,
             bytes,
             was_in_mask,
@@ -9281,8 +9281,8 @@ impl<'a> ConstraintState<'a> {
         }
         use std::time::Instant;
 
-        let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id);
+        let constraint = self.constraint.clone();
+        let bytes = token_bytes_for_id(&constraint, token_id);
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
@@ -9296,7 +9296,7 @@ impl<'a> ConstraintState<'a> {
         // mask optimization look free merely by shifting work after the timer.
         let total_ns = start.elapsed().as_nanos() as u64;
         assert_commit_oracles(
-            constraint,
+            &constraint,
             token_id,
             bytes,
             was_in_mask,
@@ -9311,8 +9311,8 @@ impl<'a> ConstraintState<'a> {
         if let Some(result) = self.commit_end_token(token_id) {
             return result.map(|()| CommitProfile::default());
         }
-        let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id);
+        let constraint = self.constraint.clone();
+        let bytes = token_bytes_for_id(&constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
             self.reject_after_failed_commit();
@@ -9327,15 +9327,15 @@ impl<'a> ConstraintState<'a> {
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         let result = self.commit_transaction(|this| {
-            expand_runtime_product_states(constraint, &mut this.state);
+            expand_runtime_product_states(&constraint, &mut this.state);
             let special = if has_special {
-                advance_special_token_paths_profiled(constraint, &this.state, token_id, None)
+                advance_special_token_paths_profiled(&constraint, &this.state, token_id, None)
             } else {
                 SpecialTokenAdvanceProfile::default()
             };
             let mut profile = if let Some(bytes) = bytes {
                 match commit_bytes_impl_profiled(
-                    constraint,
+                    &constraint,
                     &mut this.state,
                     bytes,
                     &mut this.buffers,
@@ -9355,8 +9355,8 @@ impl<'a> ConstraintState<'a> {
             };
             apply_special_token_advance_profile(&mut profile, &special);
             let special_merge_result =
-                merge_special_token_paths(constraint, &mut this.state, special.paths);
-            coalesce_uniform_runtime_source_states(constraint, &mut this.state);
+                merge_special_token_paths(&constraint, &mut this.state, special.paths);
+            coalesce_uniform_runtime_source_states(&constraint, &mut this.state);
             profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
             special_merge_result
                 .and_then(|()| finish_token_commit(&this.state))
@@ -9364,7 +9364,7 @@ impl<'a> ConstraintState<'a> {
         });
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
-            constraint,
+            &constraint,
             token_id,
             bytes,
             was_in_mask,
@@ -9382,8 +9382,8 @@ impl<'a> ConstraintState<'a> {
         if let Some(result) = self.commit_end_token(token_id) {
             return result.map(|()| (Vec::new(), final_stacks(&self.state), CommitProfile::default()));
         }
-        let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id);
+        let constraint = self.constraint.clone();
+        let bytes = token_bytes_for_id(&constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
             self.reject_after_failed_commit();
@@ -9399,10 +9399,10 @@ impl<'a> ConstraintState<'a> {
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         let result = self.commit_transaction(|this| {
-            expand_runtime_product_states(constraint, &mut this.state);
+            expand_runtime_product_states(&constraint, &mut this.state);
             let special = if has_special {
                 advance_special_token_paths_profiled(
-                    constraint,
+                    &constraint,
                     &this.state,
                     token_id,
                     Some(&mut advances),
@@ -9412,7 +9412,7 @@ impl<'a> ConstraintState<'a> {
             };
             let mut profile = if let Some(bytes) = bytes {
                 match commit_bytes_impl_profiled(
-                    constraint,
+                    &constraint,
                     &mut this.state,
                     bytes,
                     &mut this.buffers,
@@ -9433,8 +9433,8 @@ impl<'a> ConstraintState<'a> {
             };
             apply_special_token_advance_profile(&mut profile, &special);
             let special_merge_result =
-                merge_special_token_paths(constraint, &mut this.state, special.paths);
-            coalesce_uniform_runtime_source_states(constraint, &mut this.state);
+                merge_special_token_paths(&constraint, &mut this.state, special.paths);
+            coalesce_uniform_runtime_source_states(&constraint, &mut this.state);
             profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
             special_merge_result
                 .and_then(|()| finish_token_commit(&this.state))
@@ -9442,7 +9442,7 @@ impl<'a> ConstraintState<'a> {
         });
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
-            constraint,
+            &constraint,
             token_id,
             bytes,
             was_in_mask,
@@ -9503,7 +9503,7 @@ mod tests {
     #[test]
     fn unique_actionable_top_matches_isolation_reference_including_empty_paths() {
         fn reference(constraint: &Constraint, gss: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
-            if constraint.parser_has_controls() || template_advance_selected(constraint) {
+            if constraint.parser_has_controls() || template_advance_selected(&constraint) {
                 return None;
             }
             let mut selected = None;
@@ -9515,7 +9515,7 @@ mod tests {
             let (top, action) = selected?;
             let isolated = gss.isolate(Some(top));
             (!isolated.is_empty())
-                .then(|| apply_single_top_action_fast(constraint, &isolated, top, terminal, action))
+                .then(|| apply_single_top_action_fast(&constraint, &isolated, top, terminal, action))
                 .flatten()
         }
         let vocab = Vocab::new(["a", "b", "ab", "ba", ",", " ", "(", ")"]
@@ -9550,8 +9550,8 @@ mod tests {
                                     with_empty += 1;
                                 }
                                 for terminal in 0..constraint.parser_terminal_count() {
-                                    let expected = reference(constraint, &input, terminal);
-                                    let actual = try_advance_unique_actionable_top_fast(constraint, &input, terminal);
+                                    let expected = reference(&constraint, &input, terminal);
+                                    let actual = try_advance_unique_actionable_top_fast(&constraint, &input, terminal);
                                     assert_eq!(actual.as_ref().map(canonical_gss), expected.as_ref().map(canonical_gss),
                                         "terminal={terminal} depth={depth} source={source}");
                                     comparisons += 1;
@@ -9625,12 +9625,12 @@ mod tests {
             let mut state = constraint.start();
             assert!(state.commit_bytes(b"ab"));
             let mut reference = state.state.clone();
-            assert!(commit_token_no_fast_path_reference(constraint, &mut reference, 1).is_ok());
+            assert!(commit_token_no_fast_path_reference(&constraint, &mut reference, 1).is_ok());
             let mut actual = state.state.clone();
             let mut scratch = CommitBuffers::default();
-            assert!(commit_token_impl(constraint, &mut actual, &mut scratch, 1).is_ok(),
+            assert!(commit_token_impl(&constraint, &mut actual, &mut scratch, 1).is_ok(),
                 "lexer lanes sharing parser stacks must not share actionable-match answers");
-            assert_commit_fast_path_equivalence(constraint, state.state.clone(), 1, &actual, true);
+            assert_commit_fast_path_equivalence(&constraint, state.state.clone(), 1, &actual, true);
         }
     }
 
@@ -9668,10 +9668,10 @@ mod tests {
                         assert!(token_in_mask(&actual.mask(), token),
                             "ignore prefix absent from mask partitions={partitions} token={token}");
                         let mut reference = before.clone();
-                        assert!(commit_token_no_fast_path_reference(constraint, &mut reference, token).is_ok(),
+                        assert!(commit_token_no_fast_path_reference(&constraint, &mut reference, token).is_ok(),
                             "general queue must retain unfinished ignore token={token}");
                         assert!(actual.commit_token(token));
-                        assert_commit_fast_path_equivalence(constraint, before, token, &actual.state, true);
+                        assert_commit_fast_path_equivalence(&constraint, before, token, &actual.state, true);
                         for byte in fragments[token as usize] { assert!(bytewise.commit_bytes(&[*byte])); }
                         assert_eq!(actual.mask(), bytewise.mask(), "token-vs-byte prefix token={token}");
                     }
@@ -9704,7 +9704,7 @@ mod tests {
                 for prefix in ["", "[", "[a", "[ab", "[ab]", "[ab]!", "[ ", "[]"] {
                     let mut state = constraint.start();
                     if !state.commit_bytes(prefix.as_bytes()) {continue;}
-                    let runtime = state.constraint;
+                    let runtime = &state.constraint;
                     let count = runtime_terminal_count(runtime);
                     for (_, gss) in state.state.iter() {
                         for stride in [1,2,3] {
@@ -9940,7 +9940,7 @@ mod tests {
 
             let root_reset = constraint.recursive_tokenizer_reset_state(0).unwrap();
             let root_x = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                constraint,
+                &constraint,
                 b"X",
                 root_reset,
             )
@@ -9950,7 +9950,7 @@ mod tests {
                 constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 0
             }));
             let root_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                constraint,
+                &constraint,
                 b"a",
                 root_reset,
             )
@@ -9963,7 +9963,7 @@ mod tests {
 
             let child_reset = constraint.recursive_tokenizer_reset_state(1).unwrap();
             let child_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                constraint,
+                &constraint,
                 b"a",
                 child_reset,
             )
@@ -10210,7 +10210,7 @@ mod tests {
             let tsids = constraint.internal_tsids_for_state(tokenizer_state).to_vec();
             eprintln!("WEIGHT_TRANSPORT {name} tokenizer_state={tokenizer_state} tsids={tsids:?} token={token} internal_token={internal_token}");
             for labels in [&[22_u32][..], &[22_u32, 0][..]] {
-                let weight = accepted_weight(constraint, labels);
+                let weight = accepted_weight(&constraint, labels);
                 let memberships = tsids
                     .iter()
                     .map(|&tsid| (tsid, internal_token != u32::MAX && weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len()))
@@ -10283,10 +10283,10 @@ mod tests {
             let start_final = constraint.parser_dwa.states()[constraint.parser_dwa.start_state() as usize]
                 .final_weight.clone().unwrap_or_else(Weight::empty);
             for &token in tokens {
-                let mut first = contains(constraint, tokenizer_state, token, &start_final).then_some(0usize);
+                let mut first = contains(&constraint, tokenizer_state, token, &start_final).then_some(0usize);
                 for depth in 1..=reversed.len() {
-                    let w = accepted_weight(constraint, &reversed[..depth]);
-                    if contains(constraint, tokenizer_state, token, &w) {
+                    let w = accepted_weight(&constraint, &reversed[..depth]);
+                    if contains(&constraint, tokenizer_state, token, &w) {
                         first = Some(depth);
                         break;
                     }
@@ -10728,7 +10728,7 @@ mod tests {
                         terminals_disallowed.iter()
                     {
                         let execution = execute_tokenizer_from_state_small(
-                            constraint,
+                            &constraint,
                             bytes,
                             continuation_tokenizer_state,
                         );
@@ -11051,7 +11051,7 @@ nt start ::= item item? item?;
         )
         .unwrap();
 
-        let assert_failed = |state: &ConstraintState<'_>| {
+        let assert_failed = |state: &ConstraintState| {
             assert!(state.state.is_empty());
             assert!(state.mask().iter().all(|&word| word == 0));
         };
@@ -11079,23 +11079,23 @@ nt start ::= item item? item?;
 
     fn assert_fast_and_general_queue_match<'a>(
         constraint: &'a Constraint,
-        fast_state: &ConstraintState<'a>,
+        fast_state: &ConstraintState,
         token_id: u32,
         bytes: &[u8],
         context: &str,
-    ) -> Option<ConstraintState<'a>> {
+    ) -> Option<ConstraintState> {
         let mut fast = fast_state.clone();
         let mut profiled = fast_state.clone();
         let mut general = fast_state.clone();
 
         let fast_result = commit_bytes_impl(
-            constraint,
+            &constraint,
             &mut fast.state,
             bytes,
             &mut fast.buffers,
         );
         let profiled_result = commit_bytes_impl_profiled(
-            constraint,
+            &constraint,
             &mut profiled.state,
             bytes,
             &mut profiled.buffers,
@@ -11103,7 +11103,7 @@ nt start ::= item item? item?;
             true,
         );
         let general_result = commit_bytes_impl_profiled(
-            constraint,
+            &constraint,
             &mut general.state,
             bytes,
             &mut general.buffers,

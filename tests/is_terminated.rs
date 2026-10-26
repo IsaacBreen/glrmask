@@ -26,7 +26,7 @@ fn allowed(mask: &[u32], id: u32) -> bool {
 
 /// Independent oracle: can any input still commit? A clone per probe keeps the
 /// inspected state untouched.
-fn oracle_terminated(state: &ConstraintState<'_>, vocab: &Vocab, special: &[u32]) -> bool {
+fn oracle_terminated(state: &ConstraintState, vocab: &Vocab, special: &[u32]) -> bool {
     for byte in 0..=u8::MAX {
         let mut probe = state.clone();
         if probe.commit_bytes(&[byte]) {
@@ -308,7 +308,7 @@ fn dynamic_runtime_oracle_agrees_with_commit_for_every_prefix() {
     }
 }
 
-fn dynamic_oracle(state: &glrmask::DynamicConstraintState<'_>, vocab: &Vocab) -> bool {
+fn dynamic_oracle(state: &glrmask::DynamicConstraintState, vocab: &Vocab) -> bool {
     for byte in 0..=u8::MAX {
         let mut probe = state.clone();
         if probe.commit_bytes(&[byte]) {

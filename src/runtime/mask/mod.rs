@@ -489,7 +489,7 @@ pub(crate) fn initialize_runtime_config() {
     let _ = mask_queue_mode();
 }
 
-fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u32]) {
+fn assert_dynamic_mask_equivalence(state: &ConstraintState, static_mask: &[u32]) {
     if !dynamic_mask_equivalence_assert_enabled() {
         return;
     }
@@ -2278,7 +2278,7 @@ mod tests {
 
     /// The former recursive walker deliberately scanned dead descendants.
     /// Keep that independent control flow as a regression oracle for DFS jumps.
-    fn recursive_unpruned_reference(state: &super::ConstraintState<'_>) -> Vec<u32> {
+    fn recursive_unpruned_reference(state: &super::ConstraintState) -> Vec<u32> {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
         let trie = vocab.trie.as_ref();
         let mut buffers = super::CommitBuffers::default();
@@ -2300,7 +2300,7 @@ mod tests {
             let depth = edge.parent_depth as usize;
             let next = stack[depth].as_ref().and_then(|parent| {
                 crate::runtime::commit::advance_bytes_from_state_exact(
-                    state.constraint, parent, &mut buffers, trie.walk_edge_bytes(edge),
+                    &state.constraint, parent, &mut buffers, trie.walk_edge_bytes(edge),
                 )
             });
             if next.is_some() {
@@ -2320,7 +2320,7 @@ mod tests {
     }
 
     fn recursive_token_domain_reference(
-        state: &super::ConstraintState<'_>,
+        state: &super::ConstraintState,
         buffers: &mut super::CommitBuffers,
         token_id: u32,
     ) -> bool {
@@ -2330,11 +2330,11 @@ mod tests {
             // contract without suppressing any nonempty or special-ID probes.
             state.constraint.has_special_token_id(token_id)
                 && crate::runtime::commit::advance_special_token_paths(
-                    state.constraint, &state.state, token_id,
+                    &state.constraint, &state.state, token_id,
                 ).is_some_and(|gss| !gss.is_empty())
         } else {
             crate::runtime::commit::token_admissible_from_state_exact(
-                state.constraint, &state.state, buffers, token_id,
+                &state.constraint, &state.state, buffers, token_id,
             )
         }
     }
@@ -2378,7 +2378,7 @@ mod tests {
             let loaded = Constraint::load(bound.save(), &vocab).unwrap();
             for constraint in [&bound, &loaded] {
                 assert!(constraint.uses_compact_segmented_parser_runtime());
-                let check = |state: &super::ConstraintState<'_>| {
+                let check = |state: &super::ConstraintState| {
                     let mut actual = vec![0u32; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut actual);
                     assert_eq!(actual, recursive_unpruned_reference(state), "nullable={nullable}");
@@ -4052,7 +4052,7 @@ fn boundary_mask64_via_shared_queue(
     output
 }
 
-impl<'a> ConstraintState<'a> {
+impl ConstraintState {
     fn or_segmented_component_mask(&self, output: &mut [u32], component_mask: &[u32]) {
         // Retained components can carry private linker sentinel IDs (and other
         // component-local specials) that are deliberately absent from the
@@ -4307,7 +4307,7 @@ impl<'a> ConstraintState<'a> {
         }
 
         fn or_component_weight(
-            outer: &ConstraintState<'_>,
+            outer: &ConstraintState,
             component_index: usize,
             component: &crate::runtime::SegmentedParserComponent,
             global_tokenizer_state: u32,
@@ -4667,7 +4667,7 @@ impl<'a> ConstraintState<'a> {
             let shadow = ConstraintState {
             terminated: false,
             markers: None,
-                constraint: component.constraint.as_ref(),
+                constraint: component.constraint.as_ref().clone(),
                 state,
                 buffers: CommitBuffers::for_mask_only_shadow(),
                 generation: self.generation,
@@ -4882,7 +4882,7 @@ impl<'a> ConstraintState<'a> {
             let shadow = ConstraintState {
             terminated: false,
             markers: None,
-                constraint: component.constraint.as_ref(),
+                constraint: component.constraint.as_ref().clone(),
                 state,
                 buffers: CommitBuffers::for_mask_only_shadow(),
                 generation: self.generation,
@@ -5088,7 +5088,7 @@ impl<'a> ConstraintState<'a> {
                         );
                         let handled = restricted && shard.candidate_tokens.as_deref().is_some_and(|ids| {
                             let prepared = shard.mask_vocabulary.get_or_init(|| {
-                                super::dynamic_mask::PreparedMaskVocabulary::new(self.constraint, ids)
+                                super::dynamic_mask::PreparedMaskVocabulary::new(&self.constraint, ids)
                             });
                             prepared.as_ref().ok().is_some_and(|vocab| {
                                 if crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_FRONTIER_SELECTION").is_some() {
@@ -5104,7 +5104,7 @@ impl<'a> ConstraintState<'a> {
                                 let view = ConstraintState {
                                     terminated: self.terminated,
             markers: None,
-                                    constraint: self.constraint,
+                                    constraint: self.constraint.clone(),
                                     state: frontier,
                                     buffers: CommitBuffers::for_mask_only_shadow(),
                                     generation: self.generation,
@@ -5188,7 +5188,7 @@ impl<'a> ConstraintState<'a> {
         let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
         let mut state_stack = vec![None; stack_len.max(1)];
         let alphabet = if state_budget == 0 { std::array::from_fn(|byte| byte as u8) }
-            else { recursive_mask_byte_representatives(self.constraint) };
+            else { recursive_mask_byte_representatives(&self.constraint) };
         // A proved finite deterministic leaf alphabet cannot produce a wide
         // epsilon frontier. The recursive queue does not use speculative flat
         // commits, so it needs no eager pool of 256 flat-frontier GSS objects.
@@ -5236,7 +5236,7 @@ impl<'a> ConstraintState<'a> {
             let child_depth = parent_depth + 1;
             let child_state = state_stack[parent_depth].as_ref().and_then(|parent| {
                 transitions.advance(
-                    self.constraint,
+                    &self.constraint,
                     parent,
                     &mut buffers,
                     trie.walk_edge_bytes(edge),
@@ -5288,14 +5288,14 @@ impl<'a> ConstraintState<'a> {
                 // become a zero-progress alternate route that bypasses the
                 // parser's special-token terminal.
                 crate::runtime::commit::advance_special_token_paths(
-                    self.constraint,
+                    &self.constraint,
                     &self.state,
                     token_id,
                 )
                 .is_some_and(|gss| !gss.is_empty())
             } else {
                 crate::runtime::commit::token_admissible_from_state_exact(
-                    self.constraint,
+                    &self.constraint,
                     &self.state,
                     &mut buffers,
                     token_id,
@@ -5534,7 +5534,7 @@ impl<'a> ConstraintState<'a> {
                                     continue;
                                 };
                                 let advanced = super::commit::advance_parser_stacks_table_exact(
-                                    self.constraint,
+                                    &self.constraint,
                                     &parser,
                                     transition.terminal,
                                 );
@@ -5588,7 +5588,7 @@ impl<'a> ConstraintState<'a> {
                     }
                     for &(terminal, child) in &node.children {
                         if let Some(advanced) = super::commit::advance_parser_stacks_table_exact(
-                            self.constraint,
+                            &self.constraint,
                             &parser,
                             terminal,
                         ) && !advanced.is_empty()
@@ -6497,7 +6497,7 @@ impl<'a> ConstraintState<'a> {
         for special in &self.constraint.special_token_terminals {
             if self.constraint.is_late_grammar_placeholder_terminal(special.terminal_id) { continue; }
             if super::commit::advance_special_terminal_paths(
-                self.constraint, &self.state, special.terminal_id,
+                &self.constraint, &self.state, special.terminal_id,
             ).is_some_and(|gss| !gss.is_empty()) {
                 special.or_mask(buf);
             }
@@ -6546,7 +6546,7 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
             if super::commit::advance_special_terminal_paths(
-                self.constraint, &self.state, special.terminal_id,
+                &self.constraint, &self.state, special.terminal_id,
             ).is_some_and(|stack| !stack.is_empty()) {
                 live_ranges.push((special.token_id, special.token_id_end));
             }
@@ -6619,7 +6619,7 @@ impl<'a> ConstraintState<'a> {
                 .with_insert(continuation_tokenizer_state, terminal_id);
             let mut computed = vec![0u64; blocked.len()];
             super::dynamic_mask::or_blocked_internal_tokens_for_exclusions(
-                self.constraint,
+                &self.constraint,
                 &exclusions,
                 &mut computed,
             )
@@ -7014,7 +7014,7 @@ impl<'a> ConstraintState<'a> {
                                     &mut single_path_acc,
                                     internal_tsid,
                                     weight,
-                                    self.constraint,
+                                    &self.constraint,
                                 ) {
                                     break;
                                 }
@@ -7024,7 +7024,7 @@ impl<'a> ConstraintState<'a> {
                                 &mut single_path_aux,
                                 internal_tsid,
                                 weight,
-                                self.constraint,
+                                &self.constraint,
                             ) {
                                 break;
                             }
@@ -7159,7 +7159,7 @@ impl<'a> ConstraintState<'a> {
                                             &mut single_path_acc,
                                             internal_tsid,
                                             weight,
-                                            self.constraint,
+                                            &self.constraint,
                                         ) {
                                             return false;
                                         }
@@ -7170,7 +7170,7 @@ impl<'a> ConstraintState<'a> {
                                     &mut single_path_aux,
                                     internal_tsid,
                                     weight,
-                                    self.constraint,
+                                    &self.constraint,
                                 ) {
                                     return false;
                                 }
@@ -7724,7 +7724,7 @@ impl<'a> ConstraintState<'a> {
                 }
                 queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
-                    self.constraint,
+                    &self.constraint,
                     queue,
                     start_dwa_state,
                     *parser_state,
@@ -7940,7 +7940,7 @@ impl<'a> ConstraintState<'a> {
             indexed_nodes = dag.nodes.len();
             let started = profile.then(Instant::now);
             let mut evaluator = IndexedDagMaskEvaluator::new(
-                self.constraint,
+                &self.constraint,
                 &dag,
                 precomputed,
                 &mut indexed_runtime,
@@ -8602,7 +8602,7 @@ impl<'a> ConstraintState<'a> {
                 && gss.all_accs_satisfy(|blocked: &TerminalsDisallowed| blocked.is_empty())
             {
                 for &terminal in self.constraint.parser_skip_terminals() {
-                    if !super::commit::parser_may_advance_on(self.constraint, gss, terminal) {
+                    if !super::commit::parser_may_advance_on(&self.constraint, gss, terminal) {
                         continue;
                     }
                     self.constraint.visit_possible_match_original_tokens(
@@ -8618,7 +8618,7 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
             for (terminal, tokens) in &self.constraint.scoped_ignore_only_tokens {
-                if !super::commit::parser_may_advance_on(self.constraint, gss, *terminal) {
+                if !super::commit::parser_may_advance_on(&self.constraint, gss, *terminal) {
                     continue;
                 }
                 for &token in tokens.iter() {
@@ -8789,9 +8789,9 @@ impl<'a> ConstraintState<'a> {
         let mut shadow = Box::new(ConstraintState {
             terminated: false,
             markers: None,
-            constraint: self.constraint,
+            constraint: self.constraint.clone(),
             state: self.state.clone(),
-            buffers: CommitBuffers::for_constraint(self.constraint),
+            buffers: CommitBuffers::for_constraint(&self.constraint),
             generation: self.generation,
             mask_cache: Mutex::new(None),
             mask_scratch: Arc::clone(&self.mask_scratch),

@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use glrmask::__private::ConstraintStateExt as _;
 pub use glrmask;
 
 // C status codes are fixed by glrmask.h; a new kind needs a new status value there.
@@ -111,51 +110,48 @@ pub fn compile_options(
         .boundary_mask_strategy(boundary_mask_strategy)
 }
 
-type BorrowedState<'a> = glrmask::ConstraintState<'a>;
-self_cell::self_cell!(
-    struct StateCell {
-        owner: Arc<glrmask::Constraint>,
-        #[not_covariant]
-        dependent: BorrowedState,
-    }
-);
-
-/// Holds the compiled constraint alive independently of every foreign handle.
+/// Foreign-language state owns its compiled constraint through the core Arc handle.
 /// A panicking operation poisons this state; it must then be discarded.
-pub struct State { cell: StateCell, poisoned: AtomicBool }
+pub struct State {
+    state: glrmask::ConstraintState,
+    mask_len: usize,
+    poisoned: AtomicBool,
+}
 
 impl State {
     pub fn start(owner: Arc<glrmask::Constraint>) -> Result<Self> {
-        guarded(|| Ok(Self { cell: StateCell::new(owner, |c| c.start()), poisoned: AtomicBool::new(false) }))
+        guarded(|| Ok(Self {
+            state: owner.start(),
+            mask_len: owner.mask_len(),
+            poisoned: AtomicBool::new(false),
+        }))
     }
     fn check(&self) -> Result<()> {
         if self.poisoned.load(Ordering::Relaxed) {
             Err(Error::new(ErrorKind::Panic, "state is unusable after an internal panic; discard it"))
         } else { Ok(()) }
     }
-    fn read<T>(&self, f: impl FnOnce(&BorrowedState<'_>) -> Result<T>) -> Result<T> {
+    fn read<T>(&self, f: impl FnOnce(&glrmask::ConstraintState) -> Result<T>) -> Result<T> {
         self.check()?;
-        let result = guarded(|| self.cell.with_dependent(|_, state| f(state)));
+        let result = guarded(|| f(&self.state));
         if result.as_ref().err().is_some_and(|e| e.kind == ErrorKind::Panic) { self.poisoned.store(true, Ordering::Relaxed); }
         result
     }
-    fn write<T>(&mut self, f: impl FnOnce(&mut BorrowedState<'_>) -> Result<T>) -> Result<T> {
+    fn write<T>(&mut self, f: impl FnOnce(&mut glrmask::ConstraintState) -> Result<T>) -> Result<T> {
         self.check()?;
-        let result = guarded(|| self.cell.with_dependent_mut(|_, state| f(state)));
+        let result = guarded(|| f(&mut self.state));
         if result.as_ref().err().is_some_and(|e| e.kind == ErrorKind::Panic) { self.poisoned.store(true, Ordering::Relaxed); }
         result
     }
     pub fn try_clone(&self) -> Result<Self> {
         self.check()?;
-        guarded(|| {
-            let mut other = Self::start(self.cell.borrow_owner().clone())?;
-            self.cell.with_dependent(|_, source| {
-                other.cell.with_dependent_mut(|_, destination| destination.copy_snapshot_from(source));
-            });
-            Ok(other)
-        })
+        guarded(|| Ok(Self {
+            state: self.state.clone(),
+            mask_len: self.mask_len,
+            poisoned: AtomicBool::new(false),
+        }))
     }
-    pub fn mask_len(&self) -> usize { self.cell.borrow_owner().mask_len() }
+    pub fn mask_len(&self) -> usize { self.mask_len }
     pub fn mask(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.mask())) }
     pub fn fill_mask(&self, output: &mut [u32]) -> Result<()> {
         let required = self.mask_len();

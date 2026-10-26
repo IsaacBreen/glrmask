@@ -31,7 +31,7 @@ fn byte_vocab() -> Vocab {
     Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect())
 }
 
-fn live_stack_count(state: &ConstraintState<'_>) -> usize {
+fn live_stack_count(state: &ConstraintState) -> usize {
     state
         .debug_parser_stacks()
         .iter()

@@ -1471,7 +1471,7 @@ mod precompile_boundary_tests {
         let expected = Module::new(&grammar)
             .compile_with(&vocab, CompileOptions::default())
             .expect("plain ParserDwa compile");
-        fn compare(a: &crate::ConstraintState<'_>, b: &crate::ConstraintState<'_>, depth: usize) {
+        fn compare(a: &crate::ConstraintState, b: &crate::ConstraintState, depth: usize) {
             assert_eq!(a.mask(), b.mask(), "mask mismatch at depth {depth}");
             assert_eq!(a.is_accepting(), b.is_accepting(), "acceptance mismatch at depth {depth}");
             if depth == 0 { return; }
@@ -1486,7 +1486,7 @@ mod precompile_boundary_tests {
         compare(&compiled.start(), &expected.start(), 3);
     }
 
-    fn same_language(a: &crate::ConstraintState<'_>, b: &crate::ConstraintState<'_>, depth: usize) {
+    fn same_language(a: &crate::ConstraintState, b: &crate::ConstraintState, depth: usize) {
         let mask = a.mask();
         assert_eq!(mask, b.mask(), "mask mismatch at depth {depth}");
         assert_eq!(a.is_accepting(), b.is_accepting(), "acceptance mismatch at depth {depth}");
@@ -1688,8 +1688,8 @@ mod boundary_gate_tests {
     }
 
     fn walk(
-        gated: &mut crate::ConstraintState<'_>,
-        ungated: &mut crate::ConstraintState<'_>,
+        gated: &mut crate::ConstraintState,
+        ungated: &mut crate::ConstraintState,
         depth: usize,
     ) {
         assert_eq!(gated.mask(), ungated.mask(), "mask mismatch at depth {depth}");

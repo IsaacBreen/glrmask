@@ -4,17 +4,9 @@
 //! Exposes `Constraint` and `ConstraintState` to Python, matching the interface
 //! expected by the CFA (constraint-framework-analysis) benchmarking harness.
 //!
-//! # Lifetime handling
-//!
-//! `glrmask::ConstraintState<'a>` borrows `&'a Constraint`. PyO3 pyclass structs
-//! must be `'static`, so we cannot store a `ConstraintState<'_>` directly.
-//!
-//! Solution: pair the `ConstraintState<'a>` with its `Arc<Constraint>` owner inside
-//! a [`self_cell::self_cell!`] struct (`OwnedState`). `self_cell` generates the
-//! necessary unsafe bookkeeping internally (owner outlives dependent, stable
-//! address via heap allocation) and exposes a safe public API for the owner /
-//! dependent relationship. The only handwritten `unsafe` in this file is the
-//! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
+//! The compiled constraint is an Arc-backed handle and sequence states own it.
+//! No self-referential owner/dependent storage is required in Python.
+//! The only handwritten `unsafe` here is the NumPy bitmask view cast.
 
 mod final_api;
 mod template_api;
@@ -55,7 +47,6 @@ use numpy::{PyArray1, PyArrayMethods, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
-use self_cell::self_cell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -64,39 +55,13 @@ use glrmask::__private::{
 };
 
 // ---------------------------------------------------------------------------
-// OwnedState — `self_cell`-generated safe owner/dependent pair.
-// ---------------------------------------------------------------------------
+// Plain non-self-referential state access helpers.
+// Inline closures retain the old call sites' explicit borrow scopes.
+#[inline]
+fn with_state<S, R>(state: &S, f: impl FnOnce(&S) -> R) -> R { f(state) }
 
-type ConstraintState<'a> = glrmask::ConstraintState<'a>;
-type DynamicConstraintState<'a> = glrmask::DynamicConstraintState<'a>;
-
-self_cell!(
-    struct OwnedState {
-        owner: Arc<glrmask::Constraint>,
-        #[not_covariant]
-        dependent: ConstraintState,
-    }
-);
-
-impl OwnedState {
-    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
-        OwnedState::new(arc, |arc_ref| arc_ref.start())
-    }
-}
-
-self_cell!(
-    struct OwnedDynamicState {
-        owner: Arc<glrmask::DynamicConstraint>,
-        #[not_covariant]
-        dependent: DynamicConstraintState,
-    }
-);
-
-impl OwnedDynamicState {
-    fn from_arc(arc: Arc<glrmask::DynamicConstraint>) -> Self {
-        OwnedDynamicState::new(arc, |arc_ref| arc_ref.start())
-    }
-}
+#[inline]
+fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(state) }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -818,8 +783,9 @@ impl PyConstraint {
 
     fn start(&self) -> PyConstraintState {
         PyConstraintState {
-            inner: OwnedState::from_arc(self.inner.clone()),
+            inner: self.inner.start(),
             max_token: self.max_token,
+            mask_len: self.inner.mask_len(),
         }
     }
 
@@ -966,7 +932,7 @@ impl PyDynamicConstraint {
 
     fn start(&self) -> PyDynamicConstraintState {
         PyDynamicConstraintState {
-            inner: OwnedDynamicState::from_arc(self.inner.clone()),
+            inner: self.inner.start(),
             max_token: self.max_token,
         }
     }
@@ -974,27 +940,24 @@ impl PyDynamicConstraint {
 
 #[pyclass(name = "DynamicConstraintState", module = "glrmask._glrmask")]
 pub struct PyDynamicConstraintState {
-    inner: OwnedDynamicState,
+    inner: glrmask::DynamicConstraintState,
     max_token: u32,
 }
 
 #[pymethods]
 impl PyDynamicConstraintState {
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_bytes(data))
+        with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
     }
 
     /// Commits one model token event; returns false when it is disallowed.
     fn commit_token(&mut self, token_id: u32) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
+        with_state_mut(&mut self.inner, |state| state.commit_token(token_id))
     }
 
     /// Commits model token IDs in order; returns false at the first disallowed event.
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
+        with_state_mut(&mut self.inner, |state| state.commit_tokens(&token_ids))
     }
 
 
@@ -1006,7 +969,7 @@ impl PyDynamicConstraintState {
         py: Python<'py>,
         token_id: u32,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let profile = self.inner.with_dependent_mut(|_owner, state| {
+        let profile = with_state_mut(&mut self.inner, |state| {
             state
                 .commit_token_profiled(token_id)
                 .map_err(PyValueError::new_err)
@@ -1053,15 +1016,14 @@ impl PyDynamicConstraintState {
 
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
-        self.inner
-            .with_dependent(|_owner, state| state.fill_mask(buf));
+        with_state(&self.inner, |state| state.fill_mask(buf));
         Ok(())
     }
 
     #[doc(hidden)]
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let buf = bitmask_u32_view(&mut bitmask)?;
-        Ok(self.inner.with_dependent(|_owner, state| {
+        Ok(with_state(&self.inner, |state| {
             let start = Instant::now();
             state.fill_mask(buf);
             start.elapsed().as_nanos() as u64
@@ -1072,13 +1034,12 @@ impl PyDynamicConstraintState {
     /// Locally inevitable original token IDs, without choosing an encoding.
     /// Pure query; proof/resource errors propagate and no full mask is built.
     fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
-        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+        py.detach(||with_state(&self.inner, |state|state.forced_tokens()))
     }
 
     /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     fn is_accepting(&self) -> bool {
-        self.inner
-            .with_dependent(|_owner, state| state.is_accepting())
+        with_state(&self.inner, |state| state.is_accepting())
     }
 
     /// Whether nothing more can be committed.
@@ -1087,8 +1048,7 @@ impl PyDynamicConstraintState {
     ///
     /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
     fn is_terminated(&self) -> bool {
-        self.inner
-            .with_dependent(|_owner, state| state.is_terminated())
+        with_state(&self.inner, |state| state.is_terminated())
     }
 
     #[pyo3(signature = (size=None))]
@@ -1099,8 +1059,7 @@ impl PyDynamicConstraintState {
     ) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let size = resolved_mask_size(self.max_token, size)?;
         let mut words = vec![0u32; size.div_ceil(32)];
-        self.inner
-            .with_dependent(|_owner, state| state.fill_mask(&mut words));
+        with_state(&self.inner, |state| state.fill_mask(&mut words));
         Ok(words_to_bool_array(py, &words, size))
     }
 }
@@ -1112,28 +1071,23 @@ impl PyDynamicConstraintState {
 /// Mutable state for one generated sequence.
 #[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
-    inner: OwnedState,
+    inner: glrmask::ConstraintState,
     max_token: u32,
+    mask_len: usize,
 }
 
 #[pymethods]
 impl PyConstraintState {
     /// Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.
     fn marker_events(&self) -> Vec<(u32, u64)> {
-        self.inner.with_dependent(|_, state| {
+        with_state(&self.inner, |state| {
             state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
         })
     }
 
     /// Independent snapshot at the current prefix.
     fn copy(&self) -> Self {
-        let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
-        self.inner.with_dependent(|_, source| {
-            inner.with_dependent_mut(|_, destination| {
-                destination.copy_snapshot_from(source);
-            });
-        });
-        Self { inner, max_token: self.max_token }
+        Self { inner: self.inner.clone(), max_token: self.max_token, mask_len: self.mask_len }
     }
 
     fn __copy__(&self) -> Self { self.copy() }
@@ -1148,8 +1102,7 @@ impl PyConstraintState {
     ) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let size = resolved_mask_size(self.max_token, size)?;
         let mut words = vec![0u32; size.div_ceil(32)];
-        self.inner
-            .with_dependent(|_owner, state| state.fill_mask(&mut words));
+        with_state(&self.inner, |state| state.fill_mask(&mut words));
         Ok(words_to_bool_array(py, &words, size))
     }
 
@@ -1163,40 +1116,37 @@ impl PyConstraintState {
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
-        let required = self.inner.borrow_owner().mask_len();
+        let required = self.mask_len;
         if buf.len() < required {
             return Err(PyValueError::new_err(format!("mask needs at least {required} packed words")));
         }
-        self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
+        with_state(&self.inner, |state| state.fill_mask(buf));
         Ok(())
     }
 
     /// Commits one model token event; returns false when it is disallowed.
     fn commit_token(&mut self, token_id: u32) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
+        with_state_mut(&mut self.inner, |state| state.commit_token(token_id))
     }
 
     /// Commits model token IDs in order; returns false at the first disallowed event.
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
+        with_state_mut(&mut self.inner, |state| state.commit_tokens(&token_ids))
     }
 
     /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_bytes(data))
+        with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
     }
 
     /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
     fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
-        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+        py.detach(||with_state(&self.inner, |state|state.forced_tokens()))
     }
 
     /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     fn is_accepting(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_accepting())
+        with_state(&self.inner, |state| state.is_accepting())
     }
 
     /// Whether nothing more can be committed.
@@ -1205,7 +1155,7 @@ impl PyConstraintState {
     ///
     /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
     fn is_terminated(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_terminated())
+        with_state(&self.inner, |state| state.is_terminated())
     }
 
     #[cfg(feature = "allocation-tracking")]
@@ -1255,7 +1205,7 @@ impl PyConstraintState {
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
-        Ok(self.inner.with_dependent(|_owner, state| state.fill_mask_timed_ns(buf)))
+        Ok(with_state(&self.inner, |state| state.fill_mask_timed_ns(buf)))
     }
 
     #[cfg(feature = "allocation-tracking")]
@@ -1270,8 +1220,7 @@ impl PyConstraintState {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
         let (elapsed_ns, stats) = allocation_tracking::measure(|| {
-            self.inner
-                .with_dependent(|_owner, state| state.fill_mask_timed_ns(buf))
+            with_state(&self.inner, |state| state.fill_mask_timed_ns(buf))
         });
         Ok(allocation_stats_tuple(elapsed_ns, stats))
     }
@@ -1287,14 +1236,12 @@ impl PyConstraintState {
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
-        let profile = self
-            .inner
-            .with_dependent(|_owner, state| state.fill_mask_profiled(buf));
+        let profile = with_state(&self.inner, |state| state.fill_mask_profiled(buf));
         mask_profile_to_dict(py, profile)
     }
 
     fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
-        self.inner.with_dependent_mut(|_owner, state| {
+        with_state_mut(&mut self.inner, |state| {
             state
                 .commit_token_timed_ns(token_id)
                 .map_err(PyValueError::new_err)
@@ -1307,7 +1254,7 @@ impl PyConstraintState {
         token_id: u32,
     ) -> PyResult<Vec<u64>> {
         let (result, stats) = allocation_tracking::measure(|| {
-            self.inner.with_dependent_mut(|_owner, state| {
+            with_state_mut(&mut self.inner, |state| {
                 state.commit_token_timed_ns(token_id)
             })
         });
@@ -1317,7 +1264,7 @@ impl PyConstraintState {
 
     /// Like commit_token but returns profiling stats as a dict.
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let profile = self.inner.with_dependent_mut(|_owner, state| {
+        let profile = with_state_mut(&mut self.inner, |state| {
             state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
         })?;
         let dict = pyo3::types::PyDict::new(py);
@@ -1398,22 +1345,22 @@ impl PyConstraintState {
 
     /// Return total parser GSS root count across all tokenizer states.
     fn parser_root_count(&self) -> usize {
-        self.inner.with_dependent(|_owner, state| state.parser_root_count())
+        with_state(&self.inner, |state| state.parser_root_count())
     }
 
     /// Return parser path count (capped at limit).
     fn parser_path_count(&self, limit: usize) -> usize {
-        self.inner.with_dependent(|_owner, state| state.parser_path_count(limit))
+        with_state(&self.inner, |state| state.parser_path_count(limit))
     }
 
     /// Return all flattened parser stacks for debugging.
     fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
-        self.inner.with_dependent(|_owner, state| state.debug_parser_stacks())
+        with_state(&self.inner, |state| state.debug_parser_stacks())
     }
 
     /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
     fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let (advances, final_stacks, commit_profile) = self.inner.with_dependent_mut(|_owner, state| {
+        let (advances, final_stacks, commit_profile) = with_state_mut(&mut self.inner, |state| {
             state.commit_token_per_advance(token_id).map_err(|e| PyValueError::new_err(e))
         })?;
 

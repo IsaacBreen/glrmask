@@ -87,7 +87,7 @@ fn grammar_source(words: &Residuals) -> (String, BTreeSet<u32>) {
 }
 
 fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: &str) -> usize {
-    let mut pending = VecDeque::<(ConstraintState<'_>, Residuals, Vec<u32>)>::new();
+    let mut pending = VecDeque::<(ConstraintState, Residuals, Vec<u32>)>::new();
     pending.push_back((c.start(), language.clone(), Vec::new()));
     let mut checked = 0;
     while let Some((state, words, trace)) = pending.pop_front() {

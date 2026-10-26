@@ -100,20 +100,18 @@ fn close_token_id(vocab: &glrmask::Vocab, close_token_bytes: &[u8]) -> u32 {
         .unwrap_or_else(|| panic!("Llama vocab is missing token bytes {:?}", close_token_bytes))
 }
 
-fn prepare_state<'a>(
+fn prepare_state(
     schema: &str,
-    vocab: &'a glrmask::Vocab,
+    vocab: &glrmask::Vocab,
     prefix: &[u8],
     close_token_bytes: &[u8],
     token_id_override: Option<u32>,
-) -> glrmask::ConstraintState<'a> {
-    let constraint = Box::leak(Box::new(
-        Constraint::compile(
+) -> glrmask::ConstraintState {
+    let constraint = Constraint::compile(
             Grammar::json_schema(schema),
             vocab,
         )
-        .unwrap(),
-    ));
+        .unwrap();
     let mut state = constraint.start();
     assert!(state.commit_bytes(prefix));
     let close_token_id = token_id_override.unwrap_or_else(|| close_token_id(vocab, close_token_bytes));

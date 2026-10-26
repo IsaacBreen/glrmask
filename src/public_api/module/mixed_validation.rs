@@ -321,8 +321,8 @@ fn allowed_tokens(mask: &[u32]) -> Vec<u32> {
 /// Exhaustive walk to `depth`, comparing the mask and acceptance of every
 /// reachable state. Returns the number of visited states.
 fn compare_exhaustive(
-    reference: &crate::ConstraintState<'_>,
-    candidate: &crate::ConstraintState<'_>,
+    reference: &crate::ConstraintState,
+    candidate: &crate::ConstraintState,
     depth: usize,
     label: &str,
 ) -> usize {

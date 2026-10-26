@@ -7461,8 +7461,8 @@ mod mask_strategy_configuration_tests {
     }
 
     fn assert_same_language(
-        reference: &crate::ConstraintState<'_>,
-        candidate: &crate::ConstraintState<'_>,
+        reference: &crate::ConstraintState,
+        candidate: &crate::ConstraintState,
         depth: usize,
     ) -> usize {
         let mask = reference.mask();
