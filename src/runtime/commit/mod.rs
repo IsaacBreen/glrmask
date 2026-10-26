@@ -9155,6 +9155,9 @@ impl<'a> ConstraintState<'a> {
     /// unusable.
     #[must_use]
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
+        if token_ids.is_empty() {
+            return !(self.is_terminated() && !self.is_accepting());
+        }
         for &token_id in token_ids {
             if !self.commit_token(token_id) {
                 return false;
@@ -9457,6 +9460,9 @@ impl<'a> ConstraintState<'a> {
     /// [`commit_token`](Self::commit_token).
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return !(self.is_terminated() && !self.is_accepting());
+        }
         self.commit_bytes_raw(bytes).is_ok()
     }
 

@@ -323,3 +323,39 @@ fn dynamic_oracle(state: &glrmask::DynamicConstraintState<'_>, vocab: &Vocab) ->
     }
     true
 }
+
+#[test]
+fn empty_commit_on_failed_state_returns_false() {
+    for strategy in STRATEGIES {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let constraint = compile(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), &vocab, strategy);
+
+        // Fresh state: both empty commits return true
+        let mut fresh = constraint.start();
+        assert!(!fresh.is_terminated());
+        assert!(!fresh.is_accepting());
+        assert!(fresh.commit_bytes(b""));
+        assert!(fresh.commit_tokens(&[]));
+
+        // Finished state (terminated and accepting): both empty commits return true
+        let mut finished = constraint.start();
+        assert!(finished.commit_bytes(b"a"));
+        assert!(finished.is_accepting());
+        assert!(finished.is_terminated());
+        assert!(finished.commit_bytes(b""));
+        assert!(finished.commit_tokens(&[]));
+
+        // Failed state: committing a disallowed token
+        let mut failed = constraint.start();
+        assert!(!failed.commit_token(999));
+        assert!(failed.is_terminated());
+        assert!(!failed.is_accepting());
+        assert!(!failed.commit_bytes(b""));
+        assert!(failed.is_terminated());
+        assert!(!failed.is_accepting());
+        assert!(!failed.commit_tokens(&[]));
+        assert!(failed.is_terminated());
+        assert!(!failed.is_accepting());
+    }
+}
+
