@@ -117,6 +117,29 @@ fn a_bare_integer_binds_one_token_id() {
 }
 
 #[test]
+fn range_construction_normalizes() {
+    let ranges = TokenSet::from_ranges([12..=20, 5..=12, 21..=25, 6..=7]);
+    assert_eq!(ranges, TokenSet::from_ranges(std::iter::once(5..=25)));
+    assert_eq!(
+        TokenSet::from_ranges(std::iter::empty::<std::ops::RangeInclusive<u32>>()),
+        TokenSet::new([]),
+    );
+    assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(20, 10))).range_pairs(), &[]);
+    assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
+    assert_eq!(TokenSet::new([5, 5]), TokenSet::from(5));
+
+    // A token set is IDs only. IDs the vocabulary does not define are allowed
+    // in the set; they simply never match any text.
+    let vocab = mixed_vocab();
+    let crossing_hole = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges(std::iter::once(39..=48))).unwrap();
+    assert!(crossing_hole.compile(&vocab).is_ok());
+    let outside = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges(std::iter::once(79..=80))).unwrap();
+    assert!(outside.compile(&vocab).is_ok());
+    let different = Vocab::new(vec![(0, b"different".to_vec())]);
+    assert!(Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", ranges).unwrap().compile(&different).is_ok());
+}
+
+#[test]
 fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
     const N: u32 = 131_072;
     let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new());
