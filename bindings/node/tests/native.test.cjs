@@ -42,7 +42,7 @@ for(const {label:maskStrategy,options} of strategies) {
     const c=Grammar.fromLark('start: "é"').compileSync(v,{...options}),s=c.start();
     assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
-    const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
+    const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root ::= T;');
     for(const id of [31,40,99]) {
       const m=new Module(host);
       m.bind('T',new TokenSet([id]));

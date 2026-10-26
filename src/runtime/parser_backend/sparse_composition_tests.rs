@@ -70,7 +70,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
         let embedding = child.template_parser.as_ref().unwrap().embedding.as_ref().unwrap();
         assert_eq!(embedding.return_pop, 1); assert_eq!(embedding.nullable, nullable);
         let child = Constraint::load(child.save(), &vocab).unwrap();
-        let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "x" C "y";"#).unwrap()
+        let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root ::= "x" C "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
         let mut words = vec![b"xay".to_vec(), b"xby".to_vec(), b"xaby".to_vec()];
         if nullable { words.push(b"xy".to_vec()); }
@@ -79,7 +79,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             let loaded = Constraint::load(linked.save(), &vocab).unwrap();
             let external = Constraint::load(linked.save(), &vocab).unwrap();
             for c in [&linked, &loaded, &external] { check(c, &tokens, &words); }
-            let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#).unwrap()
+            let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root ::= "p" C "q";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("C", &loaded).unwrap().link_with(options(mode)).unwrap();
             let outer_words = words.iter().map(|word| {
                 let mut out = vec![b'p']; out.extend(word); out.push(b'q'); out

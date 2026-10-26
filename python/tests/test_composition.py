@@ -37,7 +37,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         '''
         glrm 1;
         start child;
-        nt child = "a" "b";
+        nt child ::= "a" "b";
         ''',
         vocab,
     )
@@ -46,7 +46,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         glrm 1;
         start document;
         extern grammar payload;
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         ''',
         vocab,
         subgrammars={"payload": child},
@@ -57,9 +57,9 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         start document;
         grammar payload {
             start child;
-            nt child = "a" "b";
+            nt child ::= "a" "b";
         };
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         ''',
         vocab,
     )
@@ -81,7 +81,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         '''
         glrm 1;
         start child;
-        nt child = "a" "b";
+        nt child ::= "a" "b";
         ''',
         vocab,
     )
@@ -90,7 +90,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         glrm 1;
         start document;
         extern grammar payload;
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         ''',
         vocab,
         subgrammars={"payload": child},
@@ -101,9 +101,9 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         start document;
         grammar inner {
             start child;
-            nt child = "a" "b";
+            nt child ::= "a" "b";
         };
-        nt document = "X" inner "!";
+        nt document ::= "X" inner "!";
         ''',
         vocab,
     )
@@ -129,8 +129,8 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         '''
         glrm 1;
         start child;
-        nt item = "a";
-        nt child = item?;
+        nt item ::= "a";
+        nt child ::= item?;
         ''',
         vocab,
     )
@@ -139,7 +139,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         glrm 1;
         start document;
         extern grammar payload;
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         ''',
         vocab,
         subgrammars={"payload": child},
@@ -148,8 +148,8 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         '''
         glrm 1;
         start document;
-        nt item = "a";
-        nt document = "X" item? "!";
+        nt item ::= "a";
+        nt document ::= "X" item? "!";
         ''',
         vocab,
     )
@@ -173,7 +173,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         '''
         glrm 1;
         start leaf;
-        nt leaf = "a";
+        nt leaf ::= "a";
         ''',
         vocab,
     )
@@ -182,7 +182,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         glrm 1;
         start middle;
         extern grammar leaf;
-        nt middle = leaf?;
+        nt middle ::= leaf?;
         ''',
         vocab,
         subgrammars={"leaf": leaf},
@@ -193,7 +193,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         glrm 1;
         start document;
         extern grammar middle;
-        nt document = "X" middle "!";
+        nt document ::= "X" middle "!";
         ''',
         vocab,
         subgrammars={"middle": middle},
@@ -202,8 +202,8 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         '''
         glrm 1;
         start document;
-        nt item = "a";
-        nt document = "X" item? "!";
+        nt item ::= "a";
+        nt document ::= "X" item? "!";
         ''',
         vocab,
     )
@@ -236,7 +236,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         '''
         glrm 1;
         start child;
-        nt child = "a";
+        nt child ::= "a";
         ''',
         vocab,
     )
@@ -245,9 +245,9 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         glrm 1;
         start document;
         ignore WS;
-        t WS = " "+;
+        t WS ::= " "+;
         extern grammar payload;
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         ''',
         vocab,
         subgrammars={"payload": child},
@@ -257,8 +257,8 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         glrm 1;
         start document;
         ignore WS;
-        t WS = " "+;
-        nt document = "X" "a" "!";
+        t WS ::= " "+;
+        nt document ::= "X" "a" "!";
         ''',
         vocab,
     )
@@ -290,7 +290,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         '''
         glrm 1;
         start child;
-        nt child = "a" | "b";
+        nt child ::= "a" | "b";
         ''',
         vocab,
     )
@@ -300,7 +300,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         start document;
         extern grammar left;
         extern grammar right;
-        nt document = "<" left ">,<" right ">";
+        nt document ::= "<" left ">,<" right ">";
         ''',
         vocab,
         subgrammars={"left": child, "right": child},
@@ -309,8 +309,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         '''
         glrm 1;
         start document;
-        nt child = "a" | "b";
-        nt document = "<" child ">,<" child ">";
+        nt child ::= "a" | "b";
+        nt document ::= "<" child ">,<" child ">";
         ''',
         vocab,
     )
@@ -335,7 +335,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         """
         glrm 1;
         start child;
-        nt child = "a";
+        nt child ::= "a";
         """,
         vocab,
     )
@@ -344,7 +344,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         glrm 1;
         start document;
         extern grammar payload;
-        nt document = "X" payload "!";
+        nt document ::= "X" payload "!";
         """,
         vocab,
         subgrammars={"payload": child},
@@ -383,16 +383,16 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         glrm 1;
         extern grammar payload;
         start document;
-        nt document = "x" | "<" payload ">";
+        nt document ::= "x" | "<" payload ">";
         """
     ))
     parent.precompile(vocab)
     child_a = _prepare_glrm(
-        'glrm 1; start value; nt value = "a";',
+        'glrm 1; start value; nt value ::= "a";',
         vocab,
     )
     child_b = _prepare_glrm(
-        'glrm 1; start value; nt value = "b";',
+        'glrm 1; start value; nt value ::= "b";',
         vocab,
     )
 

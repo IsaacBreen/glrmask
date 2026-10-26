@@ -1722,7 +1722,7 @@ mod lazy_prefix_minimal_regressions {
     use super::*;
     use crate::automata::lexer::tokenizer::Lexer as _;
     use crate::grammar::ast::resolved_named_terminal_exprs;
-    use crate::grammar::glrm::{from_glrm, to_glrm, to_glrm_v1};
+    use crate::grammar::glrm::{to_glrm, to_glrm_v1};
 
     fn assert_language(grammar: &NamedGrammar, name: &str, samples: &[(&[u8], bool)]) {
         lower(grammar).unwrap();
@@ -1759,7 +1759,7 @@ mod lazy_prefix_minimal_regressions {
                 assert_language(&grammar, name, &samples);
                 for dump in [to_glrm(&grammar), to_glrm_v1(&grammar).unwrap()] {
                     assert!(!dump.contains("shortest {"), "{dump}");
-                    assert_language(&from_glrm(&dump).unwrap(), name, &samples);
+                    assert_language(&crate::grammar::glrm::from_glrm_for_private_tools(&dump).unwrap(), name, &samples);
                 }
             }
         }

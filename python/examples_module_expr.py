@@ -6,7 +6,7 @@ child = Module(Grammar.from_lark('start: "a"'))
 child.precompile(vocab, mask_strategy=TokenTrie(
     parser_backend=ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
 parent = Module(Grammar.from_glrm(
-    'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
+    'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";'
 ))
 parent.bind(child=child)
 restored = Module.load(parent.save())
@@ -14,7 +14,7 @@ assert restored.compile(vocab).start().mask().tolist() == [True, False]
 
 choice = Expr.choice(child, Grammar.from_lark('start: "b"'))
 parent2 = Module(Grammar.from_glrm(
-    'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
+    'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";'
 ))
 parent2.bind(child=choice)
 assert parent2.compile(vocab).start().mask().tolist() == [True, True]

@@ -333,9 +333,9 @@ mod tests {
     #[test]
     fn greedy_ab_stops_before_optional_event_after_a() {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]).with_special_tokens([9]);
-        let ordinary=Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
+        let ordinary=Grammar::from_glrm("start root nt root::=\"ab\"").unwrap();
         let guarded=Grammar::from_glrm(
-            "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"").unwrap()
+            "extern token MARK start root nt root::=\"ab\" | \"a\" MARK \"b\"").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap();
         for mode in MaskMode::ALL {
             let options=mode.build_options();
@@ -350,10 +350,10 @@ mod tests {
     fn physical_byte_bound_matches_complete_alphabet_probe() {
         let v=Vocab::new((0..=255).map(|i| (i,vec![i as u8])).collect());
         for source in [
-            "glrm 1; start root; nt root = \"abc\";",
-            "glrm 1; start root; t A=/a+/; nt root = A \"b\";",
-            "glrm 1; start root; t W=/[ \\t]+/; ignore W; nt root=\"a\" \"b\";",
-            "glrm 1; start root; nt root = \"\u{e9}\u{e9}\";",
+            "glrm 1; start root; nt root ::= \"abc\";",
+            "glrm 1; start root; t A::=/a+/; nt root ::= A \"b\";",
+            "glrm 1; start root; t W::=/[ \\t]+/; ignore W; nt root::=\"a\" \"b\";",
+            "glrm 1; start root; nt root ::= \"\u{e9}\u{e9}\";",
         ] {
             for mode in MaskMode::ALL {
                 let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();

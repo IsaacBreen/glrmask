@@ -372,6 +372,13 @@ fn is_ascii_identifier_name(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bundled_javascript_glrm_parses_as_v1() {
+        let grammar = crate::grammar::glrm::from_glrm(JAVASCRIPT_GLRM)
+            .expect("bundled JavaScript GLRM must parse as V1 with ::= declarations");
+        assert_eq!(grammar.start, "program");
+    }
+
     fn vocab() -> Vocab {
         let pieces = [
             "tools", ".lookup(", ")", "{", "}", "customer_id", "\"customer_id\"",

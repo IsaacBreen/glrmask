@@ -11613,7 +11613,7 @@ mod raw_terminal_radius_tests {
         let mut positive = 0usize;
         let mut checked = 0usize;
         for (pattern, slice_pattern, atoms) in fixtures {
-            let grammar = format!("glrm 1; start s; t WORD = /{pattern}/; nt s = WORD;");
+            let grammar = format!("glrm 1; start s; t WORD ::= /{pattern}/; nt s ::= WORD;");
             let constraint = Constraint::compile(Grammar::glrm(&grammar), &vocab).unwrap();
             let terminal = constraint.terminal_display_names.iter()
                 .position(|name| name == "WORD").unwrap() as TerminalID;

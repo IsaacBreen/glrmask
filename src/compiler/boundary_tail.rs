@@ -823,9 +823,9 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
         (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
     for mode in [MaskMode::C, MaskMode::ParserDwa] {
         let options = || mode.build_options().parser_backend(ParserBackend::TemplateDfa);
-        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
+        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options()).unwrap();
-        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
+        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#).unwrap()
             .prepare(&vocab).unwrap();
         let middle = parent.bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
         let overlay = middle.static_dynamic_overlay.as_ref().unwrap();

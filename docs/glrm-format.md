@@ -5,18 +5,18 @@ declarations are optional.
 
 ```glrm
 start value
-internal t DIGIT = /[0-9]/
-t INTEGER = DIGIT+
-nt value = INTEGER | "(" value ")"
+internal t DIGIT ::= /[0-9]/
+t INTEGER ::= DIGIT+
+nt value ::= INTEGER | "(" value ")"
 ```
 
 ## Declarations
 
 - `start NAME` names the rule the grammar matches. Every grammar has exactly one.
-- `t NAME = ...` declares a terminal: a regular language the lexer matches as one unit, taking the longest match.
-- `internal t NAME = ...` declares a regular helper for use inside other terminals. It isn't a terminal itself, so rules
+- `t NAME ::= ...` declares a terminal: a regular language the lexer matches as one unit, taking the longest match.
+- `internal t NAME ::= ...` declares a regular helper for use inside other terminals. It isn't a terminal itself, so rules
   and `ignore` can't use it.
-- `nt NAME = ...` declares a rule. Rule bodies can use terminals, other rules, and literals and regular expressions
+- `nt NAME ::= ...` declares a rule. Rule bodies can use terminals, other rules, and literals and regular expressions
   directly.
 - `ignore NAME` skips a terminal wherever it can appear between others.
 - `extern token NAME` and `extern grammar NAME` declare externs, bound later from your code.
@@ -24,8 +24,8 @@ nt value = INTEGER | "(" value ")"
 
 A rule whose language happens to be regular is still a rule, not a terminal.
 
-Each declaration keyword starts a new declaration, so several fit on one line: `start root nt root = "a" nt other = "b"`.
-Put a name in backticks to use a keyword as a name: ``nt `start` = "a"``.
+Each declaration keyword starts a new declaration, so several fit on one line: `start root nt root ::= "a" nt other ::= "b"`.
+Put a name in backticks to use a keyword as a name: ``nt `start` ::= "a"``.
 
 `eps` matches the empty string. An empty alternative or body is an error, so write `eps` where you mean it.
 
@@ -68,11 +68,11 @@ Backreferences, lookaround, anchors and lazy quantifiers such as `*?` are errors
 
 ```glrm
 start root
-t IDENTIFIER = /[a-z]+/ - /(if|else|while)/
-nt root = IDENTIFIER
+t IDENTIFIER ::= /[a-z]+/ - /(if|else|while)/
+nt root ::= IDENTIFIER
 ```
 
-On a rule, `-` removes matching top-level alternatives instead: in `nt without_x = value - "x"`, the alternative `"x"` of
+On a rule, `-` removes matching top-level alternatives instead: in `nt without_x ::= value - "x"`, the alternative `"x"` of
 `value` is removed, but `x` can still appear inside a nested `value`.
 
 In `sep ~ (...)`, each item's own `?`, `*` or `+` says whether it must appear, and a separator goes between items that
@@ -85,9 +85,9 @@ To make a terminal end as soon as it can, subtract every longer match: for a reg
 
 ```glrm
 start response
-internal t THROUGH_END_BODY = /.*END/s
-t THROUGH_END = THROUGH_END_BODY - (THROUGH_END_BODY b/./s+)
-nt response = THROUGH_END "!"
+internal t THROUGH_END_BODY ::= /.*END/s
+t THROUGH_END ::= THROUGH_END_BODY - (THROUGH_END_BODY b/./s+)
+nt response ::= THROUGH_END "!"
 ```
 
 `THROUGH_END` stops at the first `END`. Use `b/./s+`, not `/./s+`, so that the suffix can be any bytes. This changes only
@@ -98,12 +98,12 @@ that terminal; every other terminal still takes the longest match. Lark's `[lazy
 ```glrm
 grammar item {
     start value
-    nt value = "item"
+    nt value ::= "item"
 }
 extern grammar PAYLOAD
 extern token END_CALL
 start response
-nt response = item PAYLOAD item END_CALL
+nt response ::= item PAYLOAD item END_CALL
 ```
 
 An inline grammar has its own names, start rule and ignored terminals, and can't refer to names outside it. Externs are
@@ -116,11 +116,11 @@ GLRM has no syntax for token IDs or inline JSON Schema. Bind a token set or a JS
 
 ```glrm
 start root
-t SPACE = /[ \t]+/
-t COMMENT = /#[^\n]*/
+t SPACE ::= /[ \t]+/
+t COMMENT ::= /#[^\n]*/
 ignore SPACE
 ignore COMMENT
-nt root = "hello" "world"
+nt root ::= "hello" "world"
 ```
 
 An ignored terminal can't match the empty string. Each `ignore` stays a separate terminal, which matters because each
@@ -132,7 +132,7 @@ A rule or terminal can be written as a finite automaton:
 
 ```glrm
 start framed
-nt framed = fa {
+nt framed ::= fa {
     start q0
     accept q2
     edge q0 -> q1: "("

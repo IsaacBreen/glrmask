@@ -79,7 +79,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let entries = [(0, b"x".as_slice()), (1, b"a".as_slice()), (2, b"y".as_slice()), (3, b"xay".as_slice())];
         let ffi_entries: Vec<_> = entries.iter().map(|(id, b)| glrmask_vocab_entry { id: *id, bytes: b.as_ptr(), bytes_len: b.len() }).collect();
         let mut vocab = ptr::null_mut(); assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
-        let host = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
+        let host = "glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"y\";";
         let leaf = "start: \"a\"";
         let (mut grammar, mut child) = (ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_grammar_from_source(1, host.as_ptr().cast(), host.len(), &mut grammar), 0);

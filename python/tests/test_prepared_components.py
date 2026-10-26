@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 import glrmask
 
-HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
-TWO_EXTERNS = 'glrm 1; start start; extern token A; extern grammar B; nt start = A B;'
-MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
+HOST = 'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";'
+TWO_EXTERNS = 'glrm 1; start start; extern token A; extern grammar B; nt start ::= A B;'
+MARK = 'glrm 1; start start; extern token MARK; nt start ::= MARK;'
 
 
 def vocab():
@@ -24,7 +24,7 @@ def test_atomic_kwargs_bind():
     # Failed atomic keyword bind: second argument is invalid
     m2 = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
     saved = m2.save()
-    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
+    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s ::= X;")
     with pytest.raises(ValueError, match="unbound externs"):
         m2.bind(A=glrmask.TokenSet([1]), B=open_child)
     # On error, m2 must be completely unchanged; A was not bound!
