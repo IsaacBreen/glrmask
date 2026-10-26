@@ -5,13 +5,13 @@
 - `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.
 - `special_token_ids` and `Vocab::with_special_tokens` are removed. A token ID that isn't in the vocabulary never matches text, and a token set can still allow it.
 - In C and C++, token ranges are now `{start, end}` with `end` excluded, as in Rust, Python and Node.js. They used to be `{first, last}` with `last` included.
-- Removed markers (`@mark(id)`, `marker_events()` and `marker_ids()`) from this release. They will return in a later one.
+- Markers (`@mark(id)`, `marker_events()` and `marker_ids()`) are removed for now. They will return in a later release.
 - Removed EBNF as a grammar format; use Lark or GLRM. In C, `GLRMASK_EBNF` is gone and the other format constants keep their values.
 - Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_len()` for the mask's length.
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
 - The minimum supported Rust version is now 1.89.
 - Grammar text can no longer allow a special token. In Lark, `<[*]>` and `<[^...]>` match only tokens with bytes, and
-  naming a special token by ID, with `<[...]>` or `@token(...)` in Lark or `@token(...)` in EBNF, is a compile error.
+  naming a special token by ID, with `<[...]>` or `@token(...)`, is a compile error.
   Declare a token extern instead (`<|name|>` in Lark) and bind the token to it.
 - Committing empty input to a failed state now returns `false`.
 
