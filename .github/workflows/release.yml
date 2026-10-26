@@ -184,7 +184,7 @@ jobs:
           wait_until_public() {
             local name="$1" tgz="$2" expected got
             expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
-            for attempt in $(seq 1 20); do
+            for attempt in $(seq 1 60); do
               if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
                 got="$(printf '%s' "$got" | jq -r 'if type == "array" then .[0] else . end')"
                 if [ "$got" != "$expected" ]; then
@@ -194,7 +194,7 @@ jobs:
                 echo "Public and integrity-verified: $name@${RELEASE_VERSION}"
                 return 0
               fi
-              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/20)"
+              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/60)"
               sleep 15
             done
             echo "Package did not become publicly resolvable: $name@${RELEASE_VERSION}" >&2
@@ -465,7 +465,7 @@ jobs:
           wait_until_public() {
             local name="$1" tgz="$2" expected got
             expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
-            for attempt in $(seq 1 20); do
+            for attempt in $(seq 1 60); do
               if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
                 got="$(printf '%s' "$got" | jq -r 'if type == "array" then .[0] else . end')"
                 if [ "$got" != "$expected" ]; then
@@ -475,7 +475,7 @@ jobs:
                 echo "Public and integrity-verified: $name@${RELEASE_VERSION}"
                 return 0
               fi
-              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/20)"
+              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/60)"
               sleep 15
             done
             echo "Package did not become publicly resolvable: $name@${RELEASE_VERSION}" >&2
