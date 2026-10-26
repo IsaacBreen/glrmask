@@ -121,10 +121,10 @@ clone_handle!(glrmask_token_set_clone, glrmask_token_set);
 clone_handle!(glrmask_grammar_clone, glrmask_grammar);
 clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_new(entries: *const glrmask_vocab_entry, n: usize, special_token_ids: *const u32, n_special_token_ids: usize, out: *mut *mut glrmask_vocab) -> i32 {
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_new(entries: *const glrmask_vocab_entry, n: usize, out: *mut *mut glrmask_vocab) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let entries = input(entries, n)?.iter().map(|e| Ok((e.id, input(e.bytes, e.bytes_len)?.to_vec()))).collect::<Result<Vec<_>>>()?;
-        Ok(glrmask_vocab(core::vocab(entries, input(special_token_ids, n_special_token_ids)?.to_vec())?))
+        Ok(glrmask_vocab(core::vocab(entries)?))
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_new(ids: *const u32, n: usize, out: *mut *mut glrmask_token_set) -> i32 {
@@ -243,8 +243,10 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_terminated(p: *const glrmask_state, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_terminated()?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_tokens(p: *const glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.forced_tokens()?))) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_forced_tokens(p: *mut glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
+    ffi(|| unsafe {
+        produce(out, || Ok(glrmask_u32s(write(p)?.0.commit_forced_tokens()?)))
+    })
 }
 
 macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{

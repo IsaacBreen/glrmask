@@ -20,7 +20,7 @@ fn assert_mask(constraint: &Constraint, prefix: &[u32], domain: u32, expected: i
 fn mixed_vocab() -> Vocab {
     // Byte aliases deliberately straddle interval boundaries. Empty-byte and
     // exact-only IDs are included, and 40..48 is an undefined hole.
-    Vocab::new((0..40).map(|id| (id, if id % 3 == 0 { Vec::new() } else { b"x".to_vec() })).collect()).with_special_tokens(48..80)
+    Vocab::new((0..40).map(|id| (id, if id % 3 == 0 { Vec::new() } else { b"x".to_vec() })).collect())
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
 
 #[test]
 fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
-    let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new()).with_special_tokens(0..100);
+    let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new());
     // At the start only A is live. After A only B is live. Their overlap must
     // not make either one's non-overlapping tail spuriously allowed.
     let source = "glrm 1; start start; extern token A; extern token B; nt start = A B;";
@@ -79,7 +79,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
 
 #[test]
 fn repeated_ranges_and_compiled_open_slots_roundtrip() {
-    let vocab = Vocab::new(vec![(0, b"[".to_vec()), (1, b"]".to_vec())]).with_special_tokens(2..128);
+    let vocab = Vocab::new(vec![(0, b"[".to_vec()), (1, b"]".to_vec())]);
     let child_source = "glrm 1; start start; extern token T; nt start = T T;";
     let open = Grammar::from_glrm(child_source).unwrap().prepare(&vocab).unwrap();
     let bound = open.bind_snapshot("T", TokenSet::from_ranges([5..=15, 100..=120])).unwrap();
@@ -109,7 +109,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
 
 #[test]
 fn a_bare_integer_binds_one_token_id() {
-    let vocab = Vocab::new(Vec::new()).with_special_tokens(0..8);
+    let vocab = Vocab::new(Vec::new());
     let constraint = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", 5).unwrap().compile(&vocab).unwrap();
     let mask = constraint.start().mask();
     assert!(allowed(&mask, 5));
@@ -117,34 +117,9 @@ fn a_bare_integer_binds_one_token_id() {
 }
 
 #[test]
-fn range_construction_normalizes_and_validates_membership_at_compile() {
-    let vocab = mixed_vocab();
-    let ranges = TokenSet::from_ranges([12..=20, 5..=12, 21..=25, 6..=7]);
-    assert_eq!(ranges, TokenSet::from_ranges(std::iter::once(5..=25)));
-    assert_eq!(
-        TokenSet::from_ranges(std::iter::empty::<std::ops::RangeInclusive<u32>>()),
-        TokenSet::new([]),
-    );
-    assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(20, 10))).range_pairs(), &[]);
-    assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
-    assert_eq!(TokenSet::new([5, 5]), TokenSet::from(5));
-    let crossing_hole = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges(std::iter::once(39..=48))).unwrap();
-    assert!(crossing_hole.compile(&vocab).is_err(), "a range may not span undefined IDs");
-    let outside = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges(std::iter::once(79..=80))).unwrap();
-    assert!(outside.compile(&vocab).is_err(), "an ID outside the vocabulary is rejected");
-    let different = Vocab::new(vec![(0, b"different".to_vec())]).with_special_tokens(1..80);
-    // A token set is IDs only: different byte spellings do not matter, but every
-    // ID must be defined by the target vocabulary.
-    Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", ranges).unwrap().compile(&different).unwrap();
-    // The same IDs remain valid against any vocabulary that defines them.
-    let same_ids = Vocab::new(vec![(0, b"elsewhere".to_vec())]).with_special_tokens(1..80);
-    Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", TokenSet::from_ranges(std::iter::once(5..=25))).unwrap().compile(&same_ids).unwrap();
-}
-
-#[test]
 fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
     const N: u32 = 131_072;
-    let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new()).with_special_tokens(0..N);
+    let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new());
     for excluded in [None, Some(65_535)] {
         let ranges = match excluded {
             None => vec![std::ops::RangeInclusive::new(0, N - 1)],
@@ -228,7 +203,7 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
 }
 #[test]
 fn ranges_preserve_forcing_and_reserved_end_token_policy() {
-    let vocab = Vocab::new(Vec::new()).with_special_tokens(0..16);
+    let vocab = Vocab::new(Vec::new());
     for mode in MODES {
         let singleton = Grammar::from_glrm(ONE).unwrap()
             .bind_snapshot("T", TokenSet::from_ranges(std::iter::once(5..=5))).unwrap()
@@ -254,7 +229,7 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
 
 #[test]
 fn neutral_scalar_module_formats_are_not_misread_as_range_artifacts() {
-    let vocab = Vocab::new(Vec::new()).with_special_tokens(0..128);
+    let vocab = Vocab::new(Vec::new());
     let module = Grammar::from_glrm(ONE).unwrap().prepare(&vocab).unwrap()
         .bind_snapshot("T", TokenSet::from_ranges(std::iter::once(0..=127))).unwrap();
     let bytes = module.save();

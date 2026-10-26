@@ -102,7 +102,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
             let got = if canonical {
-                let public=state.forced_tokens();
+                let public=state.clone().commit_forced_tokens();
                 assert_eq!(public,state.forced_canonical_reference(),"public/reference divergence: {label}; trace={trace:?}");
                 public
             } else { state.forced_token_ids_reference() };
@@ -144,7 +144,7 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
         Entry{id:10,bytes:Some("é".as_bytes().to_vec())},
     ];
     let vocab=Vocab::new(entries.iter().filter_map(|e|
-        e.bytes.as_ref().map(|b|(e.id,b.clone()))).collect()).with_special_tokens([9]);
+        e.bytes.as_ref().map(|b|(e.id,b.clone()))).collect());
     let bases = [vec![B(b'a'),B(b'b')],vec![E(3),B(b'b')],vec![B(b'a'),E(4)],
         vec![E(4),B(b'a'),B(b'b')],vec![E(9),B(b'a')]];
     let mut cases=(1usize..(1<<bases.len())).map(|bits|
@@ -190,7 +190,7 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
         Entry{id:10,bytes:Some(b"()".to_vec())}, Entry{id:11,bytes:None},
     ];
     let vocab=Vocab::new(entries.iter().filter_map(|e|
-        e.bytes.as_ref().map(|bytes|(e.id,bytes.clone()))).collect()).with_special_tokens([11]);
+        e.bytes.as_ref().map(|bytes|(e.id,bytes.clone()))).collect());
     let parent = Grammar::from_glrm("extern grammar CHILD start root nt root=\"(\" CHILD \")\"").unwrap();
     let parent_prepared=parent.prepare(&vocab).unwrap();
     let leaf_cases: Vec<Residuals>=vec![
@@ -234,7 +234,7 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
     for highest in [31,32,63,64,257] {
         let vocab=Vocab::new(vec![
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"a".to_vec()),
-            (highest,b"unused".to_vec())]).with_special_tokens([highest-1]);
+            (highest,b"unused".to_vec())]);
         let g=Grammar::from_glrm("extern token MARK start root nt root=\"a\" \"b\" | MARK \"b\"").unwrap()
             .bind_snapshot("MARK",TokenSet::new([3])).unwrap();
         for mode in MaskMode::ALL {

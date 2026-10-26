@@ -29,7 +29,7 @@ fn main() {
         .map(|(i,b)|((i*3) as u32,b.clone())).collect();
       for j in 0..512 {entries.push((1000+j, format!("z{j:04}").into_bytes()));}
       entries.push((9000,b"a".to_vec()));entries.push((9001,b"a".to_vec()));
-      let vocab=Vocab::new(entries).with_special_tokens([10000,10001]);
+      let vocab=Vocab::new(entries);
       for (gno,source) in grammars.iter().enumerate() {
         for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
           let c=Grammar::from_glrm(source).compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();

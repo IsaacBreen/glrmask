@@ -121,9 +121,6 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
     with pytest.raises(ValueError):
         token_parent.bind('MARK', source())
     assert list(token_parent.externs.unbound) == ['MARK']
-    token_parent.bind('MARK', g.TokenSet([62]))
-    with pytest.raises(ValueError):
-        token_parent.compile(v)
 
 
 def test_grammar_precompile_returns_a_module():
@@ -167,10 +164,6 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
     for data in [b'', b'GLRASM01bad', before[:-1]]:
         with pytest.raises(ValueError):
             g.Module.load(data)
-    target = g.Module(g.Grammar.from_glrm(MARK))
-    target.bind('MARK', g.TokenSet([99]))
-    with pytest.raises(ValueError):
-        target.compile(v)
     accepts(parent, v, [1])
 
 

@@ -94,8 +94,6 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     mask = c.start().mask()
     assert mask[7] and mask[63]
     assert not mask[1]  # Same bytes as token 7, not the same token ID.
-    with pytest.raises((ValueError, RuntimeError)):
-        _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.TokenSet([126])).compile(v)
     empty = glrmask.TokenSet([])
     assert empty == glrmask.TokenSet.from_ranges([])
     for mode in MODES:
@@ -103,7 +101,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
-        assert state.forced_tokens() == [] and state.forced_tokens() == []
+        assert state.copy().commit_forced_tokens() == [] and state.copy().commit_forced_tokens() == []
     assert glrmask.TokenSet([7, 7]) == glrmask.TokenSet([7])
 
 

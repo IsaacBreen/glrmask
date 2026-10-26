@@ -137,7 +137,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
             for ended in [branch, branch.copy()]:
                 assert ended.is_accepting() and not ended.mask().any()
                 assert not ended.mask().any()
-                assert ended.forced_tokens() == []
+                assert ended.copy().commit_forced_tokens() == []
                 assert not ended.commit_token(0)
                 assert not ended.commit_bytes(b"a")
                 assert not ended.is_accepting() and not ended.mask().any()

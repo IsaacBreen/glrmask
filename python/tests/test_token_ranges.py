@@ -50,18 +50,6 @@ def test_empty_and_reversed_ranges_contribute_nothing():
     assert glrmask.TokenSet.from_ranges([range(3, 3), range(5, 5)]) == glrmask.TokenSet([])
 
 
-def test_membership_is_validated_at_compile_and_duplicates_are_ignored():
-    v = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"x", 3: b"x"})
-    grammar = glrmask.Grammar.from_glrm(ONE)
-    for value in [glrmask.TokenSet(range(4)), glrmask.TokenSet.from_ranges([range(1, 4)])]:
-        with pytest.raises(ValueError):
-            _bound_snapshot(grammar, "T", value).compile(v)
-    assert glrmask.TokenSet([1, 1]) == glrmask.TokenSet([1])
-    assert _bound_snapshot(grammar, "T", glrmask.TokenSet([])).compile(v) is not None
-    assert _bound_snapshot(grammar, "T", glrmask.TokenSet.from_ranges([])).compile(v) is not None
-    assert glrmask.TokenSet.from_ranges([range(0, 2), range(3, 4)]) == glrmask.TokenSet([0, 1, 3])
-
-
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()

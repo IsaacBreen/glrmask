@@ -538,7 +538,7 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
     let vocab = Vocab::new(vec![
         (0, b"a".to_vec()), (2, b"b".to_vec()), (7, Vec::new()),
         (31, Vec::new()), (42, vec![0]), (512, Vec::new()),
-    ]).with_special_tokens([1000]);
+    ]);
     let source = r#"start ::= "a""#;
     let expected = crate::compiler::compile::vocab_empty_byte_token_ids(&vocab);
     let mut compiled = vec![crate::DynamicConstraint::from_ebnf(source, &vocab)

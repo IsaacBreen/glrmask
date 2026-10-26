@@ -26,8 +26,6 @@ impl PyExtern {
     }
 
     /// What the extern can be bound to: `"token"` or `"grammar"`.
-    ///
-    /// A token extern takes only a token ID or token set.
     #[getter]
     fn kind(&self) -> &str {
         &self.kind
@@ -69,7 +67,7 @@ impl From<glrmask::Extern> for PyExtern {
 
 /// A grammar's or module's externs, in declaration order.
 ///
-/// A read-only map from name to `Extern`.
+/// A read-only mapping from name to `Extern`.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug)]
 pub(super) struct PyExterns {
@@ -296,7 +294,7 @@ impl PyExpr {
     }
 }
 
-/// A grammar you can compose with others and partly compile before its externs are bound. Can be saved and loaded.
+/// A grammar you can compose with others and partly compile before its externs are bound.
 #[pyclass(name = "Module", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyModule {
@@ -537,7 +535,7 @@ impl PyModule {
         Ok(())
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work. Every extern must be bound.
+    /// Compiles the module for `vocab`, reusing any precompiled work. Raises `ValueError` if any extern is unbound or the module was precompiled for another vocabulary.
     ///
     /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
@@ -598,7 +596,7 @@ impl PyModule {
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
-    /// Loads a module saved with `save()`. Its precompiled work only applies to the vocabulary it was built for; compiling with another is an error.
+    /// Loads a module saved with `save()`.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

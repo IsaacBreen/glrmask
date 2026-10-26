@@ -6,7 +6,7 @@ fn main(){
   let mut entries=vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),(3,b" ".to_vec())];
   if aliases{entries.extend([(7,b"a".to_vec()),(8,b"ab".to_vec()),(9,b"bc".to_vec())]);}
   for i in 0..512{entries.push((100+i,format!("z{i:04}").into_bytes()));}
-  let v=Vocab::new(entries).with_special_tokens([9000]);
+  let v=Vocab::new(entries);
   for mode in modes{
    for source in [
     "start root nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2) \"c\" @mark(3)",

@@ -27,7 +27,7 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     let state = constraint.start();
     let before = state.mask();
     let accepted = state.is_accepting();
-    let ids = state.forced_tokens();
+    let ids = state.clone().commit_forced_tokens();
     assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
@@ -58,7 +58,7 @@ fn exact_only_event_competes_with_text_even_without_spelling() {
     for empty_spelling in [false,true] {
         let mut entries=vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())];
         if empty_spelling { entries.push((9,Vec::new())); }
-        let vocab=Vocab::new(entries).with_special_tokens([9]);
+        let vocab=Vocab::new(entries);
         for mode in MODES {
             let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;").unwrap()
                 .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
@@ -118,7 +118,7 @@ fn canonical_text_forcing_is_not_token_id_uniqueness() {
 fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() {
     let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),
-    ]).with_special_tokens([9]);
+    ]);
     let ordinary=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap();
     let guarded=Grammar::from_glrm(
         "glrm 1; start root; extern token MARK; nt root = \"ab\" | \"a\" MARK \"b\";",
@@ -147,7 +147,7 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
 fn exact_events_before_and_after_text_keep_their_original_ids() {
     let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),(8,Vec::new()),
-    ]).with_special_tokens([9,10]);
+    ]);
     for (event,expected) in [
         (8,vec![8,1,8]),
         (9,vec![9,1,9]),
@@ -191,7 +191,7 @@ fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
 
 #[test]
 fn exact_event_chain_retains_ids_and_never_canonicalizes_equal_bytes() {
-    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]).with_special_tokens([3]);
+    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token A; extern token B; extern token C; nt root = A B C;").unwrap()
             .bind_snapshot("A",TokenSet::new([1])).unwrap()
@@ -266,7 +266,7 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
 
 #[test]
 fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]).with_special_tokens([9]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK \"a\" \"b\"?;").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
@@ -306,7 +306,7 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
 fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
     let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),
         (2,b" ".to_vec()),(3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),
-        (6,b"\t".to_vec())]).with_special_tokens([9]);
+        (6,b"\t".to_vec())]);
     let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap();
     let parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap();
     let p=parent.prepare(&v).unwrap().bind_snapshot("CHILD",child.prepare(&v).unwrap()).unwrap()
@@ -326,4 +326,61 @@ fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
         assert!(s.forced_canonical_reference().is_empty(),"byte proof must stop before optional exact event");
         assert!(!allows(&s.mask(),6),"child's space ignore must not allow arbitrary whitespace");
     }
+}
+
+fn long_forced_fixture() -> (Constraint, Vocab) {
+    let vocab = Vocab::new(vec![
+        (0, b"first ".to_vec()),
+        (1, b"second ".to_vec()),
+        (2, b"third ".to_vec()),
+        (3, b"fourth ".to_vec()),
+        (4, b"end".to_vec()),
+    ]);
+    let grammar = Grammar::from_glrm("glrm 1; start root; nt root = \"first second third fourth end\";").unwrap();
+    let constraint = grammar.compile(&vocab).unwrap();
+    (constraint, vocab)
+}
+
+#[test]
+fn commit_forced_tokens_semantics_match_commit_tokens_replay() {
+    let (constraint, _) = long_forced_fixture();
+    let mut state = constraint.start();
+    let mut replay = state.clone();
+    let returned = state.commit_forced_tokens();
+    assert!(!returned.is_empty());
+    assert!(replay.commit_tokens(&returned));
+    assert_eq!(state.mask(), replay.mask());
+    assert_eq!(state.is_accepting(), replay.is_accepting());
+    assert_eq!(state.is_terminated(), replay.is_terminated());
+}
+
+#[test]
+fn commit_forced_tokens_stops_after_1000_tokens_and_continues() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let parts = (0..1005).map(|_| glrmask::Expr::literal("a"));
+    let grammar = Grammar::from_expr(glrmask::Expr::sequence(parts)).unwrap();
+    let constraint = grammar.compile(&vocab).unwrap();
+    let mut state = constraint.start();
+    let first = state.commit_forced_tokens();
+    assert_eq!(first.len(), 1000);
+    assert!(!state.is_accepting());
+    let second = state.commit_forced_tokens();
+    assert_eq!(second.len(), 5);
+    assert!(state.is_accepting());
+}
+
+#[test]
+fn code_bound_token_set_with_unregistered_id_is_allowed_after_literal() {
+    let vocab = Vocab::new(vec![(0, b"hello ".to_vec())]);
+    assert!(!vocab.contains_token_id(99));
+    let mut module = glrmask::Module::new(&Grammar::from_glrm("glrm 1; start root; extern token SPECIAL; nt root = \"hello \" SPECIAL;").unwrap());
+    module.bind("SPECIAL", TokenSet::new([99])).unwrap();
+    let constraint = module.compile(&vocab).unwrap();
+    assert!(constraint.mask_len() * 32 > 99);
+    let mut state = constraint.start();
+    assert!(!allows(&state.mask(), 99));
+    assert!(state.commit_token(0));
+    assert!(allows(&state.mask(), 99));
+    assert!(state.commit_token(99));
+    assert!(state.is_accepting());
 }

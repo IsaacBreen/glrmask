@@ -104,7 +104,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
     let v=Vocab::new(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
         (2,b"b".to_vec()),(3,b"y".to_vec()),(4,b"xaby".to_vec()),(5,b"ab".to_vec()),
         (6,b" ".to_vec()),(7,b"\t".to_vec()),(8,b"x ab y".to_vec()),(9,b"xab\ty".to_vec()),
-        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]).with_special_tokens([99]);
+        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]);
     let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";").unwrap();
     let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap(),
         Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/").unwrap(),

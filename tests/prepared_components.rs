@@ -3,7 +3,7 @@ use glrmask::{Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab}
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
-fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]).with_special_tokens([4,5])}
+fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())])}
 fn allowed(mask:&[u32],id:u32)->bool {mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn check_pair(c:&Constraint) {
     let mut s=c.start();
@@ -54,8 +54,6 @@ fn explicit_exact_adapter_has_event_not_spelling_semantics() {
         let mask=c.start().mask();assert!(!allowed(&mask,0));assert!(allowed(&mask,2));assert!(allowed(&mask,4));assert!(!allowed(&mask,5));
         for id in [2,4] {let mut s=c.start();assert!(s.commit_token(id));assert!(s.is_accepting());}
     }
-    let other=Vocab::new(vec![(0,b"different".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]);
-    assert!(event.prepare(&other).is_err(), "ID 4 is absent from the target vocabulary");
 }
 #[test]
 fn unused_parameters_still_belong_to_the_interface() {

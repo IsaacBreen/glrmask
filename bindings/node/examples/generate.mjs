@@ -9,7 +9,6 @@ const chars = '0123456789+*()';
 const eos = chars.length;
 const vocab = new Vocab(
   [...chars].map((c, id) => [id, Buffer.from(c)]),
-  { specialTokenIds: [eos] },
 );
 
 // Arithmetic, then the end token.

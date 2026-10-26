@@ -234,7 +234,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
     }
 
     Ok((
-        glrmask::Vocab::new(entries).with_special_tokens(exact_only_token_ids),
+        glrmask::Vocab::new(entries),
         end_token_ids,
     ))
 }
@@ -576,7 +576,7 @@ fn advance_trace_step_to_dict<'py>(
 // PyVocab
 // ---------------------------------------------------------------------------
 
-/// A model's tokens and their bytes.
+/// A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.
 #[pyclass(name = "Vocab", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
@@ -597,26 +597,24 @@ impl PyVocab {
 
     /// Creates a vocabulary from a `{token: id}` dict.
     ///
-    /// `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
+    /// `str` tokens are UTF-8 encoded; `bytes` tokens are used as is.
     #[staticmethod]
-    #[pyo3(signature = (token_to_id, *, special_token_ids = None))]
-    fn from_dict(token_to_id: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
+    #[pyo3(signature = (token_to_id, /))]
+    fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
         Ok(Self {
-            inner: vocab.with_special_tokens(special_token_ids.unwrap_or_default()),
+            inner: vocab,
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
 
     /// Creates a vocabulary from an `{id: bytes}` dict.
-    ///
-    /// `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
     #[staticmethod]
-    #[pyo3(signature = (id_to_bytes, *, special_token_ids = None))]
-    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
+    #[pyo3(signature = (id_to_bytes, /))]
+    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
         Ok(Self {
-            inner: vocab.with_special_tokens(special_token_ids.unwrap_or_default()),
+            inner: vocab,
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
@@ -754,7 +752,7 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// A grammar compiled for a vocabulary.
+/// A grammar compiled for a vocabulary. Call `start()` for each sequence you generate.
 #[pyclass(name = "Constraint", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -797,14 +795,14 @@ impl PyConstraint {
 #[pymethods]
 impl PyConstraint {
     /// Saves the constraint as bytes, without the vocabulary.
+    ///
+    /// Bytes saved by one GLRMask version may not load in another.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.detach(|| self.inner.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Loads a constraint saved with `save`.
-    ///
-    /// `vocab` must be the one it was compiled for, or loading raises `ValueError`.
+    /// Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for.
     #[staticmethod]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
@@ -980,20 +978,21 @@ pub struct PyDynamicConstraintState {
 
 #[pymethods]
 impl PyDynamicConstraintState {
+    /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
-    /// Commits a token. Returns `False` if it is not allowed, which terminates the state.
+    /// Commits a token. If it isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
-    /// Commits each token in order. Returns `False` at the first one that is not allowed, which terminates the state.
+    /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
         self.inner
@@ -1054,6 +1053,9 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
+    ///
+    /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
@@ -1072,25 +1074,29 @@ impl PyDynamicConstraintState {
         }))
     }
 
-
-    /// Locally inevitable original token IDs, without choosing an encoding.
-    /// Pure query; proof/resource errors propagate and no full mask is built.
-    fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
-        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
+    fn commit_forced_tokens(&mut self, py: Python<'_>) -> Vec<u32> {
+        py.detach(|| {
+            self.inner
+                .with_dependent_mut(|_owner, state| state.commit_forced_tokens())
+        })
     }
 
-    /// Whether the input so far is a complete match.
+    /// Whether everything committed so far is a complete match.
     fn is_accepting(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_accepting())
     }
 
-    /// Whether no more input can be accepted.
+    /// Whether nothing more can be committed.
     fn is_terminated(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_terminated())
     }
 
+    /// The tokens allowed next, as a NumPy `bool` array indexed by token ID.
+    ///
+    /// `size` sets the array length, for example to match your logits; it must cover every token ID.
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1133,7 +1139,7 @@ impl PyConstraintState {
     fn __copy__(&self) -> Self { self.copy() }
 
 
-    /// The tokens allowed next, as a Boolean array indexed by token ID.
+    /// The tokens allowed next, as a NumPy `bool` array indexed by token ID.
     ///
     /// `size` sets the array length, for example to match your logits; it must cover every token ID.
     #[pyo3(signature = (*, size=None))]
@@ -1149,7 +1155,7 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
@@ -1170,42 +1176,41 @@ impl PyConstraintState {
         Ok(())
     }
 
-    /// Commits one model token event; returns false when it is disallowed.
+    /// Commits a token. If it isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
-    /// Commits model token IDs in order; returns false at the first disallowed event.
+    /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
     }
 
-    /// Commits raw bytes. Returns `False` if they are not allowed, which terminates the state.
+    /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
-    /// Tokens for what must come next, taking the longest token at each step. Stops before anything that could vary, or at 10,000 tokens or bytes.
-    fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
-        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
+    fn commit_forced_tokens(&mut self, py: Python<'_>) -> Vec<u32> {
+        py.detach(|| {
+            self.inner
+                .with_dependent_mut(|_owner, state| state.commit_forced_tokens())
+        })
     }
 
-    /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
+    /// Whether everything committed so far is a complete match.
     fn is_accepting(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
     }
 
     /// Whether nothing more can be committed.
-    ///
-    /// This is true when the sequence is finished, for example after its end token, and after a failed commit. `is_accepting` tells the two apart.
-    ///
-    /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
     fn is_terminated(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_terminated())
     }

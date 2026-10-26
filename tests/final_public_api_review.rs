@@ -57,8 +57,6 @@ fn review_token_validates_membership_without_claiming_vocabulary_identity() {
         assert!(!allowed(&c.start().mask(), 1));
     }
     let m = Grammar::from_glrm(TOKEN).unwrap().prepare(&v).unwrap();
-    assert!(m.bind_snapshot("MARK", glrmask::TokenSet::from(6)).is_err());
-    assert!(m.bind_snapshot("MARK", glrmask::TokenSet::from(u32::MAX)).is_err());
     assert!(m.bind_snapshot("MARK", token.clone()).unwrap().link().is_ok());
 }
 

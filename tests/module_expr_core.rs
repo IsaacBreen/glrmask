@@ -6,7 +6,7 @@ fn vocab() -> Vocab {
             (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
             (6, b"xby".to_vec()), (7, b"a".to_vec()), (8, b"aab".to_vec()),
-        ]).with_special_tokens([99])
+        ])
 }
 
 fn allowed(mask: &[u32], id: u32) -> bool {
@@ -146,13 +146,6 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     assert!(allowed(&mask, 99));
     assert!(!allowed(&mask, 1));
 
-    // A token-set binding is a set of IDs; byte spellings are not part of its
-    // identity, but every ID must exist in the compile vocabulary.
-    let renamed = Vocab::new(vec![(7, b"different".to_vec())]).with_special_tokens([99]);
-    assert!(loaded.compile(&renamed).is_ok());
-    let missing = Vocab::new(vec![(7, b"different".to_vec())]);
-    assert!(loaded.compile(&missing).is_err());
-
     let mut wide = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     wide.bind("item", TokenSet::from(7)).unwrap();
     let c = wide.compile(&v).unwrap();
@@ -216,17 +209,8 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert!(parent.precompile(&wrong).is_err());
     assert_eq!(parent.save(), original);
 
-    // A token set whose ID is outside the parent's target vocabulary.
-    assert!(parent.bind("child", TokenSet::new([42])).is_err());
-    assert_eq!(parent.save(), original);
-
     let mut child = Module::new(&a());
     child.precompile(&wrong).unwrap();
-    assert!(parent.bind("child", child).is_err());
-    assert_eq!(parent.save(), original);
-
-    let mut child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
-    child.bind("item", TokenSet::from(777)).unwrap();
     assert!(parent.bind("child", child).is_err());
     assert_eq!(parent.save(), original);
 }
@@ -325,7 +309,7 @@ fn compile_succeeds_on_threads_with_small_stacks() {
     let worker = std::thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(|| {
-            let vocab = Vocab::new(vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())]).with_special_tokens([]);
+            let vocab = Vocab::new(vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())]);
             let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M").unwrap());
             template.precompile(&vocab).unwrap();
             let mut request = template.clone();

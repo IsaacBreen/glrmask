@@ -359,7 +359,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         assert not mask[end_token]
         mask[end_token] = True
         assert mask[end_token]
-        assert state.forced_tokens() == []
+        assert state.copy().commit_forced_tokens() == []
 
     loaded = glrmask.Constraint.load(composed.save(), vocab)
     loaded_state = loaded.start()

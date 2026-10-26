@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.
+- `special_token_ids` and `Vocab::with_special_tokens` are removed. A token ID that isn't in the vocabulary never matches text, and a token set can still allow it.
 - In C and C++, token ranges are now `{start, end}` with `end` excluded, as in Rust, Python and Node.js. They used to be `{first, last}` with `last` included.
 - Removed markers (`@mark(id)`, `marker_events()` and `marker_ids()`) from this release. They will return in a later one.
 - Removed EBNF as a grammar format; use Lark or GLRM. In C, `GLRMASK_EBNF` is gone and the other format constants keep their values.

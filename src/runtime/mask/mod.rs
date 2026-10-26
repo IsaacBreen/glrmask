@@ -8521,7 +8521,7 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
-    /// The tokens allowed next, as a bitset. Token `id` is allowed when bit
+    /// The tokens allowed next, as a bitmask. Token `id` is allowed when bit
     /// `id % 32` of word `id / 32` is set.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];

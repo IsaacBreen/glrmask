@@ -36,7 +36,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             assert expected.commit_bytes(prefix)
             mask = state.mask()
             assert np.array_equal(mask, expected.mask())
-            assert state.forced_tokens() == expected.forced_tokens()
+            assert state.copy().commit_forced_tokens() == expected.copy().commit_forced_tokens()
             assert state.is_accepting() == expected.is_accepting()
             assert not state.is_accepting()
             assert not mask[25]
@@ -105,7 +105,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
             assert state.commit_bytes(b"a" * n)
             assert expected.commit_bytes(b"a" * n)
             assert np.array_equal(state.mask(), expected.mask())
-            assert state.forced_tokens() == expected.forced_tokens()
+            assert state.copy().commit_forced_tokens() == expected.copy().commit_forced_tokens()
             snapshot = state.copy()
             if n == 30:
                 assert state.commit_token(1)
@@ -135,7 +135,7 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
             assert expected.commit_bytes(prefix)
             assert np.array_equal(state.mask(), expected.mask())
             assert state.is_accepting() == expected.is_accepting()
-            assert state.forced_tokens() == expected.forced_tokens()
+            assert state.copy().commit_forced_tokens() == expected.copy().commit_forced_tokens()
             assert np.array_equal(state.copy().mask(), expected.mask())
         state = constraint.start()
         assert state.mask()[3] and state.mask()[7]

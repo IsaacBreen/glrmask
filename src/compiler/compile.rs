@@ -81,11 +81,6 @@ pub(crate) fn vocab_fingerprint(vocab: &crate::Vocab) -> [u8; 32] {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
-    let special = vocab.special_token_ids().collect::<Vec<_>>();
-    hasher.update(&(special.len() as u64).to_le_bytes());
-    for token_id in special {
-        hasher.update(&token_id.to_le_bytes());
-    }
     let fingerprint = *hasher.finalize().as_bytes();
     vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabFingerprint { fingerprint }));
     fingerprint
@@ -307,15 +302,13 @@ mod fingerprint_tests {
 
     #[test]
     fn fingerprint_is_stable_across_calls_and_clones_and_distinct_per_vocab() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
-            .with_special_tokens([1]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let first = vocab_fingerprint(&vocab);
         let cloned = vocab.clone();
         assert_eq!(vocab_fingerprint(&cloned), first);
         assert_eq!(vocab_fingerprint(&vocab), first);
 
-        let other = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())])
-            .with_special_tokens([1]);
+        let other = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         assert_ne!(vocab_fingerprint(&other), first);
     }
 }
@@ -332,7 +325,7 @@ mod empty_byte_summary_tests {
             (512, Vec::new()), (31, Vec::new()), (7, Vec::new()),
             (7, b"last spelling wins".to_vec()), (3, Vec::new()),
             (0, vec![0]), (2, b"a".to_vec()), (90, b"a".to_vec()),
-        ]).with_special_tokens([1000, 3]);
+        ]);
         assert_eq!(vocab.compiler_cache_entry_count(), 0);
         let first = vocab_empty_byte_token_ids(&vocab);
         assert_eq!(first.as_ref(), &[3, 31, 512]);
@@ -344,11 +337,10 @@ mod empty_byte_summary_tests {
         let other = Vocab::new(vec![
             (512, vec![0]), (31, b"a".to_vec()), (7, b"last spelling wins".to_vec()),
             (3, b"b".to_vec()), (0, Vec::new()), (2, b"a".to_vec()), (90, Vec::new()),
-        ]).with_special_tokens([1000]);
+        ]);
         assert_eq!(vocab_empty_byte_token_ids(&other).as_ref(), &[0, 90]);
         assert_eq!(vocab_empty_byte_token_ids(&vocab).as_ref(), &[3, 31, 512]);
         assert!(vocab_empty_byte_token_ids(&Vocab::new(Vec::new())).is_empty());
-        assert!(vocab_empty_byte_token_ids(&Vocab::new(Vec::new()).with_special_tokens([0, 1, 77])).is_empty());
     }
 
     #[test]

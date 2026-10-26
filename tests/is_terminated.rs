@@ -143,7 +143,7 @@ fn repetition_keeps_an_accepting_state_live() {
 #[test]
 fn end_token_root_terminates_only_after_the_end_token() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([99]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let grammar = with_end_token(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), 99);
         let constraint = compile(&grammar, &vocab, strategy);
 
@@ -164,7 +164,7 @@ fn end_token_root_terminates_only_after_the_end_token() {
 #[test]
 fn special_token_on_the_normal_path_keeps_the_state_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([99]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let grammar = Grammar::from_glrm(
             "glrm 1; start root; extern token eos; nt root = \"a\" eos;",
         ).unwrap();
@@ -191,8 +191,7 @@ fn special_token_on_the_normal_path_keeps_the_state_live() {
 #[test]
 fn ignored_root_with_a_special_token_stays_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())])
-            .with_special_tokens([99]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]);
         let grammar = Grammar::from_glrm(
             r#"
                 glrm 1;
@@ -222,7 +221,7 @@ fn ignored_root_with_a_special_token_stays_live() {
 
 #[test]
 fn oracle_agrees_with_commit_for_every_prefix() {
-    let vocab_a = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([99]);
+    let vocab_a = Vocab::new(vec![(0, b"a".to_vec())]);
     let json_vocab = Vocab::new(vec![
         (0, b"{".to_vec()),
         (1, b"}".to_vec()),
@@ -232,8 +231,7 @@ fn oracle_agrees_with_commit_for_every_prefix() {
         (5, b"0".to_vec()),
         (6, b"1".to_vec()),
         (7, b" ".to_vec()),
-    ])
-    .with_special_tokens([99]);
+    ]);
     let plain_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
 
     let json_body = Grammar::from_lark(

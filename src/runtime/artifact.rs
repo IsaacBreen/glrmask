@@ -10379,7 +10379,7 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// A grammar compiled for a vocabulary.
+/// A grammar compiled for a vocabulary. Call [`start`](Self::start) for each sequence you generate.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.

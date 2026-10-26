@@ -32,13 +32,13 @@ for(const {label:maskStrategy,options} of strategies) {
     assert.throws(()=>s.fillMask(short),e=>e.code==='GLRMASK_BUFFER_TOO_SMALL');assert.equal(short[0],123);
     const copy=s.clone();c.dispose();g.dispose();v.dispose();closed(()=>c.start());
     assert.ok(s.commitToken(31));assert.ok(s.isAccepting());assert.ok(!copy.isAccepting());
-    assert.ok(copy.commitToken(0));assert.deepEqual(Array.from(copy.forcedTokens()),[1]);assert.ok(!copy.isAccepting());
+    assert.ok(copy.commitToken(0));assert.deepEqual(Array.from(copy.clone().commitForcedTokens()),[1]);assert.ok(!copy.isAccepting());
     assert.ok(copy.commitToken(1));assert.ok(copy.isAccepting());
     s.dispose();s.dispose();closed(()=>s.mask());closed(()=>s.commitToken(0));
     copy[Symbol.dispose]();closed(()=>copy.isAccepting());
   });
   test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,()=>{
-    const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],{specialTokenIds:[99]});
+    const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],);
     const c=Grammar.fromLark('start: "é"').compileSync(v,{...options}),s=c.start();
     assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
@@ -51,7 +51,7 @@ for(const {label:maskStrategy,options} of strategies) {
     }
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
-    const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
+    const v=new Vocab([[0,b('a')]]);
     const s=Grammar.fromExpr(Expr.sequence(Grammar.fromLark('start: "a"'),new TokenSet([99]))).compileSync(v,{...options}).start();
     assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
@@ -82,7 +82,6 @@ test('token sets normalize ranges and expose no inspection accessors',()=>{
   assert.ok(new TokenSet([7,7,3]).equals(new TokenSet([3,7])));
   assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),RangeError);
   assert.throws(()=>TokenSet.fromRanges([{start:5,end:5}]),RangeError);
-  const high=new Vocab([],{specialTokenIds:[0xffffffff]});
   assert.equal(TokenSet.fromRanges([{start:0xffffffff,end:4294967296}]).toString(),'TokenSet[4294967295..=4294967295]');
 });
 
@@ -110,7 +109,6 @@ test('frontends and input validation preserve the public contracts',async()=>{
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GlrMaskError);
-  assert.throws(()=>new Vocab([[0,b('a')]],{specialTokenIds:[0]}),GlrMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) {
     assert.throws(()=>new TokenSet([bad]),RangeError);
     assert.throws(()=>s.commitToken(bad),RangeError);
@@ -183,7 +181,7 @@ test('ESM and CommonJS share constructor identities',async()=>{
 });
 
 test('named Lark special tokens use explicit mappings, not byte aliases',async()=>{
-  const v=new Vocab([[0,b('a')],[1,b('a')]],{specialTokenIds:[99]});
+  const v=new Vocab([[0,b('a')],[1,b('a')]]);
   for(const {label:maskStrategy,options} of strategies) {
     const g=Grammar.fromLark('start: <|begin|> <|body|>');
     const m=new Module(g);

@@ -8,8 +8,7 @@ fn main() -> glrmask::Result<()> {
     // One token per character, and an end-of-sequence token with no bytes.
     let chars = b"0123456789+*()";
     let eos = chars.len() as u32;
-    let vocab = Vocab::new(chars.iter().enumerate().map(|(id, &c)| (id as u32, vec![c])).collect())
-        .with_special_tokens([eos]);
+    let vocab = Vocab::new(chars.iter().enumerate().map(|(id, &c)| (id as u32, vec![c])).collect());
 
     // Arithmetic, then the end token.
     let arithmetic = Grammar::from_glrm(r#"

@@ -86,16 +86,11 @@ export interface Externs extends ReadonlyMap<string, Extern> {
   readonly unbound: Externs;
 }
 
-/** Options for `new Vocab`. */
-export interface VocabOptions {
-  /** Tokens that have no bytes, such as end-of-sequence tokens. They can be used in token sets but never match text. */
-  specialTokenIds?: Iterable<number>;
-}
-/** A model's tokens and their bytes. */
+/** A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it. */
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
   /** Creates a vocabulary from `[id, bytes]` entries. */
-  constructor(entries: Iterable<readonly [number, Uint8Array]>, options?: VocabOptions);
+  constructor(entries: Iterable<readonly [number, Uint8Array]>);
   /** A new handle to the same object. */
   clone(): Vocab;
   /** Frees the native handle now instead of at garbage collection. */
@@ -131,7 +126,7 @@ export interface CompileOptions {
   boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
-/** A grammar, written as source text or built from an `Expr`. */
+/** A grammar, parsed from source or built from an `Expr`. */
 export declare class Grammar implements Disposable {
   private constructor();
   private readonly __grammarBrand: void;
@@ -155,9 +150,13 @@ export declare class Grammar implements Disposable {
   precompile(vocab: Vocab, options?: CompileOptions): Promise<Module>;
   /** Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work. */
   precompileSync(vocab: Vocab, options?: CompileOptions): Module;
-  /** Like `compileSync`, but returns a promise and doesn't block the event loop. */
+  /** Like `compileSync`, but returns a promise and doesn't block the event loop.
+   *
+   * Throws if any extern is unbound. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Compiles the grammar for `vocab`. */
+  /** Compiles the grammar for `vocab`.
+   *
+   * Throws if any extern is unbound. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -208,17 +207,21 @@ export declare class Module implements Disposable {
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
-  /** Like `compileSync`, but returns a promise and doesn't block the event loop. */
+  /** Like `compileSync`, but returns a promise and doesn't block the event loop.
+   *
+   * Throws if any extern is unbound or the module was precompiled for another vocabulary. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Compiles the module for `vocab`, reusing any precompiled work. Every extern must be bound. */
+  /** Compiles the module for `vocab`, reusing any precompiled work. Throws if any extern is unbound or the module was precompiled for another vocabulary. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Like `saveSync`, but returns a promise and doesn't block the event loop. */
   save(): Promise<Uint8Array>;
   /** Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another. */
   saveSync(): Uint8Array;
-  /** Like `loadSync`, but returns a promise and doesn't block the event loop. */
+  /** Like `loadSync`, but returns a promise and doesn't block the event loop.
+   *
+   * Loads a module saved with `save()` or `saveSync()`. */
   static load(data: Uint8Array): Promise<Module>;
-  /** Loads a module saved with `save`. Its precompiled work only applies to the vocabulary it was built for; compiling with another is an error. */
+  /** Loads a module saved with `save()` or `saveSync()`. */
   static loadSync(data: Uint8Array): Module;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -226,7 +229,7 @@ export declare class Module implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A grammar compiled for a vocabulary. */
+/** A grammar compiled for a vocabulary. Call `start()` for each sequence you generate. */
 export declare class Constraint implements Disposable {
   private constructor();
   private readonly __constraintBrand: void;
@@ -242,9 +245,11 @@ export declare class Constraint implements Disposable {
    *
    * Bytes saved by one GLRMask version may not load in another. */
   saveSync(): Uint8Array;
-  /** Like `loadSync`, but returns a promise and doesn't block the event loop. */
+  /** Like `loadSync`, but returns a promise and doesn't block the event loop.
+   *
+   * Loads a constraint saved with `save()` or `saveSync()`. Throws if `vocab` isn't the one it was compiled for. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** Loads a constraint saved with `save`. `vocab` must be the one it was compiled for, or loading fails. */
+  /** Loads a constraint saved with `save()` or `saveSync()`. Throws if `vocab` isn't the one it was compiled for. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -260,22 +265,22 @@ export declare class ConstraintState implements Disposable {
   readonly maskLength: number;
   /** A copy of the state. */
   clone(): ConstraintState;
-  /** The tokens allowed next, as a bitset. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
+  /** The tokens allowed next, as a bitmask. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
   mask(): Uint32Array;
-  /** Writes the mask into `output`, zeroing any extra elements. Throws `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if it has fewer than `maskLength` elements. */
+  /** Writes the mask into `output`, zeroing any extra elements. Throws `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `maskLength` elements. */
   fillMask(output: Uint32Array): void;
-  /** Commits a token. Returns `false` if it is not allowed, which terminates the state. */
+  /** Commits a token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;
-  /** Commits each token in order. Returns `false` at the first one that is not allowed, which terminates the state. */
+  /** Commits each token in order. If one isn't allowed, returns `false` and terminates the state. */
   commitTokens(ids: Iterable<number> | Uint32Array): boolean;
-  /** Commits raw bytes. Returns `false` if they are not allowed, which terminates the state. */
+  /** Commits raw bytes. If they aren't allowed, returns `false` and terminates the state. */
   commitBytes(bytes: Uint8Array): boolean;
-  /** Whether the input so far is a complete match. */
+  /** Whether everything committed so far is a complete match. */
   isAccepting(): boolean;
-  /** Whether no more input can be accepted. */
+  /** Whether nothing more can be committed. */
   isTerminated(): boolean;
-  /** Tokens for what must come next, taking the longest token at each step. Stops before anything that could vary, or at 10,000 tokens or bytes. */
-  forcedTokens(): Uint32Array;
+  /** Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens. */
+  commitForcedTokens(): Uint32Array;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
   /** Same as `dispose()`, for `using` declarations. */

@@ -89,4 +89,4 @@ def test_empty_event_binding_recognizes_no_output():
             assert state.commit_token(0)
         assert not state.is_accepting()
         assert not state.mask(size=79).any()
-        assert not state.forced_tokens()
+        assert not state.copy().commit_forced_tokens()

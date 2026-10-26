@@ -47,7 +47,7 @@ void basic() {
         auto copy = s; c.dispose(); g.dispose(); v.dispose();
         CHECK(!s.is_terminated());
         CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(s.is_terminated()); CHECK(!copy.is_accepting());
-        CHECK(copy.commit_token(0)); CHECK(copy.forced_tokens()==std::vector<TokenId>{1});
+        CHECK(copy.commit_token(0)); auto look = copy; CHECK(look.commit_forced_tokens()==std::vector<TokenId>{1});
         CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting()); CHECK(copy.is_terminated());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
         s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
@@ -225,7 +225,7 @@ int thread_stack_probe(std::size_t stack_bytes) {
             for (auto& constraint : *p.constraints) for (int j=0; j<8; ++j) {
                 auto s = constraint.start(); CHECK(allowed(s.mask(), 31));
                 auto snapshot = s; CHECK(s.commit_token(31)); CHECK(s.is_accepting());
-                CHECK(snapshot.commit_token(0)); CHECK(snapshot.forced_tokens()==std::vector<TokenId>{1});
+                CHECK(snapshot.commit_token(0)); auto look = snapshot; CHECK(look.commit_forced_tokens()==std::vector<TokenId>{1});
                 CHECK(snapshot.commit_token(1)); CHECK(snapshot.is_accepting());
             }
             p.okay = true;

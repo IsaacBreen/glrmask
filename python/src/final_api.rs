@@ -252,9 +252,7 @@ impl PyTokenSet {
         })
     }
 
-    /// Creates a set from `range` objects, which must have step 1 and start <= stop.
-    ///
-    /// Overlapping and adjacent ranges are merged. An empty range contributes nothing.
+    /// Creates a set from `range` objects, which must have step 1.
     #[staticmethod]
     #[pyo3(signature = (ranges, /))]
     fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -301,7 +299,7 @@ impl PyTokenSet {
 #[derive(Clone, Copy)]
 enum SourceKind { Glrm, JsonSchema, Lark }
 
-/// A grammar, written as source text or built from an expression.
+/// A grammar, parsed from source or built from an Expr.
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
@@ -427,7 +425,7 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
-    /// Compiles the grammar for `vocab`.
+    /// Compiles the grammar for `vocab`. Raises `ValueError` if any extern is unbound.
     ///
     /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]

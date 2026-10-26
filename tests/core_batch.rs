@@ -1,7 +1,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
 fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
-fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).with_special_tokens([17,29])}
+fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())])}
 
 #[test]
 fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
@@ -51,9 +51,6 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
     let mut t=Grammar::from_glrm("extern token VALUE start root nt root=VALUE").unwrap();
     assert!(t.bind("VALUE",Grammar::from_glrm("start r nt r=\"x\"").unwrap()).is_err());
     assert_eq!(t.requirements().unwrap().len(),1);
-    let mut g=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap();
-    g.bind("VALUE",TokenSet::from(12345)).unwrap();
-    assert!(g.compile_with_build_options(&v,options()).is_err());
 }
 #[test]
 fn independent_concurrent_specializations_do_not_share_mutations() {

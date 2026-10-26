@@ -4992,12 +4992,7 @@ impl Constraint {
     }
 
     fn save_with_vocab_policy(&self) -> Vec<u8> {
-        let exact_only_token_ids = self
-            .late_bind_vocab
-            .get()
-            .map(|vocab| vocab.special_token_ids().collect::<Vec<_>>())
-            .or_else(|| self.pending_special_token_ids.clone())
-            .unwrap_or_default();
+        let exact_only_token_ids: Vec<u32> = Vec::new();
         if self.end_tokens.is_empty() && exact_only_token_ids.is_empty() {
             return self.save_body_with_vocab_policy();
         }
@@ -5910,8 +5905,8 @@ impl Constraint {
         bytes
     }
 
-    /// Loads a constraint saved with [`save`](Self::save). `vocab` must be the
-    /// one it was compiled for, or loading fails.
+    /// Loads a constraint saved with [`save`](Self::save). Fails if `vocab` isn't
+    /// the one it was compiled for.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
@@ -6027,7 +6022,7 @@ impl Constraint {
         if supplied_vocab.is_some() && !exact_ids.is_empty() {
             let vocab = crate::Vocab::new(body.token_bytes_iter()
                     .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
-                    .collect()).with_special_tokens(exact_ids);
+                    .collect());
             body.bind_vocab_exact(&vocab)
                 .map_err(crate::Error::Serialization)?;
         } else if supplied_vocab.is_none() {

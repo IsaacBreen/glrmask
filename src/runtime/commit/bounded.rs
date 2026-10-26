@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn exact_events_aliases_root_controls_and_empty_spellings() {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"a".to_vec()),
-            (3,b"ab".to_vec()),(17,Vec::new())]).with_special_tokens([29,30,31,4096]);
+            (3,b"ab".to_vec()),(17,Vec::new())]);
         for body in ["M \"a\"", "M | \"ab\"", "M \"b\" | \"ab\"", "M? \"ab\"", "M M?"] {
             let source=format!("extern token M start root nt root={body}");
             for tokens in [vec![0],vec![17],vec![29],vec![29,30,31],vec![0,17,29,4096]] {
@@ -603,7 +603,7 @@ mod tests {
     fn composed_and_partial_utf8_frontiers_match_final_admission() {
         let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,vec![0xc3]),(7,vec![0xa9]),
-            (8,vec![0xc3,0xa9]),(10,b"x".to_vec())]).with_special_tokens([9]);
+            (8,vec![0xc3,0xa9]),(10,b"x".to_vec())]);
         let mut child=Grammar::from_glrm("extern token M start item ignore SPACE t SPACE=/ +/ nt item=\"a\" M?").unwrap();
         child.bind("M",TokenSet::new([9])).unwrap();
         let mut p=Grammar::from_glrm("extern grammar C start root nt root=\"P\" C \" X\"").unwrap().prepare(&v).unwrap();
@@ -743,7 +743,7 @@ mod differential_tests {
             (8,b"x".to_vec()),(9,b"(".to_vec()),(10,b")".to_vec()),(11,b"()".to_vec()),
             (12,b"a ".to_vec()),(13,b"ab ".to_vec()),(14,b" a".to_vec()),
             (32,vec![0xc3]),(33,vec![0xa9]),(34,"\u{e9}".as_bytes().to_vec()),(67,b"a".to_vec()),
-        ]).with_special_tokens([99,130]);
+        ]);
         for source in [
             "start root nt root=\"ab\" \"c\"?",
             "start root nt root=\"a\" | \"ab\" | \"abc\"",
@@ -773,7 +773,7 @@ mod differential_tests {
     )]
     fn bounded_exact_events_aliases_empty_spelling_and_root_controls() {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),
-            (4,b"a".to_vec()),(5,b"ab".to_vec()),(7,Vec::new())]).with_special_tokens([99,130]);
+            (4,b"a".to_vec()),(5,b"ab".to_vec()),(7,Vec::new())]);
         for body in ["MARK", "MARK \"a\"", "\"ab\" | MARK \"c\"", "\"a\" MARK?", "MARK? \"b\""] {
             let source=format!("extern token MARK start root nt root={body}");
             for set in [vec![],vec![0],vec![4],vec![7],vec![99],vec![99,130],vec![0,4,7,99]] {
@@ -789,7 +789,7 @@ mod differential_tests {
     fn bounded_composed_calls_ignore_and_independent_event_lanes() {
         let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,b"\t".to_vec()),
-            (7,b"a X".to_vec()),(8,b"a".to_vec())]).with_special_tokens([9]);
+            (7,b"a X".to_vec()),(8,b"a".to_vec())]);
         let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap().prepare(&v).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap().prepare(&v).unwrap();
         parent.bind("CHILD",&child).unwrap();parent.bind("CHILD::MARK",TokenSet::from(9)).unwrap();
@@ -840,7 +840,7 @@ mod differential_tests {
         let mut entries=(0..256u32).map(|id|(id,vec![id as u8])).collect::<Vec<_>>();
         for piece in pieces {entries.push((entries.len() as u32,piece));}
         entries.push((entries.len() as u32,Vec::new()));
-        let v=Vocab::new(entries.clone()).with_special_tokens([2000]);
+        let v=Vocab::new(entries.clone());
         for (name,grammar,text) in [
             ("json-schema",Grammar::from_json_schema(schema).unwrap(),json),
             ("lark-arithmetic",Grammar::from_lark(lark).unwrap(),arithmetic),

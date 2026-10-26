@@ -165,14 +165,7 @@ impl Certificate {
         }
         Ok(())
     }
-    fn tokens(&mut self, set: &TokenSet) -> Result<()> {
-        if let Some(vocab) = &self.target {
-            if let Some(id) = vocab.first_unknown_token_id(set) {
-                return Err(error(format!("token ID {id} is not in the vocabulary")));
-            }
-        } else {
-            self.pending_sets.push(set.clone());
-        }
+    fn tokens(&mut self, _set: &TokenSet) -> Result<()> {
         Ok(())
     }
     fn value(&mut self, value: &BoundValue) -> Result<()> {
@@ -890,8 +883,7 @@ impl Module {
         }
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work. Every extern
-    /// must be bound.
+    /// Compiles the module for `vocab`, reusing any precompiled work. Fails if any extern is unbound or the module was precompiled for another vocabulary.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
@@ -1236,9 +1228,7 @@ impl Module {
     /// Saves the module as bytes, with its precompiled work but without the
     /// vocabulary. Bytes saved by one GLRMask version may not load in another.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Loads a module saved with [`save`](Self::save). Its precompiled work only
-    /// applies to the vocabulary it was built for; compiling with another is an
-    /// error.
+    /// Loads a module saved with [`save`](Self::save).
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
     }

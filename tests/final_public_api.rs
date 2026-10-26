@@ -131,7 +131,6 @@ fn token_membership_and_compiled_vocabulary_are_validated() {
     let other = Vocab::new(vec![(7, b"different".to_vec())]);
     let mut parent = Module::new(&Grammar::from_glrm(TOKEN_HOST).unwrap());
     parent.precompile(&v).unwrap();
-    assert!(parent.bind("MARK", TokenSet::from(6)).is_err());
 
     let mut widened = Module::new(&Grammar::from_glrm(HOST).unwrap());
     widened.bind("child", TokenSet::from(7)).unwrap();
@@ -250,7 +249,7 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
 
 #[test]
 fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]).with_special_tokens([2, 77]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
     let mut open = Module::new(&Grammar::from_glrm(
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ).unwrap());
@@ -275,7 +274,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.commit_token(1));
     assert!(state.is_accepting());
 
-    let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+    let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"different".to_vec())]);
     assert!(Module::load(open.save()).is_ok());
     assert!(Constraint::load(constraint.save(), &missing_domain).is_err());
 }

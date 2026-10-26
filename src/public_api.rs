@@ -521,7 +521,7 @@ fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// A grammar, written as source text or built from an [`Expr`].
+/// A grammar, parsed from source or built from an [`Expr`].
 #[derive(Debug, Clone)]
 pub struct Grammar {
     source: GrammarSource,
@@ -618,7 +618,7 @@ impl Grammar {
     }
 
 
-    /// Creates a grammar from JSON Schema source.
+    /// Creates a grammar from a JSON Schema, given as JSON text.
     pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
         let source = source.as_ref();
         crate::import::parse_json_schema_to_named(source)?;
@@ -729,14 +729,7 @@ impl Grammar {
         }).as_ref().map_err(Clone::clone)
     }
 
-    fn validate_exact_target(&self, vocab:&Vocab) -> Result<()> {
-        if let Some(set) = &self.exact_value
-            && let Some(id) = vocab.first_unknown_token_id(set)
-        {
-            return Err(Error::Compilation(format!(
-                "token ID {id} is not in the vocabulary",
-            )));
-        }
+    fn validate_exact_target(&self, _vocab:&Vocab) -> Result<()> {
         Ok(())
     }
 
@@ -856,7 +849,7 @@ impl Grammar {
         }
     }
 
-    /// Compiles the grammar for `vocab`.
+    /// Compiles the grammar for `vocab`. Fails if any extern is unbound.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         Module::new(self).compile(vocab)
     }
@@ -1166,11 +1159,6 @@ impl Grammar {
         for (name, value) in source_bindings {
             match value {
                 GrammarValue::TokenSet(tokens) => {
-                    if let Some(id) = vocab.first_unknown_token_id(&tokens) {
-                        return Err(Error::Compilation(format!(
-                            "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
-                        )));
-                    }
                     bindings.insert(name.clone(),ModuleBinding::TokenSet(event_adapters.leaf(tokens.range_pairs())?));
                     builder.token_bindings.insert(name, tokens.range_pairs().to_vec());
                 }
@@ -1246,9 +1234,6 @@ impl Grammar {
                     match value {
                         GrammarValue::Source(child)=>children.push((name.as_str(),ParsedComponent::from_named(child.resolve_dynamic_source(vocab,true)?,&[])?)),
                         GrammarValue::TokenSet(ids)=>{
-                            if let Some(id) = vocab.first_unknown_token_id(ids) {
-                                return Err(Error::Compilation(format!("token ID {id} is not in the vocabulary")));
-                            }
                             tokens.push((name.as_str(),ids.range_pairs().to_vec()));
                         },
                     }
@@ -2164,11 +2149,6 @@ impl<'a> ConstraintSpecBuilder<'a> {
                             "there is no token extern named {name:?}",
                         )));
                     }
-                    if let Some(id) = vocab.first_unknown_token_id(&tokens) {
-                        return Err(Error::Compilation(format!(
-                            "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
-                        )));
-                    }
                     token_bindings.insert(name, tokens.range_pairs().to_vec());
                 }
                 GrammarValue::Source(child) => {
@@ -3000,9 +2980,7 @@ impl PreparedGrammar {
                 ModuleBinding::TokenSet(ids) => {
                     let mut previous = None;
                     for &(start, end) in ids.iter() {
-                        if !vocab.contains_token_range(start, end)
-                            || previous.is_some_and(|value| u64::from(value) + 1 >= u64::from(start))
-                        {
+                        if previous.is_some_and(|value| u64::from(value) + 1 >= u64::from(start)) {
                             return Err(Error::Serialization(format!(
                                 "unlinked-constraint token-set binding {name:?} is invalid for its vocabulary",
                             )));
@@ -3082,11 +3060,6 @@ impl PreparedGrammar {
             }
             UnlinkedValue::TokenSet(tokens) => {
                 self.require_direct_slot(name)?;
-                if let Some(id) = vocab.first_unknown_token_id(&tokens) {
-                    return Err(Error::Compilation(format!(
-                        "extern {name:?} is bound to token ID {id}, which is not in the vocabulary",
-                    )));
-                }
                 ModuleBinding::TokenSet(self.event_adapters.leaf(tokens.range_pairs())?)
             }
             UnlinkedValue::StaticBorrowed(child) => {
@@ -3504,7 +3477,7 @@ mod tests {
             (0, b"<".to_vec()), (1, b"a".to_vec()), (2, b">".to_vec()),
             (3, b"<a>".to_vec()), (4, b"a>".to_vec()), (5, b"<a".to_vec()),
             (6, b"b".to_vec()), (7, b"ab".to_vec()), (8, b"<ab>".to_vec()),
-        ]).with_special_tokens([99]);
+        ]);
         let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root = \"<\" child \">\";")
             .prepare(&vocab).unwrap();
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")

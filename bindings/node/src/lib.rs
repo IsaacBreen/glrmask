@@ -71,12 +71,12 @@ pub struct NativeVocab { inner: Handle<g::Vocab> }
 #[napi]
 impl NativeVocab {
     #[napi(factory)]
-    pub fn from_entries(env: Env, token_ids: Vec<f64>, token_bytes: Vec<Unknown<'_>>, special: Vec<f64>) -> napi::Result<Self> {
+    pub fn from_entries(env: Env, token_ids: Vec<f64>, token_bytes: Vec<Unknown<'_>>) -> napi::Result<Self> {
         call(|| {
             if token_ids.len() != token_bytes.len() { return Err(core::Error::invalid("vocabulary IDs and bytes have different lengths")); }
             let token_ids = ids(token_ids)?;
             let bytes = token_bytes.iter().map(|b| arrays::bytes(&env, b)).collect::<core::Result<Vec<_>>>()?;
-            Ok(Self { inner: Handle::new(core::vocab(token_ids.into_iter().zip(bytes).collect(), ids(special)?)?) })
+            Ok(Self { inner: Handle::new(core::vocab(token_ids.into_iter().zip(bytes).collect())?) })
         })
     }
     #[napi]
@@ -263,7 +263,9 @@ impl NativeState {
     #[napi]
     pub fn is_terminated(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_terminated()) }
     #[napi]
-    pub fn forced_tokens(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.forced_tokens()?.into())) }
+    pub fn commit_forced_tokens(&self) -> napi::Result<Uint32Array> {
+        call(|| Ok(live(&self.inner)?.commit_forced_tokens()?.into()))
+    }
 }
 
 pub struct CompileTask { module: g::Module, vocab: g::Vocab, options: g::CompileOptions }

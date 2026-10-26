@@ -3751,7 +3751,7 @@ impl<'a> DynamicConstraintState<'a> {
         }
     }
 
-    /// Advance the state by raw bytes.
+    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
@@ -3764,7 +3764,7 @@ impl<'a> DynamicConstraintState<'a> {
         self.retain_committing(|state| state.commit_bytes_raw(bytes))
     }
 
-    /// Advance the state by one model token ID.
+    /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
     #[must_use]
     pub fn commit_token(&mut self, token_id: u32) -> bool {
         if self
@@ -3779,8 +3779,7 @@ impl<'a> DynamicConstraintState<'a> {
         self.commit_token_raw(token_id).is_ok()
     }
 
-    /// Advance the state by a batch of model token IDs in order. A disallowed
-    /// event returns false and rejects the state.
+    /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
     #[must_use]
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
         if token_ids.is_empty() {
@@ -3881,11 +3880,9 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
 
-    /// Return a read-only prefix of library-canonical forced output.
-    /// Ordinary text uses longest admitted spelling and lowest-ID alias
-    /// selection; exact-token events retain their IDs.
-    pub fn forced_tokens(&self)->Vec<u32> {
-        crate::runtime::force_for_states_result(&self.alternatives,Some(true))
+    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
+    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
+        crate::runtime::force_for_states_result(&mut self.alternatives, Some(true))
     }
     pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
         crate::runtime::mask_for_states_at_most(&self.alternatives,max_allowed)
@@ -3901,21 +3898,12 @@ impl<'a> DynamicConstraintState<'a> {
         crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
-    /// Whether the input committed so far is a complete match for the grammar.
-    ///
-    /// More input may still be allowed; see [`is_terminated`](Self::is_terminated).
+    /// Whether everything committed so far is a complete match.
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }
 
     /// Whether nothing more can be committed.
-    ///
-    /// This is true when the sequence is finished, for example after its end token,
-    /// and after a failed commit. [`is_accepting`](Self::is_accepting) tells the two
-    /// apart.
-    ///
-    /// A complete match is not terminated if more input could follow, such as
-    /// whitespace the grammar ignores.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
         self.alternatives.iter().all(ConstraintState::is_terminated)
@@ -3925,7 +3913,7 @@ impl<'a> DynamicConstraintState<'a> {
         self.alternatives.iter().any(ConstraintState::frontier_complete)
     }
 
-    /// Return the allowed-token mask as a packed `u32` bitset.
+    /// Return the allowed-token mask as a packed `u32` bitmask.
     pub fn mask(&self) -> Vec<u32> {
         let mut mask = vec![0u32; self.mask_len];
         self.fill_mask(&mut mask);

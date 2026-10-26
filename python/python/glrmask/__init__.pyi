@@ -140,20 +140,17 @@ class TokenSet:
 
 @final
 class Vocab:
-    """A model's tokens and their bytes."""
+    """A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it."""
     @staticmethod
-    def from_dict(token_to_id: dict[Union[str, bytes], int], *, special_token_ids: Optional[Sequence[int]] = None) -> Vocab:
+    def from_dict(token_to_id: dict[Union[str, bytes], int], /) -> Vocab:
         """Creates a vocabulary from a `{token: id}` dict.
 
-        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
+        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is.
         """
         ...
     @staticmethod
-    def from_id_to_bytes(id_to_bytes: dict[int, bytes], *, special_token_ids: Optional[Sequence[int]] = None) -> Vocab:
-        """Creates a vocabulary from an `{id: bytes}` dict.
-
-        `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
-        """
+    def from_id_to_bytes(id_to_bytes: dict[int, bytes], /) -> Vocab:
+        """Creates a vocabulary from an `{id: bytes}` dict."""
         ...
     @staticmethod
     def from_llama_cpp(llm: Any, /) -> Vocab:
@@ -287,7 +284,7 @@ class Module:
         mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
         boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
-        """Compiles the module for `vocab`, reusing any precompiled work. Every extern must be bound.
+        """Compiles the module for `vocab`, reusing any precompiled work. Raises `ValueError` if any extern is unbound or the module was precompiled for another vocabulary.
 
         The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
@@ -310,12 +307,12 @@ class Module:
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
-        """Loads a module saved with `save()`. Its precompiled work only applies to the vocabulary it was built for; compiling with another is an error."""
+        """Loads a module saved with `save()`."""
         ...
 
 @final
 class Grammar:
-    """A grammar, written as source text or built from an `Expr`."""
+    """A grammar, parsed from source or built from an Expr."""
     @staticmethod
     def from_glrm(source: str, /) -> Grammar:
         """Creates a grammar from GLRM source."""
@@ -351,7 +348,7 @@ class Grammar:
         mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
         boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
-        """Compiles the grammar for `vocab`.
+        """Compiles the grammar for `vocab`. Raises `ValueError` if any extern is unbound.
 
         The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
@@ -386,7 +383,7 @@ class Grammar:
 
 @final
 class Constraint:
-    """A grammar compiled for a vocabulary."""
+    """A grammar compiled for a vocabulary. Call `start()` for each sequence you generate."""
     def start(self) -> ConstraintState:
         """A new state with nothing committed."""
         ...
@@ -401,7 +398,7 @@ class Constraint:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab) -> Constraint:
-        """Loads a constraint saved with `save`. `vocab` must be the one it was compiled for, or loading raises `ValueError`."""
+        """Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for."""
         ...
 
 @final
@@ -414,32 +411,32 @@ class ConstraintState:
         """Same as `copy()`."""
         ...
     def mask(self, *, size: Optional[int] = None) -> NDArray[np.bool_]:
-        """The tokens allowed next, as a Boolean array indexed by token ID.
+        """The tokens allowed next, as a NumPy `bool` array indexed by token ID.
 
         `size` sets the array length, for example to match your logits; it must cover every token ID.
         """
         ...
     def fill_mask(self, bitmask: NDArray[np.int32], /) -> None:
-        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words.
+        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """
         ...
     def commit_token(self, token_id: int, /) -> bool:
-        """Commits a token. Returns `False` if it is not allowed, which terminates the state."""
+        """Commits a token. If it isn't allowed, returns `False` and terminates the state."""
         ...
     def commit_tokens(self, token_ids: Sequence[int], /) -> bool:
-        """Commits each token in order. Returns `False` at the first one that is not allowed, which terminates the state."""
+        """Commits each token in order. If one isn't allowed, returns `False` and terminates the state."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """Commits raw bytes. Returns `False` if they are not allowed, which terminates the state."""
+        """Commits raw bytes. If they aren't allowed, returns `False` and terminates the state."""
         ...
     def is_accepting(self) -> bool:
-        """Whether the input so far is a complete match."""
+        """Whether everything committed so far is a complete match."""
         ...
     def is_terminated(self) -> bool:
-        """Whether no more input can be accepted."""
+        """Whether nothing more can be committed."""
         ...
-    def forced_tokens(self) -> list[int]:
-        """Tokens for what must come next, taking the longest token at each step. Stops before anything that could vary, or at 10,000 tokens or bytes."""
+    def commit_forced_tokens(self) -> list[int]:
+        """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
         ...

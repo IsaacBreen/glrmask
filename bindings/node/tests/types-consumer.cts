@@ -1,5 +1,5 @@
 import api = require('@glrmask/node');
-const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {specialTokenIds:[99]});
+const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]]);
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromLark('start: "a"');

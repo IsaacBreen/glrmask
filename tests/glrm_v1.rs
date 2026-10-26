@@ -116,7 +116,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
 #[test]
 fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
-    let vocab = Vocab::new(Vec::new()).with_special_tokens([100,101]);
+    let vocab = Vocab::new(Vec::new());
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()

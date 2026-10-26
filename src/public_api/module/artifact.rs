@@ -345,7 +345,7 @@ mod tests {
     }
     #[test]
     fn token_set_ranges_are_validated() {
-        let v = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([7]);
+        let v = Vocab::new(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
         module.bind("mark", TokenSet::from(7)).unwrap();
         let bytes = module.save();

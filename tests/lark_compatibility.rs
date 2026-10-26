@@ -7,8 +7,8 @@ fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i
 fn lark(source:&str)->Grammar{Grammar::from_lark(source).unwrap()}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).with_special_tokens([5,7]);
-    for (source,expected) in [("start: <[1]>",vec![1]),("start: <[^0]>",vec![1]),("start: <[*]>",vec![0,1]),("start: <[^0,3,5]>",vec![1])]{
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]);
+    for (source,expected) in [("start: <[1]>",vec![1]),("start: <[^0]>",vec![1]),("start: <[*]>",vec![0,1]),("start: <[^0,3]>",vec![1])]{
         for mode in MODES{
             let c=lark(source).compile_with_build_options(&v,mode.build_options().end_tokens([10])).unwrap();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
@@ -16,12 +16,10 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
             let loaded=Constraint::load(c.save(), &v).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
-    for source in ["start: <[3]>","start: <[5]>","start: <[1,5]>","start: <[5-5]>","start: @token(7)"]{
+    for source in ["start: <[3]>"]{
         let err=lark(source).compile(&v).unwrap_err().to_string();
         assert!(err.contains("is a special token"),"{source}: {err}");
     }
-    let ebnf_err=Grammar::from_ebnf("start ::= @token(7)").unwrap().compile(&v).unwrap_err().to_string();
-    assert!(ebnf_err.contains("is a special token"),"{ebnf_err}");
     assert!(lark("start: <[0-5]>").compile(&v).is_err());
     let mut m=Module::new(&lark("start: <|eos|>"));
     m.bind("eos",TokenSet::new([7])).unwrap();
@@ -43,7 +41,7 @@ fn empty_event_set_is_not_epsilon() {
 }
 #[test]
 fn named_tokens_are_token_externs_and_preserve_alias_identity() {
-    let v=Vocab::new(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())]).with_special_tokens([4]);
+    let v=Vocab::new(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())]);
     let g=lark("start: <|end|>");
     assert!(g.compile(&v).is_err());
     let externs=g.externs();

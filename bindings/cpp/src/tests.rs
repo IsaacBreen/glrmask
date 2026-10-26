@@ -4,12 +4,12 @@ use std::mem::{size_of, offset_of};
 #[test]
 fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
     let entries = vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (31, b"ab".to_vec()), (32, b"a".to_vec()), (65, b"z".to_vec())];
-    let rust_vocab = core::vocab(entries.clone(), vec![]).unwrap();
+    let rust_vocab = core::vocab(entries.clone()).unwrap();
     let ffi_entries: Vec<_> = entries.iter().map(|(id, b)| glrmask_vocab_entry { id: *id, bytes: b.as_ptr(), bytes_len: b.len() }).collect();
     let source = "start: \"a\" \"b\"";
     unsafe {
         let (mut vocab, mut grammar) = (ptr::null_mut(), ptr::null_mut());
-        assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
+        assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), &mut vocab), 0);
         assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 0);
         for strategy in 0..3 {
             let rust_g = g::Grammar::from_lark(source).unwrap();
@@ -57,9 +57,9 @@ fn invalid_foreign_lengths_and_null_outputs_fail_before_access() {
     unsafe {
         let entry = glrmask_vocab_entry { id: 0, bytes: ptr::null(), bytes_len: 0 };
         let mut vocab = ptr::dangling_mut();
-        assert_eq!(glrmask_vocab_new(&entry, usize::MAX, ptr::null(), 0, &mut vocab), 1);
+        assert_eq!(glrmask_vocab_new(&entry, usize::MAX, &mut vocab), 1);
         assert!(vocab.is_null());
-        assert_eq!(glrmask_vocab_new(&entry, 1, ptr::null(), 0, ptr::null_mut()), 1);
+        assert_eq!(glrmask_vocab_new(&entry, 1, ptr::null_mut()), 1);
         assert_eq!(glrmask_constraint_load(ptr::null(), 1, ptr::null(), ptr::null_mut()), 1);
     }
 }
@@ -78,7 +78,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
     unsafe {
         let entries = [(0, b"x".as_slice()), (1, b"a".as_slice()), (2, b"y".as_slice()), (3, b"xay".as_slice())];
         let ffi_entries: Vec<_> = entries.iter().map(|(id, b)| glrmask_vocab_entry { id: *id, bytes: b.as_ptr(), bytes_len: b.len() }).collect();
-        let mut vocab = ptr::null_mut(); assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
+        let mut vocab = ptr::null_mut(); assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), &mut vocab), 0);
         let host = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
         let leaf = "start: \"a\"";
         let (mut grammar, mut child) = (ptr::null_mut(), ptr::null_mut());

@@ -59,9 +59,9 @@ impl From<u32> for Expr {
 }
 
 impl Expr {
-    /// Matches any one of `items`.
-    pub fn choice(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
-        let list: Vec<Expr> = items.into_iter().map(Into::into).collect();
+    /// Matches any one of `parts`.
+    pub fn choice(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
+        let list: Vec<Expr> = parts.into_iter().map(Into::into).collect();
         if list.len() == 1 {
             list.into_iter().next().unwrap()
         } else {
@@ -69,9 +69,9 @@ impl Expr {
         }
     }
 
-    /// Matches `items` in order.
-    pub fn sequence(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
-        Self(Arc::new(ExprNode::Sequence(items.into_iter().map(Into::into).collect())))
+    /// Matches `parts` in order.
+    pub fn sequence(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
+        Self(Arc::new(ExprNode::Sequence(parts.into_iter().map(Into::into).collect())))
     }
 
     /// Matches exactly `bytes`.

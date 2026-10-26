@@ -8,7 +8,6 @@ fn vocab() -> Vocab {
         (1, b"}".to_vec()),
         (2, b" ".to_vec()),
     ])
-    .with_special_tokens([99])
 }
 
 fn body() -> Grammar {

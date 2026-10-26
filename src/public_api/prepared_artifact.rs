@@ -140,8 +140,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
         definitions.push(Definition {
             bytes: body.len() as u64,
             runnable,
-            exact_only_token_ids: if runnable { Vec::new() }
-                else { constraint_vocab(value).special_token_ids().collect() },
+            exact_only_token_ids: Vec::new(),
         });
         bodies.push(body); ids.insert(key, id); id
     };

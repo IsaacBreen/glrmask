@@ -580,7 +580,7 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Whether the input so far is a complete match.
+    /// Whether everything committed so far is a complete match.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
@@ -588,7 +588,7 @@ impl<'a> ConstraintState<'a> {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
 
-    /// Whether no more input can be accepted.
+    /// Whether nothing more can be committed.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
         if self.terminated {
@@ -651,10 +651,9 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Tokens for what must come next, taking the longest token at each step.
-    /// Stops before anything that could vary, or at 10,000 tokens or bytes.
-    pub fn forced_tokens(&self) -> Vec<u32> {
-        super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
+    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
+    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
+        super::commit::forcing_reference::force_single(self, None)
     }
 
     #[cfg(any(test,feature="internal-api"))]

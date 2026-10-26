@@ -19,8 +19,8 @@ use crate::automata::lexer::Lexer;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{frontier_is_accepting, CommitBuffers, ConstraintState, ParserStateMap};
 
-const MAX_OUTPUT_BYTES: usize = 10_000;
-const MAX_OUTPUT_IDS: usize = 10_000;
+const MAX_FORCED_TOKENS: usize = 1_000;
+const MAX_BYTE_EXPLORATION: usize = 10_000;
 // Bounds checked byte/event probes, not CPU, allocator work, or mask cost.
 const MAX_PROBES: usize = 100_000;
 const REJECTED: &str = "commit rejected: no valid parser states remain";
@@ -211,16 +211,39 @@ fn commit_selected(
 }
 
 pub(crate) fn force(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
-    force_result(states, dynamic)
+    let mut copy = states.to_vec();
+    force_result(&mut copy, dynamic)
+}
+
+pub(crate) fn force_single(
+    state: &mut ConstraintState<'_>,
+    dynamic: Option<bool>,
+) -> Vec<u32> {
+    let mut states = vec![state.clone()];
+    let res = glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(&mut states, dynamic))
+        .unwrap_or_default();
+    if !res.is_empty() && !states.is_empty() {
+        *state = states.pop().unwrap();
+    }
+    res
 }
 
 /// Public-query adapter for the canonical reference implementation. A proof or
 /// resource limit returns the empty prefix.
 pub(crate) fn force_result(
-    states: &[ConstraintState<'_>], dynamic: Option<bool>,
+    states: &mut Vec<ConstraintState<'_>>,
+    dynamic: Option<bool>,
 ) -> Vec<u32> {
-    glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(states, dynamic))
-        .unwrap_or_default()
+    if states.is_empty() {
+        return Vec::new();
+    }
+    let mut work = states.clone();
+    let res = glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(&mut work, dynamic))
+        .unwrap_or_default();
+    if !res.is_empty() {
+        *states = work;
+    }
+    res
 }
 
 /// Strict token-ID forcing: no canonical spelling selection. Each next ID is
@@ -231,7 +254,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bo
         let mut states = states.to_vec();
         states.retain(|state| !state.state.is_empty());
         let mut output = Vec::new();
-        while !states.is_empty() && output.len() < MAX_OUTPUT_IDS {
+        while !states.is_empty() && output.len() < MAX_FORCED_TOKENS {
             if states.iter().any(ConstraintState::frontier_complete) { break; }
             let (individual, union) = masks(&states, dynamic);
             let Some(id) = singleton(&union) else { break; };
@@ -242,18 +265,16 @@ pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bo
     }).unwrap_or_default()
 }
 
-fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
+fn force_inner(states: &mut Vec<ConstraintState<'_>>, dynamic: Option<bool>) -> Vec<u32> {
     if states.is_empty() || states.iter().any(ConstraintState::frontier_complete) || !same_spelling_policy(states) {
         return Vec::new();
     }
-    let mut states = states.to_vec();
     states.retain(|state| !state.state.is_empty());
     let mut budget = Budget(MAX_PROBES);
     let mut output = Vec::new();
-    let mut output_bytes = 0;
-    while !states.is_empty() && output.len() < MAX_OUTPUT_IDS && output_bytes < MAX_OUTPUT_BYTES {
+    while !states.is_empty() && output.len() < MAX_FORCED_TOKENS {
         if states.iter().any(ConstraintState::frontier_complete) { break; }
-        let (individual, mask) = masks(&states, dynamic);
+        let (individual, mask) = masks(states, dynamic);
         let constraints = states.iter().map(|s| s.constraint).collect::<Vec<_>>();
         let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
         for (&c, s) in constraints.iter().zip(&mut frontiers) { expand_runtime_product_states(c, s); }
@@ -263,32 +284,29 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
         };
         if event {
             let Some(id) = singleton(&mask) else { break; };
-            let width = states[0].constraint.token_bytes_for_id(id).map_or(0, <[u8]>::len);
-            if width > MAX_OUTPUT_BYTES - output_bytes { break; }
-            if !commit_selected(&mut states, &individual, id, dynamic) { break; }
+            if !commit_selected(states, &individual, id, dynamic) { break; }
             output.push(id);
-            output_bytes += width;
             continue;
         }
-        let prefix = byte_prefix(&states, MAX_OUTPUT_BYTES - output_bytes, &mut budget);
+        let prefix = byte_prefix(states, MAX_BYTE_EXPLORATION, &mut budget);
         if prefix.is_empty() { break; }
         let mut offset = 0;
         let mut current_masks = individual;
         let mut current_mask = mask;
         while offset < prefix.len() {
-            if states.iter().any(ConstraintState::is_accepting) || output.len() >= MAX_OUTPUT_IDS { return output; }
+            if states.iter().any(ConstraintState::is_accepting) || output.len() >= MAX_FORCED_TOKENS { return output; }
             let Some((id, width)) = canonical_token(states[0].constraint, &current_mask, &prefix[offset..]) else { return output; };
-            if !commit_selected(&mut states, &current_masks, id, dynamic) { return output; }
+            if !commit_selected(states, &current_masks, id, dynamic) { return output; }
             output.push(id);
-            output_bytes += width;
             offset += width;
             if offset < prefix.len() {
+                if output.len() >= MAX_FORCED_TOKENS { return output; }
                 // The full ID successor, not a byte-shadow cursor, owns the next proof.
                 let constraints = states.iter().map(|s| s.constraint).collect::<Vec<_>>();
                 let mut next = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
                 for (&c, s) in constraints.iter().zip(&mut next) { expand_runtime_product_states(c, s); }
                 if !matches!(event_possible(&constraints, &next, &mut budget), Ok(false)) { return output; }
-                (current_masks, current_mask) = masks(&states, dynamic);
+                (current_masks, current_mask) = masks(states, dynamic);
             }
         }
     }
@@ -332,7 +350,7 @@ mod tests {
 
     #[test]
     fn greedy_ab_stops_before_optional_event_after_a() {
-        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]).with_special_tokens([9]);
+        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
         let ordinary=Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
         let guarded=Grammar::from_glrm(
             "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"").unwrap()
@@ -340,9 +358,9 @@ mod tests {
         for mode in MaskMode::ALL {
             let options=mode.build_options();
             let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
-            assert_eq!(baseline.start().forced_tokens(),[1],"{mode:?}");
+            assert_eq!(baseline.start().clone().commit_forced_tokens(),[1],"{mode:?}");
             let event=guarded.compile_with_build_options(&vocab,options).unwrap();
-            assert!(event.start().forced_tokens().is_empty(),"{mode:?}");
+            assert!(event.start().clone().commit_forced_tokens().is_empty(),"{mode:?}");
         }
     }
 

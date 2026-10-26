@@ -800,7 +800,7 @@ fn r1_trie_and_reference_match_for_every_byte_without_changing_preparation() {
             (id+2,vec![b'x',byte]),(id+3,vec![byte,b'x'])]);
     }
     entries.push((10_000,Vec::new()));
-    let vocab=crate::Vocab::new(entries).with_special_tokens([10_001]);
+    let vocab=crate::Vocab::new(entries);
     for prepared in [false,true] {
         if prepared { super::constraint_possible_matches::prepare_vocab_for_possible_matches(&vocab); }
         let count=vocab.compiler_cache_entry_count();
@@ -2348,7 +2348,7 @@ fn pure_cut_postings_preserve_binary_sparse_same_cut_predicates() {
                 ((random >> 32) % 6) as u8
             }).collect()));
         }
-        let vocab = crate::Vocab::new(entries).with_special_tokens([88]);
+        let vocab = crate::Vocab::new(entries);
         let index = std::sync::Arc::new(VocabProperCutPostings::build(&vocab).unwrap());
         vocab.vocab_derived_cache_set(index);
         let mut exits = ByteSet::default();
@@ -2380,7 +2380,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
     let vocab = Vocab::new(vec![
         (0, b"a".to_vec()), (7, b"aa".to_vec()), (19, b"aa".to_vec()),
         (23, b"ab".to_vec()), (51, b"ba".to_vec()), (99, Vec::new()),
-    ]).with_special_tokens([127]);
+    ]);
     let large_body = (0..70).map(|i| {
         if i == 69 { format!("r{i} ::= 'a' | 'b'\n") }
         else { format!("r{i} ::= 'a' r{} | 'b' r{}\n", i + 1, i + 1) }

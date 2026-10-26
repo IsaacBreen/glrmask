@@ -1828,13 +1828,12 @@ mod preparation_tests {
 
     #[test]
     fn persisted_candidates_reject_sparse_byte_domain_holes_even_when_exact_only() {
-        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (2, b"ab".to_vec())]).with_special_tokens([1]);
+        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (2, b"ab".to_vec())]);
         let mut source = Constraint::from_glrm_grammar(
             r#"glrm 1; start document; nt document = "a";"#, &vocab,
         ).unwrap();
         persist_boundary_candidate_summary(&mut source, &vocab);
         assert_eq!(persisted_boundary_candidate_ids(&source, &vocab).unwrap(), Some(vec![2]));
-        assert!(vocab.contains_token_id(1));
         let mut summary = source.boundary_candidate_summary.take().unwrap();
         let BoundaryCandidateSummary::Known { tokens, .. } = &mut summary else {
             panic!("expected a checked component certificate");

@@ -152,17 +152,15 @@ class Owned {
 }
 
 class Vocab extends Owned {
-  constructor(entries, options) {
-    if (entries === key) { super(key, options); return; }
-    const o = checkedOptions(options, ['specialTokenIds']);
+  constructor(entries) {
+    if (entries === key) { super(key, arguments[1]); return; }
     const input = iterable(entries, 'vocabulary entries');
     const tokenIds = [], tokenBytes = [];
     for (const entry of input) {
       if (!Array.isArray(entry) || entry.length !== 2) throw new TypeError('Each vocabulary entry must be [id, Uint8Array]');
       tokenIds.push(tokenId(entry[0])); tokenBytes.push(bytes(entry[1]));
     }
-    const special = o.specialTokenIds === undefined ? [] : ids(o.specialTokenIds);
-    super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes, special)));
+    super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes)));
   }
   clone() { return wrap(Vocab, invoke(() => handle(this, Vocab).clone())); }
 }
@@ -425,7 +423,9 @@ class ConstraintState extends Owned {
   commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }
   isTerminated() { return invoke(() => handle(this, ConstraintState).isTerminated()); }
-  forcedTokens() { return invoke(() => handle(this, ConstraintState).forcedTokens()); }
+  commitForcedTokens() {
+    return invoke(() => handle(this, ConstraintState).commitForcedTokens());
+  }
 }
 
 module.exports = Object.freeze({

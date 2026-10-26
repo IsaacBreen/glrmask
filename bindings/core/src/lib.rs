@@ -42,15 +42,12 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 }
 
-pub fn vocab(entries: Vec<(u32, Vec<u8>)>, exact_only: Vec<u32>) -> Result<glrmask::Vocab> {
+pub fn vocab(entries: Vec<(u32, Vec<u8>)>) -> Result<glrmask::Vocab> {
     let mut ids = BTreeSet::new();
     for (id, _) in &entries {
         if !ids.insert(*id) { return Err(Error::invalid(format!("duplicate vocabulary ID {id}"))); }
     }
-    for id in &exact_only {
-        if !ids.insert(*id) { return Err(Error::invalid(format!("duplicate or byte-backed exact-only ID {id}"))); }
-    }
-    guarded(|| Ok(glrmask::Vocab::new(entries).with_special_tokens(exact_only)))
+    guarded(|| Ok(glrmask::Vocab::new(entries)))
 }
 
 pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
@@ -169,7 +166,7 @@ impl State {
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<bool> { self.write(|s| Ok(s.commit_bytes(bytes))) }
     pub fn is_accepting(&self) -> Result<bool> { self.read(|s| Ok(s.is_accepting())) }
     pub fn is_terminated(&self) -> Result<bool> { self.read(|s| Ok(s.is_terminated())) }
-    pub fn forced_tokens(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.forced_tokens())) }
+    pub fn commit_forced_tokens(&mut self) -> Result<Vec<u32>> { self.write(|s| Ok(s.commit_forced_tokens())) }
 }
 
 #[cfg(test)]
@@ -177,7 +174,7 @@ mod tests {
     use super::*;
     #[test]
     fn state_retains_owner_and_clones_independently() {
-        let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())], vec![]).unwrap();
+        let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())]).unwrap();
         for mode in 0..3 {
             let grammar = glrmask::Grammar::from_lark("start: \"a\" \"b\"").unwrap();
             let module = glrmask::Module::new(&grammar);
@@ -203,7 +200,7 @@ mod tests {
     }
     #[test]
     fn duplicate_ids_and_panics_are_errors() {
-        assert!(vocab(vec![(1,vec![]),(1,vec![1])],vec![]).is_err());
+        assert!(vocab(vec![(1,vec![]),(1,vec![1])]).is_err());
         assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Panic);
     }
 }

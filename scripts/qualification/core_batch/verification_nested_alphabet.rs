@@ -32,7 +32,7 @@ fn main(){
         let mut words=(0..256u32).map(|i|(i,vec![i as u8])).collect::<Vec<_>>();
         for i in 0..512{words.push((300+i,format!("word{i:04}").into_bytes()));}
         if alias{for (i,s) in ["A","xy","Axy","xyB","yz!","!?","\u{e9}","A\u{e9}","bad","badly"].iter().enumerate(){words.push((1000+i as u32,s.as_bytes().to_vec()));}}
-        let v=Vocab::new(words).with_special_tokens([9000]);
+        let v=Vocab::new(words);
         for mode in modes{for source in sources{
             let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();compiled+=1;
             let restored=Constraint::load(c.save(), &vocab).unwrap();

@@ -20,10 +20,10 @@ MODES = [
 ]
 
 
-def assert_read_only_and_replay(state, method):
+def assert_read_only_and_replay(state):
     before = state.mask().copy()
     accepted = state.is_accepting()
-    result = getattr(state, method)()
+    result = state.copy().commit_forced_tokens()
     assert np.array_equal(state.mask(), before)
     assert state.is_accepting() == accepted
     cursor = state.copy()
@@ -43,9 +43,9 @@ def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
         state = constraint.start()
         assert not hasattr(state, "forced")
         assert not hasattr(state, "forced_token_ids")
-        assert assert_read_only_and_replay(state,"forced_tokens") == [2]
+        assert assert_read_only_and_replay(state) == [2]
         assert state.commit_token(0)
-        assert assert_read_only_and_replay(state,"forced_tokens") == [1]
+        assert assert_read_only_and_replay(state) == [1]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -56,7 +56,7 @@ def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
         for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
             state = constraint.start()
             assert np.flatnonzero(state.mask()).tolist() == [0, 1]
-            assert assert_read_only_and_replay(state,"forced_tokens") == expected
+            assert assert_read_only_and_replay(state) == expected
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -68,7 +68,7 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
     state = grammar.compile(vocab, **mode).start()
     assert state.mask()[9]
     assert not hasattr(state, "forced")
-    assert assert_read_only_and_replay(state,"forced_tokens") == []
+    assert assert_read_only_and_replay(state) == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -76,7 +76,7 @@ def test_force_stops_at_acceptance_not_optional_continuation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"c"})
     state = glrmask.Grammar.from_lark('start: "ab" "c"?').compile(vocab,**mode).start()
     assert not hasattr(state, "forced")
-    assert assert_read_only_and_replay(state,"forced_tokens") == [0,1]
+    assert assert_read_only_and_replay(state) == [0,1]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -91,12 +91,12 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert state.mask()[0] and state.mask()[2]
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
         assert state.commit_token(0)
         assert state.mask()[1] and state.mask()[9]
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
         assert state.commit_token(9)
-        assert assert_read_only_and_replay(state, "forced_tokens") == [3]
+        assert assert_read_only_and_replay(state) == [3]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -106,11 +106,11 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" | "ab"'), glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
         assert state.commit_token(0)
         # With end tokens configured, completion alone is not acceptance.
         assert not state.is_accepting() and state.mask()[1] and state.mask()[9]
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -123,9 +123,23 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
         assert state.commit_token(0)
-        assert assert_read_only_and_replay(state, "forced_tokens") == [1]
+        assert assert_read_only_and_replay(state) == [1]
         assert state.commit_token(1)
         assert not state.is_accepting() and state.mask()[3] and state.mask()[9]
-        assert assert_read_only_and_replay(state, "forced_tokens") == []
+        assert assert_read_only_and_replay(state) == []
+
+
+def test_commit_forced_tokens_semantics_match_commit_tokens_replay():
+    v = glrmask.Vocab.from_id_to_bytes({0: b"first ", 1: b"second ", 2: b"third ", 3: b"fourth ", 4: b"end"})
+    grammar = glrmask.Grammar.from_glrm('glrm 1; start root; nt root = "first second third fourth end";')
+    constraint = grammar.compile(v)
+    state = constraint.start()
+    replay = state.copy()
+    returned = state.commit_forced_tokens()
+    assert len(returned) > 0
+    assert replay.commit_tokens(returned)
+    assert np.array_equal(state.mask(), replay.mask())
+    assert state.is_accepting() == replay.is_accepting()
+    assert state.is_terminated() == replay.is_terminated()

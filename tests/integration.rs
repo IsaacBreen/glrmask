@@ -2462,8 +2462,7 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
 
 #[test]
 fn commit_tokens_commits_in_order_and_post_end_commits_error() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
-        .with_special_tokens([7]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let constraint = glrmask::Grammar::from_expr(glrmask::Expr::sequence([
         glrmask::Expr::from(glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)),
         glrmask::Expr::from(glrmask::TokenSet::new([7])),
@@ -2494,11 +2493,7 @@ fn constraint_artifacts_require_the_exact_vocabulary() {
     assert_eq!(loaded.start().mask(), constraint.start().mask());
     // Same size, different mapping.
     let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
-    assert!(Constraint::load(bytes.clone(), &wrong).is_err());
-    // Special/exact-only IDs are part of the fingerprint.
-    let special = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
-        .with_special_tokens([9]);
-    assert!(Constraint::load(bytes, &special).is_err());
+    assert!(Constraint::load(bytes, &wrong).is_err());
 }
 
 #[test]

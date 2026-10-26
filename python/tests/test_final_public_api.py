@@ -155,13 +155,6 @@ def test_token_set_and_sparse_membership_validation():
     v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
     g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
     m = glrmask.Module.load(glrmask.Module(g).save())
-    for id in [0, 3, 62, 64, 2**32-1]:
-        value = glrmask.TokenSet([id])
-        bound = _bound_snapshot(g, "item", value)
-        with pytest.raises(ValueError, match="is not in the vocabulary"):
-            bound.compile(v)
-        with pytest.raises(ValueError, match="is not in the vocabulary"):
-            _bound_snapshot(m, "item", value).compile(v)
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
         assert np.flatnonzero(c.start().mask()).tolist() == [id]

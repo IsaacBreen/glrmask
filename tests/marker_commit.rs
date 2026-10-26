@@ -101,11 +101,11 @@ fn clone_masks_forcing_errors_and_eos_obey_batch_lifecycle() {
         let c=Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(1) \"b\" @mark(2)\n").unwrap()
             .compile_with_build_options(&v,mode.build_options().end_tokens([4])).unwrap();
         let mut s=c.start();let initial=s.marker_events().to_vec();
-        let _=s.mask();let _=s.forced_tokens();assert_eq!(s.marker_events(),initial);
+        let _=s.mask();let _=s.clone().commit_forced_tokens();assert_eq!(s.marker_events(),initial);
         let mut fork=s.clone();assert!(fork.commit_token(2));
         assert_eq!(events(&fork),[(1,1),(2,2)]);assert_eq!(s.marker_events(),initial);
         assert!(s.commit_token(0));let observed=s.marker_events().to_vec();
-        let _=s.mask();let _=s.forced_tokens();assert_eq!(s.marker_events(),observed);
+        let _=s.mask();let _=s.clone().commit_forced_tokens();assert_eq!(s.marker_events(),observed);
         // A failed commit kills the state, so continue from a clone taken first.
         let mut rejected_batch=s.clone();
         assert!(!rejected_batch.commit_token(99999));

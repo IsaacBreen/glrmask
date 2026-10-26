@@ -50,7 +50,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskMode)
     // Fresh vocabulary for every case. Input-vector allocation and validation
     // index construction are INCLUDED, not shifted before this timer.
     let (vocab, vocab_ns) = timed(|| match kind {
-        "exact_only" => Vocab::new(Vec::new()).with_special_tokens(0..n),
+        "exact_only" => Vocab::new(Vec::new()),
         "byte_aliases" => Vocab::new((0..n).map(|id| (id, b"x".to_vec())).collect()),
         "empty_aliases" => Vocab::new((0..n).map(|id| (id, Vec::new())).collect()),
         _ => unreachable!(),
