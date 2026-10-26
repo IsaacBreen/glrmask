@@ -9,7 +9,7 @@ fn extern_repr(py: Python<'_>, name: &str, kind: &str) -> PyResult<String> {
     Ok(format!("Extern(name={name}, kind={kind})"))
 }
 
-/// One declared extern contract on a Grammar or Module.
+/// A named placeholder in a grammar.
 #[pyclass(name = "Extern", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PyExtern {
@@ -19,20 +19,28 @@ pub(super) struct PyExtern {
 
 #[pymethods]
 impl PyExtern {
+    /// The extern's name.
     #[getter]
     fn name(&self) -> &str {
         &self.name
     }
 
+    /// What the extern can be bound to: `"token"` or `"grammar"`.
+    ///
+    /// A token extern takes only a token ID or token set.
     #[getter]
     fn kind(&self) -> &str {
         &self.kind
     }
 
+    /// A representation for debugging.
+    /// A representation for debugging.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         extern_repr(py, &self.name, &self.kind)
     }
 
+    /// Whether both have the same name and kind.
+    /// Whether both list the same externs in the same order.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = other.py();
         match other.extract::<PyRef<'_, Self>>() {
@@ -59,7 +67,9 @@ impl From<glrmask::Extern> for PyExtern {
     }
 }
 
-/// Read-only snapshot of a Module's declared externs. Implements collections.abc.Mapping semantics.
+/// A grammar's or module's externs, in declaration order.
+///
+/// A read-only map from name to `Extern`.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug)]
 pub(super) struct PyExterns {
@@ -69,6 +79,7 @@ pub(super) struct PyExterns {
 
 #[pymethods]
 impl PyExterns {
+    /// The externs not yet bound.
     #[getter]
     fn unbound(&self) -> Self {
         match &self.unbound_entries {
@@ -80,6 +91,7 @@ impl PyExterns {
         }
     }
 
+    /// The number of externs.
     fn __len__(&self) -> usize {
         self.entries.len()
     }
@@ -88,6 +100,7 @@ impl PyExterns {
         self.entries.iter().any(|e| e.name == key)
     }
 
+    /// The extern named `key`. Raises `KeyError` if there is none.
     fn __getitem__(&self, key: &str) -> PyResult<PyExtern> {
         self.entries
             .iter()
@@ -106,6 +119,7 @@ impl PyExterns {
         }
     }
 
+    /// The extern names, in declaration order.
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let names: Vec<String> = slf.borrow().entries.iter().map(|e| e.name.clone()).collect();
@@ -152,7 +166,7 @@ impl PyExterns {
     }
 }
 
-/// Immutable union or concatenation of independently scoped Grammar, Module or Expr snapshots.
+/// A grammar expression.
 #[pyclass(name = "Expr", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyExpr {
@@ -241,7 +255,7 @@ fn collect_parts(args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Vec<glrmask
 
 #[pymethods]
 impl PyExpr {
-    /// Match exact bytes (str is encoded as UTF-8). No whitespace is inserted between parts.
+    /// Matches exactly `value`. A `str` is UTF-8 encoded.
     #[staticmethod]
     #[pyo3(signature = (value, /))]
     fn literal(value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -257,7 +271,9 @@ impl PyExpr {
         })
     }
 
-    /// Unordered union. Empty choice matches nothing. One-part choice is that part.
+    /// Matches any one of `parts`.
+    ///
+    /// Raises `ValueError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn choice(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -267,7 +283,9 @@ impl PyExpr {
         })
     }
 
-    /// Concatenation; model tokens may cross operand boundaries. Empty sequence is epsilon.
+    /// Matches `parts` in order.
+    ///
+    /// Raises `ValueError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn sequence(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -278,7 +296,7 @@ impl PyExpr {
     }
 }
 
-/// Owned mutable assembly. Holds a source Grammar, local settings, bindings and retained compilation work.
+/// A grammar you can compose with others and partly compile before its externs are bound. Can be saved and loaded.
 #[pyclass(name = "Module", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyModule {
@@ -445,6 +463,7 @@ pub(super) fn compile_options(
 
 #[pymethods]
 impl PyModule {
+    /// Creates a module from a grammar.
     #[new]
     #[pyo3(signature = (source, /))]
     fn new(source: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -454,9 +473,9 @@ impl PyModule {
         Ok(Self::from_inner(glrmask::Module::new(&grammar.inner)))
     }
 
-    /// Binds the extern `name` to `value`: a grammar, module, expression, token set or token ID.
+    /// Binds the extern `name` to `value`.
     ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -493,6 +512,9 @@ impl PyModule {
         Ok(())
     }
 
+    /// Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
+    ///
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,
@@ -515,6 +537,9 @@ impl PyModule {
         Ok(())
     }
 
+    /// Compiles the module for `vocab`, reusing any precompiled work. Every extern must be bound.
+    ///
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
@@ -532,6 +557,7 @@ impl PyModule {
         Ok(super::constraint(constraint))
     }
 
+    /// The module's externs.
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
         let snapshot = slf.borrow().snapshot();
@@ -548,26 +574,31 @@ impl PyModule {
         })
     }
 
+    /// A copy of the module. Binding the copy does not change the original.
     fn copy(&self) -> Self {
         Self::from_inner(self.snapshot())
     }
 
+    /// Same as `copy()`.
     fn __copy__(&self) -> Self {
         self.copy()
     }
 
+    /// Same as `copy()`.
     fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
         let copy = Py::new(slf.py(), slf.try_borrow()?.copy())?;
         memo.set_item(slf.as_ptr() as usize, &copy)?;
         Ok(copy)
     }
 
+    /// Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another.
     fn save<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = slf.try_borrow()?.snapshot();
         let bytes = slf.py().detach(move || snapshot.save());
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
+    /// Loads a module saved with `save()`. Its precompiled work only applies to the vocabulary it was built for; compiling with another is an error.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

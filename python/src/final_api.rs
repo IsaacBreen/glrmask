@@ -48,11 +48,6 @@ impl From<glrmask::MaskStrategy> for PyMaskStrategy {
 }
 
 /// How masks are computed at grammar boundaries.
-///
-/// `PARSER_DWA` installs the static boundary parser (faster crossings; an
-/// over-budget build raises `ValueError`). `TOKEN_TRIE` keeps the segmented
-/// dynamic boundary and builds faster. `AUTO` uses `PARSER_DWA` and falls back
-/// to `TOKEN_TRIE` when the static boundary parser declines on budget.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +156,7 @@ impl PyTokenTrie {
         self.merge_equivalent_tokens
     }
 
+    /// Whether both sets contain the same IDs.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = other.py();
         match other.extract::<PyRef<'_, Self>>() {
@@ -214,7 +210,7 @@ pub(super) fn resolve_mask_strategy_settings(
     ))
 }
 
-/// A set of model token IDs. IDs are validated against the compile vocabulary; an empty set matches nothing.
+/// A set of token IDs.
 #[pyclass(name = "TokenSet", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyTokenSet {
@@ -243,6 +239,7 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
 
 #[pymethods]
 impl PyTokenSet {
+    /// Creates a set from `ids`.
     #[new]
     #[pyo3(signature = (ids, /))]
     fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -255,7 +252,9 @@ impl PyTokenSet {
         })
     }
 
-    /// Creates a set from Python ranges with step 1 and exclusive stops; overlapping or adjacent ranges merge, and an empty or reversed range contributes nothing.
+    /// Creates a set from `range` objects, which must have step 1 and start <= stop.
+    ///
+    /// Overlapping and adjacent ranges are merged. An empty range contributes nothing.
     #[staticmethod]
     #[pyo3(signature = (ranges, /))]
     fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -302,7 +301,7 @@ impl PyTokenSet {
 #[derive(Clone, Copy)]
 enum SourceKind { Glrm, JsonSchema, Lark }
 
-/// Reusable source grammar without compilation settings or bindings.
+/// A grammar, written as source text or built from an expression.
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
@@ -340,16 +339,14 @@ impl Drop for PyGrammar {
 
 #[pymethods]
 impl PyGrammar {
-    /// GLRM supports typed external declarations; bind them via `Module(g).bind(...)` before compiling.
+    /// Creates a grammar from GLRM source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_glrm(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Glrm)
     }
 
-    /// Accepts JSON text or a JSON-serializable object. Unsupported keywords are rejected with an error, except that
-    /// `format` is treated as an annotation only (as in JSON Schema 2020-12) and
-    /// unrecognised keywords are ignored.
+    /// Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.
     #[staticmethod]
     #[pyo3(signature = (schema, /))]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -365,14 +362,14 @@ impl PyGrammar {
         Self::new(source, SourceKind::JsonSchema)
     }
 
-    /// Named token atoms declare token externs; bind each through `Module.bind`.
+    /// Creates a grammar from Lark source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_lark(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Lark)
     }
 
-    /// Builds a source grammar from an `Expr`, `Grammar`, or `TokenSet`.
+    /// Creates a grammar from an expression.
     #[staticmethod]
     #[pyo3(signature = (expr, /))]
     fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -382,9 +379,9 @@ impl PyGrammar {
         })
     }
 
-    /// Binds the extern `name` to `value`: a grammar, expression, token set or token ID.
+    /// Binds the extern `name` to `value`.
     ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set or token ID.
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -421,7 +418,7 @@ impl PyGrammar {
         Ok(())
     }
 
-    /// The grammar's declared externs, in declaration order.
+    /// The grammar's externs.
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {
         let inner = self.inner.clone();
@@ -430,7 +427,9 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
-    /// Compile this grammar against the target vocabulary. Sugar for `Module(self, mask_strategy=..., boundary_mask_strategy=...).compile(vocab)`.
+    /// Compiles the grammar for `vocab`.
+    ///
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
@@ -450,9 +449,9 @@ impl PyGrammar {
         .map_err(api_error)
     }
 
-    /// Retains vocabulary-specific compilation artifacts and returns the module.
+    /// Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
     ///
-    /// Equivalent to `Module(self).precompile(vocab, ...)`.
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,

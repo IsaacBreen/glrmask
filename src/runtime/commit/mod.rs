@@ -9137,10 +9137,8 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Commits one token.
-    ///
-    /// Returns `false` if it is not allowed, leaving the state unusable. To try a
-    /// token safely, commit it on a clone.
+    /// Commits a token. Returns `false` if it is not allowed, which terminates
+    /// the state.
     #[must_use]
     pub fn commit_token(
         &mut self,
@@ -9149,10 +9147,8 @@ impl<'a> ConstraintState<'a> {
         self.commit_token_raw(token_id).is_ok()
     }
 
-    /// Commits the tokens in order.
-    ///
-    /// Returns `false` at the first token that is not allowed, leaving the state
-    /// unusable.
+    /// Commits each token in order. Returns `false` at the first one that is
+    /// not allowed, which terminates the state.
     #[must_use]
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
         if token_ids.is_empty() {
@@ -9453,11 +9449,8 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
-    /// Commits raw bytes instead of a token.
-    ///
-    /// Returns `false` if they are not allowed, leaving the state unusable. Bytes
-    /// never match a token set; commit those tokens with
-    /// [`commit_token`](Self::commit_token).
+    /// Commits raw bytes. Returns `false` if they are not allowed, which
+    /// terminates the state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {

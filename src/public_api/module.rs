@@ -343,7 +343,7 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// The module's externs, in declaration order.
+    /// The module's externs.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),
@@ -358,11 +358,8 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// Binds the extern `name` to `value`: a module, grammar, expression, token
-    /// set or token ID.
-    ///
-    /// Fails if `name` is undeclared or already bound, or if `value` is the wrong
-    /// kind for it. A token extern takes only a token set or token ID.
+    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
+    /// bound, or `value` is the wrong kind.
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
         let next = self.bound(name, value.into())?;
         *self = next;
@@ -541,10 +538,8 @@ impl Module {
         Ok(())
     }
 
-    /// Compiles as much as possible for `vocab` now, so later compiles are fast.
-    ///
-    /// Externs may still be unbound. The work is kept in the module and included
-    /// by [`save`](Self::save).
+    /// Compiles as much as possible for `vocab` now, even with externs unbound, so
+    /// later compiles are faster.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.precompile_with(vocab, CompileOptions::default())
     }
@@ -895,9 +890,8 @@ impl Module {
         }
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work.
-    ///
-    /// Every extern must be bound.
+    /// Compiles the module for `vocab`, reusing any precompiled work. Every extern
+    /// must be bound.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
@@ -1239,15 +1233,12 @@ impl Module {
         Ok(grammar)
     }
 
-    /// Saves the module, including precompiled work, as bytes.
-    ///
-    /// The vocabulary is not included. Bytes saved by one GLRMask version may not
-    /// load in another.
+    /// Saves the module as bytes, with its precompiled work but without the
+    /// vocabulary. Bytes saved by one GLRMask version may not load in another.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Loads a module saved with [`save`](Self::save).
-    ///
-    /// Precompiled work applies only to the vocabulary it was built for;
-    /// compiling with a different one is an error.
+    /// Loads a module saved with [`save`](Self::save). Its precompiled work only
+    /// applies to the vocabulary it was built for; compiling with another is an
+    /// error.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
     }

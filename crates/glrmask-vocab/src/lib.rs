@@ -8,9 +8,6 @@ use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// A set of token IDs.
-///
-/// In a grammar, it matches any one of its tokens. Every ID must be in the
-/// vocabulary.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
     ranges: Arc<[(u32, u32)]>,
@@ -92,10 +89,7 @@ impl From<u32> for TokenSet {
 
 use range_set_blaze::RangeSetBlaze;
 
-/// A model's vocabulary: each token ID and its bytes.
-///
-/// Use each token's exact bytes, not its display form: `b" hello"`, not
-/// `"Ġhello"`. IDs need not be contiguous.
+/// A model's tokens and their bytes.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     /// Model token IDs which are valid for token-set bindings but have no
@@ -195,10 +189,8 @@ impl Vocab {
         vocab
     }
 
-    /// Adds tokens that have no bytes, such as end-of-sequence or tool-call
-    /// tokens.
-    ///
-    /// They can be used in token sets but never match text.
+    /// Adds tokens that have no bytes, such as end-of-sequence tokens. They can
+    /// be used in token sets but never match text.
     pub fn with_special_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         {
             let entries = Arc::make_mut(&mut self.entries);

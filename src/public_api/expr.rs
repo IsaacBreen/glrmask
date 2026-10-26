@@ -1,9 +1,7 @@
 //! Expression operators have no source, lexical scope or path segment of their own.
 use super::*;
 
-/// A choice or sequence of grammars, modules, token sets and literals.
-///
-/// Each grammar keeps its own rules, including which whitespace it ignores.
+/// A grammar expression.
 #[derive(Debug, Clone)]
 pub struct Expr(pub(crate) Arc<ExprNode>);
 
@@ -71,14 +69,12 @@ impl Expr {
         }
     }
 
-    /// Matches `items` one after another.
-    ///
-    /// One token may span several items.
+    /// Matches `items` in order.
     pub fn sequence(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
         Self(Arc::new(ExprNode::Sequence(items.into_iter().map(Into::into).collect())))
     }
 
-    /// Matches exactly `bytes`, with no whitespace skipped.
+    /// Matches exactly `bytes`.
     pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
         Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }

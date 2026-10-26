@@ -8521,11 +8521,8 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
-    /// The tokens allowed next, as a bitset.
-    ///
-    /// Token `id` is allowed when bit `id % 32` of word `id / 32` is set. No bits
-    /// are set when nothing can follow: the sequence is complete, or a commit
-    /// failed.
+    /// The tokens allowed next, as a bitset. Token `id` is allowed when bit
+    /// `id % 32` of word `id / 32` is set.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -8804,7 +8801,7 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
-    /// Writes the mask into `buf`, setting any extra words to zero.
+    /// Writes the mask into `buf`, zeroing any extra words.
     ///
     /// # Panics
     ///

@@ -22,8 +22,6 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
 }
 
 /// A GLRMask error.
-///
-/// Errors in grammar source include their location when known.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Error {
@@ -43,7 +41,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The kind of an [`Error`].
+/// The kind of error.
 #[derive(ThisError, Debug, Clone)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -67,8 +65,8 @@ pub enum ErrorKind {
     #[error("unsupported by the chosen mask strategy: {0}")]
     StrategyUnsupported(String),
 
-    /// Saved bytes could not be loaded: they are corrupt, from another GLRMask
-    /// version, or for a different vocabulary.
+    /// Saved bytes are corrupt, from another GLRMask version, or for a
+    /// different vocabulary.
     #[error("cannot load saved bytes: {0}")]
     Serialization(String),
 }
@@ -113,7 +111,7 @@ impl Error {
         Self { kind, span: None }
     }
 
-    /// What kind of error this is.
+    /// The kind of error.
     pub fn kind(&self) -> &ErrorKind {
         &self.kind
     }

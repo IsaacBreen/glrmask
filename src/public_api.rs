@@ -168,7 +168,7 @@ impl Engine {
     }
 }
 
-/// An extern declared by a grammar: a named slot to bind later.
+/// A named placeholder in a grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extern {
     pub(crate) name: String,
@@ -176,7 +176,7 @@ pub struct Extern {
 }
 
 impl Extern {
-    /// The declared name.
+    /// The extern's name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -243,7 +243,7 @@ impl<'a> Externs<'a> {
         self.len() == 0
     }
 
-    /// Only the externs that are not yet bound.
+    /// The externs not yet bound.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
             source: self.source.clone(),
@@ -610,9 +610,6 @@ impl Grammar {
     }
 
     /// Creates a grammar from Lark source.
-    ///
-    /// A token name such as `<|end|>` declares a token extern, which must be bound
-    /// before compiling.
     pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
         grammar.lark_document()?;
@@ -621,17 +618,14 @@ impl Grammar {
     }
 
 
-    /// Creates a grammar from a JSON Schema document.
-    ///
-    /// Standard keywords that GLRMask does not support are an error. Unknown
-    /// keywords and `format` are ignored.
+    /// Creates a grammar from JSON Schema source.
     pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
         let source = source.as_ref();
         crate::import::parse_json_schema_to_named(source)?;
         Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))
     }
 
-    /// Creates a grammar from GLRM, GLRMask's native format.
+    /// Creates a grammar from GLRM source.
     pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
         grammar.component()?;
@@ -780,11 +774,8 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Binds the extern `name` to `value`: a grammar, expression, token set or
-    /// token ID.
-    ///
-    /// Fails if `name` is undeclared or already bound, or if `value` is the wrong
-    /// kind for it.
+    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
+    /// bound, or `value` is the wrong kind.
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
@@ -857,7 +848,7 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// The grammar's externs, in declaration order.
+    /// The grammar's externs.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Grammar(self),
@@ -870,10 +861,8 @@ impl Grammar {
         Module::new(self).compile(vocab)
     }
 
-    /// Compiles as much as possible for `vocab` now, and returns a [`Module`] that
-    /// keeps the work.
-    ///
-    /// Externs may still be unbound.
+    /// Compiles as much as possible for `vocab` now, even with externs unbound, and
+    /// returns a [`Module`] that keeps the work.
     pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
         self.precompile_with(vocab, CompileOptions::default())
     }
@@ -885,7 +874,7 @@ impl Grammar {
         Ok(module)
     }
 
-    /// Compiles the grammar for `vocab` with `options`.
+    /// Like [`compile`](Self::compile), with `options`.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
@@ -1501,11 +1490,6 @@ impl Grammar {
     }
 
     /// Creates a grammar from an expression.
-    ///
-    /// Use it to require an end token after a grammar:
-    /// `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(eos_id)]))`.
-    ///
-    /// The end token must be in the vocabulary; see [`Vocab::with_special_tokens`].
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)

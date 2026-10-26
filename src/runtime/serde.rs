@@ -5910,10 +5910,8 @@ impl Constraint {
         bytes
     }
 
-    /// Loads a constraint saved with [`save`](Self::save).
-    ///
-    /// `vocab` must be the vocabulary it was compiled for; a different one is an
-    /// error.
+    /// Loads a constraint saved with [`save`](Self::save). `vocab` must be the
+    /// one it was compiled for, or loading fails.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,

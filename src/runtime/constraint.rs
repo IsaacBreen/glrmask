@@ -12618,7 +12618,7 @@ impl Constraint {
             .and_then(|id| self.packed_dwa_token_dense_masks.get(id))
     }
 
-    /// Starts a new sequence.
+    /// A new state with nothing committed.
     pub fn start(&self) -> ConstraintState<'_> {
         if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();

@@ -576,7 +576,7 @@ fn advance_trace_step_to_dict<'py>(
 // PyVocab
 // ---------------------------------------------------------------------------
 
-/// Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.
+/// A model's tokens and their bytes.
 #[pyclass(name = "Vocab", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
@@ -595,7 +595,9 @@ impl PyVocab {
         }
     }
 
-    /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
+    /// Creates a vocabulary from a `{token: id}` dict.
+    ///
+    /// `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
     #[staticmethod]
     #[pyo3(signature = (token_to_id, *, special_token_ids = None))]
     fn from_dict(token_to_id: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
@@ -606,7 +608,9 @@ impl PyVocab {
         })
     }
 
-    /// Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.
+    /// Creates a vocabulary from an `{id: bytes}` dict.
+    ///
+    /// `special_token_ids` adds tokens that have no bytes, such as end-of-sequence tokens.
     #[staticmethod]
     #[pyo3(signature = (id_to_bytes, *, special_token_ids = None))]
     fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>, special_token_ids: Option<Vec<u32>>) -> PyResult<Self> {
@@ -750,7 +754,7 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
+/// A grammar compiled for a vocabulary.
 #[pyclass(name = "Constraint", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -792,13 +796,15 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Serializes without the vocabulary; load with the exact original token-ID/byte mapping.
+    /// Saves the constraint as bytes, without the vocabulary.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.detach(|| self.inner.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Rejects malformed or incompatible artifacts. `vocab` must match the original mapping.
+    /// Loads a constraint saved with `save`.
+    ///
+    /// `vocab` must be the one it was compiled for, or loading raises `ValueError`.
     #[staticmethod]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
@@ -809,6 +815,7 @@ impl PyConstraint {
         Ok(Self { inner: Arc::new(inner), max_token })
     }
 
+    /// A new state with nothing committed.
     fn start(&self) -> PyConstraintState {
         PyConstraintState {
             inner: OwnedState::from_arc(self.inner.clone()),
@@ -816,7 +823,7 @@ impl PyConstraint {
         }
     }
 
-    /// Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`.
+    /// The number of `int32` words that `fill_mask` needs.
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
@@ -979,14 +986,14 @@ impl PyDynamicConstraintState {
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
-    /// Commits one model token event; returns false when it is disallowed.
+    /// Commits a token. Returns `False` if it is not allowed, which terminates the state.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
-    /// Commits model token IDs in order; returns false at the first disallowed event.
+    /// Commits each token in order. Returns `False` at the first one that is not allowed, which terminates the state.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
         self.inner
@@ -1072,17 +1079,13 @@ impl PyDynamicConstraintState {
         py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
     }
 
-    /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
+    /// Whether the input so far is a complete match.
     fn is_accepting(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_accepting())
     }
 
-    /// Whether nothing more can be committed.
-    ///
-    /// This is true when the sequence is finished, for example after its end token, and after a failed commit. `is_accepting` tells the two apart.
-    ///
-    /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
+    /// Whether no more input can be accepted.
     fn is_terminated(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_terminated())
@@ -1106,7 +1109,7 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// Mutable state for one generated sequence.
+/// A constraint's state during generation.
 #[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
     inner: OwnedState,
@@ -1115,7 +1118,7 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    /// Independent snapshot at the current prefix.
+    /// A copy of the state.
     fn copy(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
         self.inner.with_dependent(|_, source| {
@@ -1126,10 +1129,13 @@ impl PyConstraintState {
         Self { inner, max_token: self.max_token }
     }
 
+    /// Same as `copy()`.
     fn __copy__(&self) -> Self { self.copy() }
 
 
-    /// New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.
+    /// The tokens allowed next, as a Boolean array indexed by token ID.
+    ///
+    /// `size` sets the array length, for example to match your logits; it must cover every token ID.
     #[pyo3(signature = (*, size=None))]
     fn mask<'py>(
         &self,
@@ -1143,7 +1149,9 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    /// Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words.
+    ///
+    /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
@@ -1176,14 +1184,14 @@ impl PyConstraintState {
             .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
     }
 
-    /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
+    /// Commits raw bytes. Returns `False` if they are not allowed, which terminates the state.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
-    /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
+    /// Tokens for what must come next, taking the longest token at each step. Stops before anything that could vary, or at 10,000 tokens or bytes.
     fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
         py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
     }

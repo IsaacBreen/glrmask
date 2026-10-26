@@ -50,7 +50,7 @@ enum {
     GLRMASK_PANIC=3,              ///< An internal error was caught. Discard the handle involved.
     GLRMASK_BUFFER_TOO_SMALL=4,   ///< The buffer is too small; nothing was written.
     GLRMASK_CLOSED=5,             ///< The handle was already freed.
-    GLRMASK_REJECTED=6            ///< The token or bytes were not allowed. The state is now unusable.
+    GLRMASK_REJECTED=6            ///< The token or bytes were not allowed. The state is now terminated.
 };
 /// How masks are computed.
 enum {
@@ -79,7 +79,7 @@ enum {
 };
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
-    GLRMASK_GLRM=1,         ///< GLRM, GLRMask's native format.
+    GLRMASK_GLRM=1,         ///< GLRM.
     GLRMASK_JSON_SCHEMA=2,  ///< JSON Schema.
     GLRMASK_LARK=3          ///< Lark.
 };
@@ -156,7 +156,7 @@ GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* p,glrmask_vo
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* p);
 /// Creates a token set from `ids`.
 GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t* ids,size_t n,glrmask_token_set** out);
-/// Creates a token set from inclusive `ranges`.
+/// Creates a token set from half-open `ranges`, each including `start` and excluding `end`.
 GLRMASK_API glrmask_status glrmask_token_set_from_ranges(const glrmask_token_range* r,size_t n,glrmask_token_set** out);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_token_set_clone(const glrmask_token_set* p,glrmask_token_set** out);
@@ -243,10 +243,9 @@ GLRMASK_API glrmask_status glrmask_module_load(const uint8_t* bytes,size_t n,glr
 
 /// Creates an expression matching any one of `operands`.
 GLRMASK_API glrmask_status glrmask_expr_choice(const glrmask_expr_operand* items,size_t n,glrmask_expr** out);
-/// Creates an expression matching `operands` one after another. One token may
-/// span several operands.
+/// Creates an expression matching `operands` one after another.
 GLRMASK_API glrmask_status glrmask_expr_sequence(const glrmask_expr_operand* items,size_t n,glrmask_expr** out);
-/// Creates an expression matching exactly `bytes`, with no whitespace skipped.
+/// Creates an expression matching exactly `bytes`.
 GLRMASK_API glrmask_status glrmask_expr_literal(const uint8_t* bytes,size_t n,glrmask_expr** out);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_expr_clone(const glrmask_expr* p,glrmask_expr** out);
@@ -257,7 +256,7 @@ GLRMASK_API void glrmask_expr_free(glrmask_expr* p);
 GLRMASK_API glrmask_status glrmask_constraint_clone(const glrmask_constraint* p,glrmask_constraint** out);
 /// Frees a constraint handle.
 GLRMASK_API void glrmask_constraint_free(glrmask_constraint* p);
-/// Starts a new sequence.
+/// Creates a state for one generated sequence.
 GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* p,glrmask_state** out);
 /// Writes the number of `uint32_t` words in a mask.
 GLRMASK_API glrmask_status glrmask_constraint_mask_len(const glrmask_constraint* p,size_t* out);
@@ -267,14 +266,13 @@ GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* p,g
 /// vocabulary it was compiled for.
 GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n,const glrmask_vocab* v,glrmask_constraint** out);
 
-/// Copies the state, for trying tokens without changing the original.
+/// Copies the state.
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* p,glrmask_state** out);
 /// Frees a sequence state.
 GLRMASK_API void glrmask_state_free(glrmask_state* p);
 /// Writes the number of `uint32_t` words in a mask.
 GLRMASK_API glrmask_status glrmask_state_mask_len(const glrmask_state* p,size_t* out);
-/// Whether the input committed so far is a complete match for the grammar. More
-/// input may still be allowed; see `glrmask_state_is_terminated`. Writes 1 or 0 to
+/// Whether the tokens committed so far form a complete match. Writes 1 or 0 to
 /// `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uint32_t* out);
 /// Writes the tokens allowed next into `out` as a bitset, setting extra words to
@@ -282,20 +280,16 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uin
 /// `GLRMASK_BUFFER_TOO_SMALL`, writing nothing, if `out_len` is less than the mask
 /// length.
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* p,uint32_t* out,size_t n);
-/// Whether nothing more can be committed. This is true when the sequence is
-/// finished, for example after its end token, and after a failed commit.
-/// `glrmask_state_is_accepting` tells the two apart. A complete match is not
-/// terminated if more input could follow, such as whitespace the grammar ignores.
-/// Writes 1 or 0 to `out`.
+/// Whether no more input can be accepted. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* p,uint32_t* out);
-/// Commits one token. Returns `GLRMASK_REJECTED` if it is not allowed, leaving the
-/// state unusable. To try a token safely, commit it on a clone.
+/// Commits one token. Returns `GLRMASK_REJECTED` if it is not allowed, which
+/// terminates the state.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* p,uint32_t id);
 /// Commits `ids` in order. Returns `GLRMASK_REJECTED` at the first token that is
-/// not allowed, leaving the state unusable.
+/// not allowed, which terminates the state.
 GLRMASK_API glrmask_status glrmask_state_commit_tokens(glrmask_state* p,const uint32_t* ids,size_t n);
 /// Commits raw bytes instead of a token. Returns `GLRMASK_REJECTED` if they are
-/// not allowed, leaving the state unusable. Bytes never match a token set.
+/// not allowed, which terminates the state.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* p,const uint8_t* bytes,size_t n);
 /// Writes the tokens that must come next, without committing them. Stops where
 /// more than one token could follow, or after 10,000 tokens or bytes.

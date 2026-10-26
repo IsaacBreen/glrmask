@@ -514,9 +514,7 @@ impl CommitBuffers {
     }
 }
 
-/// The state of one generated sequence.
-///
-/// Clone it to try tokens without changing the original.
+/// A constraint's state during generation.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
@@ -582,9 +580,7 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Whether the input committed so far is a complete match for the grammar.
-    ///
-    /// More input may still be allowed; see [`is_terminated`](Self::is_terminated).
+    /// Whether the input so far is a complete match.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
@@ -592,14 +588,7 @@ impl<'a> ConstraintState<'a> {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
 
-    /// Whether nothing more can be committed.
-    ///
-    /// This is true when the sequence is finished, for example after its end token,
-    /// and after a failed commit. [`is_accepting`](Self::is_accepting) tells the two
-    /// apart.
-    ///
-    /// A complete match is not terminated if more input could follow, such as
-    /// whitespace the grammar ignores.
+    /// Whether no more input can be accepted.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
         if self.terminated {
@@ -662,11 +651,8 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// The tokens that must come next, without committing them.
-    ///
-    /// Stops where more than one token could follow, or after 10,000 tokens or
-    /// bytes. When forced text could be tokenized in several ways, the longest
-    /// token is chosen at each step.
+    /// Tokens for what must come next, taking the longest token at each step.
+    /// Stops before anything that could vary, or at 10,000 tokens or bytes.
     pub fn forced_tokens(&self) -> Vec<u32> {
         super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
     }
