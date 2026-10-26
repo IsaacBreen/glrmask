@@ -16,10 +16,9 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
             let loaded=Constraint::load(c.save(), &v).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
-    for source in ["start: <[3]>"]{
-        let err=lark(source).compile(&v).unwrap_err().to_string();
-        assert!(err.contains("is a special token"),"{source}: {err}");
-    }
+    let source = "start: <[3]>";
+    let err = lark(source).compile(&v).unwrap_err().to_string();
+    assert!(err.contains("is a special token"), "{source}: {err}");
     assert!(lark("start: <[0-5]>").compile(&v).is_err());
     let mut m=Module::new(&lark("start: <|eos|>"));
     m.bind("eos",TokenSet::new([7])).unwrap();
