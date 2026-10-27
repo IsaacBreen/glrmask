@@ -82,18 +82,27 @@ impl ProgrammaticJsCompiler {
     pub fn compile_parent(vocab: &Vocab) -> crate::Result<Constraint> {
         let placeholder_token_id =
             crate::import::external_placeholder_token_id_avoiding(vocab, std::iter::empty())?;
-        Constraint::from_glrm_grammar_for_private_tools(&programmatic_parent_source(placeholder_token_id)?, vocab)
+        let (source, ids) = programmatic_parent_source(placeholder_token_id)?;
+        let bindings = ids
+            .iter()
+            .map(|&(name, id)| (name, [(id, id)]))
+            .collect::<Vec<_>>();
+        let bindings = bindings
+            .iter()
+            .map(|(name, ranges)| (*name, ranges.as_slice()))
+            .collect::<Vec<_>>();
+        Constraint::from_glrm_grammar_with_bindings_and_end_tokens(&source, vocab, &bindings, &[])
     }
 
     /// Compile the reusable opaque-runtime-value expression subgrammar.
     pub fn compile_dynamic_value(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar_for_private_tools(&dynamic_value_source()?, vocab)
+        Constraint::from_glrm_grammar(&dynamic_value_source()?, vocab)
     }
 
     /// Compile the reusable unrestricted JavaScript condition subgrammar used
     /// only as the test of schema-aware conditional expressions.
     pub fn compile_condition(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar_for_private_tools(&condition_source()?, vocab)
+        Constraint::from_glrm_grammar(&condition_source()?, vocab)
     }
 
     /// Assemble a reusable compiler from independently compiled shared parts.
@@ -258,7 +267,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     source.replace_range(..start.len(), &format!("start {start_rule};"));
     source.push_str(extra_rules);
 
-    let mut grammar = crate::import::parse_glrm_to_named_for_private_tools(&source)?;
+    let mut grammar = crate::import::parse_glrm_to_named(&source)?;
     reserve_tools_identifier(&mut grammar)?;
     // The generic reachability pass follows grammar references from `start`,
     // while `ignore IGNORE` is metadata. Temporarily root IGNORE through a
@@ -279,7 +288,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     crate::grammar::right_linear::retain_reachable_rules(&mut grammar);
     grammar.rules.retain(|rule| rule.name != synthetic);
     grammar.start = original_start;
-    Ok(crate::grammar::glrm::to_glrm(&grammar))
+    Ok(crate::grammar::glrm::to_glrm_v1(&grammar)?)
 }
 
 fn dynamic_value_source() -> crate::Result<String> {
@@ -290,10 +299,12 @@ fn condition_source() -> crate::Result<String> {
     pruned_javascript_source("coalesce_expression", "")
 }
 
-fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String> {
-    use crate::grammar::ast::{GrammarExpr, NamedRule};
+fn programmatic_parent_source(
+    placeholder_token_id: u32,
+) -> crate::Result<(String, [(&'static str, u32); 1])> {
+    use crate::grammar::ast::GrammarExpr;
 
-    let mut grammar = crate::import::parse_glrm_to_named_for_private_tools(JAVASCRIPT_GLRM)?;
+    let mut grammar = crate::import::parse_glrm_to_named(JAVASCRIPT_GLRM)?;
     // `tools` is a reserved namespace in programmatic-tool mode. Without this
     // subtraction, `tools.foo(...)` can take the ordinary IDENTIFIER/call path
     // and bypass the schema dispatcher entirely.
@@ -317,13 +328,10 @@ fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String
         }
         other => GrammarExpr::Choice(vec![tool_expr, other]),
     };
-    grammar.rules.push(NamedRule {
-        name: PARENT_PLACEHOLDER_NAME.to_string(),
-        expr: GrammarExpr::SpecialToken(placeholder_token_id),
-        is_terminal: true,
-        is_internal: false,
-    });
-    Ok(crate::grammar::glrm::to_glrm(&grammar))
+    let mut source = crate::grammar::glrm::to_glrm_v1(&grammar)?;
+    source = format!("extern token {PARENT_PLACEHOLDER_NAME};\n{source}");
+    let ids = [(PARENT_PLACEHOLDER_NAME, placeholder_token_id)];
+    Ok((source, ids))
 }
 
 fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> String {

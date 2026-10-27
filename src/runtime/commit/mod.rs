@@ -9515,7 +9515,7 @@ mod tests {
                 nt start ::= A B? | B A?;"#,
             r#"start start; ignore WS; t WS ::= " "+; t A ::= "a"+; t B ::= "a"+ "b"?;
                 nt item ::= A | B; nt start ::= item ("," item)*;"#,
-            r#"start start; t A ::= "a"; nt start ::= A? | "(" start ")";"#,
+            r#"start start; t A ::= "a"; nt start ::= A? | "(" `start` ")";"#,
         ];
         let empty = ParserGSS::from_single_stack(Vec::new(), TerminalsDisallowed::new());
         let mut exclusive = 0usize;
@@ -9604,8 +9604,10 @@ mod tests {
         ]);
         let compiled = Constraint::compile(Grammar::glrm(r#"
             start document;
-            lexer group first ::= A, C;
-            lexer group second ::= B;
+            pragma glrmask {
+                lexer group first ::= A, C;
+                lexer group second ::= B;
+            }
             t A ::= "abx";
             t C ::= "abc";
             t B ::= "abcd";
@@ -9632,12 +9634,15 @@ mod tests {
         ];
         let vocab = Vocab::new(fragments.iter().enumerate()
             .map(|(id, bytes)| (id as u32, bytes.to_vec())).collect());
-        for partitions in ["", "lexer group words ::= WORD; lexer group trivia ::= WS;"] {
+        for partitions in [
+            "",
+            "pragma glrmask { lexer group words ::= WORD; lexer group trivia ::= WS; }",
+        ] {
             let source = format!(r#"
                 start document;
                 {partitions}
                 ignore WS;
-                t WS ::= " "+ | "//" [^\n]* "\n" | "/*" ([^*] | "*" [^/])* "*/";
+                t WS ::= " "+ | "//" b/[^\n]/* "\n" | "/*" (b/[^*]/ | "*" b/[^\/]/)* "*/";
                 t WORD ::= /[a-z]+/;
                 nt document ::= WORD ("+" WORD)*;
             "#);
@@ -10542,15 +10547,18 @@ mod tests {
 
     #[test]
     fn special_token_advance_matches_normalized_duplicate_key_state() {
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start start;
                 t A ::= "a";
                 t B ::= "a" | "ab";
                 nt item ::= A | B;
-                nt start ::= item @token(100);
+                extern token EXACT_100;
+                nt start ::= item EXACT_100;
             "#,
             &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+            &[("EXACT_100", 100)],
+            &[],
         )
         .unwrap();
 
@@ -10835,16 +10843,16 @@ nt start ::= item item? item?;
             (5, b"%".to_vec()),
             (6, b"0".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
                 ignore WS;
                 nt start ::= declaration expression;
                 nt declaration ::= "@" ID;
                 nt expression ::= ID OP "0";
-                t WS ::= [ \t\r\n]+;
+                t WS ::= b/[ \t\r\n]/+;
                 t OP ::= "=" | "%=";
-                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+                t ID ::= b/[A-Za-z_$]/ b/[A-Za-z0-9_$]/*;
             "#,
             &vocab,
         )
@@ -10879,16 +10887,16 @@ nt start ::= item item? item?;
             (5, b"%".to_vec()),
             (6, b"0".to_vec()),
         ]);
-        let body = Constraint::from_glrm_grammar_for_private_tools(
+        let body = Constraint::from_glrm_grammar(
             r#"
                 start start;
                 ignore WS;
                 nt start ::= declaration expression;
                 nt declaration ::= "@" ID;
                 nt expression ::= ID OP "0";
-                t WS ::= [ \t\r\n]+;
+                t WS ::= b/[ \t\r\n]/+;
                 t OP ::= "=" | "%=";
-                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+                t ID ::= b/[A-Za-z_$]/ b/[A-Za-z0-9_$]/*;
             "#,
             &vocab,
         )
@@ -11404,10 +11412,12 @@ nt start ::= item item? item?;
                 start start;
                 ignore WS;
                 pragma glrmask {
-                lexer group ws ::= WS;
-                lexer group a ::= A;
-                lexer group b ::= B;
-                lexer group c ::= C;
+                pragma glrmask {
+                    lexer group ws ::= WS;
+                    lexer group a ::= A;
+                    lexer group b ::= B;
+                    lexer group c ::= C;
+                }
                 }
                 t WS ::= " "+;
                 t A ::= "a"+;
@@ -11521,8 +11531,8 @@ nt start ::= item item? item?;
             r#"
                 start start;
                 pragma glrmask {
-                lexer group left ::= A;
-                lexer group right ::= B;
+                    lexer group left ::= A;
+                    lexer group right ::= B;
                 }
                 t A ::= "a";
                 t B ::= "b";

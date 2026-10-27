@@ -2603,13 +2603,13 @@ mod tests {
             (7, b" provider assertion\"".to_vec()),
             (8, b" validation of assertion\"".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
-                fa assurance_body ::= {
+                nt assurance_body ::= fa {
                     start 0;
                     accept 1;
-                    0 -- "\"" ("Service provider assertion\"" | "Independent validation of assertion\"") --> 1;
+                    edge 0 -> 1: "\"" ("Service provider assertion\"" | "Independent validation of assertion\"");
                 };
                 nt start ::= assurance_body;
             "#,

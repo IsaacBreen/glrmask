@@ -155,9 +155,9 @@ nt s ::= A | B | C;
     );
     assert!(!grammar.lexer_partitions.contains_key("C"));
 
-    let dumped = crate::grammar::glrm::to_glrm(&grammar);
-    assert!(dumped.contains("lexer group words ::= A, B;"), "{dumped}");
-    let reparsed = crate::grammar::glrm::from_glrm_for_private_tools(&dumped).unwrap();
+    let dumped = crate::grammar::glrm::to_glrm_v1(&grammar).unwrap();
+    assert!(dumped.contains("lexer group words ::= A, B"), "{dumped}");
+    let reparsed = crate::grammar::glrm::from_glrm(&dumped).unwrap();
     assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
 
     let lowered = lower(&grammar).unwrap();

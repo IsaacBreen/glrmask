@@ -4127,16 +4127,15 @@ mod tests {
             (8, b"ab".to_vec()),
             (9, b"cd".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start doc;
                 t PA ::= "a";
                 t PB ::= "b";
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt doc ::= PA SUB PB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
@@ -5080,13 +5079,15 @@ mod tests {
     /// `dispatcher_literal_names_parent_source` in
     /// `examples/static_link_measure.rs` (10 `.tool_i(` slots over the same
     /// placeholder token IDs).
-    fn dispatch_parent_source() -> String {
+    fn dispatch_parent_source() -> (String, Vec<(&'static str, u32)>) {
         let mut source = String::from("start suffix;\n");
+        let mut token_ids = Vec::with_capacity(10);
         for index in 0..10 {
-            source.push_str(&format!(
-                "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
-                128_320 + 10 + index
-            ));
+            let name: &'static str =
+                Box::leak(format!("TOOL_ARGS_SLOT_{index}").into_boxed_str());
+            let token_id = 128_320 + 10 + index;
+            source.push_str(&format!("extern token {name};\n"));
+            token_ids.push((name, token_id));
         }
         source.push_str("nt suffix ::=\n    ");
         for index in 0..10 {
@@ -5096,7 +5097,7 @@ mod tests {
             source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
         }
         source.push_str(";\n");
-        source
+        (source, token_ids)
     }
 
     /// Per-link stage timing record for the sweep table.
@@ -5458,7 +5459,11 @@ mod tests {
         let root = phase1_root();
         let vocab = phase1_vocab();
         let parent =
-            Constraint::from_glrm_grammar(&dispatch_parent_source(), &vocab).expect("parent");
+            {
+                let (source, token_ids) = dispatch_parent_source();
+                Constraint::from_glrm_with_token_ids(&source, &vocab, &token_ids, &[])
+                    .expect("parent")
+            };
         let mut schema_paths: Vec<_> = std::fs::read_dir(&root)
             .expect("read cache dir")
             .filter_map(|entry| {
@@ -5591,14 +5596,13 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "L" SUB "x" | "R" SUB "y";
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
@@ -6098,10 +6102,10 @@ mod tests {
             (3, b"La".to_vec()), (4, b"ax".to_vec()), (5, b"Lx".to_vec()),
             (6, b"Lax".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(r#"
-            start document; t SUB ::= @token(999);
+        let parent = Constraint::from_glrm_with_token_ids(r#"
+            start document; extern token SUB;
             nt document ::= "L" SUB "x";
-        "#, &vocab).unwrap();
+        "#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(r#"
             start child; nt item ::= "a"; nt child ::= item?;
         "#, &vocab).unwrap();
@@ -6202,14 +6206,13 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "L" SUB "x" | "R" SUB "y";
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
@@ -6354,14 +6357,13 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"y".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "L" SUB "x" | "R" SUB "y";
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
@@ -6560,23 +6562,21 @@ mod tests {
             (10, b"gx".to_vec()),
             (11, b"gy".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
-        let mid = Constraint::from_glrm_grammar_for_private_tools(
+        let mid = Constraint::from_glrm_with_token_ids(
             r#"
                 start m;
-                t SUB2 ::= @token(998);
+                extern token SUB2;
                 nt m ::= "m" SUB2;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB2", 998)], &[])
         .unwrap();
         let grandchild = Constraint::from_glrm_grammar(
             r#"

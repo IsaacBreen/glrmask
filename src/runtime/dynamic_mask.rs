@@ -11434,8 +11434,10 @@ mod tests {
         assert!(virtual_child.tokenizer.has_virtual_residual_runtime());
         let epsilon_child = Constraint::compile(Grammar::glrm(r#"
             start payload;
-            lexer group a ::= A;
-            lexer group b ::= B;
+            pragma glrmask {
+                lexer group a ::= A;
+                lexer group b ::= B;
+            }
             t A ::= "a"+;
             t B ::= "ab"+;
             nt payload ::= A | B;
@@ -12193,10 +12195,10 @@ nt start ::= A B;
 start start;
 ignore WS;
 pragma glrmask {
-lexer group ws ::= WS;
-lexer group a ::= A;
-lexer group b ::= B;
-lexer group c ::= C;
+    lexer group ws ::= WS;
+    lexer group a ::= A;
+    lexer group b ::= B;
+    lexer group c ::= C;
 }
 t WS ::= " "+;
 t A ::= "a"+;

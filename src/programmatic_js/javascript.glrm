@@ -9,8 +9,8 @@ nt program ::= statement_list?;
 t IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | _COMMENT ;
 t _WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 t _COMMENT ::= _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT ;
-t _SINGLE_LINE_COMMENT ::= '//' ( [^\n\r]/utf8 )* ( '\r\n' | '\r' | '\n' ) ;
-t _MULTI_LINE_COMMENT ::= '/*' ( [^*]/utf8 | '*' [^/]/utf8 )* '*/' ;
+t _SINGLE_LINE_COMMENT ::= '//' ( /[^\n\r]/ )* ( '\r\n' | '\r' | '\n' ) ;
+t _MULTI_LINE_COMMENT ::= '/*' ( /[^*]/ | '*' /[^/]/ )* '*/' ;
 
 // Statements
 nt statement_list ::= statement+ ;
@@ -409,20 +409,20 @@ t _NUMERIC_LITERAL ::= _HEX_LITERAL | _BINARY_LITERAL | _OCTAL_LITERAL | _DECIMA
 t _DECIMAL_LITERAL ::= _DECIMAL_INTEGER_LITERAL '.' _DECIMAL_DIGITS? _EXPONENT_PART? | _DECIMAL_INTEGER_LITERAL _EXPONENT_PART? ;
 t _DECIMAL_INTEGER_LITERAL ::= '0' | _NON_ZERO_DIGIT ( '_'? _DECIMAL_DIGIT )* ;
 t _DECIMAL_DIGITS ::= _DECIMAL_DIGIT ( '_'? _DECIMAL_DIGIT )* ;
-t _DECIMAL_DIGIT ::= [0-9] ;
-t _NON_ZERO_DIGIT ::= [1-9] ;
+t _DECIMAL_DIGIT ::= b/[0-9]/ ;
+t _NON_ZERO_DIGIT ::= b/[1-9]/ ;
 t _EXPONENT_PART ::= ('e'|'E') ('+'|'-')? _DECIMAL_DIGITS ;
 t _HEX_LITERAL ::= '0' ('x'|'X') _HEX_DIGIT ( '_'? _HEX_DIGIT )* ;
 t _BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1') ( '_'? ('0'|'1') )* ;
 t _OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7') ( '_'? ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7') )* ;
 t _BIGINT_LITERAL ::= (_DECIMAL_INTEGER_LITERAL | _HEX_LITERAL | _BINARY_LITERAL | _OCTAL_LITERAL) 'n' ;
 
-t _STRING_LITERAL ::= '"' ( [^"\\\n\r]/utf8 | _ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\\n\r]/utf8 | _ESCAPE_SEQUENCE )* '\'' ;
-t _ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' _HEX_DIGIT _HEX_DIGIT | 'u' _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT ) ;
+t _STRING_LITERAL ::= '"' ( /[^"\\\n\r]/ | _ESCAPE_SEQUENCE )* '"' | '\'' ( /[^'\\\n\r]/ | _ESCAPE_SEQUENCE )* '\'' ;
+t _ESCAPE_SEQUENCE ::= '\\' ( b/[\'"\\bfnrtv]/ | 'x' _HEX_DIGIT _HEX_DIGIT | 'u' _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT ) ;
 
 t _REGULAR_EXPRESSION_LITERAL ::= '/' _REGEX_BODY '/' _REGEX_FLAGS? ;
-t _REGEX_BODY ::= ( [^/\n\r\\]/utf8 | '\\' [^\n\r]/utf8 )+ ; // Any UTF-8 scalar except /, newline, or backslash, or an escaped non-line-terminator scalar.
-t _REGEX_FLAGS ::= [A-Za-z_$]+ ;
+t _REGEX_BODY ::= ( /[^/\n\r\\]/ | '\\' /[^\n\r]/ )+ ; // Any UTF-8 scalar except /, newline, or backslash, or an escaped non-line-terminator scalar.
+t _REGEX_FLAGS ::= b/[A-Za-z_$]/+ ;
 
 //template_literal ::= '`' ( _TEMPLATE_CHARS | template_substitution )* '`' ;
 //_TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
@@ -460,324 +460,324 @@ t _REGEX_FLAGS ::= [A-Za-z_$]+ ;
 //TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
 t TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
 t _TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
-t _TEMPLATE_CHAR ::= [^`\\]/utf8 | '\\' [^]/utf8 ;
+t _TEMPLATE_CHAR ::= /[^`\\]/ | '\\' /[^]/ ;
 
 //template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
 
 // Identifiers
 t IDENTIFIER ::=
-    [ABCDEFGHIJKLMNOPQRSTUVWXYZhjkmpquxz$_] _IDENTIFIER_PART*
+    b/[ABCDEFGHIJKLMNOPQRSTUVWXYZhjkmpquxz$_]/ _IDENTIFIER_PART*
   | 'a'
-  | 'a' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvxyz0123456789$_] _IDENTIFIER_PART*
+  | 'a' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'as'
-  | 'as' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'as' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_]/ _IDENTIFIER_PART*
   | 'asy'
-  | 'asy' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'asy' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'asyn'
-  | 'asyn' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'async' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'asyn' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'async' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'aw'
-  | 'aw' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'aw' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'awa'
-  | 'awa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'awa' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'awai'
-  | 'awai' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'await' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'awai' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'await' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'b'
-  | 'b' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'b' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'br'
-  | 'br' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'br' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'bre'
-  | 'bre' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'bre' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'brea'
-  | 'brea' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijlmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'break' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'brea' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijlmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'break' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'c'
-  | 'c' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijkmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'c' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijkmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ca'
-  | 'ca' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ca' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cas'
-  | 'cas' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'case' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cas' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'case' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cat'
-  | 'cat' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cat' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'catc'
-  | 'catc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'catch' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'catc' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'catch' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cl'
-  | 'cl' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cl' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cla'
-  | 'cla' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cla' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'clas'
-  | 'clas' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'class' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'clas' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'class' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'co'
-  | 'co' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'co' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'con'
-  | 'con' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'con' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cons'
-  | 'cons' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'const' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cons' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'const' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'cont'
-  | 'cont' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cont' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'conti'
-  | 'conti' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'conti' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'contin'
-  | 'contin' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'contin' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'continu'
-  | 'continu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'continue' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'continu' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'continue' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'd'
-  | 'd' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'd' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'de'
-  | 'de' [ABCDEFGHIJKLMNOPQRSTUVWXYZacdeghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'de' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZacdeghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'deb'
-  | 'deb' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'deb' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'debu'
-  | 'debu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debu' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'debug'
-  | 'debug' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debug' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'debugg'
-  | 'debugg' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debugg' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'debugge'
-  | 'debugge' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'debugger' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debugge' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'debugger' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'def'
-  | 'def' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'def' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'defa'
-  | 'defa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defa' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'defau'
-  | 'defau' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defau' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'defaul'
-  | 'defaul' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'default' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defaul' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'default' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'del'
-  | 'del' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'del' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'dele'
-  | 'dele' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'dele' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'delet'
-  | 'delet' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'delete' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'do' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'delet' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'delete' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'do' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'e'
-  | 'e' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwyz0123456789$_] _IDENTIFIER_PART*
+  | 'e' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwyz0123456789$_]/ _IDENTIFIER_PART*
   | 'el'
-  | 'el' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'el' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'els'
-  | 'els' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'else' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'els' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'else' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ex'
-  | 'ex' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ex' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'exp'
-  | 'exp' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exp' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'expo'
-  | 'expo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'expo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'expor'
-  | 'expor' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'export' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'expor' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'export' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ext'
-  | 'ext' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ext' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'exte'
-  | 'exte' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exte' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'exten'
-  | 'exten' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exten' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'extend'
-  | 'extend' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'extends' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'extend' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'extends' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'f'
-  | 'f' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghjklmnpqstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'f' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghjklmnpqstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fa'
-  | 'fa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fa' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fal'
-  | 'fal' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fal' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fals'
-  | 'fals' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'false' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fals' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'false' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fi'
-  | 'fi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fin'
-  | 'fin' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fin' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fina'
-  | 'fina' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fina' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'final'
-  | 'final' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'final' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'finall'
-  | 'finall' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_] _IDENTIFIER_PART*
-  | 'finally' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'finall' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_]/ _IDENTIFIER_PART*
+  | 'finally' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fo'
-  | 'fo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'for' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'for' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fr'
-  | 'fr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fr' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fro'
-  | 'fro' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'from' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fro' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'from' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fu'
-  | 'fu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fu' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'fun'
-  | 'fun' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fun' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'func'
-  | 'func' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'func' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'funct'
-  | 'funct' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'funct' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'functi'
-  | 'functi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'functi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'functio'
-  | 'functio' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'function' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'functio' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'function' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'g'
-  | 'g' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'g' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ge'
-  | 'ge' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'get' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ge' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'get' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'i'
-  | 'i' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'if' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'i' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'if' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'im'
-  | 'im' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'im' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'imp'
-  | 'imp' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'imp' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'impo'
-  | 'impo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'impo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'impor'
-  | 'impor' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'import' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'in' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'impor' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'import' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'in' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ins'
-  | 'ins' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ins' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'inst'
-  | 'inst' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'inst' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'insta'
-  | 'insta' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'insta' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'instan'
-  | 'instan' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instan' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'instanc'
-  | 'instanc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instanc' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'instance'
-  | 'instance' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instance' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'instanceo'
-  | 'instanceo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'instanceof' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instanceo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'instanceof' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'l'
-  | 'l' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'l' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'le'
-  | 'le' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'let' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'le' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'let' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'n'
-  | 'n' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'n' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ne'
-  | 'ne' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_] _IDENTIFIER_PART*
-  | 'new' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ne' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'new' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'nu'
-  | 'nu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'nu' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'nul'
-  | 'nul' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'null' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'nul' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'null' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'o'
-  | 'o' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'of' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'o' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'of' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'r'
-  | 'r' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'r' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 're'
-  | 're' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 're' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ret'
-  | 'ret' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ret' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'retu'
-  | 'retu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'retu' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'retur'
-  | 'retur' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'return' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'retur' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'return' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 's'
-  | 's' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrsvxyz0123456789$_] _IDENTIFIER_PART*
+  | 's' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrsvxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'se'
-  | 'se' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'set' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'se' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'set' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'st'
-  | 'st' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'st' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'sta'
-  | 'sta' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sta' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'stat'
-  | 'stat' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'stat' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'stati'
-  | 'stati' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'static' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'stati' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'static' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'su'
-  | 'su' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'su' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'sup'
-  | 'sup' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sup' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'supe'
-  | 'supe' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'super' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'supe' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'super' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'sw'
-  | 'sw' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sw' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'swi'
-  | 'swi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'swi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'swit'
-  | 'swit' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'swit' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'switc'
-  | 'switc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'switch' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'switc' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'switch' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 't'
-  | 't' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqstuvwxz0123456789$_] _IDENTIFIER_PART*
+  | 't' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqstuvwxz0123456789$_]/ _IDENTIFIER_PART*
   | 'th'
-  | 'th' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'th' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'thi'
-  | 'thi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'this' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'this' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'thr'
-  | 'thr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thr' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'thro'
-  | 'thro' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_] _IDENTIFIER_PART*
-  | 'throw' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thro' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'throw' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'tr'
-  | 'tr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'tr' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxz0123456789$_]/ _IDENTIFIER_PART*
   | 'tru'
-  | 'tru' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'true' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'try' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'tru' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'true' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'try' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'ty'
-  | 'ty' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ty' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'typ'
-  | 'typ' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'typ' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'type'
-  | 'type' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'type' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'typeo'
-  | 'typeo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'typeof' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'typeo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'typeof' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'v'
-  | 'v' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'v' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnpqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'va'
-  | 'va' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'var' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'va' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'var' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'vo'
-  | 'vo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'vo' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'voi'
-  | 'voi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'void' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'voi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'void' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'w'
-  | 'w' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'w' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'wh'
-  | 'wh' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wh' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'whi'
-  | 'whi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'whi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'whil'
-  | 'whil' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'while' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'whil' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'while' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'wi'
-  | 'wi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'wit'
-  | 'wit' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'with' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wit' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'with' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'y'
-  | 'y' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'y' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'yi'
-  | 'yi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yi' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'yie'
-  | 'yie' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yie' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   | 'yiel'
-  | 'yiel' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
-  | 'yield' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yiel' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
+  | 'yield' b/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_]/ _IDENTIFIER_PART*
   ;
-t _IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
+t _IDENTIFIER_START ::= b/[a-zA-Z]/ | '$' | '_' ;
 t _IDENTIFIER_PART ::= _IDENTIFIER_START | _DECIMAL_DIGIT ;
-t _HEX_DIGIT ::= [0-9a-fA-F] ;
+t _HEX_DIGIT ::= b/[0-9a-fA-F]/ ;

@@ -485,7 +485,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                g child ::= {
+                grammar child {
                     start child;
                     nt child ::= "a";
                 };

@@ -60,7 +60,7 @@ fn source_for_reparse(mut grammar: NamedGrammar) -> String {
         if !rule.is_terminal { hoist(&mut rule.expr, &mut names, &mut aliases, &mut rules); }
     }
     grammar.rules.extend(rules);
-    glrmask_grammar::__private::grammar::glrm::to_glrm(&grammar)
+    glrmask_grammar::__private::grammar::glrm::to_glrm_v1(&grammar).unwrap()
 }
 
 #[derive(Deserialize)]

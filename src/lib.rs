@@ -207,7 +207,7 @@ pub(crate) fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String>
     let named = import::json_schema::schema_to_named_grammar(&schema)?;
     let mut factored = grammar::factoring::factor_named_grammar(named);
     import::json_schema::prepare_named_grammar_for_dump(&mut factored)?;
-    Ok(grammar::glrm::to_glrm(&factored))
+    Ok(grammar::glrm::to_glrm_v1(&factored)?)
 }
 
 pub(crate) fn set_test_compat_mode(enabled: bool) {

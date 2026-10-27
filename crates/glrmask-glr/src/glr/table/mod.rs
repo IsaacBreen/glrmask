@@ -2107,7 +2107,7 @@ mod ambiguity_tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::grammar::ast::{lower, GrammarExpr, Quantifier, NamedGrammar, NamedRule};
     use crate::grammar::expr_nfa::ExprNfaBuilder;
-    use crate::grammar::glrm::from_glrm;
+    use crate::grammar::glrm::{from_glrm, from_glrm_with_external_terminals};
 
     use super::testing::build_test_table;
     use super::{Action, GLRTable, GuardedStackShift, StackShift, TableAmbiguity, TableAmbiguityKind};
@@ -2127,7 +2127,7 @@ mod ambiguity_tests {
     #[ignore]
     fn dump_tiny_subgrammar_splice_oracle() {
         fn dump(label: &str, source: &str) {
-            let named = from_glrm(source).unwrap();
+            let named = from_glrm_with_external_terminals(source, &[("SUB", &[999])]).unwrap();
             let grammar = lower(&named).unwrap();
             let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
             let table = GLRTable::build(&analyzed);
@@ -2165,7 +2165,7 @@ mod ambiguity_tests {
             "parent-pseudo",
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "<" SUB ">";
             "#,
         );
@@ -2173,7 +2173,7 @@ mod ambiguity_tests {
             "flattened",
             r#"
                 start document;
-                g inner ::= {
+                grammar inner {
                     start child;
                     nt child ::= "a" "b";
                 };

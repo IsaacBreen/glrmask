@@ -1352,27 +1352,25 @@ mod tests {
             (3, b"ab".to_vec()),
             (4, b" a".to_vec()),
         ]);
-        let plain = Constraint::from_glrm_grammar_for_private_tools(
+        let plain = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "a" SUB | "b" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         assert_indexed_initial_seed_matches_bruteforce(&plain);
 
-        let ignored = Constraint::from_glrm_grammar_for_private_tools(
+        let ignored = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "a" SUB | "b" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         assert_indexed_initial_seed_matches_bruteforce(&ignored);
     }
@@ -1420,14 +1418,13 @@ mod tests {
             (2, b"mx".to_vec()),
             (3, b"g".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(998);
+                extern token SUB;
                 nt document ::= "m" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 998)], &[])
         .unwrap();
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
         assert_eq!(ids, Some(vec![1, 2]));
@@ -1441,14 +1438,13 @@ mod tests {
             (2, b"mx".to_vec()),
             (3, b"g".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(998);
+                extern token SUB;
                 nt document ::= "m" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 998)], &[])
         .unwrap();
         constraint
             .boundary_candidate_summary
@@ -1481,16 +1477,15 @@ mod tests {
             (3, b"X".to_vec()),
             (4, b"a".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "X" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
 
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
@@ -1508,16 +1503,15 @@ mod tests {
             (3, b"\t".to_vec()),
             (4, b"a".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "X" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
 
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
@@ -1536,14 +1530,13 @@ mod tests {
             (3, b"a".to_vec()),
             (4, b"b".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "a" "b" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
         assert_eq!(ids, Some(vec![1]));
@@ -1556,14 +1549,13 @@ mod tests {
             (1, "éx".as_bytes().to_vec()),
             (2, b"x".to_vec()),
         ]);
-        let constraint = Constraint::from_glrm_grammar_for_private_tools(
+        let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "é" SUB;
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
         assert_eq!(ids, Some(vec![1]));
@@ -1584,14 +1576,13 @@ mod tests {
             (5, b"}".to_vec()),
             (6, b"p(".to_vec()),
         ]);
-        let parent = Constraint::from_glrm_grammar_for_private_tools(
+        let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t SUB ::= @token(999);
+                extern token SUB;
                 nt document ::= "p(" SUB ")";
             "#,
-            &vocab,
-        )
+            &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
@@ -1650,10 +1641,10 @@ mod preparation_tests {
     fn fixture() -> (Constraint, crate::Vocab) {
         let vocab=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),
             (2,b"ax".to_vec()),(3,b"b".to_vec()),(4,b"ba".to_vec())]);
-        let component=Constraint::from_glrm_grammar_for_private_tools(r#"
-            start document; t SUB ::= @token(999);
+        let component=Constraint::from_glrm_with_token_ids(r#"
+            start document; extern token SUB;
             nt document ::= "a" SUB | "b" SUB;
-        "#,&vocab).unwrap();
+        "#,&vocab, &[("SUB", 999)], &[]).unwrap();
         (component,vocab)
     }
 

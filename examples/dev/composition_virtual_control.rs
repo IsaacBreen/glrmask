@@ -28,9 +28,9 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
         if !file.exists() {
             eprintln!("BUILD_BEGIN {name}");
             let start=Instant::now();
-            let leaf=Constraint::compile(if json {Grammar::json_schema(source)} else {Grammar::glrm(source)},&vocab)?;
-            let parent=Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar payload; nt root ::= "X" payload "!";"#),&vocab)?;
+            let leaf=Constraint::compile(if json {Grammar::json_schema(source)} else {Grammar::from_glrm(source)?},&vocab)?;
+            let parent=Constraint::compile(Grammar::from_glrm(
+                r#"glrm 1; start root; extern grammar payload; nt root ::= "X" payload "!";"#)?,&vocab)?;
             let components_ms=start.elapsed().as_secs_f64()*1000.;
             let start=Instant::now();let bound=parent.bind_grammar_dynamic_boundary("payload",leaf)?;
             let link_ms=start.elapsed().as_secs_f64()*1000.;

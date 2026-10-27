@@ -597,7 +597,7 @@ impl Grammar {
     #[doc(hidden)]
     pub fn glrm(source: &str) -> Self {
         let grammar=Self::new(GrammarSource::Glrm(Arc::from(source)));
-        let _=grammar.parsed_component.set(ParsedComponent::parse_glrm_for_tools(source).map_err(Into::into));
+        let _=grammar.parsed_component.set(ParsedComponent::parse_glrm(source).map_err(Into::into));
         grammar
     }
 
@@ -5256,7 +5256,10 @@ mod tests {
     fn recursive_special_token_routes_through_active_child_leaf_and_returns_to_parent() {
         let vocab = Vocab::new(vec![(0, b"X".to_vec()), (1, b"!".to_vec()), (100, b"[100]".to_vec())]);
         let child = RuntimeConstraint::compile(
-            Grammar::glrm("start child; nt child ::= @token(100);"),
+            Grammar::from_glrm("start child; extern token CHILD_TOKEN; nt child ::= CHILD_TOKEN;")
+                .unwrap()
+                .bind_snapshot("CHILD_TOKEN", crate::TokenSet::from(100))
+                .unwrap(),
             &vocab,
         )
         .unwrap();
@@ -6330,7 +6333,7 @@ mod tests {
                     start document;
                     ignore PARENT_WS;
                     t PARENT_WS ::= " "+;
-                    g child ::= {
+                    grammar child {
                         start child;
                         ignore CHILD_WS;
                         t CHILD_WS ::= "\t"+;
@@ -6438,7 +6441,7 @@ mod tests {
                 r#"
                     glrm 1;
                     start document;
-                    g child ::= { start child; nt child ::= "a"; };
+                    grammar child { start child; nt child ::= "a"; };
                     nt document ::= "X" child "!" "?";
                 "#,
             ),

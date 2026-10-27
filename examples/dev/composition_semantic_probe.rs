@@ -115,7 +115,7 @@ fn main() {
         ), &vocab).unwrap();
         let reference = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start document; ignore PARENT_WS; t PARENT_WS ::= " "+;
-               g child ::= { start child; ignore CHILD_WS; t CHILD_WS ::= "\t"+; nt child ::= "a"; };
+               grammar child { start child; ignore CHILD_WS; t CHILD_WS ::= "\t"+; nt child ::= "a"; };
                nt document ::= "X" child "!";"#,
         ), &vocab).unwrap();
         let begin = Instant::now();

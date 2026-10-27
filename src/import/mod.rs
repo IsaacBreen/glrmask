@@ -57,7 +57,7 @@ pub(crate) fn validate_ebnf_source(source: &str, vocab: &crate::Vocab) -> crate:
 }
 
 pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate::Result<()> {
-    let comp = crate::grammar::glrm::ParsedComponent::parse_glrm_for_tools(source)?;
+    let comp = crate::grammar::glrm::ParsedComponent::parse_glrm(source)?;
     let ranges = comp.inline_token_ranges();
     for &(start, end) in &ranges {
         if !vocab.contains_token_range(start, end) {
@@ -80,14 +80,6 @@ pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGramm
     Ok(crate::grammar::glrm::from_glrm(source)?)
 }
 
-/// Legacy fixture loader for in-repo tools and tests only. Phase 2 converts the
-/// remaining fixtures and deletes this path; no public path calls it.
-pub(crate) fn parse_glrm_to_named_for_private_tools(
-    source: &str,
-) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_for_private_tools(source)?)
-}
-
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
     bindings: &[(&str, &[(u32, u32)])],
@@ -96,19 +88,6 @@ fn parse_glrm_with_external_terminal_bindings(
         source,
         bindings,
     )?)
-}
-
-fn parse_glrm_with_external_terminal_bindings_for_private_tools(
-    source: &str,
-    bindings: &[(&str, &[(u32, u32)])],
-) -> crate::Result<ast::NamedGrammar> {
-    match crate::grammar::glrm::from_glrm_with_external_terminal_ranges(source, bindings) {
-        Ok(named) => Ok(named),
-        Err(_) => Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges_for_private_tools(
-            source,
-            bindings,
-        )?),
-    }
 }
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
@@ -1543,25 +1522,6 @@ impl Constraint {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
-    /// Compile legacy GLRM fixture text for in-repo tools and tests only.
-    /// Phase 2 converts the remaining fixtures and deletes this path.
-    pub(crate) fn from_glrm_grammar_for_private_tools(
-        glrm: &str,
-        vocab: &crate::Vocab,
-    ) -> crate::Result<Self> {
-        with_large_import_stack(glrm.len(), || {
-            let named =
-                parse_glrm_with_external_terminal_bindings_for_private_tools(glrm, &[])?;
-            compile_from_named_grammar(
-                named,
-                vocab,
-                "glrm",
-                GlrTableConstruction::ExperimentalCoreMerged,
-                &[],
-            )
-        })
-    }
-
     /// Compile a GLRM grammar and declare model end-token IDs.
     pub(crate) fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
@@ -1569,26 +1529,6 @@ impl Constraint {
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_bindings_and_end_tokens(glrm, vocab, &[], end_token_ids)
-    }
-
-    /// Compile legacy GLRM fixture text with end-token IDs, for tests only.
-    /// Phase 2 converts the remaining fixtures and deletes this path.
-    pub(crate) fn from_glrm_grammar_with_end_tokens_for_private_tools(
-        glrm: &str,
-        vocab: &crate::Vocab,
-        end_token_ids: &[u32],
-    ) -> crate::Result<Self> {
-        with_large_import_stack(glrm.len(), || {
-            let named =
-                parse_glrm_with_external_terminal_bindings_for_private_tools(glrm, &[])?;
-            compile_from_named_grammar(
-                named,
-                vocab,
-                "glrm",
-                GlrTableConstruction::ExperimentalCoreMerged,
-                end_token_ids,
-            )
-        })
     }
 
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
@@ -1607,6 +1547,31 @@ impl Constraint {
                 end_token_ids,
             )
         })
+    }
+
+    /// Compile fixture GLRM whose `extern token` declarations are each bound to
+    /// exactly one token ID. Test scaffolding only.
+    #[cfg(test)]
+    pub(crate) fn from_glrm_with_token_ids(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        token_ids: &[(&str, u32)],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        let bindings = token_ids
+            .iter()
+            .map(|&(name, id)| (name, [(id, id)]))
+            .collect::<Vec<_>>();
+        let bindings = bindings
+            .iter()
+            .map(|(name, ranges)| (*name, ranges.as_slice()))
+            .collect::<Vec<_>>();
+        Self::from_glrm_grammar_with_bindings_and_end_tokens(
+            glrm,
+            vocab,
+            &bindings,
+            end_token_ids,
+        )
     }
 
     /// Compile a GLRM parent shell while retaining unresolved `extern grammar`
@@ -2201,6 +2166,31 @@ impl DynamicConstraint {
         })
     }
 
+    /// Compile fixture GLRM whose `extern token` declarations are each bound to
+    /// exactly one token ID. Test scaffolding only.
+    #[cfg(test)]
+    pub(crate) fn from_glrm_with_token_ids(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        token_ids: &[(&str, u32)],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        let bindings = token_ids
+            .iter()
+            .map(|&(name, id)| (name, [(id, id)]))
+            .collect::<Vec<_>>();
+        let bindings = bindings
+            .iter()
+            .map(|(name, ranges)| (*name, ranges.as_slice()))
+            .collect::<Vec<_>>();
+        Self::from_glrm_grammar_with_bindings_and_end_tokens(
+            glrm,
+            vocab,
+            &bindings,
+            end_token_ids,
+        )
+    }
+
     pub(crate) fn from_glrm_grammar_with_subgrammars_and_bindings(
         glrm: &str,
         children: &[(&str, &Constraint)],
@@ -2708,15 +2698,14 @@ mod tests {
         ]);
         let vocab = Vocab::new(entries);
 
-        Constraint::from_glrm_grammar_for_private_tools(
+        Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t LEFT ::= @token(1000000);
-                t RIGHT ::= @token(1000001);
+                extern token LEFT;
+                extern token RIGHT;
                 nt document ::= "{" "\"value\": " (LEFT | RIGHT) "}";
             "#,
-            &vocab,
-        )
+            &vocab, &[("LEFT", 1000000), ("RIGHT", 1000001)], &[])
         .expect("partial terminal-family maps should merge without indexing the unmapped sentinel");
     }
 
@@ -2729,7 +2718,7 @@ mod tests {
                 ignore OUTER_WS;
                 t OUTER_WS ::= " "+;
 
-                g inner ::= {
+                grammar inner {
                     start value;
                     ignore INNER_WS;
                     t INNER_WS ::= " "+;
@@ -2760,12 +2749,12 @@ mod tests {
                 ignore ROOT_WS;
                 t ROOT_WS ::= " "+;
 
-                g middle ::= {
+                grammar middle {
                     start wrapped;
                     ignore MIDDLE_WS;
                     t MIDDLE_WS ::= " "+;
 
-                    g leaf ::= {
+                    grammar leaf {
                         start value;
                         ignore LEAF_WS;
                         t LEAF_WS ::= " "+;
@@ -2796,7 +2785,7 @@ mod tests {
                 ignore OUTER_WS;
                 t OUTER_WS ::= " "+;
 
-                g inner ::= {
+                grammar inner {
                     start value;
                     ignore INNER_WS;
                     t INNER_WS ::= "\t"+;
@@ -2827,7 +2816,7 @@ mod tests {
                 ignore OUTER_WS;
                 t OUTER_WS ::= " "+;
 
-                g inner ::= {
+                grammar inner {
                     start value;
                     nt value ::= "a" "b";
                 };
@@ -2868,7 +2857,7 @@ mod tests {
         let inline = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                g payload ::= {
+                grammar payload {
                     start child;
                     nt child ::= "a" "b";
                 };
@@ -2984,7 +2973,7 @@ mod tests {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                g child ::= {
+                grammar child {
                     start value;
                     ignore CHILD_WS;
                     t CHILD_WS ::= "\t"+;
@@ -3048,14 +3037,13 @@ mod tests {
     #[test]
     fn glrm_external_subgrammar_allocator_avoids_child_special_tokens() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"!".to_vec())]);
-        let child = Constraint::from_glrm_grammar_for_private_tools(
+        let child = Constraint::from_glrm_with_token_ids(
             r#"
                 start child;
-                t MARK ::= @token(2);
+                extern token MARK;
                 nt child ::= "a" MARK;
             "#,
-            &vocab,
-        )
+            &vocab, &[("MARK", 2)], &[])
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"

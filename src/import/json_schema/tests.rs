@@ -23,7 +23,7 @@ use crate::grammar::ast::{
     lower, resolved_named_terminal_exprs, GrammarExpr, NamedGrammar, NamedRule, Quantifier,
 };
 use crate::grammar::factoring::factor_named_grammar;
-use crate::grammar::glrm::{from_glrm_for_private_tools, to_glrm};
+use crate::grammar::glrm::{from_glrm, to_glrm_v1};
 use crate::dump_json_schema_grammar_glrm;
 use crate::{DynamicConstraint, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
@@ -295,8 +295,7 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
     assert!(
         glrm.lines().any(|line| {
-            line.contains(&format!("\\\"{key}\\\""))
-                && line.contains("JSON_KEY_SEPARATOR")
+            line.contains(&format!("{key}\"")) && line.contains("JSON_KEY_SEPARATOR")
         }),
         "{glrm}"
     );
@@ -364,7 +363,7 @@ fn literal_terminal_splitting_env_toggle() {
         "additionalProperties": false
     });
     let object_grammar = schema_to_named_grammar(&object_schema).unwrap();
-    let object_glrm = to_glrm(&object_grammar);
+    let object_glrm = to_glrm_v1(&object_grammar).unwrap();
 
     let string_const = schema_to_named_grammar(&json!({"const": "ready"})).unwrap();
     let string_const_expr = start_expr(&string_const);
@@ -1081,7 +1080,7 @@ fn json_importer_compacts_terminal_pattern_literals() {
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": r"^file:.+\.geodatabase?$"});
     let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
 
     assert!(glrm.contains("json_string_constrained"), "{glrm}");
     assert!(glrm.contains("file:"), "{glrm}");
@@ -1120,7 +1119,7 @@ fn map_only_typed_additional_properties_repeat_with_separators() {
     ));
 
     let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         !glrm.contains("JSON_ITEM_SEPARATOR ~ ( (((JSON_KEY_STRING JSON_KEY_SEPARATOR)"),
         "map entries must not be emitted as one optional inner `+` item: {glrm}",
@@ -1586,7 +1585,7 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
     let schema = json!({"type": "string", "pattern": r"^(?:\S+\s+){0,9}\S+$"});
 
     let grammar = schema_to_named_grammar(&schema).expect("schema should import");
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let constrained_lines = glrm
         .lines()
         .filter(|line| line.starts_with("t json_string_constrained_"))
@@ -1972,7 +1971,7 @@ fn closed_object_lowers_to_prefix_chain_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!contains_separated_sequence(start_expr(&grammar)));
     assert!(glrm.contains("json_closed_object_prefix"), "{glrm}");
     assert!(!grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
@@ -1993,7 +1992,7 @@ fn large_optional_closed_object_uses_expr_nfa_body() {
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains("json_closed_object_fixed_pair_loop_body"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
@@ -2022,7 +2021,7 @@ fn expr_nfa_pattern_property_symbols_hoist_raw_regexes_for_glrm_roundtrip() {
         "ExprNFA transition symbols must not contain raw regex literals"
     );
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     for line in glrm.lines().filter(|line| line.trim_start().contains("--")) {
         assert!(!line.contains("/"), "raw regex leaked into FA transition: {line}
 {glrm}");
@@ -2049,7 +2048,7 @@ fn required_prefix_open_object_keeps_ordered_prefix_chain() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         !glrm.contains("json_required_prefix_open_object_pair_loop_body"),
         "{glrm}"
@@ -2140,7 +2139,7 @@ fn open_additional_map_max_properties_emits_bounded_dynamic_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("{0,1}") || glrm.contains("?"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -2157,7 +2156,7 @@ fn required_property_covered_by_pattern_properties_is_synthesized() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.is_empty(), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -2195,7 +2194,7 @@ fn required_property_not_covered_by_closed_object_lowers_to_empty_language() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.is_empty(), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -2215,7 +2214,7 @@ fn fixed_property_still_intersects_matching_pattern_property() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("ok") || glrm.contains("line1") || glrm.contains("json_additional"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -2259,7 +2258,7 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
     assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
     assert!(glrm.contains(r#"/, "k1": "#), "{glrm}");
@@ -2289,11 +2288,11 @@ fn object_property_array_opener_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert_glrm_has_split_literal_key(&glrm, "items");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("\"\\\"items\\\"\" JSON_KEY_SEPARATOR \"[\"")
+            line.contains("'\"items\"' JSON_KEY_SEPARATOR \"[\"")
         }),
         "{glrm}"
     );
@@ -2313,9 +2312,9 @@ fn object_property_string_value_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert_glrm_has_split_literal_key(&glrm, "name");
-    assert!(glrm.contains("-- JSON_STRING -->"), "{glrm}");
+    assert!(glrm.contains(": JSON_STRING\n"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -2332,14 +2331,14 @@ fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
     assert_glrm_has_split_literal_key(&glrm, "name");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("\"\\\"name\\\"\" JSON_KEY_SEPARATOR")
+            line.contains("'\"name\"' JSON_KEY_SEPARATOR")
                 && line.contains("\"null\"")
         }),
         "{glrm}"
@@ -2360,7 +2359,7 @@ fn format_annotation_nullable_uuid_property_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2393,7 +2392,7 @@ fn patterned_property_keeps_literal_key_boundaries_and_length_bounds() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2422,7 +2421,7 @@ fn costly_bounded_pattern_property_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2456,7 +2455,7 @@ fn patterned_property_reuses_split_key_components_after_an_object_separator() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2485,7 +2484,7 @@ fn mixed_string_integer_pattern_property_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2513,7 +2512,7 @@ fn llguidance_compat_escaped_pattern_property_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
@@ -2539,11 +2538,11 @@ fn object_property_null_value_keeps_literal_key_boundaries() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert_glrm_has_split_literal_key(&glrm, "name");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("\"\\\"name\\\"\" JSON_KEY_SEPARATOR \"null\"")
+            line.contains("'\"name\"' JSON_KEY_SEPARATOR \"null\"")
         }),
         "{glrm}"
     );
@@ -2678,7 +2677,7 @@ fn large_optional_open_object_with_pattern_properties_uses_fused_prefix_chain_ru
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
     assert!(!contains_separated_sequence(start_expr(&grammar)));
     assert!(glrm.contains("json_open_object_prefix"), "{glrm}");
@@ -2753,7 +2752,7 @@ fn shared_additional_key_colon_terminal_is_emitted_once() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let count = grammar
         .rules
         .iter()
@@ -2784,7 +2783,7 @@ fn additional_properties_factoring_uses_shared_key_colon_terminal() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -2906,7 +2905,7 @@ fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disab
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     assert!(!glrm.contains("json_additional_key_colon_local"), "{glrm}");
     lower(&grammar).unwrap();
@@ -2955,7 +2954,7 @@ fn huge_shared_additional_exclusion_set_uses_shared_addback_by_default() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     assert!(glrm.contains("json_additional_excluded_key_colon_shared"), "{glrm}");
     assert!(glrm.contains("JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED"), "{glrm}");
@@ -3019,7 +3018,7 @@ fn arrays_use_item_schema_and_min_max_items() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("{1,3}"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -3038,7 +3037,7 @@ fn bounded_object_arrays_use_separated_sequence_range() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(contains_separated_sequence(start_expr(&grammar)), "{glrm}");
     assert!(glrm.contains("{0,3}"), "{glrm}");
     assert!(!glrm.contains("bounded_array_"), "{glrm}");
@@ -3103,7 +3102,7 @@ fn bounded_pattern_string_arrays_use_terminal_rule() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("bounded_scalar_array_"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
@@ -3123,7 +3122,7 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("bounded_scalar_array_"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
@@ -3173,7 +3172,7 @@ fn format_annotation_unbounded_email_array_matches_plain_bounded_strings() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"array", "items":{"type":"string", "maxLength":1024}})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     assert!(schema_accepts_bytes(&schema, br#"["not-an-email"]"#));
     assert!(!schema_accepts_bytes(&schema, b"[true]"));
     lower(&grammar).unwrap();
@@ -3409,7 +3408,7 @@ fn unbounded_plain_string_arrays_use_terminal_rule() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("unbounded_scalar_array_"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("unbounded_scalar_array_") && rule.is_terminal
@@ -3425,7 +3424,7 @@ fn unbounded_nullable_string_arrays_keep_null_item_alternative() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains("unbounded_scalar_array_"), "{glrm}");
     assert!(glrm.contains("JSON_STRING"), "{glrm}");
     assert!(glrm.contains("JSON_NULL"), "{glrm}");
@@ -3473,7 +3472,7 @@ fn legacy_tuple_items_use_additional_items_tail() {
     let expr = start_expr(&grammar);
     assert!(contains_literal_bytes(expr, b"\"head\""), "{expr:?}");
     assert!(!contains_literal_bytes(expr, b"head\""), "{expr:?}");
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_INTEGER") || glrm.contains("JSON_NUMBER"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -3532,7 +3531,7 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
     assert!(regex.contains("[A-Za-z]"), "{regex}");
     assert!(regex.contains("{2,8}"), "{regex}");
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -3547,7 +3546,7 @@ fn large_simple_bounded_string_pattern_uses_exact_chunked_prefix_tail() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
     assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
     assert!(glrm.contains("json_string_char_upto_close_63"), "{glrm}");
@@ -3565,7 +3564,7 @@ fn dynamic_bounded_anchored_prefix_pattern_stays_one_semantic_terminal() {
     });
 
     let grammar = schema_to_named_grammar_for_dynamic(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_constrained_bounded"), "{glrm}");
     assert!(!glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_64"), "{glrm}");
@@ -3611,7 +3610,7 @@ fn chunked_anchored_prefix_pattern_is_structural_not_literal_specific() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
     assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
     assert!(!glrm.contains(" & "), "{glrm}");
@@ -3631,7 +3630,7 @@ fn chunked_anchored_prefix_pattern_rejects_prefix_longer_than_max() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains(" & "), "{glrm}");
 
     let mut input = Vec::from(*b"\"");
@@ -3658,7 +3657,7 @@ fn string_pattern_lowers_ascii_digit_subranges() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("[1-5]"), "{glrm}");
     assert!(!glrm.contains("[^\\s\\S](?:[0-9a-f])"), "{glrm}");
     lower(&grammar).unwrap();
@@ -3690,7 +3689,7 @@ fn json_string_char_terminal_requires_valid_utf8_sequences() {
     let schema = json!({"type": "string"});
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("[\\xC2-\\xDF][\\x80-\\xBF]"), "{glrm}");
     assert!(!glrm.contains("[^\\x00-\\x1f\\x7f"), "{glrm}");
     lower(&grammar).unwrap();
@@ -3718,7 +3717,7 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
         grammar.rules
     );
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -3738,7 +3737,7 @@ fn generic_repeat_chunk_env_does_not_change_string_chunking() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_17"), "{glrm}");
     lower(&grammar).unwrap();
@@ -3892,7 +3891,7 @@ fn oneof_ref_allof_shared_prefix_variants_use_exact_object_variant_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start_rule = glrm
         .lines()
         .find(|line| line.starts_with("nt schema_root_0 ::="))
@@ -3956,7 +3955,7 @@ fn oneof_ref_allof_variants_preserve_mismatched_prefix_constraints() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start_rule = glrm
         .lines()
         .find(|line| line.starts_with("nt schema_root_0 ::="))
@@ -4400,7 +4399,7 @@ fn medium_bounded_string_terminalizes_with_env_override() {
         grammar.rules
     );
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -4430,7 +4429,7 @@ fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
     assert!(regex.contains(r#"\\u00(?:"#), "{regex}");
     assert!(!regex.contains(r#"\\u0030|\\u0031|\\u0032"#), "{regex}");
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains(r#""\\u" /0/ /0/ /3/ /0/"#), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -4455,7 +4454,7 @@ fn bounded_property_string_merges_both_quotes_into_terminal() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         glrm.contains("json_string_char_bounded_wrapped_0_20"),
         "{glrm}"
@@ -4476,7 +4475,7 @@ fn moderately_bounded_string_terminalizes_by_default() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_constrained"), "{glrm}");
     assert!(!glrm.contains("JSON_STRING_CHAR{0,64}"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
@@ -4496,7 +4495,7 @@ fn moderately_large_prefix_only_string_terminalizes_without_chunk_helper_rules()
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_constrained"), "{glrm}");
     assert!(!glrm.contains("JSON_STRING_CHAR{50} JSON_STRING_CHAR{30}"), "{glrm}");
     assert!(
@@ -4522,7 +4521,7 @@ fn split_bounded_string_chunks_do_not_overlap_at_boundary() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_char_upto_close_63"), "{glrm}");
     assert!(!glrm.contains("json_string_char_upto_close_64"), "{glrm}");
     lower(&grammar).unwrap();
@@ -4545,7 +4544,7 @@ fn very_large_bounded_string_still_uses_split_chunk_rules() {
         grammar.rules
     );
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
     assert!(glrm.contains("json_string_char_exact_open_64"), "{glrm}");
     assert!(glrm.contains("json_string_char_upto_wrapped_64"), "{glrm}");
@@ -4593,7 +4592,7 @@ fn discriminator_anyof_object_lowers_to_compact_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_discriminator_anyof_object_body"), "{glrm}");
     assert!(glrm.contains("json_string_pattern_body"), "{glrm}");
     assert!(glrm.contains("t json_string_pattern_open_middle"), "{glrm}");
@@ -4874,7 +4873,7 @@ fn format_annotation_uuid_matches_plain_strings() {
     let schema = json!({"type":"string", "format":"uuid"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""not-a-valid-uuid""#));
     assert!(!schema_accepts_bytes(&schema, b"true"));
@@ -4885,7 +4884,7 @@ fn format_annotation_date_time_matches_plain_strings() {
     let schema = json!({"type":"string", "format":"date-time"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""not-a-valid-date-time""#));
     assert!(!schema_accepts_bytes(&schema, b"true"));
@@ -4896,7 +4895,7 @@ fn format_annotation_date_matches_plain_strings() {
     let schema = json!({"type":"string", "format":"date"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""not-a-valid-date""#));
     assert!(!schema_accepts_bytes(&schema, b"true"));
@@ -4907,7 +4906,7 @@ fn format_annotation_email_matches_plain_strings() {
     let schema = json!({"type":"string", "format":"email"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""not-a-valid-email""#));
     assert!(!schema_accepts_bytes(&schema, b"true"));
@@ -4923,7 +4922,7 @@ fn format_annotation_email_preserves_large_max_length() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string", "maxLength":1024})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     assert!(schema_accepts_bytes(&schema, br#""not-an-email""#));
 
     let mut at_limit = Vec::with_capacity(1026);
@@ -4968,7 +4967,7 @@ fn format_annotation_host_and_ip_names_match_plain_strings() {
     for format in ["hostname", "ipv4", "ipv6", "unknown-format"] {
         let schema = json!({"type":"string", "format":format});
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert_eq!(to_glrm(&grammar), to_glrm(&plain), "format={format}");
+        assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap(), "format={format}");
         assert!(schema_accepts_bytes(&schema, br#""not a valid host or IP""#));
         assert!(!schema_accepts_bytes(&schema, b"42"));
     }
@@ -4979,7 +4978,7 @@ fn format_annotation_uri_matches_plain_strings() {
     let schema = json!({"type":"string", "format":"uri"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
-    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap());
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""not-a-valid-uri""#));
     assert!(!schema_accepts_bytes(&schema, b"true"));
@@ -5057,7 +5056,7 @@ fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
             .any(|rule| rule.is_terminal && rule.name.starts_with("json_pattern_key_colon"))
     );
 
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         glrm.contains("\"last_modification\"")
             || glrm.contains("\\\"last_modification\\\""),
@@ -5081,7 +5080,7 @@ fn overlapping_literal_and_pattern_keys_still_lower_with_shared_factoring() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL") || glrm.contains("json_additional"), "{glrm}");
     assert!(
         glrm.contains("\"x-name\"") || glrm.contains("\\\"x-name\\\"") || glrm.contains("\"x\\-name\""),
@@ -5100,7 +5099,7 @@ fn json_separators_require_single_space() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("(?:, )"), "{glrm}");
     assert!(glrm.contains("(?:: )"), "{glrm}");
     lower(&grammar).unwrap();
@@ -5863,8 +5862,8 @@ fn oneof_nested_config_align_enum_ref_branches_lower_exactly() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     // Discriminator separation is preserved while branches lower independently.
-    assert!(to_glrm(&grammar).contains("left"));
-    assert!(to_glrm(&grammar).contains("right"));
+    assert!(to_glrm_v1(&grammar).unwrap().contains("left"));
+    assert!(to_glrm_v1(&grammar).unwrap().contains("right"));
     lower(&grammar).unwrap();
 }
 
@@ -5874,8 +5873,8 @@ fn oneof_nested_config_align_enum_ref_branches_preserve_shared_content() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     // Discriminator separation is preserved while branches lower independently.
-    assert!(to_glrm(&grammar).contains("left"));
-    assert!(to_glrm(&grammar).contains("right"));
+    assert!(to_glrm_v1(&grammar).unwrap().contains("left"));
+    assert!(to_glrm_v1(&grammar).unwrap().contains("right"));
     lower(&grammar).unwrap();
 }
 
@@ -6289,10 +6288,10 @@ fn enum_and_const_lower_to_exact_json_literals() {
     enable_split_literal_terminals_for_test!();
     let schema = json!({"enum": [null, true, "ready", 7]});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("\"null\""), "{glrm}");
     assert!(glrm.contains("\"true\""), "{glrm}");
-    assert!(glrm.contains("\"\\\"ready\\\"\""), "{glrm}");
+    assert!(glrm.contains("'\"ready\"'"), "{glrm}");
     assert!(glrm.contains("\"7\""), "{glrm}");
 }
 
@@ -6333,9 +6332,9 @@ fn literal_quote_merge_env_overrides_remain_effective() {
         "additionalProperties": false
     }))
     .unwrap();
-    let glrm = to_glrm(&object);
+    let glrm = to_glrm_v1(&object).unwrap();
     assert!(
-        glrm.contains("JSON_QUOTE \"name\\\"\" JSON_KEY_SEPARATOR"),
+        glrm.contains("JSON_QUOTE 'name\"' JSON_KEY_SEPARATOR"),
         "{glrm}"
     );
 }
@@ -6459,9 +6458,9 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
     );
     assert!(tokenizer.num_states() > 0);
 
-    let dumped = to_glrm(&grammar);
+    let dumped = to_glrm_v1(&grammar).unwrap();
     assert!(dumped.contains("@literals"), "{dumped}");
-    let reparsed = from_glrm_for_private_tools(&dumped).unwrap();
+    let reparsed = from_glrm(&dumped).unwrap();
     let reparsed_lowered = lower(&reparsed).unwrap();
     let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &reparsed_lowered,
@@ -6481,7 +6480,7 @@ fn format_annotation_recognized_and_unknown_names_reuse_plain_string_partitions(
     for format in ["uuid", "date-time", "unknown-format"] {
         let mut grammar = schema_to_named_grammar(&json!({"type":"string", "format":format})).unwrap();
         super::finalize_lexer_partitions(&mut grammar).unwrap();
-        assert_eq!(to_glrm(&grammar), to_glrm(&plain), "format={format}");
+        assert_eq!(to_glrm_v1(&grammar).unwrap(), to_glrm_v1(&plain).unwrap(), "format={format}");
         assert_eq!(grammar.lexer_partitions, plain.lexer_partitions);
     }
 }
@@ -6693,7 +6692,7 @@ fn allof_finite_string_enum_and_pattern_is_filtered_at_import_time() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#""atomic""#));
     assert!(!schema_accepts_bytes(&schema, br#""compound""#));
     assert!(!schema_accepts_bytes(&schema, br#""parallel""#));
@@ -6738,7 +6737,7 @@ fn integer_multiple_of_one_uses_plain_range_partition() {
 fn integer_power_of_ten_multiple_lowers_to_regex() {
     let schema = json!({"type": "integer", "multipleOf": 10});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("/[1-9][0-9]*0") || glrm.contains("/-?(0|[1-9][0-9]*0)/"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -6842,7 +6841,7 @@ fn finite_integer_range_multiple_lowers_to_literals() {
         "multipleOf": 2
     });
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("\"2\" | \"4\" | \"6\""), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -6997,7 +6996,7 @@ fn anyof_pattern_with_sibling_string_type_does_not_broaden_to_json_string() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start_line = glrm
         .lines()
         .find(|line| line.starts_with("nt schema_root_0 ::="))
@@ -7302,8 +7301,8 @@ fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("nt schema_root_0 ::= json_object;"), "{glrm}");
+    let glrm = to_glrm_v1(&grammar).unwrap();
+    assert!(glrm.contains("nt schema_root_0 ::= json_object"), "{glrm}");
     assert!(
         !glrm.contains("\\\"a\\\":") && !glrm.contains(r#"/"a": "#),
         "{glrm}"
@@ -7322,7 +7321,7 @@ fn unconstrained_object_collapses_to_json_object() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
     assert!(!glrm.contains("OBJ_ORD"), "{glrm}");
     lower(&grammar).unwrap();
@@ -7336,7 +7335,7 @@ fn empty_properties_object_collapses_to_json_object() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
     assert!(!glrm.contains("OBJ_ORD"), "{glrm}");
     lower(&grammar).unwrap();
@@ -7389,7 +7388,7 @@ fn anyof_open_objects_with_shared_optional_property_does_not_collapse_to_json_ob
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
     assert!(glrm.contains("json_additional_excluded_key_colon_shared"), "{glrm}");
     lower(&grammar).unwrap();
@@ -7455,7 +7454,7 @@ fn anyof_nested_object_allof_refs_factor_into_single_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     assert!(glrm.contains("nt schema_root_0 ::= \"{\" json_anyof_object_body"), "{glrm}");
     assert!(
@@ -7503,12 +7502,12 @@ fn pattern_map_anyof_open_objects_with_disjoint_optional_properties_collapses_va
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let pattern_pair_rule = glrm
         .lines()
         .find(|line| line.contains("json_pattern_map_pair_"))
         .unwrap_or_else(|| panic!("{glrm}"));
-    assert!(pattern_pair_rule.ends_with(" json_object;"), "{glrm}");
+    assert!(pattern_pair_rule.ends_with(" json_object"), "{glrm}");
     assert!(!glrm.contains("obj_ord_"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -7597,7 +7596,7 @@ fn anyof_closed_object_variants_with_shared_required_prefix_use_exact_variant_nf
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
     assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
@@ -7638,7 +7637,7 @@ fn anyof_closed_object_variants_share_identical_common_ref_property_transition()
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(count_rules_with_prefix(&grammar, "json_anyof_object_body") <= 1);
     assert!(glrm.contains("common"), "{glrm}");
     lower(&grammar).unwrap();
@@ -7681,7 +7680,7 @@ fn anyof_closed_object_variants_do_not_share_mismatched_common_ref_property_tran
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     assert!(
         glrm.matches("\\\"common\\\"").count() == 1
@@ -7689,7 +7688,7 @@ fn anyof_closed_object_variants_do_not_share_mismatched_common_ref_property_tran
         "{glrm}"
     );
     assert!(
-        glrm.contains("-- schema_ref_1") || glrm.contains("-- schema_ref_2"),
+        glrm.contains(": schema_ref_1") || glrm.contains(": schema_ref_2"),
         "{glrm}"
     );
     lower(&grammar).unwrap();
@@ -7715,7 +7714,7 @@ fn anyof_untyped_closed_object_variants_keep_non_object_alternatives() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start = start_expr(&grammar);
     let GrammarExpr::Choice(alternatives) = start else {
         panic!("expected start choice, got {start:?}");
@@ -7754,7 +7753,7 @@ fn anyof_untyped_closed_object_variants_with_sibling_required_use_exact_variant_
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start = start_expr(&grammar);
     let GrammarExpr::Choice(alternatives) = start else {
         panic!("expected start choice, got {start:?}");
@@ -7826,7 +7825,7 @@ fn mixed_anyof_closed_object_variants_with_string_alt_use_variant_nfa() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start = start_expr(&grammar);
     let GrammarExpr::Choice(alternatives) = start else {
         panic!("expected start choice, got {start:?}");
@@ -7854,7 +7853,7 @@ fn untyped_plain_object_assertions_keep_non_object_alternatives() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let start = start_expr(&grammar);
     let GrammarExpr::Choice(alternatives) = start else {
         panic!("expected start choice, got {start:?}");
@@ -8007,7 +8006,7 @@ fn allof_array_min_max_items_merge_clamps_bounds() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("{3,4}"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8214,7 +8213,7 @@ fn allof_distributes_over_object_anyof_before_lowering() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_anyof_object_body_"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8449,12 +8448,12 @@ fn open_object_anyof_uses_single_object_body_nfa() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let pattern_pair_rule = glrm
         .lines()
         .find(|line| line.contains("json_pattern_map_pair_"))
         .unwrap_or_else(|| panic!("{glrm}"));
-    assert!(pattern_pair_rule.ends_with(" json_object;"), "{glrm}");
+    assert!(pattern_pair_rule.ends_with(" json_object"), "{glrm}");
     assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
     assert!(
         !glrm.contains("\"{\" json_closed_object_body")
@@ -8554,7 +8553,7 @@ fn array_items_anyof_allof_ref_alias_variants_lower_to_shared_open_object_body()
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8596,7 +8595,7 @@ fn sibling_pattern_addback_subtracts_local_pattern_language_for_o10297_shape() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
 
     assert!(
         glrm.contains("json_additional_excluded_key_colon_shared")
@@ -8672,7 +8671,7 @@ fn llguidance_compat_drops_only_plain_subsumed_open_object_anyof_branch() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_STRING JSON_KEY_SEPARATOR"), "{glrm}");
     assert!(!glrm.contains(r#""resource": "#), "{glrm}");
     lower(&grammar).unwrap();
@@ -8703,7 +8702,7 @@ fn llguidance_compat_keeps_subsumed_open_object_branch_with_pattern_properties()
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_pattern_key_colon"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8742,7 +8741,7 @@ fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     assert!(!glrm.contains(r#"/"thumbnail": / -->"#), "{glrm}");
     lower(&grammar).unwrap();
@@ -8826,7 +8825,7 @@ fn anyof_drops_recursive_open_object_branches_subsumed_by_base_node() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains("\"r\""), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8853,7 +8852,7 @@ fn anyof_does_not_drop_open_object_branch_that_widens_base_property() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("JSON_STRING"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -8951,7 +8950,7 @@ fn shadow_owner_skips_residual_with_unsafe_additional_constraints() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.contains(" - json_string_constrained"), "{glrm}");
     assert!(schema_accepts_bytes(&schema, br#"{"name": "Ada"}"#));
     assert!(!schema_accepts_bytes(&schema, br#"{"name": 123}"#));
@@ -9025,7 +9024,7 @@ fn shadow_owner_ref_branch_context_uses_shared_open_object_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         glrm.contains("schema_ref_") && glrm.contains("json_anyof_object_body"),
         "{glrm}"
@@ -9074,7 +9073,7 @@ fn single_anyof_object_ref_with_sibling_properties_merges_before_lowering() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(!glrm.is_empty(), "{glrm}");
     assert!(
         glrm.contains("\"name\"") || glrm.contains("\\\"name\\\""),
@@ -9098,7 +9097,7 @@ fn ref_with_sibling_assertions_is_intersected() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(
         glrm.contains("json_string_constrained") || glrm.contains("JSON_STRING_CHAR{2}"),
         "{glrm}"
@@ -9600,7 +9599,7 @@ fn json_min_length_without_max_avoids_repeated_single_char_terminal_shape() {
     let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
 
     assert!(hazards.is_empty(), "hazards: {hazards:#?}");
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     assert!(glrm.contains("json_string_char_unbounded_20_close"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_1_1*"), "{glrm}");
 }
@@ -9652,7 +9651,7 @@ fn large_unbounded_min_length_uses_existing_exact_chunking_then_unbounded_close_
         "additionalProperties": false
     });
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
+    let glrm = to_glrm_v1(&grammar).unwrap();
     let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
     let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
 
@@ -9685,7 +9684,7 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
             merge_close,
         };
         let grammar = lower_document(&document, config).unwrap();
-        let glrm = to_glrm(&grammar);
+        let glrm = to_glrm_v1(&grammar).unwrap();
         let unbounded_rule = grammar
             .rules
             .iter()
