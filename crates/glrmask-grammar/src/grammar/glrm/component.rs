@@ -12,20 +12,7 @@ pub struct ParsedComponent {
 impl ParsedComponent {
     pub fn parse_glrm(source: &str) -> Result<Self, GlrMaskError> {
         let mut parser=GlrmParser::from_source(source)?;
-        parser.strict_native=true;
         Self::from_scope(parser.parse_root_scope()?)
-    }
-
-    /// Unstable repository tooling only. Public Grammar constructors select the
-    /// strict native surface above; old fixtures must opt into this separate path.
-    #[doc(hidden)]
-    pub fn parse_glrm_for_tools(source:&str)->Result<Self,GlrMaskError> {
-        let modern = GlrmParser::from_source(source).and_then(|mut parser| parser.parse_root_scope());
-        let scope = match modern {
-            Ok(scope) => scope,
-            Err(_) => GlrmParser::from_source_legacy(source)?.parse_root_scope()?,
-        };
-        Self::from_scope(scope)
     }
 
     fn from_scope(scope:ParsedGlrmScope) -> Result<Self,GlrMaskError> {

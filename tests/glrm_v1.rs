@@ -941,7 +941,7 @@ fn glrm_definition_with_equals_is_rejected_with_message_and_span() {
 fn glrm_token_atoms_are_rejected_by_the_public_parser() {
     let error = Grammar::from_glrm("start start;\nnt start ::= @token(5);").unwrap_err();
     assert!(
-        error.to_string().contains("has no @token(id) syntax"),
+        error.to_string().contains("token IDs can't appear in GLRM"),
         "{error}"
     );
 }
