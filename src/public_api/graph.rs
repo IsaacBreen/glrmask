@@ -312,7 +312,7 @@ mod snapshot_tests {
         let original=g.clone();
         for i in 0..256 {
             assert_eq!(g.requirements().unwrap(),source_index(&g).unwrap().requirements().unwrap());
-            g.bind(format!("E{i}"),TokenSet::from(7)).unwrap();
+            g.bind(&format!("E{i}"),TokenSet::from(7)).unwrap();
             assert_eq!(source_summary(&g).unwrap().closed(),i==255);
         }
         assert!(g.requirements().unwrap().is_empty());

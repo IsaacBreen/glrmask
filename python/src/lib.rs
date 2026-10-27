@@ -56,7 +56,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use self_cell::self_cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 use glrmask::__private::{
@@ -103,6 +103,16 @@ impl OwnedDynamicState {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn checked_vocab(entries: Vec<(u32, Vec<u8>)>) -> PyResult<glrmask::Vocab> {
+    let mut ids = BTreeSet::new();
+    for (id, _) in &entries {
+        if !ids.insert(*id) {
+            return Err(PyValueError::new_err(format!("duplicate vocabulary ID {id}")));
+        }
+    }
+    Ok(glrmask::Vocab::new(entries))
+}
+
 fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(token_to_id.len());
     for (key, value) in token_to_id.iter() {
@@ -114,7 +124,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
         let token_id: u32 = value.extract()?;
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries))
+    checked_vocab(entries)
 }
 
 fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
@@ -128,7 +138,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
             .to_vec();
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries))
+    checked_vocab(entries)
 }
 
 fn external_terminal_bindings_from_dict(
@@ -235,7 +245,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
     }
 
     Ok((
-        glrmask::Vocab::new(entries),
+        checked_vocab(entries)?,
         end_token_ids,
     ))
 }

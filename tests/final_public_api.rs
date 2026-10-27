@@ -327,7 +327,7 @@ fn focused_2_rebinding_error() {
 fn focused_3_qualified_path_rejection() {
     let mut m = Module::new(&Grammar::from_glrm(HOST).unwrap());
     let err = m.bind("a::b", TokenSet::from(1)).unwrap_err().to_string();
-    assert!(err.contains("qualified paths are not supported"), "{err}");
+    assert!(err.contains("there is no extern named"), "{err}");
 }
 
 #[test]

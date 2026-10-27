@@ -111,7 +111,7 @@ def test_nested_path_and_open_child_are_rejected():
     parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     with pytest.raises(ValueError, match="unbound externs"):
         parent.bind("child", child)
-    with pytest.raises(ValueError, match="qualified paths"):
+    with pytest.raises(ValueError, match="there is no extern named"):
         parent.bind("child::MARK", glrmask.TokenSet([7]))
     child.bind("MARK", glrmask.TokenSet([7]))
     parent.bind("child", child)

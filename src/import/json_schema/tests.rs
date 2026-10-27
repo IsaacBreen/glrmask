@@ -1178,13 +1178,13 @@ fn llguidance_allof_child_required_prefix_rejects_optional_anyof_key_first() {
     assert!(!schema_mask_allows_token_after_prefix(
         &schema,
         br#"{"children": [{""#,
-        67,
+        300,
         b"d",
     ));
     assert!(schema_mask_allows_token_after_prefix(
         &schema,
         br#"{"children": [{"match": "x", "devices": {}, "platforms"#,
-        68,
+        301,
         b"\":",
     ));
     assert!(schema_accepts_bytes(
@@ -1216,7 +1216,7 @@ fn llguidance_unconstrained_object_anyof_keeps_generic_key_language() {
     assert!(!schema_mask_allows_token_after_prefix(
         &schema,
         br#"{""#,
-        69,
+        300,
         br#"\/"#,
     ));
     assert!(schema_accepts_bytes(&schema, br#"{"plain": 1}"#));
@@ -1495,7 +1495,7 @@ fn llguidance_pattern_property_digit_key_rejects_bare_backslash_prefix() {
     assert!(!schema_mask_allows_token_after_prefix(
         &schema,
         br#"{""#,
-        59,
+        300,
         br#"\"#,
     ));
 }
@@ -8641,7 +8641,7 @@ fn oneof_sibling_object_preserves_root_property_order() {
     assert!(schema_mask_allows_token_after_prefix(
         &schema,
         br#"{"grantType": "authorization_code", "redirectUris": ["https://example.com/callback"], ""#,
-        81,
+        300,
         b"r",
     ));
 }

@@ -49,7 +49,7 @@ fn prepared_parent_raw_child_and_atomic_snapshots() {
 
     // Qualified path rejection: "::" is never supported
     let err_qual = parent.bind("child::item", a()).unwrap_err().to_string();
-    assert!(err_qual.contains("qualified paths are not supported"), "{err_qual}");
+    assert!(err_qual.contains("there is no extern named"), "{err_qual}");
 
     // Close child first, then bind to parent
     child.bind("item", a()).unwrap();

@@ -793,13 +793,22 @@ impl Grammar {
     }
 
     /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind.
-    #[allow(private_bounds)]
-    pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
-    where
-        T: IntoGrammarValue,
-    {
-        let next = self.bind_value(name.as_ref(), value.into_grammar_value()?)?;
+    /// bound, or `value` is the wrong kind. A grammar can't bind a [`Module`]; use
+    /// [`Module::bind`] for that.
+    pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
+        let value = match value.into().0 {
+            module::BindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
+            module::BindingKind::Expr(expr) => {
+                GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
+            }
+            module::BindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
+            module::BindingKind::Module(_) => {
+                return Err(Error::Compilation(format!(
+                    "can't bind {name:?} to a Module in a Grammar; use Module::bind instead"
+                )));
+            }
+        };
+        let next = self.bind_value(name, value)?;
         *self = next;
         Ok(())
     }
@@ -811,9 +820,7 @@ impl Grammar {
     #[allow(private_bounds)]
     pub fn bind_snapshot<T>(&self, name: impl AsRef<str>, value: T) -> Result<Self>
     where T: IntoGrammarValue {
-        let mut next = self.clone();
-        next.bind(name, value)?;
-        Ok(next)
+        self.bind_value(name.as_ref(), value.into_grammar_value()?)
     }
 
     fn bind_value(&self, name:&str, mut value:GrammarValue) -> Result<Self> {

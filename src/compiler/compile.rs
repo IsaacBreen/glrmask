@@ -322,7 +322,7 @@ mod empty_byte_summary_tests {
     #[test]
     fn empty_byte_summary_is_exact_shared_and_vocab_local() {
         let vocab = Vocab::new(vec![
-            (512, Vec::new()), (31, Vec::new()), (7, Vec::new()),
+            (512, Vec::new()), (31, Vec::new()),
             (7, b"last spelling wins".to_vec()), (3, Vec::new()),
             (0, vec![0]), (2, b"a".to_vec()), (90, b"a".to_vec()),
         ]);

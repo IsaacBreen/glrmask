@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::any::{Any, TypeId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -165,7 +165,17 @@ impl Clone for Vocab {
 
 impl Vocab {
     /// Creates a vocabulary from `(id, bytes)` pairs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an ID appears more than once.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
+        let mut ids = BTreeSet::new();
+        for (id, _) in &entries {
+            if !ids.insert(*id) {
+                panic!("duplicate vocabulary ID {id}");
+            }
+        }
         let entries: Arc<BTreeMap<u32, Vec<u8>>> = Arc::new(entries.into_iter().collect());
         let max_token_byte_len = OnceLock::new();
         let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
@@ -421,6 +431,12 @@ mod tests {
         let cloned = vocab.clone();
         assert!(Arc::ptr_eq(&vocab.compiler_cache, &cloned.compiler_cache));
         assert_eq!(cloned.compiler_cache.artifacts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate vocabulary ID")]
+    fn duplicate_ids_are_rejected() {
+        let _ = Vocab::new(vec![(0, b"a".to_vec()), (0, b"b".to_vec())]);
     }
 
     #[test]

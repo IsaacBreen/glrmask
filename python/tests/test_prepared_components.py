@@ -50,7 +50,7 @@ def test_rebinding_error():
 
 def test_qualified_paths_rejected():
     m = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
-    with pytest.raises(ValueError, match="qualified paths are not supported"):
+    with pytest.raises(ValueError, match="there is no extern named"):
         m.bind("child::sub", glrmask.Grammar.from_lark('start: "a"'))
 
 

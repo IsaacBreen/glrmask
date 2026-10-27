@@ -33,9 +33,9 @@
     "TokenSet.__repr__": "An expression that rebuilds the set, or a summary for large sets.",
     "TokenSet.__eq__": "Whether both sets contain the same IDs.",
     "Vocab": "A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.",
-    "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is.",
-    "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict.",
-    "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.",
+    "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `ValueError` if an ID appears more than once.",
+    "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict. Raises `ValueError` if an ID appears more than once.",
+    "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `ValueError` if an ID appears more than once.",
     "Vocab.llama_cpp_end_token_ids": "The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.",
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "The extern's name.",
@@ -215,5 +215,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "93af4b991a15add3962964d3ab0519104512413e76b459dc171029f359428348"
+  "content_sha256": "4135703f1f8f40d53d80f1494b9117836ac6247b5d9c9f31739c4f3b0f12a3a2"
 }

@@ -8,6 +8,8 @@
 - Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
 - 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
 - Rust: `ConstraintState::mask_len` is new, matching the other bindings.
+- Rust: `Grammar::bind` takes any `Binding`, like `Module::bind`, and its name is a `&str`. Binding a `Module` into a `Grammar` is an error.
+- Rust `Vocab::new` panics on a duplicate token ID, and Python's `Vocab` factories raise `ValueError`. The other bindings already rejected duplicates.
 
 ## 0.5.0
 

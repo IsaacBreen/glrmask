@@ -88,7 +88,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
         _bound_snapshot(bound, 'T', glrmask.TokenSet([8]))
     with pytest.raises(ValueError, match="there is no .*extern named"):
         _bound_snapshot(bound, 'missing', child)
-    with pytest.raises(ValueError, match="qualified paths"):
+    with pytest.raises(ValueError, match="there is no extern named"):
         _bound_snapshot(bound, 'C::sub', child)
     complete = _bound_snapshot(bound, 'C', child)
     assert list(complete.externs.unbound) == []
@@ -324,6 +324,11 @@ def test_grammar_batch_bind_is_atomic():
 
     assert grammar.bind(a=0, b=1) is None
     assert len(grammar.externs.unbound) == 0
+
+
+def test_vocab_from_dict_rejects_duplicate_ids():
+    with pytest.raises(ValueError, match="duplicate vocabulary ID 7"):
+        glrmask.Vocab.from_dict({b"a": 7, b"b": 7})
 
 
 def test_equality_with_other_types_is_false_not_an_error():

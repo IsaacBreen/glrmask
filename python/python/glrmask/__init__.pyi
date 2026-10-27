@@ -145,18 +145,18 @@ class Vocab:
     def from_dict(token_to_id: dict[Union[str, bytes], int], /) -> Vocab:
         """Creates a vocabulary from a `{token: id}` dict.
 
-        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is.
+        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `ValueError` if an ID appears more than once.
         """
         ...
     @staticmethod
     def from_id_to_bytes(id_to_bytes: dict[int, bytes], /) -> Vocab:
-        """Creates a vocabulary from an `{id: bytes}` dict."""
+        """Creates a vocabulary from an `{id: bytes}` dict. Raises `ValueError` if an ID appears more than once."""
         ...
     @staticmethod
     def from_llama_cpp(llm: Any, /) -> Vocab:
         """Creates a vocabulary from a llama-cpp-python `Llama` model.
 
-        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.
+        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `ValueError` if an ID appears more than once.
         """
         ...
     @property

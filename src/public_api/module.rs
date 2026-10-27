@@ -77,14 +77,15 @@ pub struct Binding(pub(crate) BindingKind);
 #[derive(Debug, Clone)]
 pub(crate) enum BindingKind {
     Module(Module),
+    Grammar(Grammar),
     Expr(Expr),
     TokenSet(TokenSet),
 }
 
 impl From<Module> for Binding { fn from(m: Module) -> Self { Self(BindingKind::Module(m)) } }
 impl From<&Module> for Binding { fn from(m: &Module) -> Self { Self(BindingKind::Module(m.clone())) } }
-impl From<Grammar> for Binding { fn from(g: Grammar) -> Self { Self(BindingKind::Module(Module::new(&g))) } }
-impl From<&Grammar> for Binding { fn from(g: &Grammar) -> Self { Self(BindingKind::Module(Module::new(g))) } }
+impl From<Grammar> for Binding { fn from(g: Grammar) -> Self { Self(BindingKind::Grammar(g)) } }
+impl From<&Grammar> for Binding { fn from(g: &Grammar) -> Self { Self(BindingKind::Grammar(g.clone())) } }
 impl From<Expr> for Binding { fn from(e: Expr) -> Self { Self(BindingKind::Expr(e)) } }
 impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Expr(e.clone())) } }
 impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
@@ -359,9 +360,25 @@ impl Module {
         Ok(())
     }
 
+    fn bound_module(
+        name: &str,
+        kind: ExternKind,
+        declared: &GlrmExternalDeclarations,
+        child: Module,
+    ) -> Result<BoundValue> {
+        check_binding_kind(name, kind, true)
+            .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
+        let unbound = child.externs().unbound();
+        if !unbound.is_empty() {
+            let names: Vec<String> = unbound.iter().map(|e| e.name().to_string()).collect();
+            return Err(error(format!("cannot bind {name:?} to a value with unbound externs: {}", names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
+        }
+        Ok(BoundValue::Module(child))
+    }
+
     fn bound(&self, name: &str, binding: Binding) -> Result<Self> {
         if name.contains("::") {
-            return Err(error("qualified paths are not supported"));
+            return Err(error(format!("there is no extern named {name:?}")));
         }
         let declared = self.node.source.declarations()?;
         let Some(&kind) = declared.kinds.get(name) else {
@@ -371,16 +388,10 @@ impl Module {
             return Err(error(format!("extern \"{name}\" is already bound")));
         }
         let value = match binding.0 {
-            BindingKind::Module(child) => {
-                check_binding_kind(name, kind, true)
-                    .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
-                let unbound = child.externs().unbound();
-                if !unbound.is_empty() {
-                    let names: Vec<String> = unbound.iter().map(|e| e.name().to_string()).collect();
-                    return Err(error(format!("cannot bind {name:?} to a value with unbound externs: {}", names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
-                }
-                BoundValue::Module(child)
+            BindingKind::Grammar(grammar) => {
+                Self::bound_module(name, kind, declared, Module::new(&grammar))?
             }
+            BindingKind::Module(child) => Self::bound_module(name, kind, declared, child)?,
             BindingKind::Expr(expr) => {
                 check_binding_kind(name, kind, true)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;

@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{BuildOptions, Expr, Grammar, MaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
 fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())])}
 
@@ -13,6 +13,37 @@ fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
     let c=g.compile_with_build_options(&vocab(),options()).unwrap();let mask=c.start().mask();
     assert_ne!(mask[0]&(1<<17),0);assert_eq!(mask[0]&(1<<29),0);
 }
+#[test]
+fn grammar_bind_accepts_every_binding_kind() {
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(7,b"x".to_vec()),(8,b"y".to_vec()),(9,b"z".to_vec())]);
+    let owned=Grammar::from_glrm("start root nt root=\"a\"").unwrap();
+    let borrowed=Grammar::from_glrm("start root nt root=\"b\"").unwrap();
+    let tokens=TokenSet::new([7]);
+    let borrowed_tokens=TokenSet::new([8]);
+    let mut g=Grammar::from_glrm(
+        "extern grammar OWNED extern grammar BORROWED extern grammar EXPR extern token TOKENS extern token SET extern token ID start root nt root=OWNED BORROWED EXPR TOKENS SET ID"
+    ).unwrap();
+    g.bind("OWNED",owned).unwrap();
+    g.bind("BORROWED",&borrowed).unwrap();
+    g.bind("EXPR",Expr::literal("a")).unwrap();
+    g.bind("TOKENS",tokens).unwrap();
+    g.bind("SET",&borrowed_tokens).unwrap();
+    g.bind("ID",9u32).unwrap();
+    assert!(g.externs().unbound().is_empty());
+    let c=g.compile_with_build_options(&v,options()).unwrap();let mut s=c.start();
+    for id in [0,1,0,7,8,9] {assert!(s.commit_token(id));}
+    assert!(s.is_accepting());
+}
+
+#[test]
+fn grammar_bind_rejects_module_with_guidance() {
+    let mut g=Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD").unwrap();
+    let child=Module::new(&Grammar::from_glrm("start root nt root=\"a\"").unwrap());
+    let err=g.bind("CHILD",child).unwrap_err().to_string();
+    assert_eq!(err,"can't bind \"CHILD\" to a Module in a Grammar; use Module::bind instead");
+    assert_eq!(g.externs().unbound().len(),1);
+}
+
 #[test]
 fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let v=vocab();let text="extern token MARK start root nt root=MARK";

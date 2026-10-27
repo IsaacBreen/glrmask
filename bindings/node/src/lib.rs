@@ -164,19 +164,19 @@ impl NativeGrammar {
     }
     #[napi]
     pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
     }
     #[napi]
     pub fn bind_expr(&self, name: String, value: &NativeExpr) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
     }
     #[napi]
     pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(name, g::TokenSet::from(id(value)?))?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, g::TokenSet::from(id(value)?))?; Ok(()) })
     }
     #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
     }
     #[napi]
     pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64, parser_backend: Option<f64>, merge_equivalent_tokens: Option<bool>) -> napi::Result<NativeConstraint> {
