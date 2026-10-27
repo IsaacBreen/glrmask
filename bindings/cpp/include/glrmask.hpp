@@ -491,12 +491,6 @@ class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, 
     using Base = detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone>;
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
-    static bool commit_status(glrmask_status status) {
-        if (status == GLRMASK_OK) return true;
-        if (status == GLRMASK_REJECTED) return false;
-        detail::check(status);
-        return false;
-    }
 public:
     /// The number of `uint32_t` words in a mask.
     std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_len(native_handle(), &n)); return n; }
@@ -517,13 +511,13 @@ public:
     /// Whether nothing more can be committed.
     bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
     /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_token(TokenId id) { return commit_status(glrmask_state_commit_token(native_handle(), id)); }
+    [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
     /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_tokens(const std::uint32_t* ids, std::size_t count) { return commit_status(glrmask_state_commit_tokens(native_handle(), ids, count)); }
+    [[nodiscard]] bool commit_tokens(const std::uint32_t* ids, std::size_t count) { return glrmask_state_commit_tokens(native_handle(), ids, count); }
     /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
     /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return commit_status(glrmask_state_commit_bytes(native_handle(), bytes, size)); }
+    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return glrmask_state_commit_bytes(native_handle(), bytes, size); }
     /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
     /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.

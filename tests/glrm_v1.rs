@@ -947,6 +947,15 @@ fn glrm_token_atoms_are_rejected_by_the_public_parser() {
 }
 
 #[test]
+fn glrm_markers_are_rejected_by_the_public_parser() {
+    let error = Grammar::from_glrm("start start;\nnt start = @mark(1) \"a\";").unwrap_err();
+    assert!(
+        error.to_string().contains("`@mark` isn't supported"),
+        "{error}"
+    );
+}
+
+#[test]
 fn glrm_v1_emitters_write_equals_and_round_trip() {
     use glrmask_grammar::__private::grammar::glrm::{from_glrm as parse_glrm, to_glrm_v1};
     let source = "glrm 1; start start; t WORD = /[a-z]+/; nt start = WORD WORD?;";

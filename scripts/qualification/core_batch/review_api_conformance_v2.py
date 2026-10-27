@@ -98,8 +98,6 @@ for source in [
     'start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=X "b"?',
     'start root nt root="\u00e9" "a"?',
     'start root nt root=eps',
-    'start root nt root=@mark(1) "a" @mark(2) "b" @mark(3)',
-    'start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=@mark(11) X @mark(12) "c"?',
 ]:
     for mode in modes:
         for ends in [[],[130],[4]]:
@@ -110,8 +108,7 @@ for source in [
 
 for source in ['extern token M start root nt root=M "a"?',
                'extern token M start root nt root="ab" | M "c"',
-               'extern grammar M start root nt root=M "b"',
-               'extern token M start root nt root=@mark(7) M @mark(8) "b" @mark(9)']:
+               'extern grammar M start root nt root=M "b"']:
     for values in [[],[0],[4],[7],[99],[0,4,7,99]]:
         for mode in modes:
             desc=g.Grammar.from_glrm(source)

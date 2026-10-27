@@ -3773,10 +3773,14 @@ impl<'a> DynamicConstraintState<'a> {
             .all(|state| !state.knows_token_id(token_id))
         {
             // An unknown ID is a failed commit: the state is dead.
-            self.alternatives.clear();
+            self.reject_after_failed_commit();
             return false;
         }
         self.commit_token_raw(token_id).is_ok()
+    }
+
+    pub(crate) fn reject_after_failed_commit(&mut self) {
+        self.alternatives.clear();
     }
 
     /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.

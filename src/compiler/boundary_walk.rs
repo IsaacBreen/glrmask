@@ -4105,7 +4105,7 @@ mod tests {
 
     #[test]
     fn toy_two_component_crossing_sets() {
-        // Parent `doc ::= PA SUB PB` with child `item ::= CC CD` bound at SUB.
+        // Parent `doc = PA SUB PB` with child `item = CC CD` bound at SUB.
         // Hand-verified crossing sets (trace the merged lexer from each
         // component's states; the composed table's pairwise follows prune the
         // rest):
@@ -6411,9 +6411,9 @@ mod tests {
     /// link (production walk/compile/publish/install, strict trap, curated
     /// differential, light ablation).
     ///
-    /// Shape: P ::= "L" SUB SUB "x" | "R" SUB SUB "y" (two adjacent call
-    /// sites into the same mid child M); M ::= "m" SUB2 (leading visible
-    /// terminal, trailing slot); G ::= "g". All links effectively
+    /// Shape: P = "L" SUB SUB "x" | "R" SUB SUB "y" (two adjacent call
+    /// sites into the same mid child M); M = "m" SUB2 (leading visible
+    /// terminal, trailing slot); G = "g". All links effectively
     /// nonnullable, acyclic, canonical. Fused vocabulary tokens span every
     /// adjacent cross-leaf terminal pair ("Lm", "Rm", "mg", "gm", "gx",
     /// "gy"); without them no walk path can cross components (single bytes

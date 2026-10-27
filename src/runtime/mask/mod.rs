@@ -8529,41 +8529,6 @@ impl<'a> ConstraintState<'a> {
         buf
     }
 
-    pub(crate) fn prefill_mask_cache(&self) {
-        if self
-            .constraint
-            .static_dynamic_overlay
-            .as_ref()
-            .is_some_and(|overlay| {
-                (!overlay.segmented_parser_components.is_empty()
-                    && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some())
-                    || (overlay.segmented_mask_authoritative
-                        && (!overlay.segmented_parser_components.is_empty()
-                            || overlay.segmented_static_baseline))
-            })
-        {
-            return;
-        }
-        let cache = self.mask_cache.lock().unwrap();
-        if cache
-            .as_ref()
-            .is_some_and(|cache_data| cache_data.generation == self.generation)
-        {
-            return;
-        }
-        drop(cache);
-
-        let mut buf = vec![0u32; self.constraint.body_mask_len()];
-        if self.constraint.uses_dynamic_runtime() {
-            self.fill_mask_dynamic(&mut buf);
-            self.store_mask_cache_reuse_dense(&buf);
-        } else {
-            self.fill_mask_uncached(&mut buf);
-            self.update_control_special_token_mask(&mut buf);
-            self.store_mask_cache_reuse_dense(&buf);
-        }
-    }
-
     // Fill `buf` with the allowed-token mask.
     //
     // `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra

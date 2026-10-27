@@ -3,6 +3,10 @@
 ## Unreleased
 
 - GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.
+- Committing a token ID never raises or throws. An ID that isn't in the vocabulary, or isn't a valid token ID at all, makes the commit return false.
+- In C, the commit functions return `bool`, and `GLRMASK_REJECTED` is gone.
+- Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
+- 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
 
 ## 0.5.0
 

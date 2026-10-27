@@ -249,7 +249,21 @@ impl NativeState {
         call(|| arrays::with_words(&env, &output, |out| live(&self.inner)?.fill_mask(out)))
     }
     #[napi]
-    pub fn commit_token(&self, value: f64) -> napi::Result<bool> { call(|| live(&self.inner)?.commit_token(id(value)?)) }
+    pub fn commit_token(&self, value: f64) -> napi::Result<bool> {
+        call(|| {
+            let mut state = live(&self.inner)?;
+            // A number outside the u32 token domain can never be allowed, so
+            // reject the state exactly as a commit of an unknown token does.
+            if !value.is_finite()
+                || value.fract() != 0.0
+                || !(0.0..=u32::MAX as f64).contains(&value)
+            {
+                state.reject()?;
+                return Ok(false);
+            }
+            state.commit_token(value as u32)
+        })
+    }
     #[napi]
     pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<bool> {
         call(|| live(&self.inner)?.commit_tokens(ids.as_ref()))

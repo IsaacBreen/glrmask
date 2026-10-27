@@ -7,7 +7,7 @@ int main(void) {
     uint32_t mask=0,accepting=0;
     if(glrmask_vocab_new(&e,1,&v) || glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&g)
       || glrmask_grammar_compile(g,v,NULL,&c) || glrmask_constraint_start(c,&s)
-      || glrmask_state_fill_mask(s,&mask,1) || mask!=1 || glrmask_state_commit_token(s,0)
+      || glrmask_state_fill_mask(s,&mask,1) || mask!=1 || !glrmask_state_commit_token(s,0)
       || glrmask_state_is_accepting(s,&accepting) || !accepting) {
         fprintf(stderr,"Installed C consumer failed: %s\n",glrmask_error_message());return 1;
     }

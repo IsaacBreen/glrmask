@@ -4157,8 +4157,8 @@ mod tests {
             out
         }
 
-        // Real nested fixture through real grammars: P ::= "L" SUB SUB "x",
-        // M ::= "m" SUB2, G ::= "g". Depth-2 chain certifies 2H = 4.
+        // Real nested fixture through real grammars: P = "L" SUB SUB "x",
+        // M = "m" SUB2, G = "g". Depth-2 chain certifies 2H = 4.
         let vocab = Vocab::new(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),

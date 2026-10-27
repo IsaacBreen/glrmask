@@ -466,7 +466,7 @@ mod tests {
     fn passive_probe_admission_and_masks_match_erased_markers_in_all_modes() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         for mode in MaskMode::ALL {
-            let marked = Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
+            let marked = crate::__private::grammar_from_glrm_with_markers("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
                 .compile_with_build_options(&vocab, mode.build_options()).unwrap();
             let ordinary = Grammar::from_glrm("start root\nnt root = \"a\" \"b\"\n").unwrap()
                 .compile_with_build_options(&vocab, mode.build_options()).unwrap();
@@ -502,7 +502,7 @@ mod tests {
         let mut comparisons = 0usize;
         for mode in MaskMode::ALL {
             for source in sources {
-                let constraint = Grammar::from_glrm(source).unwrap().compile_with_build_options(&vocab,
+                let constraint = crate::__private::grammar_from_glrm_with_markers(source).unwrap().compile_with_build_options(&vocab,
                     mode.build_options()).unwrap();
                 for seed in 0..16u64 {
                     let mut observed = constraint.start();

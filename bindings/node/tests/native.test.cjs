@@ -109,9 +109,12 @@ test('frontends and input validation preserve the public contracts',async()=>{
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GlrMaskError);
-  for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) {
-    assert.throws(()=>new TokenSet([bad]),RangeError);
-    assert.throws(()=>s.commitToken(bad),RangeError);
+  for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) assert.throws(()=>new TokenSet([bad]),RangeError);
+  for(const bad of [-1,0.5,NaN,Infinity,4294967296]) {
+    assert.equal((await Grammar.fromLark('start: "a" "b"').compile(v)).start().commitToken(bad),false);
+  }
+  for(const bad of ['1',1n,null]) {
+    assert.throws(()=>s.commitToken(bad),TypeError);
   }
   for(const Class of [Constraint,ConstraintState,Grammar,Module]) assert.throws(()=>new Class(),TypeError);
   assert.throws(()=>simple().compileSync(v,{optimisation:'auto'}),TypeError);
@@ -139,9 +142,10 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   const v=raw.NativeVocab.fromEntries([0,1,31],[b('a'),b('b'),b('ab')],[]);
   const g=raw.NativeGrammar.fromSource('lark','start: "a" "b"');const s=g.compileSync(v,0,0).start();
   const initial=s.mask();
+  const c=g.compileSync(v,0,0);
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
     const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_ARGUMENT/.test(String(e));
-    assert.throws(()=>s.commitToken(bad),badArg);
+    assert.equal(c.start().commitToken(bad),false);
     assert.throws(()=>new TokenSet([bad]),badArg);
     assert.throws(()=>g.compileSync(v,bad,0),badArg);
   }
@@ -198,4 +202,27 @@ test('source constructors reject invalid source',()=>{
   assert.throws(()=>Grammar.fromLark('start: ('));
   assert.throws(()=>Grammar.fromJsonSchema('{'));
   assert.throws(()=>Grammar.fromGlrm('invalid source'));
+});
+
+test('out-of-range token IDs fail closed instead of throwing',()=>{
+  const v=vocab();
+  for(const bad of [-1,2**32,1.5,NaN,Infinity]) {
+    const s=simple().compileSync(v).start();
+    assert.equal(s.commitToken(bad),false);
+    assert.equal(s.isAccepting(),false);
+    assert.equal(s.isTerminated(),true);
+    assert.equal(s.commitToken(0),false);
+    const list=simple().compileSync(v).start();
+    assert.equal(list.commitTokens([0,bad]),false);
+    assert.equal(list.isAccepting(),false);
+    assert.equal(list.isTerminated(),true);
+    assert.equal(list.commitToken(0),false);
+  }
+  const s=simple().compileSync(v).start();
+  assert.throws(()=>s.commitToken('0'),TypeError);
+  assert.throws(()=>s.commitTokens([0,'1']),TypeError);
+  const ok=simple().compileSync(v).start();
+  assert.equal(ok.commitToken(0),true);
+  assert.equal(ok.commitToken(1),true);
+  assert.equal(ok.isAccepting(),true);
 });

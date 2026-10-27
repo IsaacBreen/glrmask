@@ -516,7 +516,7 @@ mod reset_projection_tests {
                 .chain((0..width).map(|id| format!("\"x{id}:\" @mark({id}) \"b\"")))
                 .collect::<Vec<_>>().join(" | "));
             for mode in MaskMode::ALL {
-                let fresh = Grammar::from_glrm(&source).unwrap().compile_with_build_options(&vocab,
+                let fresh = crate::__private::grammar_from_glrm_with_markers(&source).unwrap().compile_with_build_options(&vocab,
                     mode.build_options()).unwrap();
                 let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
                 for constraint in [&fresh, &loaded] {

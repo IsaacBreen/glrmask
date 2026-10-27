@@ -1448,6 +1448,7 @@ impl GLRTable {
     /// metadata preserves the existing serialized table shape while allowing
     /// later compiled-constraint composition to distinguish end-token roles
     /// from an otherwise identical `@token(...)` placeholder terminal.
+    #[doc(hidden)]
     pub fn embedded_end_token_ids(&self) -> Vec<u32> {
         let Some(mut name) = self.augmented_start_display_name() else {
             return Vec::new();
@@ -1467,6 +1468,7 @@ impl GLRTable {
             .collect()
     }
 
+    #[doc(hidden)]
     pub fn set_embedded_end_token_ids(&mut self, token_ids: &[u32]) {
         let nullable = self.embedded_start_nullable();
         let Some(name) = self.augmented_start_display_name_mut() else {

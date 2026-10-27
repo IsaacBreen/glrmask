@@ -30,8 +30,6 @@ pub struct glrmask_externs(Vec<glrmask_extern_item>);
     pub kind: u32,
 }
 
-const REJECTED: i32 = 6;
-
 fn status(kind: core::ErrorKind) -> i32 {
     match kind {
         core::ErrorKind::InvalidArgument => 1,
@@ -52,15 +50,10 @@ fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
         }
     }
 }
-fn commit_ffi(f: impl FnOnce() -> Result<bool>) -> i32 {
-    match core::guarded(f) {
-        Ok(true) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
-        Ok(false) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); REJECTED }
-        Err(e) => {
-            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
-            status(e.kind)
-        }
-    }
+/// Commit results are not errors: a disallowed commit returns false, and so does
+/// a NULL or poisoned state.
+fn commit(f: impl FnOnce() -> Result<bool>) -> bool {
+    matches!(core::guarded(f), Ok(true))
 }
 fn valid<T>(p: *const T) -> Result<()> {
     if p.is_null() { return Err(Error::invalid("null pointer")); }
@@ -89,7 +82,7 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 2 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 3 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
 
@@ -225,17 +218,17 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_fill_mask(p: *const glrmask_state, out: *mut u32, n: usize) -> i32 {
     ffi(|| unsafe { read(p)?.0.fill_mask(output(out, n)?) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> i32 {
-    commit_ffi(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> bool {
+    commit(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> i32 {
-    commit_ffi(|| unsafe {
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> bool {
+    commit(|| unsafe {
         let ids = if n == 0 { &[] } else if ids.is_null() { return Err(Error::invalid("token ID array is null")); } else { std::slice::from_raw_parts(ids, n) };
         Ok(write(p)?.0.commit_tokens(ids)?)
     })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> i32 {
-    commit_ffi(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> bool {
+    commit(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_accepting()?); Ok(()) })

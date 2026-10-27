@@ -410,6 +410,9 @@ class ConstraintState:
     def __copy__(self) -> ConstraintState:
         """Same as `copy()`."""
         ...
+    def mask_len(self) -> int:
+        """The number of `int32` words that `fill_mask` needs."""
+        ...
     def mask(self, *, size: Optional[int] = None) -> NDArray[np.bool_]:
         """The tokens allowed next, as a NumPy `bool` array indexed by token ID.
 

@@ -424,17 +424,17 @@ t _REGULAR_EXPRESSION_LITERAL = '/' _REGEX_BODY '/' _REGEX_FLAGS? ;
 t _REGEX_BODY = ( /[^/\n\r\\]/ | '\\' /[^\n\r]/ )+ ; // Any UTF-8 scalar except /, newline, or backslash, or an escaped non-line-terminator scalar.
 t _REGEX_FLAGS = b/[A-Za-z_$]/+ ;
 
-//template_literal ::= '`' ( _TEMPLATE_CHARS | template_substitution )* '`' ;
-//_TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
-//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
-//template_substitution ::= '${' expression '}' ;
+//template_literal = '`' ( _TEMPLATE_CHARS | template_substitution )* '`' ;
+//_TEMPLATE_CHARS = _TEMPLATE_CHAR+ ;
+//_TEMPLATE_CHAR = [^`\\] | '\\' . ;
+//template_substitution = '${' expression '}' ;
 
-//template_literal ::= TEMPLATE_START template_middle* TEMPLATE_END ;
-//TEMPLATE_START ::= '`' ;
-//TEMPLATE_END ::= TEMPLATE_FILL '$'? '`' ;
-//TEMPLATE_MIDDLE ::= TEMPLATE_FILL '$' '{' ;
-//template_middle ::= TEMPLATE_MIDDLE expression '}' ;
-//TEMPLATE_FILL ::= (
+//template_literal = TEMPLATE_START template_middle* TEMPLATE_END ;
+//TEMPLATE_START = '`' ;
+//TEMPLATE_END = TEMPLATE_FILL '$'? '`' ;
+//TEMPLATE_MIDDLE = TEMPLATE_FILL '$' '{' ;
+//template_middle = TEMPLATE_MIDDLE expression '}' ;
+//TEMPLATE_FILL = (
 //    [^`$\\]
 //  | '\\' .
 //  | '$' (
@@ -443,26 +443,26 @@ t _REGEX_FLAGS = b/[A-Za-z_$]/+ ;
 //    )
 //)* ;
 
-//template_literal ::= '';
-//template_literal ::= '`' 'asdfasdfasdfasdf' '`';
+//template_literal = '';
+//template_literal = '`' 'asdfasdfasdfasdf' '`';
 
-//template_literal ::= TEMPLATE_LITERAL ;
-//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHAR+ '`' ;
-//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+//template_literal = TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL = '`' _TEMPLATE_CHAR+ '`' ;
+//_TEMPLATE_CHAR = [^`\\] | '\\' . ;
 
-//template_literal ::= TEMPLATE_LITERAL ;
-//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
-//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
-//_TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
-//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+//template_literal = TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
+//TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
+//_TEMPLATE_CHARS = _TEMPLATE_CHAR+ ;
+//_TEMPLATE_CHAR = [^`\\] | '\\' . ;
 
-//template_literal ::= TEMPLATE_LITERAL ;
-//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
+//template_literal = TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
 t TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
 t _TEMPLATE_CHARS = _TEMPLATE_CHAR+ ;
 t _TEMPLATE_CHAR = /[^`\\]/ | '\\' /[^]/ ;
 
-//template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
+//template_literal = 'asdfasdfasdfasdfasdfsaf' ;
 
 // Identifiers
 t IDENTIFIER =

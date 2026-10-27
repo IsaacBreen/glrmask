@@ -153,6 +153,11 @@ impl State {
         })
     }
     pub fn mask_len(&self) -> usize { self.cell.borrow_owner().mask_len() }
+    /// Rejects the state, exactly as a commit of an unknown token ID does.
+    pub fn reject(&mut self) -> Result<()> {
+        use glrmask::__private::ConstraintStateReject as _;
+        self.write(|s| { s.reject(); Ok(()) })
+    }
     pub fn mask(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.mask())) }
     pub fn fill_mask(&self, output: &mut [u32]) -> Result<()> {
         let required = self.mask_len();

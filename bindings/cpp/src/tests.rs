@@ -44,7 +44,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 let mut accepting = 99;
                 assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0);
                 assert_eq!(accepting != 0, reference.is_accepting());
-                if let Some(token) = token { assert_eq!(glrmask_state_commit_token(state, token), 0); assert!(reference.commit_token(token)); }
+                if let Some(token) = token { assert!(glrmask_state_commit_token(state, token)); assert!(reference.commit_token(token)); }
             }
             glrmask_state_free(state);
         }
@@ -128,7 +128,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let mut state = ptr::null_mut(); assert_eq!(glrmask_constraint_start(constraint, &mut state), 0);
         glrmask_constraint_free(constraint); glrmask_module_free(loaded);
         let mut words = [0u32; 1]; assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), 1), 0); assert_ne!(words[0] & (1 << 3), 0);
-        assert_eq!(glrmask_state_commit_token(state, 3), 0); let mut accepting = 0; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert_eq!(accepting, 1); glrmask_state_free(state);
+        assert!(glrmask_state_commit_token(state, 3)); let mut accepting = 0; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert_eq!(accepting, 1); glrmask_state_free(state);
 
         // Expr literal test
         let mut lit_expr = ptr::null_mut();

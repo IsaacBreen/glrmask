@@ -632,6 +632,16 @@ impl Grammar {
         Ok(grammar)
     }
 
+    #[cfg(feature = "internal-api")]
+    pub(crate) fn from_glrm_with_markers(source: &str) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source)));
+        let _ = grammar.parsed_component.set(
+            ParsedComponent::parse_glrm_with_markers(source).map_err(Into::into),
+        );
+        grammar.component()?;
+        Ok(grammar)
+    }
+
     fn new(source: GrammarSource) -> Self {
         Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, lark_document:Arc::new(OnceLock::new()) }
     }

@@ -1,7 +1,7 @@
 #ifndef GLRMASK_H
 #define GLRMASK_H
 
-/* GLRMask C ABI, revision 2.
+/* GLRMask C ABI, revision 3.
  * All lengths are element counts, except explicitly named byte lengths.
  * Text is UTF-8, length-delimited, and need not be NUL-terminated. Vocabulary
  * bytes are arbitrary bytes (including NUL and partial UTF-8 sequences).
@@ -26,6 +26,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #if defined(_WIN32) && defined(GLRMASK_SHARED)
 # if defined(GLRMASK_BUILDING)
 #  define GLRMASK_API __declspec(dllexport)
@@ -49,8 +50,7 @@ enum {
     GLRMASK_ENGINE_ERROR=2,       ///< Parsing, compiling or loading failed.
     GLRMASK_PANIC=3,              ///< An internal error was caught. Discard the handle involved.
     GLRMASK_BUFFER_TOO_SMALL=4,   ///< The buffer is too small; nothing was written.
-    GLRMASK_CLOSED=5,             ///< The handle was already freed.
-    GLRMASK_REJECTED=6            ///< The token or bytes were not allowed. The state is now terminated.
+    GLRMASK_CLOSED=5              ///< The handle was already freed.
 };
 /// How masks are computed.
 enum {
@@ -283,15 +283,15 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uin
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* p,uint32_t* out,size_t n);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* p,uint32_t* out);
-/// Commits a token. If it isn't allowed, returns `GLRMASK_REJECTED` and
-/// terminates the state.
-GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* p,uint32_t id);
-/// Commits each token in order. If one isn't allowed, returns `GLRMASK_REJECTED`
-/// and terminates the state.
-GLRMASK_API glrmask_status glrmask_state_commit_tokens(glrmask_state* p,const uint32_t* ids,size_t n);
-/// Commits raw bytes. If they aren't allowed, returns `GLRMASK_REJECTED` and
-/// terminates the state.
-GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* p,const uint8_t* bytes,size_t n);
+/// Commits a token. If it isn't allowed, returns `false` and terminates the
+/// state. Returns false for a NULL state.
+GLRMASK_API bool glrmask_state_commit_token(glrmask_state* p,uint32_t id);
+/// Commits each token in order. If one isn't allowed, returns `false` and
+/// terminates the state. Returns false for a NULL state.
+GLRMASK_API bool glrmask_state_commit_tokens(glrmask_state* p,const uint32_t* ids,size_t n);
+/// Commits raw bytes. If they aren't allowed, returns `false` and terminates the
+/// state. Returns false for a NULL state.
+GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* p,const uint8_t* bytes,size_t n);
 /// Commits the tokens for what must come next, taking the longest token at each
 /// step, and returns them. Stops before anything that could vary, or after 1,000
 /// tokens.

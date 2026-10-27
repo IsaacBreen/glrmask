@@ -414,6 +414,11 @@ pub mod __private {
         constraint.parser_backend_report()
     }
 
+    #[cfg(feature = "internal-api")]
+    pub fn grammar_from_glrm_with_markers(source: &str) -> Result<crate::Grammar> {
+        crate::Grammar::from_glrm_with_markers(source)
+    }
+
     /// Diagnostic artifact bytes; never used for runtime, linking or timing.
     pub fn save_without_effect_metadata_for_diagnostic(constraint:&Constraint) -> Vec<u8> {
         constraint.save_without_effect_metadata_for_diagnostic()
@@ -466,6 +471,18 @@ pub mod __private {
             }
         }
         None
+    }
+
+    pub trait ConstraintStateReject {
+        fn reject(&mut self);
+    }
+
+    impl ConstraintStateReject for crate::runtime::ConstraintState<'_> {
+        fn reject(&mut self) { self.reject_after_failed_commit(); }
+    }
+
+    impl ConstraintStateReject for crate::dynamic_constraint::DynamicConstraintState<'_> {
+        fn reject(&mut self) { self.reject_after_failed_commit(); }
     }
 
     pub trait ConstraintExt: Sized {

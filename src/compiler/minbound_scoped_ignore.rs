@@ -157,7 +157,7 @@ fn mb_run_scoped_ignore_variant(
     (static_bits, dynamic_bits, inline_bits)
 }
 
-/// The full `distinct` witness grammar: `document ::= "X" SUB "!"`, parent
+/// The full `distinct` witness grammar: `document = "X" SUB "!"`, parent
 /// ignore `" "+`, child `"a"` with ignore `"\t"+`.
 fn mb_distinct_grammar() -> (&'static str, &'static str, &'static str) {
     (

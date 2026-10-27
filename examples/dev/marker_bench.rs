@@ -9,7 +9,7 @@
 //! cross-commit cache reuse remains enabled in both revisions.
 use glrmask::test_modes::MaskMode;
 use std::{hint::black_box, time::Instant};
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{Constraint, Vocab};
 use serde_json::{json, Value};
 
 fn stats(values: &[f64]) -> Value {
@@ -88,7 +88,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     for mode in MaskMode::ALL {
         for case in workloads(marked) {
             let start=Instant::now();
-            let c=Grammar::from_glrm(&case.source)?.compile_with_build_options(&vocab,mode.build_options())?;
+            let c=glrmask::__private::grammar_from_glrm_with_markers(&case.source)?.compile_with_build_options(&vocab,mode.build_options())?;
             let build_ms=start.elapsed().as_secs_f64()*1000.;
             let values=measure(&c,&case.sequence,samples,rounds)?;
             eprintln!("BENCH {} {:?} marked={} commit_p50_ns={:.1}",case.name,mode,marked,values["commit"]["p50_ns"].as_f64().unwrap());

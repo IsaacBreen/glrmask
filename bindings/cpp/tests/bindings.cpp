@@ -237,6 +237,36 @@ int thread_stack_probe(std::size_t stack_bytes) {
 }
 #endif
 
+void commit_contract() {
+    auto v = vocabulary();
+    for (unsigned i=0; i<3; ++i) {
+        auto c = Module(simple()).compile(v, strategy_options(i));
+        auto s = c.start();
+        CHECK(!s.commit_token(1));
+        CHECK(!s.is_accepting()); CHECK(s.is_terminated());
+        CHECK(!s.commit_token(0)); CHECK(!s.commit_bytes("a"));
+        auto list = c.start();
+        CHECK(!list.commit_tokens(std::vector<TokenId>{0, 0}));
+        CHECK(!list.is_accepting()); CHECK(list.is_terminated());
+        auto closed = c.start();
+        closed.dispose();
+        throws([&]{ closed.commit_token(0); }, GLRMASK_CLOSED);
+    }
+    // The C commits return false for a rejected commit and for a NULL state.
+    CHECK(glrmask_state_commit_token(nullptr, 0) == false);
+    CHECK(glrmask_state_commit_tokens(nullptr, nullptr, 0) == false);
+    CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0) == false);
+    auto c = Module(simple()).compile(v);
+    glrmask_state* raw = nullptr;
+    CHECK(glrmask_constraint_start(c.native_handle(), &raw) == GLRMASK_OK);
+    CHECK(glrmask_state_commit_token(raw, 1) == false);
+    uint32_t accepting = 1;
+    CHECK(glrmask_state_is_accepting(raw, &accepting) == GLRMASK_OK); CHECK(accepting == 0);
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>("a");
+    CHECK(glrmask_state_commit_bytes(raw, bytes, 1) == false);
+    glrmask_state_free(raw);
+}
+
 void emit_parity() {
     auto v = vocabulary(); std::cout << '[';
     for (unsigned i=0; i<3; ++i) {
@@ -416,6 +446,7 @@ int main(int argc, char** argv) {
         composition_and_persistence();
         frontends();
         threads_and_errors();
-        std::cout << "C++ binding regression groups: 7 passed\n"; return 0;
+        commit_contract();
+        std::cout << "C++ binding regression groups: 8 passed\n"; return 0;
     } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

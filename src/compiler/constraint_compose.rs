@@ -26514,7 +26514,7 @@ table: &child_table,
         ignore = "slow (~22s); run with --features slow-tests"
     )]
     fn integration_finite_exclusion_boundary_masks() {
-        // Parent `X SUB !` (no ignores); child `OPEN ::= [ab]+ - "ab"`.
+        // Parent `X SUB !` (no ignores); child `OPEN = [ab]+ - "ab"`.
         // Tests exclusion-operator composition compatibility (static vs
         // dynamic vs inline, save/load). NOT a certificate/master-activation
         // proof: the tiny fixture does not trigger dynamic-virtual

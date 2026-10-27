@@ -60,7 +60,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use glrmask::__private::{
-    ConstraintExt as _, ConstraintStateExt as _, DynamicConstraintExt as _, VocabExt as _,
+    ConstraintExt as _, ConstraintStateExt as _, ConstraintStateReject as _,
+    DynamicConstraintExt as _, VocabExt as _,
 };
 
 // ---------------------------------------------------------------------------
@@ -269,6 +270,18 @@ fn words_to_bool_array<'py>(
         }
     }
     PyArray1::from_vec(py, bools)
+}
+
+/// Extract a Python token ID. `Ok(None)` means the int is outside the `u32`
+/// domain; anything that is not an int stays a `TypeError`.
+fn resolve_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    match value.extract::<u32>() {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyOverflowError>(value.py()) => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usize> {
@@ -987,16 +1000,40 @@ impl PyDynamicConstraintState {
 
     /// Commits a token. If it isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_id, /))]
-    fn commit_token(&mut self, token_id: u32) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
+    fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Some(id) = resolve_token_id(token_id)? else {
+            self.inner
+                .with_dependent_mut(|_owner, state| state.reject());
+            return Ok(false);
+        };
+        Ok(self
+            .inner
+            .with_dependent_mut(|_owner, state| state.commit_token(id)))
     }
 
     /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
+    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
+            return Ok(self
+                .inner
+                .with_dependent_mut(|_owner, state| state.commit_tokens(&ids)));
+        }
+        let values = token_ids.extract::<Vec<Bound<'_, PyAny>>>()?;
+        let mut ids = Vec::with_capacity(values.len());
+        for value in &values {
+            match resolve_token_id(value)? {
+                Some(id) => ids.push(id),
+                None => {
+                    self.inner
+                        .with_dependent_mut(|_owner, state| state.reject());
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(self
+            .inner
+            .with_dependent_mut(|_owner, state| state.commit_tokens(&ids)))
     }
 
 
@@ -1006,8 +1043,16 @@ impl PyDynamicConstraintState {
     fn commit_token_profiled<'py>(
         &mut self,
         py: Python<'py>,
-        token_id: u32,
+        token_id: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let token_id = match resolve_token_id(token_id)? {
+            Some(id) => id,
+            None => {
+                self.inner
+                    .with_dependent_mut(|_owner, state| state.reject());
+                0
+            }
+        };
         let profile = self.inner.with_dependent_mut(|_owner, state| {
             state
                 .commit_token_profiled(token_id)
@@ -1138,6 +1183,17 @@ impl PyConstraintState {
     /// Same as `copy()`.
     fn __copy__(&self) -> Self { self.copy() }
 
+    fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
+        let copy = Py::new(slf.py(), slf.try_borrow()?.copy())?;
+        memo.set_item(slf.as_ptr() as usize, &copy)?;
+        Ok(copy)
+    }
+
+    /// The number of `int32` words that `fill_mask` needs.
+    fn mask_len(&self) -> usize {
+        self.inner.borrow_owner().mask_len()
+    }
+
 
     /// The tokens allowed next, as a NumPy `bool` array indexed by token ID.
     ///
@@ -1178,16 +1234,40 @@ impl PyConstraintState {
 
     /// Commits a token. If it isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_id, /))]
-    fn commit_token(&mut self, token_id: u32) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
+    fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Some(id) = resolve_token_id(token_id)? else {
+            self.inner
+                .with_dependent_mut(|_owner, state| state.reject());
+            return Ok(false);
+        };
+        Ok(self
+            .inner
+            .with_dependent_mut(|_owner, state| state.commit_token(id)))
     }
 
     /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
-        self.inner
-            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
+    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
+            return Ok(self
+                .inner
+                .with_dependent_mut(|_owner, state| state.commit_tokens(&ids)));
+        }
+        let values = token_ids.extract::<Vec<Bound<'_, PyAny>>>()?;
+        let mut ids = Vec::with_capacity(values.len());
+        for value in &values {
+            match resolve_token_id(value)? {
+                Some(id) => ids.push(id),
+                None => {
+                    self.inner
+                        .with_dependent_mut(|_owner, state| state.reject());
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(self
+            .inner
+            .with_dependent_mut(|_owner, state| state.commit_tokens(&ids)))
     }
 
     /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
@@ -1226,7 +1306,7 @@ impl PyConstraintState {
 
     #[cfg(feature = "allocation-tracking")]
     #[pyo3(name = "commit_token_timed_allocation_stats")]
-    fn py_commit_token_timed_allocation_stats(&mut self, token_id: u32) -> PyResult<Vec<u64>> {
+    fn py_commit_token_timed_allocation_stats(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
         self.commit_token_timed_allocation_stats(token_id)
     }
 }
@@ -1255,6 +1335,19 @@ fn allocation_stats_tuple(
 }
 
 impl PyConstraintState {
+    /// Resolve an ID for a diagnostic commit. An out-of-domain ID rejects the
+    /// state; the already-rejected state then reports a rejected commit.
+    fn diagnostic_token_id(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<u32> {
+        Ok(match resolve_token_id(token_id)? {
+            Some(id) => id,
+            None => {
+                self.inner
+                    .with_dependent_mut(|_owner, state| state.reject());
+                0
+            }
+        })
+    }
+
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -1300,7 +1393,8 @@ impl PyConstraintState {
         mask_profile_to_dict(py, profile)
     }
 
-    fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
+    fn commit_token_timed_ns(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<u64> {
+        let token_id = self.diagnostic_token_id(token_id)?;
         self.inner.with_dependent_mut(|_owner, state| {
             state
                 .commit_token_timed_ns(token_id)
@@ -1311,8 +1405,9 @@ impl PyConstraintState {
     #[cfg(feature = "allocation-tracking")]
     fn commit_token_timed_allocation_stats(
         &mut self,
-        token_id: u32,
+        token_id: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<u64>> {
+        let token_id = self.diagnostic_token_id(token_id)?;
         let (result, stats) = allocation_tracking::measure(|| {
             self.inner.with_dependent_mut(|_owner, state| {
                 state.commit_token_timed_ns(token_id)
@@ -1323,7 +1418,8 @@ impl PyConstraintState {
     }
 
     /// Like commit_token but returns profiling stats as a dict.
-    fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: &Bound<'_, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let token_id = self.diagnostic_token_id(token_id)?;
         let profile = self.inner.with_dependent_mut(|_owner, state| {
             state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
         })?;
@@ -1419,7 +1515,8 @@ impl PyConstraintState {
     }
 
     /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
-    fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: &Bound<'_, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let token_id = self.diagnostic_token_id(token_id)?;
         let (advances, final_stacks, commit_profile) = self.inner.with_dependent_mut(|_owner, state| {
             state.commit_token_per_advance(token_id).map_err(|e| PyValueError::new_err(e))
         })?;
@@ -1895,7 +1992,7 @@ fn fill_mask_profiled<'py>(
 #[pyfunction]
 fn commit_token_timed_ns(
     mut state: PyRefMut<'_, PyConstraintState>,
-    token_id: u32,
+    token_id: &Bound<'_, PyAny>,
 ) -> PyResult<u64> {
     state.commit_token_timed_ns(token_id)
 }
@@ -1904,7 +2001,7 @@ fn commit_token_timed_ns(
 #[pyfunction]
 fn commit_token_timed_allocation_stats(
     mut state: PyRefMut<'_, PyConstraintState>,
-    token_id: u32,
+    token_id: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<u64>> {
     state.commit_token_timed_allocation_stats(token_id)
 }
@@ -1913,7 +2010,7 @@ fn commit_token_timed_allocation_stats(
 fn commit_token_profiled<'py>(
     py: Python<'py>,
     mut state: PyRefMut<'py, PyConstraintState>,
-    token_id: u32,
+    token_id: &Bound<'_, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
     state.commit_token_profiled(py, token_id)
 }
@@ -1939,7 +2036,7 @@ fn debug_parser_stacks(
 fn commit_token_per_advance<'py>(
     py: Python<'py>,
     mut state: PyRefMut<'py, PyConstraintState>,
-    token_id: u32,
+    token_id: &Bound<'_, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
     state.commit_token_per_advance(py, token_id)
 }

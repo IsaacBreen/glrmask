@@ -831,9 +831,6 @@ impl Constraint {
             let terminals = queries.terminals.to_vec();
             self.install_marker_terminals(terminals).map_err(crate::Error::Compilation)?;
         }
-        if !self.uses_dynamic_runtime() {
-            self.prime_initial_commit_hot_path();
-        }
         Ok(())
     }
 

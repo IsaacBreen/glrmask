@@ -415,10 +415,24 @@ class ConstraintState extends Owned {
     if (!types.isUint32Array(output)) throw new TypeError('fillMask requires a Uint32Array');
     invoke(() => handle(this, ConstraintState).fillMask(output));
   }
-  commitToken(id) { tokenId(id); return invoke(() => handle(this, ConstraintState).commitToken(id)); }
+  commitToken(id) {
+    if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
+    return invoke(() => handle(this, ConstraintState).commitToken(id));
+  }
   commitTokens(ids) {
-    const words = ids instanceof Uint32Array ? ids : Uint32Array.from(ids, tokenId);
-    return invoke(() => handle(this, ConstraintState).commitTokens(words));
+    if (ids instanceof Uint32Array) return invoke(() => handle(this, ConstraintState).commitTokens(ids));
+    const words = [];
+    for (const id of iterable(ids, 'token IDs')) {
+      if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
+      // An ID outside the u32 token domain can never be allowed. Commit it
+      // through commitToken so the native side rejects the state without
+      // committing the earlier IDs.
+      if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
+        return invoke(() => handle(this, ConstraintState).commitToken(id));
+      }
+      words.push(id);
+    }
+    return invoke(() => handle(this, ConstraintState).commitTokens(Uint32Array.from(words)));
   }
   commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }

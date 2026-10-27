@@ -12,7 +12,7 @@ fn source(case: usize) -> Grammar<'static> {
             g.bind("EVENT",TokenSet::from(1000)).unwrap();g
         },
         4 => Grammar::from_ebnf("start ::= \"a\" | \"ab\""),
-        5 => Grammar::from_glrm("start root nt root=@mark(7) \"ab\" @mark(9)"),
+        5 => glrmask::__private::grammar_from_glrm_with_markers("start root nt root=@mark(7) \"ab\" @mark(9)"),
         _ => unreachable!(),
     }
 }

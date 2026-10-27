@@ -118,7 +118,7 @@ def main() -> None:
         for name in symbols:assert getattr(library,name),name
         library.glrmask_abi_version.restype=ctypes.c_uint32
         library.glrmask_version.restype=ctypes.c_char_p
-        assert library.glrmask_abi_version()==2
+        assert library.glrmask_abi_version()==3
         assert library.glrmask_version().decode()==version
     if args.addon:
         verify_runtime_dependencies(args.addon.resolve(), args.platform)

@@ -3930,41 +3930,6 @@ impl Constraint {
             && self.table.action.is_empty()
     }
 
-    #[cold]
-    pub(crate) fn prime_initial_commit_hot_path(&self) {
-        let mut state = ConstraintState {
-            terminated: false,
-            markers: None,
-            constraint: self,
-            state: self.initial_state_map(),
-            buffers: Default::default(),
-            generation: 0,
-            mask_cache: Mutex::new(None),
-            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
-        };
-        state.prefill_mask_cache();
-        state.reserve_linear_stack_hot_path();
-
-        let token_ids = {
-            let cache = state.mask_cache.lock().unwrap();
-            let Some(mask) = cache.as_ref().map(|cache| cache.mask.as_slice()) else {
-                return;
-            };
-            if self.has_template_parser() {
-                template_initial_prime_token_ids(mask)
-            } else {
-                let Some(token_ids) = initial_commit_prime_token_ids(mask) else {
-                    return;
-                };
-                token_ids
-            }
-        };
-
-        let initial_state = &state.state;
-        let buffers = &mut state.buffers;
-        super::commit::prime_initial_commits(self, initial_state, buffers, &token_ids);
-    }
-
     /// Attach the derived lexer artifacts used only by exact dynamic masking.
     ///
     /// In particular, finite projections of symbolic residual lexers are a
@@ -10489,15 +10454,7 @@ impl Constraint {
         // warm-up before decoding starts. A current-format disk load already
         // has an explicit latency target, and warming an otherwise lazy cache
         // is not part of reconstructing its semantics. Ordinary LR packed
-        // loads retain their existing lazy policy. A table-free static parser
-        // uses at most 16 real initial tokens to prepare the same shared commit
-        // kernel; its measured load cost includes this work. Dynamic parsers
-        // retain their existing initialization policy.
-        if self.packed_parser_dwa.is_none()
-            || (self.has_template_parser() && !self.uses_dynamic_runtime())
-        {
-            self.prime_initial_commit_hot_path();
-        }
+        // loads retain their existing lazy policy.
         let initial_commit_prime_ms = initial_commit_prime_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
@@ -12636,7 +12593,6 @@ impl Constraint {
             mask_cache: Mutex::new(None),
             mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
-        state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
         state.initialize_markers();
         state

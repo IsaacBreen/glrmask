@@ -8566,7 +8566,7 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn reject_after_failed_commit(&mut self) {
+    pub(crate) fn reject_after_failed_commit(&mut self) {
         self.state.clear();
         self.terminated = false;
         if let Some(markers) = self.markers.as_deref_mut() { markers.begin(); }

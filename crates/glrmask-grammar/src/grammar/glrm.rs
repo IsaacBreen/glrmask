@@ -1393,6 +1393,7 @@ struct GlrmParser {
     pos: usize,
     scope_depth:usize,
     expression_depth:usize,
+    allow_markers:bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1737,7 +1738,7 @@ impl GlrmParser {
                 "unsupported or malformed GLRM version header: glrm {version}; only glrm 1; is supported"
             )));
         }
-        Ok(Self { tokens, spans:Vec::new(), pos: 0, scope_depth:0, expression_depth:0 })
+        Ok(Self { tokens, spans:Vec::new(), pos: 0, scope_depth:0, expression_depth:0, allow_markers:false })
     }
 
     fn consume_decl_eq(&mut self) -> Result<(), GlrMaskError> {
@@ -2466,16 +2467,12 @@ impl GlrmParser {
             Tok::Dot => Err(err("a `.` needs slashes: `/./s` for any character, `b/./s` for any byte")),
             Tok::At => {
                 if matches!(self.token_at(1), Tok::Ident(name) if name == "mark") {
-                    #[cfg(not(feature = "internal-api"))]
-                    return Err(err("`@mark` isn't supported"));
-                    #[cfg(feature = "internal-api")]
-                    {
-                        self.advance(); self.advance(); self.consume(&Tok::LParen)?;
-                        let id = u32::try_from(self.expect_int()?)
-                            .map_err(|_| err("marker ID does not fit in u32"))?;
-                        self.consume(&Tok::RParen)?;
-                        return Ok(GrammarExpr::marker(id));
-                    }
+                    if !self.allow_markers { return Err(err("`@mark` isn't supported")); }
+                    self.advance(); self.advance(); self.consume(&Tok::LParen)?;
+                    let id = u32::try_from(self.expect_int()?)
+                        .map_err(|_| err("marker ID does not fit in u32"))?;
+                    self.consume(&Tok::RParen)?;
+                    return Ok(GrammarExpr::marker(id));
                 }
                 Err(err("token IDs can't appear in GLRM; declare `extern token NAME;` and bind it in code"))
             }

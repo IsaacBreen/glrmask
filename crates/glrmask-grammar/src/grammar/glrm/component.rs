@@ -15,6 +15,14 @@ impl ParsedComponent {
         Self::from_scope(parser.parse_root_scope()?)
     }
 
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn parse_glrm_with_markers(source: &str) -> Result<Self, GlrMaskError> {
+        let mut parser=GlrmParser::from_source(source)?;
+        parser.allow_markers=true;
+        Self::from_scope(parser.parse_root_scope()?)
+    }
+
     fn from_scope(scope:ParsedGlrmScope) -> Result<Self,GlrMaskError> {
         validate_scope_for_v1_format(&scope,"grammar")?;
         let kinds=collect_external_kinds(&scope);

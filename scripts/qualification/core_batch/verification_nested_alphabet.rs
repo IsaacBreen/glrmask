@@ -34,7 +34,7 @@ fn main(){
         if alias{for (i,s) in ["A","xy","Axy","xyB","yz!","!?","\u{e9}","A\u{e9}","bad","badly"].iter().enumerate(){words.push((1000+i as u32,s.as_bytes().to_vec()));}}
         let v=Vocab::new(words);
         for mode in modes{for source in sources{
-            let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();compiled+=1;
+            let c=glrmask::__private::grammar_from_glrm_with_markers(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();compiled+=1;
             let restored=Constraint::load(c.save(), &vocab).unwrap();
             for c in [&c,&restored]{
                 for text in ["","A","AxyB","xy!","A xy B","A\txyB","Axyz!","!ac?","ac!","abc!","[badly]","A\u{e9}!","!?!"]{
