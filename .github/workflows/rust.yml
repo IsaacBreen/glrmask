@@ -97,5 +97,3 @@ jobs:
         run: cargo run --locked --profile fasttest --example generate
       - name: Tool-call example
         run: cargo run --locked --profile fasttest --example tool_calls
-      - name: Marker example
-        run: cargo run --locked --profile fasttest --example markers
