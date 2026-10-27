@@ -7,6 +7,7 @@
 - In C, the commit functions return `bool`, and `GLRMASK_REJECTED` is gone.
 - Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
 - 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
+- Rust: `ConstraintState::mask_len` is new, matching the other bindings.
 
 ## 0.5.0
 

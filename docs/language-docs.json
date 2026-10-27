@@ -68,7 +68,7 @@
     "Module.__deepcopy__": "Same as `copy()`.",
     "Module.save": "Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another.",
     "Module.load": "Loads a module saved with `save()`.",
-    "Grammar": "A grammar, parsed from source or built from an Expr.",
+    "Grammar": "A grammar, parsed from source or built from an `Expr`.",
     "Grammar.from_glrm": "Creates a grammar from GLRM source.",
     "Grammar.from_json_schema": "Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.",
     "Grammar.from_lark": "Creates a grammar from Lark source.",
@@ -97,6 +97,7 @@
     "Grammar.bind": "Binds the extern `name` to `value`.\n\n`bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.",
     "ConstraintState.copy": "A copy of the state.",
     "ConstraintState.__copy__": "Same as `copy()`.",
+    "ConstraintState.__deepcopy__": "Same as `copy()`.",
     "TokenTrie": "Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.\n\n`TokenTrie()` is the same as `MaskStrategy.TOKEN_TRIE`.",
     "TokenTrie.parser_backend": "How the parser is represented. Defaults to `ParserBackend.LR_TABLE`.",
     "TokenTrie.merge_equivalent_tokens": "Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.\n\nTokens are not merged in a composition that includes precompiled parts."
@@ -214,5 +215,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "9c9f204ac11670aa89e196555c913c75f314fb2fcb7cf0ef7100d35e26a523d6"
+  "content_sha256": "93af4b991a15add3962964d3ab0519104512413e76b459dc171029f359428348"
 }

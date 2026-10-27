@@ -289,7 +289,7 @@ fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usiz
     let size = requested.unwrap_or(minimum);
     if size < minimum {
         return Err(PyValueError::new_err(format!(
-            "mask size {size} is smaller than the constraint token range {minimum}"
+            "size must be at least {minimum}"
         )));
     }
     Ok(size)
@@ -300,7 +300,7 @@ fn bitmask_u32_view<'a, 'py>(
 ) -> PyResult<&'a mut [u32]> {
     let slice = bitmask
         .as_slice_mut()
-        .map_err(|e| PyValueError::new_err(format!("Array must be contiguous: {e:?}")))?;
+        .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
     // Safety: i32 and u32 have identical size, alignment, and bit representation.
     Ok(unsafe {
         std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -817,6 +817,7 @@ impl PyConstraint {
 
     /// Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for.
     #[staticmethod]
+    #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.inner.clone();
@@ -1216,9 +1217,9 @@ impl PyConstraintState {
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
+        let slice = bitmask
+            .as_slice_mut()
+            .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
         // Safety: i32 and u32 have identical size, alignment, and bit representation.
         // fill_mask writes valid u32 bitmask values where the high bit is meaningful.
         let buf: &mut [u32] = unsafe {
@@ -1226,7 +1227,7 @@ impl PyConstraintState {
         };
         let required = self.inner.borrow_owner().mask_len();
         if buf.len() < required {
-            return Err(PyValueError::new_err(format!("mask needs at least {required} packed words")));
+            return Err(PyValueError::new_err(format!("the mask array needs at least {required} words")));
         }
         self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
         Ok(())
@@ -1349,9 +1350,9 @@ impl PyConstraintState {
     }
 
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
+        let slice = bitmask
+            .as_slice_mut()
+            .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
@@ -1363,9 +1364,9 @@ impl PyConstraintState {
         &self,
         mut bitmask: PyReadwriteArray1<i32>,
     ) -> PyResult<Vec<u64>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
+        let slice = bitmask
+            .as_slice_mut()
+            .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
@@ -1381,9 +1382,9 @@ impl PyConstraintState {
         py: Python<'py>,
         mut bitmask: PyReadwriteArray1<i32>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
+        let slice = bitmask
+            .as_slice_mut()
+            .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };

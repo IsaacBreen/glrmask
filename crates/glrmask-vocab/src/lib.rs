@@ -347,12 +347,12 @@ impl Vocab {
         }
     }
 
-    /// The bytes of a token, or `None` for special and unknown IDs.
+    /// The bytes of token `id`, or `None` if the vocabulary doesn't contain it.
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }
 
-    /// Each token ID and its bytes, in ID order. Special tokens are skipped.
+    /// Each token ID and its bytes, in ID order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()

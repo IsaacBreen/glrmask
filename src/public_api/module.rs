@@ -793,7 +793,7 @@ impl Module {
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     return Err(Error::ResourceLimit(
-                        "grammar_normalization build budget exhausted".into(),
+                        "the grammar is too large to normalize".into(),
                     ));
                 }
                 let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;

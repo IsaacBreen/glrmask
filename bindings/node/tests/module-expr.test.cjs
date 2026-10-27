@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,ParserBackend}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GlrMaskError}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]]);
 const source=(text='a')=>Grammar.fromLark(`start: "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
@@ -82,7 +82,7 @@ test('Module: rebinding error, :: error and open-child error',()=>{
 
   // Qualified paths rejected
   const p2=new Module(host());
-  assert.throws(()=>p2.bind('foo::bar',source()),/qualified paths are not supported/);
+  assert.throws(()=>p2.bind('foo::bar',source()),e=>e instanceof GlrMaskError && e.code==='GLRMASK_ENGINE_ERROR' && e.message==='there is no extern named "foo::bar"');
 
   // Open-child error
   const openChild=new Module(Grammar.fromGlrm('glrm 1; start root; extern grammar inner; nt root = inner;'));

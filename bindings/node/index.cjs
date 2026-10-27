@@ -16,7 +16,7 @@ async function invokeAsync(fn) {
   try { return await fn(); } catch (error) { throw normalize(error); }
 }
 function handle(value, Type) {
-  if (!(value instanceof Type) || !handles.has(value)) throw new TypeError(`Expected ${Type.name}`);
+  if (!(value instanceof Type) || !handles.has(value)) throw new TypeError(`Expected a ${Type.name}`);
   return handles.get(value);
 }
 function wrap(Type, value) { return new Type(key, value); }
@@ -36,7 +36,7 @@ function iterable(value, name) {
 }
 function ids(value) { return iterable(value, 'token IDs').map(tokenId); }
 function bytes(value) {
-  if (!types.isUint8Array(value)) throw new TypeError('Expected Uint8Array or Buffer containing exact token bytes');
+  if (!types.isUint8Array(value)) throw new TypeError('Expected a Uint8Array or Buffer');
   return value;
 }
 function checkedOptions(value, allowed) {
@@ -80,13 +80,13 @@ function parseMaskStrategy(value) {
   }
   const o = checkedOptions(value, ['kind', 'parserBackend', 'mergeEquivalentTokens']);
   if (o.kind !== 'token-trie') {
-    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', "maskStrategy.kind must be 'token-trie'");
+    throw new TypeError("maskStrategy.kind must be 'token-trie'");
   }
   if (o.parserBackend !== undefined && o.parserBackend !== 'lr-table' && o.parserBackend !== 'template-dfa') {
-    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', "maskStrategy.parserBackend must be 'lr-table' or 'template-dfa'");
+    throw new TypeError("maskStrategy.parserBackend must be 'lr-table' or 'template-dfa'");
   }
   if (o.mergeEquivalentTokens !== undefined && typeof o.mergeEquivalentTokens !== 'boolean') {
-    throw new GlrMaskError('GLRMASK_INVALID_ARGUMENT', 'maskStrategy.mergeEquivalentTokens must be a boolean');
+    throw new TypeError('maskStrategy.mergeEquivalentTokens must be a boolean');
   }
   return {
     strategy: 2,
@@ -209,7 +209,7 @@ class Grammar extends Owned {
     if (value instanceof Expr) expr = handle(value, Expr);
     else if (value instanceof Grammar) expr = invoke(() => native.NativeExpr.fromGrammar(handle(value, Grammar)));
     else if (value instanceof TokenSet) expr = invoke(() => native.NativeExpr.fromTokenSet(handle(value, TokenSet)));
-    else throw new TypeError('Grammar.fromExpr requires Expr, Grammar, or TokenSet');
+    else throw new TypeError('Grammar.fromExpr requires an Expr, Grammar or TokenSet');
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
   }
   bind(nameOrBindings, value) {
@@ -230,7 +230,7 @@ class Grammar extends Owned {
     if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));
     if (value instanceof TokenSet) return invoke(() => target.bindTokens(name, handle(value, TokenSet)));
     if (typeof value === 'number') return invoke(() => target.bindToken(name, tokenId(value)));
-    throw new TypeError('Grammar.bind requires Grammar, Expr, Token or TokenSet');
+    throw new TypeError('Grammar.bind requires a Grammar, Expr, TokenSet or token ID');
   }
   precompileSync(vocab, options) {
     const s = compileSettings(options);
@@ -285,7 +285,7 @@ class Expr extends Owned {
           if (value instanceof Expr) return handle(value, Expr).clone();
           if (typeof value === 'number') return native.NativeExpr.fromToken(tokenId(value));
           if (value instanceof TokenSet) return native.NativeExpr.fromTokenSet(handle(value, TokenSet));
-          throw new TypeError('Expr operands must be Grammar, Module, Expr, Token or TokenSet');
+          throw new TypeError('Expr operands must be a Grammar, Module, Expr, TokenSet or token ID');
         }));
       }
       return wrap(Expr, invoke(() => native.NativeExpr[operator](parts)));
@@ -322,7 +322,7 @@ class Module extends Owned {
 
   _bindSingle(name, value) {
     string(name, 'binding name');
-    if (name.includes('::')) throw new GlrMaskError('GLRMASK_ENGINE_ERROR', 'qualified paths are not supported');
+    if (name.includes('::')) throw new GlrMaskError('GLRMASK_ENGINE_ERROR', `there is no extern named ${JSON.stringify(name)}`);
     invoke(() => {
       const target = handle(this, Module);
       if (value instanceof Grammar) target.bindGrammar(name, handle(value, Grammar));
@@ -336,7 +336,7 @@ class Module extends Owned {
       else if (value instanceof Expr) target.bindExpr(name, handle(value, Expr));
       else if (typeof value === 'number') target.bindToken(name, tokenId(value));
       else if (value instanceof TokenSet) target.bindTokens(name, handle(value, TokenSet));
-      else throw new TypeError('Module.bind requires Grammar, Module, Expr, Token or TokenSet');
+      else throw new TypeError('Module.bind requires a Grammar, Module, Expr, TokenSet or token ID');
     });
   }
 

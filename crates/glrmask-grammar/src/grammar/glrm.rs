@@ -2281,7 +2281,7 @@ impl GlrmParser {
             };
         }
         if self.can_start_nt_atom() {
-            return Err(err("invalid syntax: RHS sequence subtraction must be parenthesized"));
+            return Err(err("a subtraction in a rule body must be parenthesized"));
         }
         Ok(expr)
     }
@@ -2497,7 +2497,7 @@ impl GlrmParser {
                     }
                 }
             }
-            other => Err(err(&format!("unexpected token {:?} in NT expression", other))),
+            other => Err(err(&format!("unexpected token {:?} in a rule body", other))),
         }
     }
 }
@@ -3745,7 +3745,7 @@ nt z = x (A - c d);
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("RHS sequence subtraction must be parenthesized"), "{err}");
+        assert!(err.contains("a subtraction in a rule body must be parenthesized"), "{err}");
     }
 
     #[test]

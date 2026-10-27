@@ -1,6 +1,6 @@
 #ifndef GLRMASK_HPP
 #define GLRMASK_HPP
-// C++17 RAII facade. Implementation and engine allocations remain in Rust.
+// GLRMask C++17 API. It wraps the C API in glrmask.h.
 #include "glrmask.h"
 #include <cstddef>
 #include <cstdint>
@@ -274,7 +274,7 @@ public:
     explicit Vocab(const std::vector<VocabEntry>& entries) : Base(create(entries)) {}
 };
 
-/// A grammar, parsed from source or built from an [`Expr`].
+/// A grammar, parsed from source or built from an `Expr`.
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
@@ -350,13 +350,13 @@ class Expr : public detail::Owned<glrmask_expr, glrmask_expr_free, glrmask_expr_
     using Base = detail::Owned<glrmask_expr, glrmask_expr_free, glrmask_expr_clone>;
     explicit Expr(glrmask_expr* p) : Base(p) {}
 public:
-    /// Matches any one of its choices.
+    /// Matches any one of `values`.
     static Expr choice(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
         for (const auto& value : values) items.push_back(value.value);
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_choice(items.data(), items.size(), &p)); return Expr(p);
     }
-    /// Matches expressions in order.
+    /// Matches `values` one after another.
     static Expr sequence(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
         for (const auto& value : values) items.push_back(value.value);
@@ -460,12 +460,12 @@ inline ExprOperand::ExprOperand(const Grammar& value) : value{0, value.native_ha
 inline ExprOperand::ExprOperand(const Module& value) : value{1, value.native_handle()} {}
 /// From an expression.
 inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handle()} {}
-/// From a single token ID.
+/// From a token ID.
 inline ExprOperand::ExprOperand(TokenId value) : value{3, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value))} {}
 /// From a token set.
 inline ExprOperand::ExprOperand(const TokenSet& value) : value{4, value.native_handle()} {}
 
-/// A grammar compiled for a vocabulary. Call [`start`](Self::start) for each sequence you generate.
+/// A grammar compiled for a vocabulary. Call `start` for each sequence you generate.
 class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone> {
     using Base = detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone>;
     explicit Constraint(glrmask_constraint* p) : Base(p) {}

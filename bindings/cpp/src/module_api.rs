@@ -144,7 +144,7 @@ unsafe fn parse_expr_operand(item: &glrmask_expr_operand) -> Result<g::Expr> {
             2 => Ok(read(item.handle.cast::<glrmask_expr>())?.0.clone()),
             3 => Ok(g::Expr::from(u32::try_from(item.handle as usize).map_err(|_| Error::invalid("token operand does not fit in u32"))?)),
             4 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_token_set>())?.0.clone())),
-            _ => Err(Error::invalid("unknown expression operand; expected Grammar=0, Module=1, Expr=2, Token=3, TokenSet=4")),
+            _ => Err(Error::invalid("unknown operand kind; expected a GLRMASK_OPERAND_* value")),
         }
     }
 }

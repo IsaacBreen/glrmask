@@ -129,7 +129,7 @@ def test_artifact_ownership_and_existing_vocab_validation():
     assert isinstance(raw, bytes)
     del c
     gc.collect()
-    c = glrmask.Constraint.load(raw, vocab=v)
+    c = glrmask.Constraint.load(raw, v)
     s = c.start()
     assert s.commit_token(0)
     assert s.mask()[130]
@@ -137,7 +137,7 @@ def test_artifact_ownership_and_existing_vocab_validation():
         glrmask.Constraint.load(raw[:-1], v)
     other = glrmask.Vocab.from_id_to_bytes({0: b'changed'})
     with pytest.raises(ValueError):
-        glrmask.Constraint.load(raw, vocab=other)
+        glrmask.Constraint.load(raw, other)
 
 
 def test_token_set_has_no_introspection_accessors():

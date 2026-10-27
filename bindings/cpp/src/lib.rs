@@ -204,7 +204,7 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_load(bytes: *const u8, n: usize, v: *const glrmask_vocab, out: *mut *mut glrmask_constraint) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let bytes = input(bytes, n)?.to_vec();
-        if v.is_null() { return Err(Error::invalid("constraint load requires the exact vocabulary")); }
+        if v.is_null() { return Err(Error::invalid("vocab is NULL")); }
         Ok(glrmask_constraint(Arc::new(g::Constraint::load(bytes, &read(v)?.0)?)))
     }) })
 }

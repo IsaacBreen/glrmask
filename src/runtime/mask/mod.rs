@@ -8766,13 +8766,18 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
+    /// The number of `u32` words in a mask.
+    pub fn mask_len(&self) -> usize {
+        self.constraint.mask_len()
+    }
+
     /// Writes the mask into `buf`, zeroing any extra words.
     ///
     /// # Panics
     ///
-    /// Panics if `buf` is shorter than [`Constraint::mask_len`].
+    /// Panics if `buf` is shorter than [`mask_len`](Self::mask_len).
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is smaller than constraint mask");
+        assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is shorter than mask_len()");
         if self.terminated {
             buf.fill(0);
             return;

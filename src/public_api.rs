@@ -915,7 +915,7 @@ impl Grammar {
         self.validate_ebnf(vocab)?;
         if let Some(name) = self.unresolved_external_names()?.first() {
             return Err(Error::Compilation(format!(
-                "extern {name:?} is not bound; bind it before compiling",
+                "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
             )));
         }
         if engine == Engine::TokenTrie {
@@ -987,7 +987,7 @@ impl Grammar {
                     spec.automatic_boundary_selection = true;
                     if let Some(name) = spec.unbound_grammar_names.first() {
                         return Err(Error::Compilation(format!(
-                            "extern {name:?} is not bound; bind it before compiling",
+                            "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                         )));
                     }
                     let mut constraint = spec.compile_final(engine)?;
@@ -2868,7 +2868,7 @@ fn apply_final_boundary_trigger(constraint: &mut RuntimeConstraint, detail: Boun
 fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
     if let Some(slot) = constraint.late_grammar_slots.first() {
         return Err(Error::Compilation(format!(
-            "extern {:?} is unbound; bind it before compiling, or precompile to leave it open; bind it before compiling, or precompile to leave it open",
+            "extern {:?} is unbound; bind it before compiling, or precompile to leave it open",
             slot.name,
         )));
     }

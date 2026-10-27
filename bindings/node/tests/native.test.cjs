@@ -123,9 +123,9 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'token_class_trie'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'TokenTrie'}),TypeError);
   // The TokenTrie object form validates its own keys and values.
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',parserBackend:'nope'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'lr-table'}}),e=>e instanceof GlrMaskError && e.code==='GLRMASK_INVALID_ARGUMENT');
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',parserBackend:'nope'}}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'lr-table'}}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',bogus:true}}),TypeError);
   assert.throws(()=>simple().compileSync(v,{parserBackend:ParserBackend.LrTable}),TypeError);
   assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:true}),TypeError);

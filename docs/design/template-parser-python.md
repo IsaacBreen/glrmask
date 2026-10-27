@@ -121,7 +121,7 @@ this is not a whole-process memory guarantee.
 
 ```python
 raw = constraint.save()
-loaded = glrmask.Constraint.load(raw, vocab=vocab)
+loaded = glrmask.Constraint.load(raw, vocab)
 assert glrmask._internal.parser_backend(loaded) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 assert loaded.save() == raw
 ```

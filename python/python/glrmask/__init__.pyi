@@ -312,7 +312,7 @@ class Module:
 
 @final
 class Grammar:
-    """A grammar, parsed from source or built from an Expr."""
+    """A grammar, parsed from source or built from an `Expr`."""
     @staticmethod
     def from_glrm(source: str, /) -> Grammar:
         """Creates a grammar from GLRM source."""
@@ -397,7 +397,7 @@ class Constraint:
         """
         ...
     @staticmethod
-    def load(data: bytes, vocab: Vocab) -> Constraint:
+    def load(data: bytes, vocab: Vocab, /) -> Constraint:
         """Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for."""
         ...
 
@@ -408,6 +408,9 @@ class ConstraintState:
         """A copy of the state."""
         ...
     def __copy__(self) -> ConstraintState:
+        """Same as `copy()`."""
+        ...
+    def __deepcopy__(self, memo: dict[int, Any]) -> ConstraintState:
         """Same as `copy()`."""
         ...
     def mask_len(self) -> int:

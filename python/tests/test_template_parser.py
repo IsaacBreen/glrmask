@@ -130,7 +130,7 @@ def representations(constraint, vocab):
     loaded = glrmask.Constraint.load(raw, vocab)
     assert loaded.save() == raw
     external = constraint.save()
-    return [constraint, loaded, glrmask.Constraint.load(external, vocab=vocab)]
+    return [constraint, loaded, glrmask.Constraint.load(external, vocab)]
 
 
 @pytest.mark.parametrize("mode", MODES)
