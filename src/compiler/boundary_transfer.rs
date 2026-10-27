@@ -4171,7 +4171,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+                nt document = "L" SUB SUB "x" | "R" SUB SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -4179,14 +4179,14 @@ mod tests {
             r#"
                 start m;
                 extern token SUB2;
-                nt m ::= "m" SUB2;
+                nt m = "m" SUB2;
             "#,
             &vocab, &[("SUB2", 998)], &[])
         .unwrap();
         let grandchild = Constraint::from_glrm_grammar(
             r#"
                 start g;
-                nt g ::= "g";
+                nt g = "g";
             "#,
             &vocab,
         )
@@ -4346,9 +4346,9 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -4356,8 +4356,8 @@ mod tests {
             r#"
                 start child;
                 ignore WS;
-                t WS ::= "\t"+;
-                nt child ::= "a";
+                t WS = "\t"+;
+                nt child = "a";
             "#,
             &vocab,
         )

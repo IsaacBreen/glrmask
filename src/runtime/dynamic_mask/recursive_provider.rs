@@ -644,12 +644,12 @@ mod epsilon_reset_boundary_tests {
             entries.push((7003, b"a]!".to_vec()));
             let vocab = Vocab::new(entries.clone());
             let child_source = if nullable {
-                r#"glrm 1; start leaf; t W ::= "a" | "ab"; nt leaf ::= W?;"#
+                r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W?;"#
             } else {
-                r#"glrm 1; start leaf; t W ::= "a" | "ab"; nt leaf ::= W;"#
+                r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W;"#
             };
             let outer = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar leaf; nt root ::= "P[" leaf "]" leaf "!";"#,
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P[" leaf "]" leaf "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();
@@ -728,12 +728,12 @@ mod closed_admission_support_tests {
             entries.push((7003, b"a]!".to_vec()));
             let vocab = Vocab::new(entries.clone());
             let child_source = if nullable {
-                r#"glrm 1; start leaf; t W ::= "a" | "ab"; nt leaf ::= W?;"#
+                r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W?;"#
             } else {
-                r#"glrm 1; start leaf; t W ::= "a" | "ab"; nt leaf ::= W;"#
+                r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W;"#
             };
             let outer = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar leaf; nt root ::= "P[" leaf "]" leaf "!";"#,
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P[" leaf "]" leaf "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();

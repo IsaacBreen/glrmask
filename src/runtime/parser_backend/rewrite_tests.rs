@@ -162,7 +162,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
             .map(|(id, value)| (id as u32, value.as_bytes().to_vec())).collect()
     );
     let dynamic = crate::__private::compile_bounded_template_o2_glrm(
-        r#"start root; nt root ::= "a" | "(" root ")";"#,
+        r#"start root; nt root = "a" | "(" root ")";"#,
         &vocab,
     )
     .unwrap();
@@ -252,8 +252,8 @@ fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tabl
             .map(|(id, word)| (id as u32, word.as_bytes().to_vec())).collect()
     );
     for source in [
-        r#"start root; nt root ::= "a" | "ab";"#,
-        r#"start root; nt root ::= "a" | "(" root ")";"#,
+        r#"start root; nt root = "a" | "ab";"#,
+        r#"start root; nt root = "a" | "(" root ")";"#,
     ] {
         let component = Constraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
         let parser = component.template_parser.as_ref().unwrap();
@@ -441,7 +441,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
     ];
     let vocab = crate::Vocab::new(pieces.to_vec());
     let source = crate::Grammar::glrm(
-        r#"start root; ignore WS; t WS ::= " "+; nt root ::= "a" root "b" | "";"#
+        r#"start root; ignore WS; t WS = " "+; nt root = "a" root "b" | "";"#
     );
     for optimization in [MaskMode::C, MaskMode::ParserDwa] {
         let fresh = source.compile_with_build_options(
@@ -483,10 +483,10 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
 fn dynamic_envelope_contains_exactly_the_native_constraint_bodies() {
     let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let a = Constraint::compile(
-        crate::Grammar::glrm(r#"start root; nt root ::= "a";"#), &vocab,
+        crate::Grammar::glrm(r#"start root; nt root = "a";"#), &vocab,
     ).unwrap();
     let b = Constraint::compile(
-        crate::Grammar::glrm(r#"start root; nt root ::= "b";"#), &vocab,
+        crate::Grammar::glrm(r#"start root; nt root = "b";"#), &vocab,
     ).unwrap();
     let dynamic = crate::dynamic_constraint::DynamicConstraint::from_constraints(
         vec![a.clone(), b.clone()]

@@ -26,7 +26,7 @@ let child = Grammar::from_ebnf(r#"start ::= "a"?"#)?.compile_with(
         .parser_backend(ParserBackend::TemplateDfa),
 )?;
 let parent = Grammar::from_glrm(
-    r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y";"#,
+    r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
 )?.compile_unlinked(&vocab)?;
 
 for optimization in [Optimization::Balanced, Optimization::FastRuntime] {

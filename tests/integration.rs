@@ -189,9 +189,9 @@ fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
     let constraints = [
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= " —""#), &vocab).unwrap(),
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= " " [—]"#), &vocab).unwrap(),
-        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX ::= / —/; nt start ::= RX;"#), &vocab)
+        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX = / —/; nt start = RX;"#), &vocab)
         .unwrap(),
-        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t CLASS ::= /[—]/; nt start ::= " " CLASS;"#), &vocab)
+        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t CLASS = /[—]/; nt start = " " CLASS;"#), &vocab)
         .unwrap(),
     ];
     for (index, constraint) in constraints.iter().enumerate() {
@@ -207,7 +207,7 @@ fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
 
     let dynamic_constraints = [
         DynamicConstraint::compile(glrmask::Grammar::ebnf(r#"start ::= " —""#), &vocab).unwrap(),
-        DynamicConstraint::compile(glrmask::Grammar::glrm(r#"start start; t RX ::= / —/; nt start ::= RX;"#), &vocab)
+        DynamicConstraint::compile(glrmask::Grammar::glrm(r#"start start; t RX = / —/; nt start = RX;"#), &vocab)
         .unwrap(),
     ];
     for (index, constraint) in dynamic_constraints.iter().enumerate() {
@@ -241,7 +241,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
 
     for constraint in [
         Constraint::compile(glrmask::Grammar::lark("start: /—+/"), &vocab).unwrap(),
-        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX ::= /—+/; nt start ::= RX;"#), &vocab)
+        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX = /—+/; nt start = RX;"#), &vocab)
         .unwrap(),
     ] {
         assert_eq!(allowed(&constraint.start().mask()), vec![0, 1, 2]);
@@ -252,7 +252,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
 
     for constraint in [
         Constraint::compile(glrmask::Grammar::ebnf("start ::= [😀]"), &vocab).unwrap(),
-        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t FACE ::= /[😀]/; nt start ::= FACE;"#), &vocab)
+        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t FACE = /[😀]/; nt start = FACE;"#), &vocab)
         .unwrap(),
     ] {
         assert_eq!(allowed(&constraint.start().mask()), vec![3, 4, 5, 6]);
@@ -305,7 +305,7 @@ fn unicode_escape_spellings_preserve_runtime_prefixes() {
         Constraint::compile(glrmask::Grammar::lark(r#"start: / \U00002014/"#), &vocab).unwrap(),
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= " \u2014""#), &vocab).unwrap(),
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= " " [\u2014]"#), &vocab).unwrap(),
-        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX ::= / \u2014/; nt start ::= RX;"#), &vocab)
+        Constraint::compile(glrmask::Grammar::glrm(r#"start start; t RX = / \u2014/; nt start = RX;"#), &vocab)
         .unwrap(),
     ];
     for (index, constraint) in static_constraints.iter().enumerate() {
@@ -1402,8 +1402,8 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
     let grammar = r#"
         start s;
 
-        nt s ::= "a" host "c"* "a";
-        nt host ::= "d" | "b"*;
+        nt s = "a" host "c"* "a";
+        nt host = "d" | "b"*;
     "#;
 
     let tiny_vocab = vocab(&["a", "b"]);
@@ -1484,7 +1484,7 @@ fn glrm_special_token_is_exact_token_id_not_byte_language() {
         let grammar = Grammar::from_glrm(r#"
                 start start;
                 extern token SPECIAL;
-                nt start ::= "a" SPECIAL "b";
+                nt start = "a" SPECIAL "b";
             "#)
         .unwrap()
         .bind_snapshot("SPECIAL", TokenSet::from(7))
@@ -1514,7 +1514,7 @@ fn byte_less_special_token_extends_mask_token_space() {
     let res = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(r#"
                 start start;
-                nt start ::= @token(100);
+                nt start = @token(100);
             "#), &vocab)
     });
     assert!(res.is_err());
@@ -1547,7 +1547,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
         Grammar::from_glrm(r#"
         start start;
         extern token SPECIAL;
-        nt start ::= "a" SPECIAL "b";
+        nt start = "a" SPECIAL "b";
     "#)
         .unwrap()
         .bind_snapshot("SPECIAL", TokenSet::from(7))
@@ -1587,7 +1587,7 @@ fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
         Grammar::from_glrm(r#"
         start start;
         extern token END;
-        nt start ::= "a" END;
+        nt start = "a" END;
     "#)
         .unwrap()
         .bind_snapshot("END", TokenSet::from(100))
@@ -1624,7 +1624,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
     let grammar = Grammar::from_glrm(r#"
         start start;
         extern token SPECIAL;
-        nt start ::= "a" SPECIAL | "x" "a" "z";
+        nt start = "a" SPECIAL | "x" "a" "z";
     "#)
     .unwrap()
     .bind_snapshot("SPECIAL", TokenSet::from(7))
@@ -1655,7 +1655,7 @@ fn special_token_commit_profiling_entry_points_preserve_semantics() {
             glrm 1;
             start start;
             extern token SPECIAL;
-            nt start ::= SPECIAL;
+            nt start = SPECIAL;
         "#).unwrap();
     grammar.bind("SPECIAL", glrmask::TokenSet::new(vec![100])).unwrap();
     let constraint = with_stable_ti_env(|| {
@@ -1687,7 +1687,7 @@ fn special_token_cannot_be_configured_as_ignore_terminal() {
             start start;
             ignore SPECIAL;
             extern token SPECIAL;
-            nt start ::= "a";
+            nt start = "a";
         "#)
     .unwrap_err();
     assert!(error.to_string().contains("can't match a token ID"));
@@ -1700,7 +1700,7 @@ fn special_token_atoms_compose_in_parser_choices_and_repetition() {
                 start start;
                 extern token FIRST;
                 extern token SECOND;
-                nt start ::= (FIRST | SECOND)+;
+                nt start = (FIRST | SECOND)+;
             "#)
     .unwrap()
     .bind_snapshot("FIRST", TokenSet::from(100))
@@ -1731,28 +1731,28 @@ fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
         start start;
         ignore WS;
         pragma glrmask {
-            lexer group ws ::= WS;
-            lexer group a ::= A;
-            lexer group b ::= B;
-            lexer group c ::= C;
+            lexer group ws = WS;
+            lexer group a = A;
+            lexer group b = B;
+            lexer group c = C;
         }
-        t WS ::= " "+;
-        t A ::= "a"+;
-        t B ::= "b";
-        t C ::= "c";
-        nt start ::= A B | A C | B A | C A;
+        t WS = " "+;
+        t A = "a"+;
+        t B = "b";
+        t C = "c";
+        nt start = A B | A C | B A | C A;
     "#;
     let monolithic_grammar = r#"
         start start;
         ignore WS;
         pragma glrmask {
-            lexer group all ::= WS, A, B, C;
+            lexer group all = WS, A, B, C;
         }
-        t WS ::= " "+;
-        t A ::= "a"+;
-        t B ::= "b";
-        t C ::= "c";
-        nt start ::= A B | A C | B A | C A;
+        t WS = " "+;
+        t A = "a"+;
+        t B = "b";
+        t C = "c";
+        nt start = A B | A C | B A | C A;
     "#;
     let isolated = Constraint::compile(glrmask::Grammar::glrm(isolated_grammar), &vocab).unwrap();
     let monolithic = Constraint::compile(glrmask::Grammar::glrm(monolithic_grammar), &vocab).unwrap();
@@ -1874,72 +1874,72 @@ fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
                 start start;
                 ignore WS;
                 pragma glrmask {
-                    lexer group ws ::= WS;
-                    lexer group a ::= A;
-                    lexer group b ::= B;
-                    lexer group c ::= C;
+                    lexer group ws = WS;
+                    lexer group a = A;
+                    lexer group b = B;
+                    lexer group c = C;
                 }
-                t WS ::= " "+;
-                t A ::= "a"+;
-                t B ::= "b";
-                t C ::= "c";
-                nt item ::= A | B | C;
-                nt start ::= item item? item?;
+                t WS = " "+;
+                t A = "a"+;
+                t B = "b";
+                t C = "c";
+                nt item = A | B | C;
+                nt start = item item? item?;
             "#,
             r#"
                 start start;
                 pragma glrmask {
-                    lexer group a ::= A;
-                    lexer group b ::= B;
-                    lexer group c ::= C;
+                    lexer group a = A;
+                    lexer group b = B;
+                    lexer group c = C;
                 }
-                t A ::= "a"*;
-                t B ::= "ab" | "b";
-                t C ::= "c"+;
-                nt item ::= A | B | C;
-                nt start ::= item item?;
+                t A = "a"*;
+                t B = "ab" | "b";
+                t C = "c"+;
+                nt item = A | B | C;
+                nt start = item item?;
             "#,
             r#"
                 start start;
                 pragma glrmask {
-                    lexer group a ::= A;
-                    lexer group b ::= B;
-                    lexer group c ::= C;
+                    lexer group a = A;
+                    lexer group b = B;
+                    lexer group c = C;
                 }
-                t A ::= "a" | "ab";
-                t B ::= "ab" | "b" | "ba";
-                t C ::= "abc" | "bc" | "c";
-                nt item ::= A | B | C;
-                nt start ::= item item? item?;
+                t A = "a" | "ab";
+                t B = "ab" | "b" | "ba";
+                t C = "abc" | "bc" | "c";
+                nt item = A | B | C;
+                nt start = item item? item?;
             "#,
             r#"
                 start start;
                 pragma glrmask {
-                    lexer group a ::= A;
-                    lexer group b ::= B;
-                    lexer group c ::= C;
+                    lexer group a = A;
+                    lexer group b = B;
+                    lexer group c = C;
                 }
-                t A ::= b/[abc]/ - "b";
-                t B ::= b/[ab]/ & b/[bc]/;
-                t C ::= "b" | "bc";
-                nt item ::= A | B | C;
-                nt start ::= item item? item?;
+                t A = b/[abc]/ - "b";
+                t B = b/[ab]/ & b/[bc]/;
+                t C = "b" | "bc";
+                nt item = A | B | C;
+                nt start = item item? item?;
             "#,
             r#"
                 start start;
                 ignore WS;
                 pragma glrmask {
-                    lexer group ws ::= WS;
-                    lexer group a ::= A;
-                    lexer group b ::= B;
-                    lexer group c ::= C;
+                    lexer group ws = WS;
+                    lexer group a = A;
+                    lexer group b = B;
+                    lexer group c = C;
                 }
-                t WS ::= " "+;
-                t A ::= /a(?:b|c)*/;
-                t B ::= /b+/;
-                t C ::= /c+/;
-                nt item ::= A | B | C;
-                nt start ::= item item?;
+                t WS = " "+;
+                t A = /a(?:b|c)*/;
+                t B = /b+/;
+                t C = /c+/;
+                nt item = A | B | C;
+                nt start = item item?;
             "#,
     ];
 
@@ -1953,10 +1953,10 @@ fn residual_terminal_continuation_survives_across_vocab_tokens() {
     let vocab = vocab(&["a", "b", "c", "ab", "ba", "bc", "abc"]);
     let grammar = r#"
         start start;
-        t A ::= "a";
-        t B ::= "b" | "ba";
-        nt item ::= A | B;
-        nt start ::= item item? item?;
+        t A = "a";
+        t B = "b" | "ba";
+        nt item = A | B;
+        nt start = item item? item?;
     "#;
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
@@ -1980,12 +1980,12 @@ fn monolithic_runtime_matches_dynamic_for_ignore_and_repeated_terminals() {
     let grammar = r#"
         start start;
         ignore WS;
-        t WS ::= " "+;
-        t A ::= "a"+;
-        t B ::= "b";
-        t C ::= "c";
-        nt item ::= A | B | C;
-        nt start ::= item item? item?;
+        t WS = " "+;
+        t A = "a"+;
+        t B = "b";
+        t C = "c";
+        nt item = A | B | C;
+        nt start = item item? item?;
     "#;
     assert_partitioned_runtime_matches_dynamic(grammar, &vocab, 3);
 }
@@ -2002,11 +2002,11 @@ fn monolithic_runtime_matches_dynamic_for_overlapping_residual_terminals() {
     ]);
     let grammar = r#"
         start start;
-        t A ::= "a" | "ab";
-        t B ::= "ab" | "b" | "ba";
-        t C ::= "abc" | "bc" | "c";
-        nt item ::= A | B | C;
-        nt start ::= item item? item?;
+        t A = "a" | "ab";
+        t B = "ab" | "b" | "ba";
+        t C = "abc" | "bc" | "c";
+        nt item = A | B | C;
+        nt start = item item? item?;
     "#;
     assert_partitioned_runtime_matches_dynamic(grammar, &vocab, 4);
 }
@@ -2021,30 +2021,30 @@ fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
         start start;
         ignore WS;
         pragma glrmask {
-            lexer group ws ::= WS;
-            lexer group a ::= A;
-            lexer group b ::= B;
-            lexer group c ::= C;
+            lexer group ws = WS;
+            lexer group a = A;
+            lexer group b = B;
+            lexer group c = C;
         }
-        t WS ::= " "+;
-        t A ::= "a"+;
-        t B ::= "b";
-        t C ::= "c";
-        nt item ::= A | B | C;
-        nt start ::= item item? item?;
+        t WS = " "+;
+        t A = "a"+;
+        t B = "b";
+        t C = "c";
+        nt item = A | B | C;
+        nt start = item item? item?;
     "#;
     let monolithic_grammar = r#"
         start start;
         ignore WS;
         pragma glrmask {
-            lexer group all ::= WS, A, B, C;
+            lexer group all = WS, A, B, C;
         }
-        t WS ::= " "+;
-        t A ::= "a"+;
-        t B ::= "b";
-        t C ::= "c";
-        nt item ::= A | B | C;
-        nt start ::= item item? item?;
+        t WS = " "+;
+        t A = "a"+;
+        t B = "b";
+        t C = "c";
+        nt item = A | B | C;
+        nt start = item item? item?;
     "#;
     let partitioned = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let dynamic = DynamicConstraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -2070,22 +2070,22 @@ fn nullable_terminal_root_loop_is_preserved_by_isolated_partitions() {
     let isolated = Constraint::compile(glrmask::Grammar::glrm(r#"
             start start;
             pragma glrmask {
-                lexer group a ::= A;
-                lexer group b ::= B;
+                lexer group a = A;
+                lexer group b = B;
             }
-            t A ::= "a"*;
-            t B ::= "b";
-            nt start ::= A B;
+            t A = "a"*;
+            t B = "b";
+            nt start = A B;
         "#), &vocab)
     .unwrap();
     let monolithic = Constraint::compile(glrmask::Grammar::glrm(r#"
             start start;
             pragma glrmask {
-                lexer group all ::= A, B;
+                lexer group all = A, B;
             }
-            t A ::= "a"*;
-            t B ::= "b";
-            nt start ::= A B;
+            t A = "a"*;
+            t B = "b";
+            nt start = A B;
         "#), &vocab)
     .unwrap();
 
@@ -2123,19 +2123,19 @@ fn plan_style_mask_buffer_matches_mask() {
 fn direct_glrm_ordered_suffix_model_has_single_stack_path_after_prepass() {
     let grammar = r#"
         start start;
-        nt f0 ::= "a";
-        nt f1 ::= "b";
-        nt f2 ::= "c";
-        nt f3 ::= "d";
-        nt f4 ::= "e";
-        nt f5 ::= "f";
-        nt f6 ::= "g";
-        nt f7 ::= "h";
-        nt f8 ::= "i";
-        nt v0 ::= f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 "," f6 ("," f7)? ("," f8)?;
-        nt v1 ::= f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 ("," f6)? "," f7 ("," f8)?;
-        nt v2 ::= f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 ("," f6)? ("," f7)? "," f8;
-        nt start ::= v0 | v1 | v2;
+        nt f0 = "a";
+        nt f1 = "b";
+        nt f2 = "c";
+        nt f3 = "d";
+        nt f4 = "e";
+        nt f5 = "f";
+        nt f6 = "g";
+        nt f7 = "h";
+        nt f8 = "i";
+        nt v0 = f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 "," f6 ("," f7)? ("," f8)?;
+        nt v1 = f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 ("," f6)? "," f7 ("," f8)?;
+        nt v2 = f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 ("," f6)? ("," f7)? "," f8;
+        nt start = v0 | v1 | v2;
     "#;
 
     let constraint = with_stable_ti_env(|| {
@@ -2189,7 +2189,7 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
 
 #[test]
 fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
-    let grammar = r#"start s;nt k::="a""b"*;nt i::=k"b"?;nt s::="d"i;"#;
+    let grammar = r#"start s;nt k="a""b"*;nt i=k"b"?;nt s="d"i;"#;
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(grammar), &bytes_vocab()).unwrap()
     });
@@ -2222,7 +2222,7 @@ fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
 
 #[test]
 fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
-    let grammar = r#"start s;nt k::="a""b"*;nt i::=k"c"?;nt s::="d"i;"#;
+    let grammar = r#"start s;nt k="a""b"*;nt i=k"c"?;nt s="d"i;"#;
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(grammar), &bytes_vocab()).unwrap()
     });

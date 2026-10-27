@@ -14,10 +14,10 @@ const vocab = new Vocab(
 // Arithmetic, then the end token.
 const arithmetic = Grammar.fromGlrm(`
   start sum
-  t NUMBER ::= /[0-9]+/
-  nt sum ::= product | sum "+" product
-  nt product ::= atom | product "*" atom
-  nt atom ::= NUMBER | "(" sum ")"
+  t NUMBER = /[0-9]+/
+  nt sum = product | sum "+" product
+  nt product = atom | product "*" atom
+  nt atom = NUMBER | "(" sum ")"
 `);
 const grammar = Grammar.fromExpr(Expr.sequence(arithmetic, eos));
 const constraint = await grammar.compile(vocab);

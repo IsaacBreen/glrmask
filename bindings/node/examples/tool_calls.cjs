@@ -26,7 +26,7 @@ async function main() {
     extern grammar WEATHER_ARGS
     extern grammar SEARCH_ARGS
     start call
-    nt call ::= "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
+    nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
   `));
   call.bind({ WEATHER_ARGS: weather, SEARCH_ARGS: search });
   const constraint = await call.compile(vocab);

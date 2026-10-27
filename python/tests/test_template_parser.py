@@ -249,7 +249,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
             assert glrmask._internal.parser_backend(restored) == expected
             assert restored.start().mask().tolist() == [True, False, False]
     prepared = body.prepare(vocab)
-    parent = grammar_from_glrm('extern grammar C start root nt root ::= C').prepare(vocab)
+    parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
     for source in [prepared, glrmask.Module.load(prepared.save()),
                    glrmask.Module.load(prepared.save())]:
         child_bytes = source.save()
@@ -278,7 +278,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
                                           4: b"xy", 5: b"xx", 6: b""})
     child = grammar_from_lark('start: "a"?').prepare(vocab)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root ::= "x" C "y";').prepare(vocab)
+        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
     linked = link_module(_bound_snapshot(parent, "C", child), vocab, **mode,
         end_tokens=[6])
     for compiled in representations(linked, vocab):
@@ -323,7 +323,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     })).prepare(vocab)
     child = glrmask.Module.load(child.save())
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root ::= "p" C "q";').prepare(vocab)
+        'glrm 1; start root; extern grammar C; nt root = "p" C "q";').prepare(vocab)
     compiled = link_module(_bound_snapshot(parent, "C", child), vocab, **mode,
         end_tokens=[8])
     for compiled in representations(compiled, vocab):
@@ -355,9 +355,9 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
     selection = {} if backend is None else {"parser_backend": backend}
     prepared = grammar_from_glrm(
-        'start root t A ::= /a?/ nt root ::= A').prepare(vocab)
+        'start root t A = /a?/ nt root = A').prepare(vocab)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root ::= "x" C "y";').prepare(vocab)
+        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
     language = [b"xy", b"xay"]
     for child in [prepared, glrmask.Module.load(prepared.save()),
                   glrmask.Module.load(prepared.save())]:

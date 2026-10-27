@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn current_parser_section_rejects_duplicate_core_program_inventory() {
         let vocab = crate::Vocab::new(vec![(0, b"a".to_vec())]);
-        let original = Constraint::from_glrm_grammar("start root; nt root ::= \"a\";", &vocab).unwrap();
+        let original = Constraint::from_glrm_grammar("start root; nt root = \"a\";", &vocab).unwrap();
         let wire = encode(original.template_parser.as_ref().unwrap(), &original.template_dfas_by_terminal);
         let mut duplicate = original.clone();
         let error = decode(&wire).unwrap().install(&mut duplicate).unwrap_err();

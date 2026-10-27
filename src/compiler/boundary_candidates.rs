@@ -1268,9 +1268,9 @@ mod tests {
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
         let options = || MaskMode::C.build_options()
             .parser_backend(ParserBackend::TemplateDfa);
-        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "cat";"#).unwrap()
+        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#).unwrap()
             .compile_with_build_options(&vocabulary, options()).unwrap();
-        let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc ::= "a" child "b";"#).unwrap()
+        let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc = "a" child "b";"#).unwrap()
             .prepare(&vocabulary).unwrap();
         let linked = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
         let components = &linked.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components;
@@ -1356,7 +1356,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "a" SUB | "b" SUB;
+                nt document = "a" SUB | "b" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1366,9 +1366,9 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "a" SUB | "b" SUB;
+                nt document = "a" SUB | "b" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1399,7 +1399,7 @@ mod tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "a";
+                nt document = "a";
             "#,
             &vocab,
         )
@@ -1422,7 +1422,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "m" SUB;
+                nt document = "m" SUB;
             "#,
             &vocab, &[("SUB", 998)], &[])
         .unwrap();
@@ -1442,7 +1442,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "m" SUB;
+                nt document = "m" SUB;
             "#,
             &vocab, &[("SUB", 998)], &[])
         .unwrap();
@@ -1481,9 +1481,9 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB;
+                nt document = "X" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1507,9 +1507,9 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB;
+                nt document = "X" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1534,7 +1534,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "a" "b" SUB;
+                nt document = "a" "b" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1553,7 +1553,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "é" SUB;
+                nt document = "é" SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -1580,14 +1580,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "p(" SUB ")";
+                nt document = "p(" SUB ")";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "}";
+                nt document = "}";
             "#,
             &vocab,
         )
@@ -1643,7 +1643,7 @@ mod preparation_tests {
             (2,b"ax".to_vec()),(3,b"b".to_vec()),(4,b"ba".to_vec())]);
         let component=Constraint::from_glrm_with_token_ids(r#"
             start document; extern token SUB;
-            nt document ::= "a" SUB | "b" SUB;
+            nt document = "a" SUB | "b" SUB;
         "#,&vocab, &[("SUB", 999)], &[]).unwrap();
         (component,vocab)
     }
@@ -1697,7 +1697,7 @@ mod preparation_tests {
         ]);
         for optimization in [MaskMode::C, MaskMode::ParserDwa] {
             let source = crate::Grammar::from_glrm(
-                r#"glrm 1; start document; nt document ::= "a";"#,
+                r#"glrm 1; start document; nt document = "a";"#,
             ).unwrap()
             .compile_with_build_options(
                 &vocab,
@@ -1730,9 +1730,9 @@ mod preparation_tests {
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
         let options = MaskMode::C.build_options()
             .parser_backend(crate::ParserBackend::TemplateDfa);
-        let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "a"?;"#).unwrap()
+        let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options.clone()).unwrap();
-        let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#).unwrap()
+        let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
             .link_with(options.clone()).unwrap();
         materialize_deferred_composition_boundary_summary(&middle);
@@ -1748,7 +1748,7 @@ mod preparation_tests {
         let loaded = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(persisted_boundary_candidate_ids(&loaded, &vocab).unwrap().is_none(),
             "pre-fix nullable candidate proof must widen before it can exclude []!");
-        let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root ::= "X" middle "!";"#).unwrap()
+        let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("middle", &loaded).unwrap()
             .link_with(options).unwrap();
         let mut state = root.start(); assert!(state.commit_bytes(b"X"));
@@ -1809,7 +1809,7 @@ mod preparation_tests {
 
         let empty_vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let mut empty = Constraint::from_glrm_grammar(
-            r#"glrm 1; start document; nt document ::= "a";"#,
+            r#"glrm 1; start document; nt document = "a";"#,
             &empty_vocab,
         )
         .unwrap();
@@ -1821,7 +1821,7 @@ mod preparation_tests {
     fn persisted_candidates_reject_sparse_byte_domain_holes_even_when_exact_only() {
         let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (2, b"ab".to_vec())]);
         let mut source = Constraint::from_glrm_grammar(
-            r#"glrm 1; start document; nt document ::= "a";"#, &vocab,
+            r#"glrm 1; start document; nt document = "a";"#, &vocab,
         ).unwrap();
         persist_boundary_candidate_summary(&mut source, &vocab);
         assert_eq!(persisted_boundary_candidate_ids(&source, &vocab).unwrap(), Some(vec![2]));

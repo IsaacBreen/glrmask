@@ -13,7 +13,7 @@ fn source_module_and_expression_are_send_sync_at_the_default_budget() {
 #[test]
 fn scoped_threads_share_module_snapshots_without_mutating_the_source() {
     let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
-    let source = Grammar::from_glrm("extern grammar item start root nt root::=item").unwrap();
+    let source = Grammar::from_glrm("extern grammar item start root nt root=item").unwrap();
     let mut module = Module::new(&source);
     module.precompile(&vocab).unwrap();
     std::thread::scope(|scope| {

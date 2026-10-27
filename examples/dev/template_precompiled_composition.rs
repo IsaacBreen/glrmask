@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(output.join(format!("schema-{index:02}-source.glrm")), &schema_source)?;
         schemas.push((format!("ARGS_{index}"), schema_source));
     }
-    dispatch.push_str("nt suffix ::=\n");
+    dispatch.push_str("nt suffix =\n");
     for index in 0..10 {
         if index != 0 { dispatch.push_str("  | "); }
         dispatch.push_str(&format!("\".tool_{index}(\" ARGS_{index} \")\"\n"));
@@ -193,9 +193,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("CHILD source_prepare_compile_ns={child_compile_ns}");
     let source_path = Path::new(&args[4]);
     let mut source = fs::read_to_string(source_path)?.replace("\r\n", "\n");
-    let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
+    let needle = "nt member_expression_with_suffixes =\n    primary_expression";
     assert!(source.contains(needle), "canonical JS source shape changed");
-    source = source.replacen(needle, "nt member_expression_with_suffixes ::=\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression", 1);
+    source = source.replacen(needle, "nt member_expression_with_suffixes =\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression", 1);
     source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     fs::write(output.join("parent-source.glrm"), &source)?;
     let started = Instant::now(); let parent = Grammar::glrm(&source).prepare(&vocab)?;

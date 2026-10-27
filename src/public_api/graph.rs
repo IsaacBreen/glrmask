@@ -307,7 +307,7 @@ mod snapshot_tests {
     use super::*;
     #[test]
     fn incremental_requirements_match_full_graph_after_every_update() {
-        let text=(0..256).map(|i|format!("extern token E{i}\n")).collect::<String>()+"start root nt root::=E0";
+        let text=(0..256).map(|i|format!("extern token E{i}\n")).collect::<String>()+"start root nt root=E0";
         let mut g=Grammar::from_glrm(&text).unwrap();
         let original=g.clone();
         for i in 0..256 {
@@ -320,8 +320,8 @@ mod snapshot_tests {
     }
     #[test]
     fn snapshot_child_spines_preserve_sibling_requirements() {
-        let child=Grammar::from_glrm("extern token MARK start root nt root::=MARK").unwrap();
-        let mut p=Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root::=LEFT RIGHT").unwrap();
+        let child=Grammar::from_glrm("extern token MARK start root nt root=MARK").unwrap();
+        let mut p=Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT").unwrap();
         p.bind("LEFT",&child).unwrap();p.bind("RIGHT",&child).unwrap();
         let old=p.clone();p.bind("LEFT::MARK",TokenSet::from(17)).unwrap();
         assert_eq!(p.requirements().unwrap().iter().map(Requirement::name).collect::<Vec<_>>(),["RIGHT::MARK"]);
@@ -330,9 +330,9 @@ mod snapshot_tests {
     }
     #[test]
     fn shared_exponential_graph_validates_unique_nodes_without_expanding_closed_paths() {
-        let mut g=Grammar::from_glrm("start root nt root::=eps").unwrap();
+        let mut g=Grammar::from_glrm("start root nt root=eps").unwrap();
         for _ in 0..22 {
-            let mut p=Grammar::from_glrm("extern grammar L extern grammar R start root nt root::=L R").unwrap();
+            let mut p=Grammar::from_glrm("extern grammar L extern grammar R start root nt root=L R").unwrap();
             p.bind("L",&g).unwrap();p.bind("R",&g).unwrap();g=p;
         }
         assert!(g.requirements().unwrap().is_empty());
@@ -342,11 +342,11 @@ mod snapshot_tests {
     }
     #[test]
     fn depth_error_is_atomic_and_does_not_invalidate_old_snapshot() {
-        let mut g=Grammar::from_glrm("start root nt root::=eps").unwrap();
+        let mut g=Grammar::from_glrm("start root nt root=eps").unwrap();
         for _ in 0..MAX_DEPTH {
-            let mut p=Grammar::from_glrm("extern grammar C start root nt root::=C").unwrap();p.bind("C",&g).unwrap();g=p;
+            let mut p=Grammar::from_glrm("extern grammar C start root nt root=C").unwrap();p.bind("C",&g).unwrap();g=p;
         }
-        let mut p=Grammar::from_glrm("extern grammar C start root nt root::=C").unwrap();
+        let mut p=Grammar::from_glrm("extern grammar C start root nt root=C").unwrap();
         assert!(p.bind("C",&g).is_err());
         assert_eq!(p.requirements().unwrap()[0].name(),"C");
         assert!(g.requirements().unwrap().is_empty());

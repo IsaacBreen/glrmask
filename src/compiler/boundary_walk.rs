@@ -3928,11 +3928,11 @@ mod tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start doc;
-                t A ::= "a";
-                t B ::= "b";
-                t C ::= "c";
-                t X ::= "x";
-                nt doc ::= A X | B X | X C;
+                t A = "a";
+                t B = "b";
+                t C = "c";
+                t X = "x";
+                nt doc = A X | B X | X C;
             "#,
             &vocab,
         )
@@ -4130,19 +4130,19 @@ mod tests {
         let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start doc;
-                t PA ::= "a";
-                t PB ::= "b";
+                t PA = "a";
+                t PB = "b";
                 extern token SUB;
-                nt doc ::= PA SUB PB;
+                nt doc = PA SUB PB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start item;
-                t CC ::= "c";
-                t CD ::= "d";
-                nt item ::= CC CD;
+                t CC = "c";
+                t CD = "d";
+                nt item = CC CD;
             "#,
             &vocab,
         )
@@ -4342,7 +4342,7 @@ mod tests {
         ("kb_1104_Normalized", "Kubernetes---kb_1104_Normalized.json"),
     ];
 
-    const SELECTED10_MODULE_CORE: &str = "extern grammar PROGRAMMATIC_TOOL_SUFFIX start core nt core ::= \"tools.\" PROGRAMMATIC_TOOL_SUFFIX | \"plain\"";
+    const SELECTED10_MODULE_CORE: &str = "extern grammar PROGRAMMATIC_TOOL_SUFFIX start core nt core = \"tools.\" PROGRAMMATIC_TOOL_SUFFIX | \"plain\"";
 
     /// CFA checkout holding the selected10 JSON schemas and `js.glrm`.
     /// `SELECTED10_CFA_ROOT` overrides the documented sibling checkout next to
@@ -4380,7 +4380,7 @@ mod tests {
         for index in 0..tools {
             source.push_str(&format!("extern grammar TOOL_ARGS_SLOT_{index} "));
         }
-        source.push_str("start suffix nt suffix ::= ");
+        source.push_str("start suffix nt suffix = ");
         for index in 0..tools {
             if index != 0 {
                 source.push_str(" | ");
@@ -5089,7 +5089,7 @@ mod tests {
             source.push_str(&format!("extern token {name};\n"));
             token_ids.push((name, token_id));
         }
-        source.push_str("nt suffix ::=\n    ");
+        source.push_str("nt suffix =\n    ");
         for index in 0..10 {
             if index != 0 {
                 source.push_str("\n  | ");
@@ -5600,14 +5600,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB "x" | "R" SUB "y";
+                nt document = "L" SUB "x" | "R" SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -6104,10 +6104,10 @@ mod tests {
         ]);
         let parent = Constraint::from_glrm_with_token_ids(r#"
             start document; extern token SUB;
-            nt document ::= "L" SUB "x";
+            nt document = "L" SUB "x";
         "#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(r#"
-            start child; nt item ::= "a"; nt child ::= item?;
+            start child; nt item = "a"; nt child = item?;
         "#, &vocab).unwrap();
         assert!(child.composition_start_nullable().unwrap());
         let inputs = [CompiledSubgrammarInput {
@@ -6121,7 +6121,7 @@ mod tests {
             parent, &inputs, &vocab, SegmentedBoundaryBackend::StaticParserDwa,
         ).unwrap().constraint;
         let inline = Constraint::from_glrm_grammar(r#"
-            start document; nt document ::= "L" "a"? "x";
+            start document; nt document = "L" "a"? "x";
         "#, &vocab).unwrap();
         let reloaded = Constraint::load(static_link.save(), &vocab).unwrap();
         let mut prefixes = vec![Vec::<u32>::new()];
@@ -6210,14 +6210,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB "x" | "R" SUB "y";
+                nt document = "L" SUB "x" | "R" SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -6361,14 +6361,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB "x" | "R" SUB "y";
+                nt document = "L" SUB "x" | "R" SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -6393,7 +6393,7 @@ mod tests {
         assert!(overlay.segmented_boundary_shards.iter().all(|shard|
             matches!(&shard.backend, crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_))));
         let inline = Constraint::from_glrm_grammar(r#"
-            start document; nt document ::= "L" "a" "x" | "R" "a" "y";
+            start document; nt document = "L" "a" "x" | "R" "a" "y";
         "#, &vocab).unwrap();
         for path in [vec![], vec![2], vec![3], vec![2, 4], vec![3, 4], vec![2, 0], vec![3, 1]] {
             let mut expected = inline.start();
@@ -6566,7 +6566,7 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+                nt document = "L" SUB SUB "x" | "R" SUB SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -6574,14 +6574,14 @@ mod tests {
             r#"
                 start m;
                 extern token SUB2;
-                nt m ::= "m" SUB2;
+                nt m = "m" SUB2;
             "#,
             &vocab, &[("SUB2", 998)], &[])
         .unwrap();
         let grandchild = Constraint::from_glrm_grammar(
             r#"
                 start g;
-                nt g ::= "g";
+                nt g = "g";
             "#,
             &vocab,
         )

@@ -1778,7 +1778,7 @@ mod tests {
     #[test]
     fn dynamic_native_recursive_unary_preserves_full_masks_and_unbounded_completion() {
         let vocab = crate::Vocab::new((0..=255).map(|id| (id, vec![id as u8])).collect());
-        let grammar = "start p; nt p ::= unary ';'; nt unary ::= 'x' | '!' unary;";
+        let grammar = "start p; nt p = unary ';'; nt unary = 'x' | '!' unary;";
         let constraint = crate::DynamicConstraint::from_glrm_with_bounded_template_parser(grammar, &vocab).unwrap();
         let backend = crate::__private::dynamic_parser_backend_report(&constraint);
         assert!(backend.as_array().unwrap().iter().all(|v|
@@ -1815,9 +1815,9 @@ mod tests {
     fn native_preparation_cleans_nullable_helpers_created_by_recursion_rewrites() {
         let mut errors = Vec::new();
         for source in [
-            "start s; nt s ::= s | 'x';",
-            "start s; nt s ::= n s | 'x'; nt n ::= '' | '!';",
-            "start s; nt s ::= s s | 'x' | '';",
+            "start s; nt s = s | 'x';",
+            "start s; nt s = n s | 'x'; nt n = '' | '!';",
+            "start s; nt s = s s | 'x' | '';",
         ] {
             let named = crate::grammar::glrm::from_glrm(source).unwrap();
             let grammar = crate::grammar::ast::lower(&crate::grammar::factoring::factor_named_grammar(named)).unwrap();
@@ -1839,7 +1839,7 @@ mod tests {
     #[test]
     fn native_empty_unary_start_completion_survives_public_and_dynamic_artifacts() {
         let vocab = crate::Vocab::new((0..256).map(|id| (id, vec![id as u8])).collect());
-        let source = "start s; nt s ::= '!' s | '';";
+        let source = "start s; nt s = '!' s | '';";
         let mut expected = vec![0; 8];
         expected[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut errors = Vec::new();
@@ -1875,7 +1875,7 @@ mod tests {
     #[test]
     fn native_nullable_start_rejects_incomplete_nonempty_prefixes() {
         let vocab = crate::Vocab::new((0..256).map(|id| (id, vec![id as u8])).collect());
-        let source = "start s; nt s ::= '' | '!' 'x';";
+        let source = "start s; nt s = '' | '!' 'x';";
         let mut initial = vec![0; 8];
         initial[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut after_bang = vec![0; 8];

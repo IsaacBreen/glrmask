@@ -12,16 +12,16 @@ fn main() {
     let spellings:Vec<_>=spellings.into_iter().filter(|b|!b.is_empty()).collect();
     let mut checked=0usize;let begin=Instant::now();
     let grammars=[
-        "start root nt root::=\"abc\" | \"ac\" | \"abcc\"",
-        "start root t A::=/a|ab/ nt root::=A \"c\"",
-        "start root t A::=/a|ab/ t B::=/a|ac/ nt root::=A B",
-        "start root t A::=(/a|ab/ - (/a|ab/ b/./s+)) nt root::=A /[bc]{1,3}/",
-        "start root t A::=/[ab]{1,3}/ - /ab|baa/ nt root::=A \"c\"",
-        "start root t A::=/[a-c]{1,3}/ & /a.*/ nt root::=A /bc?/",
-        "start root nt root::=\"a\"? \"b\"? \"c\"?",
-        "start root t A::=/a+/ t B::=/ab/ nt root::=A \"c\" | B \"b\"",
-        "start root t A::=/[a-c]+/ t I::=/c/ ignore I nt root::=\"a\" \"b\"",
-        "start root nt root::=\"ab\" | \"a\" \"b\" | \"abc\"",
+        "start root nt root=\"abc\" | \"ac\" | \"abcc\"",
+        "start root t A=/a|ab/ nt root=A \"c\"",
+        "start root t A=/a|ab/ t B=/a|ac/ nt root=A B",
+        "start root t A=(/a|ab/ - (/a|ab/ b/./s+)) nt root=A /[bc]{1,3}/",
+        "start root t A=/[ab]{1,3}/ - /ab|baa/ nt root=A \"c\"",
+        "start root t A=/[a-c]{1,3}/ & /a.*/ nt root=A /bc?/",
+        "start root nt root=\"a\"? \"b\"? \"c\"?",
+        "start root t A=/a+/ t B=/ab/ nt root=A \"c\" | B \"b\"",
+        "start root t A=/[a-c]+/ t I=/c/ ignore I nt root=\"a\" \"b\"",
+        "start root nt root=\"ab\" | \"a\" \"b\" | \"abc\"",
     ];
     for dense in [false,true] {
       let mut entries:Vec<(u32,Vec<u8>)>=spellings.iter().enumerate()
@@ -46,7 +46,7 @@ fn main() {
         }
       }
       // Both ordinary byte paths and event alternatives remain live.
-      let mut g=Grammar::from_glrm("extern token E start root nt root::=E \"b\" | \"a\" \"c\"");g.bind("E",TokenSet::from(9000)).unwrap();
+      let mut g=Grammar::from_glrm("extern token E start root nt root=E \"b\" | \"a\" \"c\"");g.bind("E",TokenSet::from(9000)).unwrap();
       for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
         let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         for prefix in &prefixes {

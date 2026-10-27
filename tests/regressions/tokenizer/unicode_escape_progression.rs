@@ -9,23 +9,23 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 const GLRM_UNICODE_ESCAPE_PROGRESS_MRE: &str = r#"
 start s;
 
-nt s ::= esc "\"";
-t esc ::= /\\u00(?:[01][0-9A-Fa-f]|7[Ff])/;
+nt s = esc "\"";
+t esc = /\\u00(?:[01][0-9A-Fa-f]|7[Ff])/;
 "#;
 
 const GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE: &str = r#"
 start s;
 
-nt s ::= esc "\"";
-nt esc ::= "\\u" "0" "0" tail;
-t tail ::= /(?:[01][0-9A-Fa-f]|7[Ff])/;
+nt s = esc "\"";
+nt esc = "\\u" "0" "0" tail;
+t tail = /(?:[01][0-9A-Fa-f]|7[Ff])/;
 "#;
 
 const GLRM_TRAILING_BACKSLASH_ONE_TOKEN_MRE: &str = r#"
 start s;
 
-nt s ::= " " "\"" esc;
-t esc ::= /\\u0/;
+nt s = " " "\"" esc;
+t esc = /\\u0/;
 "#;
 
 #[test]

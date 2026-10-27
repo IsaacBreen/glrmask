@@ -3,15 +3,15 @@
 //! ```text
 //! start value;
 //!
-//! internal t DIGIT ::= /[0-9]/;
-//! t NUMBER ::= /-?(0|[1-9][0-9]*)/;
+//! internal t DIGIT = /[0-9]/;
+//! t NUMBER = /-?(0|[1-9][0-9]*)/;
 //! extern token END_TURN;
-//! nt value ::= NUMBER | "null" | END_TURN;
+//! nt value = NUMBER | "null" | END_TURN;
 //! ```
 //!
 //! The full syntax is in `docs/glrm-format.md`.
 //!
-//! Every definition uses `::=`. Epsilon is written `eps`; empty alternatives
+//! Every definition uses `=`. Epsilon is written `eps`; empty alternatives
 //! and empty groups are errors. Single- and double-quoted literals mean the
 //! same bytes. Token IDs never appear in grammar text: `extern token NAME;`
 //! declares a terminal whose token IDs are bound in code, and
@@ -154,7 +154,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
         out.push_str("pragma glrmask {\n");
         for (partition, members) in lexer_groups {
             out.push_str(&format!(
-                "  lexer group {} ::= {}\n",
+                "  lexer group {} = {}\n",
                 partition,
                 members.join(", "),
             ));
@@ -169,12 +169,12 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
             (false, _) => "nt",
         };
         if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
-            out.push_str(&format!("{prefix} {} ::= fa {{\n", source_identifier(&rule.name)));
+            out.push_str(&format!("{prefix} {} = fa {{\n", source_identifier(&rule.name)));
             out.push_str(&dump_expr_nfa(expr_nfa));
             out.push_str("}\n");
         } else {
             out.push_str(&format!(
-                "{prefix} {} ::= {}\n",
+                "{prefix} {} = {}\n",
                 source_identifier(&rule.name),
                 dump_nt_expr(&rule.expr, false)
             ));
@@ -277,7 +277,7 @@ fn dump_parsed_scope_v1(
             push_indented_line(
                 out,
                 indent + 2,
-                &format!("lexer group {partition} ::= {}", members.join(", ")),
+                &format!("lexer group {partition} = {}", members.join(", ")),
             );
         }
         push_indented_line(out, indent, "}");
@@ -308,7 +308,7 @@ fn dump_parsed_scope_v1(
             (false, _) => "nt",
         };
         if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
-            push_indented_line(out, indent, &format!("{prefix} {} ::= fa {{", source_identifier(&rule.name)));
+            push_indented_line(out, indent, &format!("{prefix} {} = fa {{", source_identifier(&rule.name)));
             push_indented_block(out, indent, &dump_expr_nfa(expr_nfa));
             push_indented_line(out, indent, "}");
         } else {
@@ -316,7 +316,7 @@ fn dump_parsed_scope_v1(
                 out,
                 indent,
                 &format!(
-                    "{prefix} {} ::= {}",
+                    "{prefix} {} = {}",
                     source_identifier(&rule.name),
                     dump_nt_expr(&rule.expr, false)
                 ),
@@ -1563,7 +1563,7 @@ fn external_terminal_rules(scope: &ParsedGlrmScope) -> Vec<NamedRule> {
                 else { GrammarExpr::SpecialTokenRange(start, end) }
             }).collect::<Vec<_>>();
             // A single bound atom names the terminal after the extern, exactly
-            // like the former `t NAME ::= @token(N);` rule shape. A multi-atom
+            // like the former `t NAME = @token(N);` rule shape. A multi-atom
             // binding stays a nonterminal wrapper over the exact-token atoms.
             let is_terminal = atoms.len() == 1;
             NamedRule {
@@ -1741,12 +1741,12 @@ impl GlrmParser {
     }
 
     fn consume_decl_eq(&mut self) -> Result<(), GlrMaskError> {
-        if matches!(self.peek(),Tok::DeclEq) {
+        if matches!(self.peek(),Tok::Equals) {
             self.advance();
             return Ok(());
         }
         let position=self.pos;
-        Err(self.locate(err("definitions use `::=`, not `=`"),position))
+        Err(self.locate(err("definitions use `=`, not `::=`"),position))
     }
 
     fn token_at(&self, offset: usize) -> &Tok {
@@ -1929,7 +1929,7 @@ impl GlrmParser {
                         rules.push(self.parse_rule(false, false)?);
                     }
                     "fa" | "nfa" => {
-                        return Err(err("an `fa { ... }` must be a whole definition body, as in `nt name ::= fa { ... }`"));
+                        return Err(err("an `fa { ... }` must be a whole definition body, as in `nt name = fa { ... }`"));
                     }
                     "t" => {
                         self.advance();
@@ -3688,8 +3688,8 @@ mod tests {
     #[test]
     fn unified_external_manifest_format_and_binding_semantics() {
         // One manifest and one formatter cover both extern kinds.
-        let token_source = "glrm 1; start s; extern token item; nt s ::= item;";
-        let grammar_source = "glrm 1; start s; extern grammar item; nt s ::= item;";
+        let token_source = "glrm 1; start s; extern token item; nt s = item;";
+        let grammar_source = "glrm 1; start s; extern grammar item; nt s = item;";
         assert_eq!(external_declarations(token_source).unwrap().names, ["item"]);
         assert_eq!(external_declarations(grammar_source).unwrap().names, ["item"]);
         let formatted = format_glrm_v1(token_source).unwrap();
@@ -3700,17 +3700,17 @@ mod tests {
         assert!(formatted_open.contains("extern grammar item\n"));
         let open = from_glrm_with_external_subgrammars(&formatted_open, 100, []).unwrap();
         assert_eq!(open.placeholders[0].binding_name, "item");
-        let nested = "glrm 1; start s; grammar child { start x; extern item; nt x ::= item; }; nt s ::= child;";
+        let nested = "glrm 1; start s; grammar child { start x; extern item; nt x = item; }; nt s = child;";
         let nested_error = external_declarations(nested).unwrap_err().to_string();
         assert!(nested_error.contains("extern declarations are only allowed at the top level"), "{nested_error}");
         assert!(from_glrm_with_external_terminals(nested, &[("child::item", &[7])]).is_err());
         for (typed,kind) in [("extern token item;",ExternKind::Token),("extern grammar item;",ExternKind::Grammar)] {
-            let source = format!("glrm 1; start s; {typed} nt s ::= item;");
+            let source = format!("glrm 1; start s; {typed} nt s = item;");
             assert_eq!(external_declarations(&source).unwrap().kinds["item"],kind);
             assert!(format_glrm_v1(&source).unwrap().contains(typed.trim_end_matches(';')));
         }
-        assert!(from_glrm_with_external_terminals("start s extern grammar item nt s::=item",&[("item",&[7])]).is_err());
-        assert!(from_glrm_with_external_terminals("start s extern token item nt s::=item",&[("item",&[7])]).is_ok());
+        assert!(from_glrm_with_external_terminals("start s extern grammar item nt s=item",&[("item",&[7])]).is_err());
+        assert!(from_glrm_with_external_terminals("start s extern token item nt s=item",&[("item",&[7])]).is_ok());
     }
 
     use crate::grammar::flat::Symbol;
@@ -3742,8 +3742,8 @@ mod tests {
         let err = from_glrm(
             r#"
 start z;
-nt A ::= a b | c d | e f;
-nt z ::= x (A - c d);
+nt A = a b | c d | e f;
+nt z = x (A - c d);
 "#,
         )
         .unwrap_err()
@@ -3756,9 +3756,9 @@ nt z ::= x (A - c d);
         let grammar = from_glrm(
             r#"
 start z;
-nt A ::= a b | c d | e f;
-nt B ::= c d | e f;
-nt z ::= x (A - B) | x (A - (B));
+nt A = a b | c d | e f;
+nt B = c d | e f;
+nt z = x (A - B) | x (A - (B));
 "#,
         )
         .unwrap();
@@ -3783,9 +3783,9 @@ nt z ::= x (A - B) | x (A - (B));
         let grammar = from_glrm(
             r#"
 start z;
-nt A ::= "a" "b" | "c" "d" | "e" "f";
-nt B ::= "c" "d" | "e" "f";
-nt z ::= "x" (A - B);
+nt A = "a" "b" | "c" "d" | "e" "f";
+nt B = "c" "d" | "e" "f";
+nt z = "x" (A - B);
 "#,
         )
         .unwrap();
@@ -3822,9 +3822,9 @@ nt z ::= "x" (A - B);
         let grammar = from_glrm(
             r#"
 start z;
-nt A ::= "a" "b" | "c" "d" | "e" "f";
-nt B ::= "c" "d" | "e" "f";
-nt z ::= "x" (A - (B));
+nt A = "a" "b" | "c" "d" | "e" "f";
+nt B = "c" "d" | "e" "f";
+nt z = "x" (A - (B));
 "#,
         )
         .unwrap();
@@ -3838,8 +3838,8 @@ nt z ::= "x" (A - (B));
         let err = from_glrm(
             r#"
 start s;
-nt s ::= "," ~+ ( item+? );
-nt item ::= "a";
+nt s = "," ~+ ( item+? );
+nt item = "a";
 "#,
         )
         .unwrap_err()
@@ -3852,8 +3852,8 @@ nt item ::= "a";
         let grammar = from_glrm(
             r#"
 start s;
-nt s ::= "," ~+ ( (item+)? );
-nt item ::= "a";
+nt s = "," ~+ ( (item+)? );
+nt item = "a";
 "#,
         )
         .unwrap();
@@ -3872,12 +3872,12 @@ nt item ::= "a";
             r#"
 start s;
 pragma glrmask {
-lexer group punctuation ::= "{";
-lexer group literals ::= @literals;
-lexer group patterns ::= *;
+lexer group punctuation = "{";
+lexer group literals = @literals;
+lexer group patterns = *;
 }
-t WORD ::= /[a-z]+/;
-nt s ::= "{" WORD "}";
+t WORD = /[a-z]+/;
+nt s = "{" WORD "}";
 "#,
         )
         .unwrap();
@@ -3899,14 +3899,14 @@ nt s ::= "{" WORD "}";
 
         let dumped = to_glrm_v1(&grammar).unwrap();
         assert!(
-            dumped.contains("lexer group punctuation ::= \"{\""),
+            dumped.contains("lexer group punctuation = \"{\""),
             "{dumped}",
         );
         assert!(
-            dumped.contains("lexer group literals ::= @literals"),
+            dumped.contains("lexer group literals = @literals"),
             "{dumped}",
         );
-        assert!(dumped.contains("lexer group patterns ::= *"), "{dumped}");
+        assert!(dumped.contains("lexer group patterns = *"), "{dumped}");
         let reparsed = from_glrm(&dumped).unwrap();
         assert_eq!(
             reparsed.lexer_literal_partitions,
@@ -3947,11 +3947,11 @@ nt s ::= "{" WORD "}";
             r#"
 start s;
 pragma glrmask {
-lexer group same ::= A, B;
+lexer group same = A, B;
 }
-t A ::= "a";
-t B ::= "a";
-nt s ::= A | B;
+t A = "a";
+t B = "a";
+nt s = A | B;
 "#,
         )
         .unwrap();
@@ -3970,12 +3970,12 @@ nt s ::= A | B;
             r#"
 start s;
 pragma glrmask {
-lexer group left ::= A;
-lexer group right ::= B;
+lexer group left = A;
+lexer group right = B;
 }
-t A ::= "a";
-t B ::= "a";
-nt s ::= A | B;
+t A = "a";
+t B = "a";
+nt s = A | B;
 "#,
         )
         .unwrap();
@@ -3988,9 +3988,9 @@ nt s ::= A | B;
         let mut grammar = from_glrm(
             r#"
 start s;
-t A ::= "a";
-t B ::= "b";
-nt s ::= A B;
+t A = "a";
+t B = "b";
+nt s = A B;
 "#,
         )
         .unwrap();
@@ -4013,9 +4013,9 @@ nt s ::= A B;
         let mut grammar = from_glrm(
             r#"
 start s;
-t A ::= "a";
-t B ::= "b";
-nt s ::= A B;
+t A = "a";
+t B = "b";
+nt s = A B;
 "#,
         )
         .unwrap();
@@ -4033,10 +4033,10 @@ nt s ::= A B;
             r#"
 start s;
 pragma glrmask {
-lexer group bad ::= MISSING;
+lexer group bad = MISSING;
 }
-t A ::= "a";
-nt s ::= A;
+t A = "a";
+nt s = A;
 "#,
         )
         .unwrap();
@@ -4050,16 +4050,16 @@ nt s ::= A;
             r#"
 start document;
 ignore WS;
-t WS ::= " "+;
+t WS = " "+;
 
 grammar inner {
     start value;
     ignore NL;
-    t NL ::= "\n"+;
-    nt value ::= "a" "b";
+    t NL = "\n"+;
+    nt value = "a" "b";
 };
 
-nt document ::= "<" inner ">";
+nt document = "<" inner ">";
 "#,
         )
         .unwrap();
@@ -4078,20 +4078,20 @@ nt document ::= "<" inner ">";
             r#"
 start document;
 pragma glrmask {
-lexer group outer ::= *;
+lexer group outer = *;
 }
-t OUTER ::= "x";
+t OUTER = "x";
 
 grammar inner {
     start value;
     pragma glrmask {
-    lexer group inner ::= *;
+    lexer group inner = *;
     }
-    t INNER ::= "a";
-    nt value ::= INNER b/[bc]/;
+    t INNER = "a";
+    nt value = INNER b/[bc]/;
 };
 
-nt document ::= OUTER inner;
+nt document = OUTER inner;
 "#,
         )
         .unwrap();
@@ -4120,20 +4120,20 @@ nt document ::= OUTER inner;
             r#"
 start document;
 pragma glrmask {
-lexer group outer ::= *;
+lexer group outer = *;
 }
-t A ::= "a";
+t A = "a";
 
 grammar inner {
     start value;
     pragma glrmask {
-    lexer group inner ::= *;
+    lexer group inner = *;
     }
-    t A ::= "a";
-    nt value ::= A;
+    t A = "a";
+    nt value = A;
 };
 
-nt document ::= A inner;
+nt document = A inner;
 "#,
         )
         .unwrap();
@@ -4149,7 +4149,7 @@ nt document ::= A inner;
             r#"
 start document;
 extern grammar payload;
-nt document ::= "<" payload ">";
+nt document = "<" payload ">";
 "#,
         )
         .unwrap_err()
@@ -4166,10 +4166,10 @@ extern grammar payload;
 extern grammar leaf;
 grammar wrapper {
     start value;
-    nt value ::= "[" "x" "]";
+    nt value = "[" "x" "]";
 };
 extern token END;
-nt document ::= "<" payload leaf wrapper ">" END?;
+nt document = "<" payload leaf wrapper ">" END?;
 "#,
             52,
             [50, 51],
@@ -4213,7 +4213,7 @@ nt document ::= "<" payload leaf wrapper ">" END?;
 start document;
 extern grammar left;
 extern grammar right;
-nt document ::= left right;
+nt document = left right;
 "#,
             u32::MAX,
             [],
@@ -4224,19 +4224,28 @@ nt document ::= left right;
     }
 
     #[test]
-    fn glrm_declarations_use_coloncolon_equals_with_or_without_header() {
-        for source in ["start start; nt start ::= 'a';", "glrm 1; start start; nt start ::= 'a';"] {
+    fn glrm_declarations_use_equals_with_or_without_header() {
+        for source in ["start start; nt start = 'a';", "glrm 1; start start; nt start = 'a';"] {
             let grammar = from_glrm(source).unwrap();
             assert_eq!(grammar.start, "start");
         }
-        for source in ["nt a = \"x\"", "start a; nt a = \"x\";", "glrm 1; start a; nt a = \"x\";"] {
+        for source in ["nt a ::= \"x\"", "start a; nt a ::= \"x\";", "glrm 1; start a; nt a ::= \"x\";"] {
             let message = match from_glrm(source).unwrap_err() {
                 GlrMaskError::GrammarParseAt { message, .. } | GlrMaskError::GrammarParse(message) => message,
             };
-            assert_eq!(message, "definitions use `::=`, not `=`");
+            assert_eq!(message, "definitions use `=`, not `::=`");
         }
-        assert!(from_glrm("start a; t T ::= /x/; nt a ::= T;").is_ok());
-        let dot = from_glrm("start a; nt a ::= .;").unwrap_err().to_string();
+        let source = "start a;\nnt a ::= \"x\";";
+        match from_glrm(source).unwrap_err() {
+            GlrMaskError::GrammarParseAt { message, span } => {
+                assert_eq!(message, "definitions use `=`, not `::=`");
+                assert_eq!(&source[span.start..span.end], "::=");
+                assert_eq!((span.line, span.column), (2, 6));
+            }
+            other => panic!("expected a located error, got {other:?}"),
+        }
+        assert!(from_glrm("start a; t T = /x/; nt a = T;").is_ok());
+        let dot = from_glrm("start a; nt a = .;").unwrap_err().to_string();
         assert!(dot.contains("a `.` needs slashes: `/./s` for any character, `b/./s` for any byte"), "{dot}");
     }
 
@@ -4248,11 +4257,11 @@ nt document ::= left right;
             ("'\\\''", "\"'\""),
         ] {
             let single = from_glrm(&format!(
-                "glrm 1; start start; nt start ::= {single};"
+                "glrm 1; start start; nt start = {single};"
             ))
             .unwrap();
             let double = from_glrm(&format!(
-                "glrm 1; start start; nt start ::= {double};"
+                "glrm 1; start start; nt start = {double};"
             ))
             .unwrap();
             assert_eq!(single.rules, double.rules);
@@ -4265,7 +4274,7 @@ nt document ::= left right;
             r#"
 glrm 1;
 start start;
-nt start ::= '"' | "'" | "plain";
+nt start = '"' | "'" | "plain";
 "#,
         )
         .unwrap();
@@ -4280,30 +4289,30 @@ nt start ::= '"' | "'" | "plain";
     #[test]
     fn glrm_v1_rejects_nonregular_and_malformed_regex_syntax() {
         for pattern in [r"(a)\1", r"(?=a)a", r"a(?<=b)", r"\bword", r"a{3,2}", r"(abc", r"[abc"] {
-            let source = format!("glrm 1; start start; t RX ::= /{pattern}/; nt start ::= RX;");
+            let source = format!("glrm 1; start start; t RX = /{pattern}/; nt start = RX;");
             assert!(from_glrm(&source).is_err(), "pattern unexpectedly accepted: {pattern}");
         }
-        assert!(from_glrm(r#"glrm 1; start start; t RX ::= /(?:ab|a)+/; nt start ::= RX;"#).is_ok());
+        assert!(from_glrm(r#"glrm 1; start start; t RX = /(?:ab|a)+/; nt start = RX;"#).is_ok());
     }
 
     #[test]
     fn glrm_v1_rejects_descending_repetition_bounds() {
-        assert!(from_glrm(r#"glrm 1; start start; nt start ::= "a"{3,2};"#).is_err());
-        assert!(from_glrm(r#"glrm 1; start start; nt item ::= "a"; nt start ::= "," ~ ( item{3,2} );"#).is_err());
-        assert!(from_glrm(r#"glrm 1; start start; nt start ::= "a"{2,3};"#).is_ok());
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{3,2};"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt item = "a"; nt start = "," ~ ( item{3,2} );"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{2,3};"#).is_ok());
     }
 
     #[test]
     fn glrm_v1_rejects_numeric_token_syntax_and_implicit_epsilon() {
-        let error = from_glrm("glrm 1; start start; nt start ::= @token(7);")
+        let error = from_glrm("glrm 1; start start; nt start = @token(7);")
             .unwrap_err()
             .to_string();
         assert!(error.contains("token IDs can't appear in GLRM"), "{error}");
 
-        assert!(from_glrm("start start; nt start ::= 'a' |;").is_err());
-        assert!(from_glrm("glrm 1; start start; nt start ::= 'a' |;").is_err());
-        assert!(from_glrm("glrm 1; start start; nt start ::= ();").is_err());
-        assert!(from_glrm("glrm 1; start start; nt start ::= 'a' | eps;").is_ok());
+        assert!(from_glrm("start start; nt start = 'a' |;").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = 'a' |;").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = ();").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = 'a' | eps;").is_ok());
     }
 
     #[test]
@@ -4314,7 +4323,7 @@ nt start ::= '"' | "'" | "plain";
 glrm 1;
 start start;
 extern token END_TURN;
-nt start ::= "a" END_TURN;
+nt start = "a" END_TURN;
 "#,
             &[("END_TURN", &ids)],
         )
@@ -4331,7 +4340,7 @@ nt start ::= "a" END_TURN;
 
     #[test]
     fn glrm_v1_external_terminal_binding_errors_are_explicit() {
-        let source = "glrm 1; start start; extern token X; nt start ::= X;";
+        let source = "glrm 1; start start; extern token X; nt start = X;";
         let missing = from_glrm(source).unwrap_err().to_string();
         assert!(missing.contains("explicit bindings"), "{missing}");
         let empty = from_glrm_with_external_terminals(source, &[("X", &[])]).unwrap();
@@ -4352,7 +4361,7 @@ nt start ::= "a" END_TURN;
     fn glrm_v1_external_terminal_is_not_visible_inside_terminal_bodies() {
         let ids = [100];
         let error = from_glrm_with_external_terminals(
-            "glrm 1; start start; extern token X; t BAD ::= X; nt start ::= BAD;",
+            "glrm 1; start start; extern token X; t BAD = X; nt start = BAD;",
             &[("X", &ids)],
         )
         .unwrap_err()
@@ -4366,9 +4375,9 @@ nt start ::= "a" END_TURN;
             r#"
 glrm 1;
 start declaration;
-t IDENTIFIER ::= /[A-Za-z_][A-Za-z0-9_]*/;
-nt expression ::= IDENTIFIER;
-nt declaration ::= fa {
+t IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/;
+nt expression = IDENTIFIER;
+nt declaration = fa {
     start 0;
     accept 3;
     edge 0 -> 1: "const" | "let" | "var";
@@ -4395,13 +4404,13 @@ nt declaration ::= fa {
             r#"
 glrm 1;
 start start;
-t WORD ::= fa {
+t WORD = fa {
     start begin;
     accept done;
     edge begin -> middle: /a+/;
     edge middle -> done: "b";
 };
-nt start ::= fa {
+nt start = fa {
     start root;
     accept end;
     edge root -> end: WORD;
@@ -4423,16 +4432,16 @@ nt start ::= fa {
 glrm 1;
 start message;
 pragma glrmask {
-    lexer group words ::= WORD;
+    lexer group words = WORD;
 }
 extern token END_TURN;
 extern token BEGIN_ASSISTANT;
 grammar inner {
     start value;
-    nt value ::= "x";
+    nt value = "x";
 };
-t WORD ::= /[a-z]+/;
-nt message ::= inner WORD BEGIN_ASSISTANT END_TURN;
+t WORD = /[a-z]+/;
+nt message = inner WORD BEGIN_ASSISTANT END_TURN;
 "#;
         let begin_ids = [41];
         let end_ids = [42, 43];
@@ -4470,7 +4479,7 @@ nt message ::= inner WORD BEGIN_ASSISTANT END_TURN;
 glrm 1;
 start document;
 extern grammar payload;
-nt document ::= "<" payload ">";
+nt document = "<" payload ">";
 "#;
         let formatted = format_glrm_v1(source).unwrap();
         assert!(formatted.contains("extern grammar payload\n"), "{formatted}");
@@ -4482,11 +4491,11 @@ nt document ::= "<" payload ">";
     }
 
     #[test]
-    fn canonical_formatter_accepts_headerless_source_and_rejects_equals() {
-        let formatted = format_glrm_v1("start start; nt start ::= 'x';").unwrap();
-        assert!(formatted.contains("nt `start` ::= "), "{formatted}");
-        let error = format_glrm_v1("start start; nt start = 'x';").unwrap_err().to_string();
-        assert!(error.contains("definitions use `::=`, not `=`"), "{error}");
+    fn canonical_formatter_accepts_headerless_source_and_rejects_coloncolon_equals() {
+        let formatted = format_glrm_v1("start start; nt start = 'x';").unwrap();
+        assert!(formatted.contains("nt `start` = "), "{formatted}");
+        let error = format_glrm_v1("start start; nt start ::= 'x';").unwrap_err().to_string();
+        assert!(error.contains("definitions use `=`, not `::=`"), "{error}");
     }
 
     #[test]
@@ -4496,22 +4505,22 @@ nt document ::= "<" payload ">";
 glrm 1;
 start start;
 pragma glrmask {
-    lexer group words ::= WORD;
+    lexer group words = WORD;
 }
-t WORD ::= fa {
+t WORD = fa {
     start begin;
     accept done;
     edge begin -> middle: "a";
     edge middle -> done: "b";
 };
-nt start ::= WORD | "x";
+nt start = WORD | "x";
 "#,
         )
         .unwrap();
         let dumped = to_glrm_v1(&grammar).unwrap();
         assert!(dumped.starts_with("start `start`\n"), "{dumped}");
-        assert!(dumped.contains("lexer group words ::= WORD\n"), "{dumped}");
-        assert!(dumped.contains("t WORD ::= fa {"), "{dumped}");
+        assert!(dumped.contains("lexer group words = WORD\n"), "{dumped}");
+        assert!(dumped.contains("t WORD = fa {"), "{dumped}");
         assert!(dumped.contains("edge begin -> middle: \"a\"\n"), "{dumped}");
         let reparsed = from_glrm(&dumped).unwrap();
         assert_eq!(reparsed.rules, grammar.rules);
@@ -4552,10 +4561,10 @@ nt start ::= WORD | "x";
 glrm 1;
 start start;
 pragma glrmask {
-    lexer group words ::= WORD;
+    lexer group words = WORD;
 }
-t WORD ::= /[a-z]+/;
-nt start ::= WORD;
+t WORD = /[a-z]+/;
+nt start = WORD;
 "#,
         )
         .unwrap();
@@ -4563,7 +4572,7 @@ nt start ::= WORD;
         let dumped = to_glrm_v1(&grammar).unwrap();
         assert!(dumped.starts_with("start `start`\n"), "{dumped}");
         assert!(dumped.contains("pragma glrmask {"), "{dumped}");
-        assert!(dumped.contains("t WORD ::= /[a-z]+/\n"), "{dumped}");
+        assert!(dumped.contains("t WORD = /[a-z]+/\n"), "{dumped}");
         from_glrm(&dumped).unwrap();
     }
 
@@ -4584,12 +4593,12 @@ mod inline_subgrammar_tests {
     #[test]
     fn direct_external_binding_matches_hand_inlined_grammar() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
-            &[("SUB", "start child; nt child ::= \"a\";")],
+            "start document; extern grammar SUB; nt document = \"X\" SUB \"!\";",
+            &[("SUB", "start child; nt child = \"a\";")],
         )
         .unwrap();
         let expected = from_glrm(
-            "start document; grammar SUB { start child; nt child ::= \"a\"; }; nt document ::= \"X\" SUB \"!\";",
+            "start document; grammar SUB { start child; nt child = \"a\"; }; nt document = \"X\" SUB \"!\";",
         )
         .unwrap();
         assert_same_grammar(&actual, &expected);
@@ -4598,35 +4607,35 @@ mod inline_subgrammar_tests {
     #[test]
     fn extern_declarations_only_allowed_at_top_level() {
         let err_grammar_sub = from_glrm(
-            "glrm 1; start s; grammar sub { start x; extern item; nt x ::= item; }; nt s ::= sub;",
+            "glrm 1; start s; grammar sub { start x; extern item; nt x = item; }; nt s = sub;",
         )
         .unwrap_err()
         .to_string();
         assert!(err_grammar_sub.contains("extern declarations are only allowed at the top level"), "{err_grammar_sub}");
 
         let err_grammar_token = from_glrm(
-            "glrm 1; start s; grammar sub { start x; extern token item; nt x ::= item; }; nt s ::= sub;",
+            "glrm 1; start s; grammar sub { start x; extern token item; nt x = item; }; nt s = sub;",
         )
         .unwrap_err()
         .to_string();
         assert!(err_grammar_token.contains("extern declarations are only allowed at the top level"), "{err_grammar_token}");
 
         let err_grammar_gram = from_glrm(
-            "glrm 1; start s; grammar sub { start x; extern grammar item; nt x ::= item; }; nt s ::= sub;",
+            "glrm 1; start s; grammar sub { start x; extern grammar item; nt x = item; }; nt s = sub;",
         )
         .unwrap_err()
         .to_string();
         assert!(err_grammar_gram.contains("extern declarations are only allowed at the top level"), "{err_grammar_gram}");
 
         let err_legacy_g = from_glrm(
-            "start s; grammar sub { start x; extern item; nt x ::= item; }; nt s ::= sub;",
+            "start s; grammar sub { start x; extern item; nt x = item; }; nt s = sub;",
         )
         .unwrap_err()
         .to_string();
         assert!(err_legacy_g.contains("extern declarations are only allowed at the top level"), "{err_legacy_g}");
 
         let err_legacy_g_typed = from_glrm(
-            "start s; grammar sub { start x; extern token item; nt x ::= item; }; nt s ::= sub;",
+            "start s; grammar sub { start x; extern token item; nt x = item; }; nt s = sub;",
         )
         .unwrap_err()
         .to_string();
@@ -4634,7 +4643,7 @@ mod inline_subgrammar_tests {
 
         // Top level succeeds:
         let ok = from_glrm_with_external_subgrammars(
-            "glrm 1; start s; extern grammar item; nt s ::= item;",
+            "glrm 1; start s; extern grammar item; nt s = item;",
             100,
             [],
         );
@@ -4648,12 +4657,12 @@ mod inline_subgrammar_tests {
             r#"
 glrm 1;
 start main;
-nt outer_rule ::= "hello";
+nt outer_rule = "hello";
 grammar sub {
     start x;
-    nt x ::= outer_rule;
+    nt x = outer_rule;
 };
-nt main ::= sub;
+nt main = sub;
 "#,
         )
         .unwrap_err()
@@ -4668,12 +4677,12 @@ nt main ::= sub;
             r#"
 glrm 1;
 start main;
-t OUTER_TERM ::= "hello";
+t OUTER_TERM = "hello";
 grammar sub {
     start x;
-    nt x ::= OUTER_TERM;
+    nt x = OUTER_TERM;
 };
-nt main ::= sub;
+nt main = sub;
 "#,
         )
         .unwrap_err()
@@ -4691,9 +4700,9 @@ start main;
 extern grammar OUTER_EXT;
 grammar sub {
     start x;
-    nt x ::= OUTER_EXT;
+    nt x = OUTER_EXT;
 };
-nt main ::= sub;
+nt main = sub;
 "#,
             100,
             [],
@@ -4712,37 +4721,37 @@ nt main ::= sub;
             let expected = format!("'{kw}' is a reserved keyword");
 
             // Nonterminal rule
-            let src = format!("glrm 1; start s; nt {kw} = \"a\"; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; nt {kw} = \"a\"; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for nt {kw}: {err}");
 
             // Terminal rule
-            let src = format!("glrm 1; start s; t {kw} = \"a\"; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; t {kw} = \"a\"; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for t {kw}: {err}");
 
             // Internal terminal rule
-            let src = format!("glrm 1; start s; internal t {kw} = \"a\"; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; internal t {kw} = \"a\"; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for internal t {kw}: {err}");
 
             // Inline grammar
-            let src = format!("glrm 1; start s; grammar {kw} {{ start x; nt x ::= \"a\"; }}; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; grammar {kw} {{ start x; nt x = \"a\"; }}; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for grammar {kw}: {err}");
 
             // Extern token
-            let src = format!("glrm 1; start s; extern token {kw}; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; extern token {kw}; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for extern token {kw}: {err}");
 
             // Extern grammar
-            let src = format!("glrm 1; start s; extern grammar {kw}; nt s ::= {kw};");
+            let src = format!("glrm 1; start s; extern grammar {kw}; nt s = {kw};");
             let err = from_glrm(&src).unwrap_err().to_string();
             assert!(err.contains(&expected), "failed for extern grammar {kw}: {err}");
 
             // Backtick escaped is allowed as a declared name and reference
-            let src = format!("glrm 1; start s; nt `{kw}` ::= \"a\"; nt s ::= `{kw}`;");
+            let src = format!("glrm 1; start s; nt `{kw}` = \"a\"; nt s = `{kw}`;");
             assert!(from_glrm(&src).is_ok(), "backtick-escaped {kw} should be allowed");
 
         }
@@ -4772,8 +4781,8 @@ nt main ::= sub;
             default_lexer_partition: None,
         };
         let dumped = to_glrm_v1(&grammar).expect("dumping grammar with rule named import must succeed");
-        assert!(dumped.contains("t `import` ::= \"hello\""), "{dumped}");
-        assert!(dumped.contains("nt main ::= `import`"), "{dumped}");
+        assert!(dumped.contains("t `import` = \"hello\""), "{dumped}");
+        assert!(dumped.contains("nt main = `import`"), "{dumped}");
         let reparsed = from_glrm(&dumped).expect("reparsing dumped grammar with rule named import must succeed");
         assert_eq!(reparsed.rules, grammar.rules);
         assert_eq!(reparsed.start, grammar.start);
@@ -4781,41 +4790,41 @@ nt main ::= sub;
 
     #[test]
     fn colons_invalid_in_extern_names() {
-        let err1 = from_glrm("glrm 1; start s; extern a::b; nt s ::= \"a\";")
+        let err1 = from_glrm("glrm 1; start s; extern a::b; nt s = \"a\";")
             .unwrap_err()
             .to_string();
         // Bare extern names are gone, so this fails before the name is
         // inspected; the typed forms below still report the '::' itself.
         assert!(err1.contains("external declarations require"), "{err1}");
 
-        let err2 = from_glrm("glrm 1; start s; extern token a::b; nt s ::= \"a\";")
+        let err2 = from_glrm("glrm 1; start s; extern token a::b; nt s = \"a\";")
             .unwrap_err()
             .to_string();
         assert!(err2.contains("'::' is not valid in extern names"), "{err2}");
 
-        let err3 = from_glrm("glrm 1; start s; extern grammar a::b; nt s ::= \"a\";")
+        let err3 = from_glrm("glrm 1; start s; extern grammar a::b; nt s = \"a\";")
             .unwrap_err()
             .to_string();
         assert!(err3.contains("'::' is not valid in extern names"), "{err3}");
 
-        let err4 = from_glrm("glrm 1; start s; extern ::a; nt s ::= \"a\";")
+        let err4 = from_glrm("glrm 1; start s; extern ::a; nt s = \"a\";")
             .unwrap_err()
             .to_string();
         assert!(err4.contains("'::' is not valid in extern names"), "{err4}");
 
-        let err5 = from_glrm("glrm 1; start s; extern token ::a; nt s ::= \"a\";")
+        let err5 = from_glrm("glrm 1; start s; extern token ::a; nt s = \"a\";")
             .unwrap_err()
             .to_string();
         assert!(err5.contains("'::' is not valid in extern names"), "{err5}");
 
-        let g = from_glrm("glrm 1; start s; nt s ::= \"a\";").unwrap();
+        let g = from_glrm("glrm 1; start s; nt s = \"a\";").unwrap();
         let err_comp = ParsedComponent::from_named(g, &[("a::b".to_string(), ExternKind::Token)])
             .unwrap_err()
             .to_string();
         assert!(err_comp.contains("'::' is not valid in extern names"), "{err_comp}");
 
         let err_bind = from_glrm_with_external_terminals(
-            "glrm 1; start s; extern token a; nt s ::= a;",
+            "glrm 1; start s; extern token a; nt s = a;",
             &[("a::b", &[1])],
         )
         .unwrap_err()
@@ -4826,12 +4835,12 @@ nt main ::= sub;
     #[test]
     fn identical_rule_and_terminal_names_stay_in_separate_scopes() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; t X ::= \"X\"; extern grammar SUB; nt document ::= X SUB;",
-            &[("SUB", "start child; t X ::= \"Y\"; nt child ::= X;")],
+            "start document; t X = \"X\"; extern grammar SUB; nt document = X SUB;",
+            &[("SUB", "start child; t X = \"Y\"; nt child = X;")],
         )
         .unwrap();
         let expected = from_glrm(
-            "start document; t X ::= \"X\"; grammar SUB { start child; t X ::= \"Y\"; nt child ::= X; }; nt document ::= X SUB;",
+            "start document; t X = \"X\"; grammar SUB { start child; t X = \"Y\"; nt child = X; }; nt document = X SUB;",
         )
         .unwrap();
         assert_same_grammar(&actual, &expected);
@@ -4844,14 +4853,14 @@ nt main ::= sub;
 
     #[test]
     fn repeated_identical_child_sources_are_independent_occurrences() {
-        const CHILD: &str = "start child; nt child ::= \"a\";";
+        const CHILD: &str = "start child; nt child = \"a\";";
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar LEFT; extern grammar RIGHT; nt document ::= LEFT RIGHT;",
+            "start document; extern grammar LEFT; extern grammar RIGHT; nt document = LEFT RIGHT;",
             &[("LEFT", CHILD), ("RIGHT", CHILD)],
         )
         .unwrap();
         let expected = from_glrm(
-            "start document; grammar LEFT { start child; nt child ::= \"a\"; }; grammar RIGHT { start child; nt child ::= \"a\"; }; nt document ::= LEFT RIGHT;",
+            "start document; grammar LEFT { start child; nt child = \"a\"; }; grammar RIGHT { start child; nt child = \"a\"; }; nt document = LEFT RIGHT;",
         )
         .unwrap();
         assert_same_grammar(&actual, &expected);
@@ -4860,7 +4869,7 @@ nt main ::= sub;
     #[test]
     fn missing_duplicate_and_unused_bindings_are_rejected() {
         let missing = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= SUB;",
+            "start document; extern grammar SUB; nt document = SUB;",
             &[],
         )
         .unwrap_err();
@@ -4870,10 +4879,10 @@ nt main ::= sub;
         );
 
         let duplicate = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= SUB;",
+            "start document; extern grammar SUB; nt document = SUB;",
             &[
-                ("SUB", "start child; nt child ::= \"a\";"),
-                ("SUB", "start other; nt other ::= \"b\";"),
+                ("SUB", "start child; nt child = \"a\";"),
+                ("SUB", "start other; nt other = \"b\";"),
             ],
         )
         .unwrap_err();
@@ -4883,8 +4892,8 @@ nt main ::= sub;
         );
 
         let unused = from_glrm_with_inline_subgrammars(
-            "start document; nt document ::= \"a\";",
-            &[("SUB", "start child; nt child ::= \"a\";")],
+            "start document; nt document = \"a\";",
+            &[("SUB", "start child; nt child = \"a\";")],
         )
         .unwrap_err();
         assert!(
@@ -4896,15 +4905,15 @@ nt main ::= sub;
     #[test]
     fn child_ignore_and_lexer_partitions_survive_inlining() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            "start document; extern grammar SUB; nt document = \"X\" SUB \"!\";",
             &[(
                 "SUB",
-                "start child; ignore WS; t WS ::= \" \"+; t WORD ::= /[a-z]+/; nt child ::= WORD;",
+                "start child; ignore WS; t WS = \" \"+; t WORD = /[a-z]+/; nt child = WORD;",
             )],
         )
         .unwrap();
         let expected = from_glrm(
-            "start document; grammar SUB { start child; ignore WS; t WS ::= \" \"+; t WORD ::= /[a-z]+/; nt child ::= WORD; }; nt document ::= \"X\" SUB \"!\";",
+            "start document; grammar SUB { start child; ignore WS; t WS = \" \"+; t WORD = /[a-z]+/; nt child = WORD; }; nt document = \"X\" SUB \"!\";",
         )
         .unwrap();
         assert_same_grammar(&actual, &expected);
@@ -4932,7 +4941,7 @@ mod redesigned_surface_tests {
     }
 
     fn shortest_grammar(body: &str) -> NamedGrammar {
-        let mut grammar = from_glrm(&format!("start root t VALUE::={body} nt root::=VALUE")).unwrap();
+        let mut grammar = from_glrm(&format!("start root t VALUE={body} nt root=VALUE")).unwrap();
         let rule = grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap();
         rule.expr = GrammarExpr::Shortest(Box::new(rule.expr.clone()));
         grammar
@@ -4941,44 +4950,44 @@ mod redesigned_surface_tests {
     #[test]
     fn optional_semicolons_and_named_inline_scopes() {
         let source=r#"start root
-            t LETTER::=/[a-z]/
-            grammar child {start value nt value::="[" /a+/ "]"}
-            nt root::=LETTER child
-            nt unused::="x"; nt unused2::="y""#;
+            t LETTER=/[a-z]/
+            grammar child {start value nt value="[" /a+/ "]"}
+            nt root=LETTER child
+            nt unused="x"; nt unused2="y""#;
         assert!(from_glrm(source).is_ok());
-        assert!(from_glrm("start root nt root::=\"a\" nt other::=\"b\"").is_ok());
-        assert!(from_glrm("glrm 1 start root nt root::=\"a\"").is_ok());
-        assert!(from_glrm("start root nt root::=\"a\" | nt other::=\"b\"").is_err());
-        assert!(from_glrm("start root nt root::=(\"a\" nt other::=\"b\"").is_err());
+        assert!(from_glrm("start root nt root=\"a\" nt other=\"b\"").is_ok());
+        assert!(from_glrm("glrm 1 start root nt root=\"a\"").is_ok());
+        assert!(from_glrm("start root nt root=\"a\" | nt other=\"b\"").is_err());
+        assert!(from_glrm("start root nt root=(\"a\" nt other=\"b\"").is_err());
     }
 
     #[test]
     fn escaped_identifiers_and_fa_boundaries() {
-        assert!(from_glrm("start `start` nt `start`::=\"a\" `start`? ").is_ok());
+        assert!(from_glrm("start `start` nt `start`=\"a\" `start`? ").is_ok());
         let source=r#"start root
-            nt root::=fa { start q0 accept q2
+            nt root=fa { start q0 accept q2
                 edge q0 -> q1: "("
                 edge q1 -> q1: "a" | "b"
                 edge q1 -> q2: ")"
             }"#;
         assert!(from_glrm(source).is_ok());
-        assert!(from_glrm("start root nt root::=fa{start0}").is_err());
-        assert!(from_glrm("start root nt root::=fa{start 0,1 accept 2 edge 0 -> 2:eps}").is_err());
-        assert!(from_glrm("start root nt root::=fa{start 0 start 1 accept 2 edge 0 -> 2:eps}").is_err());
+        assert!(from_glrm("start root nt root=fa{start0}").is_err());
+        assert!(from_glrm("start root nt root=fa{start 0,1 accept 2 edge 0 -> 2:eps}").is_err());
+        assert!(from_glrm("start root nt root=fa{start 0 start 1 accept 2 edge 0 -> 2:eps}").is_err());
     }
 
     #[test]
     fn unicode_and_byte_strings_are_distinct_explicit_languages() {
-        let text=r#"start root t VALUE::="\xFF" nt root::=VALUE"#;
-        let bytes=r#"start root t VALUE::=b"\xFF" nt root::=VALUE"#;
+        let text=r#"start root t VALUE="\xFF" nt root=VALUE"#;
+        let bytes=r#"start root t VALUE=b"\xFF" nt root=VALUE"#;
         assert!(terminal_matches(text,"VALUE","ÿ".as_bytes()));
         assert!(!terminal_matches(text,"VALUE",&[0xFF]));
         assert!(terminal_matches(bytes,"VALUE",&[0xFF]));
         assert!(!terminal_matches(bytes,"VALUE","ÿ".as_bytes()));
-        assert!(terminal_matches(r#"start root t VALUE::="\u{1F600}" nt root::=VALUE"#,"VALUE","😀".as_bytes()));
-        for s in [r#"start root nt root::="\q""#,r#"start root nt root::="\u{D800}""#,
-                  r#"start root nt root::=b"é""#,r#"start root nt root::=b"\u{41}""#,
-                  r#"start root nt root::=."#,r#"start root nt root::=[a-z]"#,r#"start root nt root::="a" /*"#] {
+        assert!(terminal_matches(r#"start root t VALUE="\u{1F600}" nt root=VALUE"#,"VALUE","😀".as_bytes()));
+        for s in [r#"start root nt root="\q""#,r#"start root nt root="\u{D800}""#,
+                  r#"start root nt root=b"é""#,r#"start root nt root=b"\u{41}""#,
+                  r#"start root nt root=."#,r#"start root nt root=[a-z]"#,r#"start root nt root="a" /*"#] {
             assert!(from_glrm(s).is_err(),"{s}");
         }
     }
@@ -4986,26 +4995,26 @@ mod redesigned_surface_tests {
     #[test]
     fn native_shortest_syntax_is_rejected_but_the_identifier_is_ordinary() {
         for source in [
-            r#"start root t VALUE::=shortest { /a|ab/ } nt root::=VALUE"#,
-            r#"start root; t VALUE ::= shortest { /a|ab/ }; nt root ::= VALUE;"#,
-            r#"start root nt root::=shortest { "a" }"#,
-            r#"start root t VALUE::=(shortest { "a" })+ nt root::=VALUE"#,
-            r#"start root grammar child {start value t VALUE::=shortest { "a" } nt value::=VALUE} nt root::=child"#,
-            r#"start root t VALUE::=fa {start q0 accept q1 edge q0 -> q1: shortest { "a" }} nt root::=VALUE"#,
+            r#"start root t VALUE=shortest { /a|ab/ } nt root=VALUE"#,
+            r#"start root; t VALUE = shortest { /a|ab/ }; nt root = VALUE;"#,
+            r#"start root nt root=shortest { "a" }"#,
+            r#"start root t VALUE=(shortest { "a" })+ nt root=VALUE"#,
+            r#"start root grammar child {start value t VALUE=shortest { "a" } nt value=VALUE} nt root=child"#,
+            r#"start root t VALUE=fa {start q0 accept q1 edge q0 -> q1: shortest { "a" }} nt root=VALUE"#,
         ] {
             assert!(from_glrm(source).is_err(), "{source}");
             assert!(format_glrm_v1(source).is_err(), "{source}");
             assert!(ParsedComponent::parse_glrm(source).is_err(), "{source}");
         }
         for source in [
-            r#"start root t shortest::="a" t VALUE::=shortest{2} nt root::=VALUE"#,
-            r#"start root; t shortest ::= "a"; t VALUE ::= shortest{2}; nt root ::= VALUE;"#,
-            r#"start root t `shortest`::="a" t VALUE::=`shortest`{2} nt root::=VALUE"#,
+            r#"start root t shortest="a" t VALUE=shortest{2} nt root=VALUE"#,
+            r#"start root; t shortest = "a"; t VALUE = shortest{2}; nt root = VALUE;"#,
+            r#"start root t `shortest`="a" t VALUE=`shortest`{2} nt root=VALUE"#,
         ] {
             assert!(terminal_matches(source, "VALUE", b"aa"), "{source}");
             assert!(!terminal_matches(source, "VALUE", b"a"), "{source}");
         }
-        let source = r#"start shortest nt shortest::="a" shortest{0,1}"#;
+        let source = r#"start shortest nt shortest="a" shortest{0,1}"#;
         assert!(ParsedComponent::parse_glrm(source).is_ok());
         let formatted = format_glrm_v1(source).unwrap();
         assert!(!formatted.contains("`shortest`"), "{formatted}");
@@ -5034,12 +5043,12 @@ mod redesigned_surface_tests {
         grammar.ignore = Some("VALUE".into());
         assert!(validate_ignore_terminal(&grammar, "test").is_err());
 
-        let mut grammar = from_glrm(r#"start root nt X::="a" nt root::=X"#).unwrap();
+        let mut grammar = from_glrm(r#"start root nt X="a" nt root=X"#).unwrap();
         grammar.rules.iter_mut().find(|r| r.name == "root").unwrap().expr =
             GrammarExpr::Shortest(Box::new(GrammarExpr::Ref("X".into())));
         assert!(crate::grammar::ast::validate_shortest_operands(&grammar).is_err());
         assert!(crate::grammar::ast::lower(&grammar).is_err());
-        assert!(from_glrm(r#"start root t VALUE::=/a+?/ nt root::=VALUE"#).is_err());
+        assert!(from_glrm(r#"start root t VALUE=/a+?/ nt root=VALUE"#).is_err());
     }
 
     fn assert_shortest_dump_language(grammar: &NamedGrammar, samples: &[(&[u8], bool)]) {
@@ -5112,7 +5121,7 @@ mod redesigned_surface_tests {
 
     #[test]
     fn shortest_dump_preserves_nested_and_surrounding_operator_scopes() {
-        let mut helpers = from_glrm(r"start root internal t LETTER::=/\p{L}+/ t VALUE::=LETTER nt root::=VALUE").unwrap();
+        let mut helpers = from_glrm(r"start root internal t LETTER=/\p{L}+/ t VALUE=LETTER nt root=VALUE").unwrap();
         let value = helpers.rules.iter_mut().find(|r| r.name == "VALUE").unwrap();
         value.expr = GrammarExpr::Shortest(Box::new(value.expr.clone()));
         assert_shortest_dump_language(&helpers, &[("é".as_bytes(), true), ("éa".as_bytes(), false), (b"", false)]);
@@ -5144,22 +5153,22 @@ mod redesigned_surface_tests {
 
     #[test]
     fn regex_flags_and_byte_mode_survive_lowering() {
-        assert!(terminal_matches(r#"start root t VALUE::=/abc/i nt root::=VALUE"#,"VALUE",b"ABC"));
-        assert!(terminal_matches(r#"start root t VALUE::=/./s nt root::=VALUE"#,"VALUE",b"\n"));
-        assert!(!terminal_matches(r#"start root t VALUE::=/./ nt root::=VALUE"#,"VALUE",b"\n"));
-        assert!(terminal_matches(r#"start root t VALUE::=b/./s nt root::=VALUE"#,"VALUE",&[255]));
-        assert!(!terminal_matches(r#"start root t VALUE::=/./s nt root::=VALUE"#,"VALUE",&[255]));
-        assert!(from_glrm(r#"start root t VALUE::=b/é/ nt root::=VALUE"#).is_err());
+        assert!(terminal_matches(r#"start root t VALUE=/abc/i nt root=VALUE"#,"VALUE",b"ABC"));
+        assert!(terminal_matches(r#"start root t VALUE=/./s nt root=VALUE"#,"VALUE",b"\n"));
+        assert!(!terminal_matches(r#"start root t VALUE=/./ nt root=VALUE"#,"VALUE",b"\n"));
+        assert!(terminal_matches(r#"start root t VALUE=b/./s nt root=VALUE"#,"VALUE",&[255]));
+        assert!(!terminal_matches(r#"start root t VALUE=/./s nt root=VALUE"#,"VALUE",&[255]));
+        assert!(from_glrm(r#"start root t VALUE=b/é/ nt root=VALUE"#).is_err());
     }
 
     #[test]
     fn canonical_formatter_is_idempotent_and_retains_literal_alphabets() {
         for source in [
-            r#"start root internal t L::=/.*END/s t VALUE::=L - (L b/./s+) nt root::=VALUE"#,
-            r#"start root t VALUE::=b/[\x00-\xFF]+/ nt root::=VALUE"#,
-            r#"start root t VALUE::="é\u{1F600}\n" nt root::=VALUE"#,
-            r#"start `start` nt `start`::=b"\xFF\x00""#,
-            r#"start root grammar child {start value nt value::="x"} nt root::=child"#,
+            r#"start root internal t L=/.*END/s t VALUE=L - (L b/./s+) nt root=VALUE"#,
+            r#"start root t VALUE=b/[\x00-\xFF]+/ nt root=VALUE"#,
+            r#"start root t VALUE="é\u{1F600}\n" nt root=VALUE"#,
+            r#"start `start` nt `start`=b"\xFF\x00""#,
+            r#"start root grammar child {start value nt value="x"} nt root=child"#,
         ] {
             let first=format_glrm_v1(source).unwrap();
             let second=format_glrm_v1(&first).unwrap();
@@ -5173,7 +5182,7 @@ mod redesigned_surface_tests {
 
     #[test]
     fn multiple_ignore_format_and_distinct_emission() {
-        let source="ignore A ignore AB start root t A::=\"a\" t AB::=\"ab\" nt root::=\"b\"";
+        let source="ignore A ignore AB start root t A=\"a\" t AB=\"ab\" nt root=\"b\"";
         let formatted=format_glrm_v1(source).unwrap();
         assert!(formatted.contains("ignore A\nignore AB\n"));
         assert_eq!(formatted,format_glrm_v1(&formatted).unwrap());
@@ -5185,10 +5194,10 @@ mod redesigned_surface_tests {
 
     #[test]
     fn foreign_pragmas_skip_only_balanced_lexical_blocks() {
-        let source=r##"start root pragma unknown { words: @ weird% { "}" /[{}]/ } } nt root::="a""##;
+        let source=r##"start root pragma unknown { words: @ weird% { "}" /[{}]/ } } nt root="a""##;
         assert!(from_glrm(source).is_ok());
-        assert!(from_glrm(r#"start root pragma unknown { "}" nt root::="a""#).is_err());
-        assert!(from_glrm(r#"start root pragma glrmask {typo "x"} nt root::="a""#).is_err());
+        assert!(from_glrm(r#"start root pragma unknown { "}" nt root="a""#).is_err());
+        assert!(from_glrm(r#"start root pragma glrmask {typo "x"} nt root="a""#).is_err());
     }
 }
 

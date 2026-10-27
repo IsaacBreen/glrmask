@@ -30,12 +30,12 @@ const DYNAMIC_VALUE_RULES: &str = r#"
 // particular there are deliberately no arithmetic/logical/conditional tails:
 // schema-aware constructions such as `cond ? "open" : "closed"` are lowered
 // by the JSON-Schema layer, where each result arm can be checked.
-nt dynamic_value_expression ::=
+nt dynamic_value_expression =
     dynamic_reference_expression
   | 'await' dynamic_reference_expression
   ;
 
-nt dynamic_reference_expression ::=
+nt dynamic_reference_expression =
     IDENTIFIER dynamic_reference_suffix*
   | 'this' dynamic_reference_suffix*
   | 'new' '.' 'target' dynamic_reference_suffix*
@@ -43,7 +43,7 @@ nt dynamic_reference_expression ::=
   | 'import' '.' 'meta' dynamic_reference_suffix*
   ;
 
-nt dynamic_reference_suffix ::=
+nt dynamic_reference_suffix =
     '[' expression ']'
   | '?.' '[' expression ']'
   | '.' IDENTIFIER
@@ -340,7 +340,7 @@ fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     for index in 0..names.len() {
         source.push_str(&format!("extern args_{index};\n"));
     }
-    source.push_str("start suffix;\nnt suffix ::=\n");
+    source.push_str("start suffix;\nnt suffix =\n");
     for (index, name) in names.iter().enumerate() {
         let prefix = if index == 0 { "    " } else { "  | " };
         let head = serde_json::to_string(&format!(".{name}(")).expect("tool name is UTF-8");

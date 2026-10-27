@@ -64,7 +64,7 @@ fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
         assert!(accepts(&c,&[0,0]));assert!(!accepts(&c,&[2]));
     }
     assert_eq!(g.requirements().unwrap().len(),1);
-    let child=Grammar::from_glrm("start root nt root::=\"y\"").unwrap();
+    let child=Grammar::from_glrm("start root nt root=\"y\"").unwrap();
     let p=g.prepare(&v).unwrap().bind_snapshot("payload",child.prepare(&v).unwrap()).unwrap();
     let loaded=PreparedGrammar::load(p.save(), &v).unwrap();
     for mode in MODES {
@@ -102,10 +102,10 @@ fn lazy_regular_body_and_casefold_flags_have_exact_effects() {
 #[test]
 fn ignored_terminals_remain_distinct_under_maximal_munch() {
     let v=words(&["ab","abb","b","a","<ab>","<abb>"]);
-    let native=Grammar::from_glrm("ignore A ignore AB start root t A::=\"a\" t AB::=\"ab\" nt root::=\"b\"").unwrap();
+    let native=Grammar::from_glrm("ignore A ignore AB start root t A=\"a\" t AB=\"ab\" nt root=\"b\"").unwrap();
     let lark=Grammar::from_lark("%ignore \"a\"\n%ignore \"ab\"\nstart: \"b\"").unwrap();
-    let union=Grammar::from_glrm("ignore ALL start root t ALL::=\"a\" | \"ab\" nt root::=\"b\"").unwrap();
-    let nested=Grammar::from_glrm("start root grammar child{ignore A ignore AB start x t A::=\"a\" t AB::=\"ab\" nt x::=\"b\"} nt root::=\"<\" child \">\"").unwrap();
+    let union=Grammar::from_glrm("ignore ALL start root t ALL=\"a\" | \"ab\" nt root=\"b\"").unwrap();
+    let nested=Grammar::from_glrm("start root grammar child{ignore A ignore AB start x t A=\"a\" t AB=\"ab\" nt x=\"b\"} nt root=\"<\" child \">\"").unwrap();
     for mode in MODES {
         let opts=mode.build_options();
         let a=native.compile_with_build_options(&v,opts.clone()).unwrap();let b=lark.compile_with_build_options(&v,opts.clone()).unwrap();
@@ -113,8 +113,8 @@ fn ignored_terminals_remain_distinct_under_maximal_munch() {
         assert!(!accepts(&union.compile_with_build_options(&v,opts.clone()).unwrap(),&[0]),"union must not be silently substituted");
         let c=nested.compile_with_build_options(&v,opts).unwrap();for id in [4,5]{assert!(accepts(&c,&[id]));}
     }
-    for bad in ["ignore A ignore EMPTY start r t A::=\"a\" t EMPTY::=/b*/ nt r::=\"c\"",
-                "ignore A ignore X start r t A::=\"a\" nt X::=\"b\" nt r::=\"c\""]{
+    for bad in ["ignore A ignore EMPTY start r t A=\"a\" t EMPTY=/b*/ nt r=\"c\"",
+                "ignore A ignore X start r t A=\"a\" nt X=\"b\" nt r=\"c\""]{
         assert!(Grammar::from_glrm(bad).and_then(|g|g.compile(&v).map(|_|())).is_err());
     }
     assert!(Grammar::from_lark("%ignore \"a\"\n%ignore /b*/\nstart: \"b\"").unwrap().compile(&v).is_err());

@@ -73,10 +73,10 @@ const fn node(kind: Kind) -> NodeSpec {
     NodeSpec { kind, slots: &[], tokens: &[] }
 }
 
-const HOST: &str = r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y";"#;
-const MIDDLE: &str = r#"glrm 1; start root; extern grammar leaf; nt root ::= "p" leaf "q";"#;
-const TWO_EXTERNS: &str = r#"glrm 1; start root; extern grammar LEFT; extern grammar RIGHT; nt root ::= "x" LEFT "c" RIGHT "y";"#;
-const TOKEN_HOST: &str = r#"glrm 1; start root; extern token MARK; nt root ::= "x" MARK "y";"#;
+const HOST: &str = r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#;
+const MIDDLE: &str = r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#;
+const TWO_EXTERNS: &str = r#"glrm 1; start root; extern grammar LEFT; extern grammar RIGHT; nt root = "x" LEFT "c" RIGHT "y";"#;
+const TOKEN_HOST: &str = r#"glrm 1; start root; extern token MARK; nt root = "x" MARK "y";"#;
 
 fn assemblies() -> Vec<AssemblySpec> {
     vec![

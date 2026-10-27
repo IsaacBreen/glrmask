@@ -506,7 +506,7 @@ fn auto_decline_with_a_retained_child_keeps_that_child() {
     let child_builds = static_build_probe::builds(&child);
 
     let parent_source = Grammar::from_glrm(
-        r#"glrm 1; start start; extern grammar child; nt start ::= "a" child;"#,
+        r#"glrm 1; start start; extern grammar child; nt start = "a" child;"#,
     )
     .unwrap();
     let mut reference_parent = Module::new(&parent_source);

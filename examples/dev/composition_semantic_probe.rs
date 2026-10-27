@@ -107,16 +107,16 @@ fn main() {
 
     if "scoped_ignores_static".contains(filter) {
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start document; ignore PARENT_WS; t PARENT_WS ::= " "+;
-               extern grammar child; nt document ::= "X" child "!";"#,
+            r#"glrm 1; start document; ignore PARENT_WS; t PARENT_WS = " "+;
+               extern grammar child; nt document = "X" child "!";"#,
         ), &vocab).unwrap();
         let child = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start child; ignore CHILD_WS; t CHILD_WS ::= "\t"+; nt child ::= "a";"#,
+            r#"glrm 1; start child; ignore CHILD_WS; t CHILD_WS = "\t"+; nt child = "a";"#,
         ), &vocab).unwrap();
         let reference = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start document; ignore PARENT_WS; t PARENT_WS ::= " "+;
-               grammar child { start child; ignore CHILD_WS; t CHILD_WS ::= "\t"+; nt child ::= "a"; };
-               nt document ::= "X" child "!";"#,
+            r#"glrm 1; start document; ignore PARENT_WS; t PARENT_WS = " "+;
+               grammar child { start child; ignore CHILD_WS; t CHILD_WS = "\t"+; nt child = "a"; };
+               nt document = "X" child "!";"#,
         ), &vocab).unwrap();
         let begin = Instant::now();
         let bound = parent.bind_grammar("child", &child).unwrap();
@@ -131,12 +131,12 @@ fn main() {
     if "exclusion_static".contains(filter) {
         let body = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start start; ignore WS;
-               t WS ::= /[ \t\r\n]+/; t OP ::= "=" | "%="; t ID ::= /[A-Za-z_$][A-Za-z0-9_$]*/;
-               nt declaration ::= "@" ID; nt expression ::= ID OP "0";
-               nt start ::= declaration expression;"#,
+               t WS = /[ \t\r\n]+/; t OP = "=" | "%="; t ID = /[A-Za-z_$][A-Za-z0-9_$]*/;
+               nt declaration = "@" ID; nt expression = ID OP "0";
+               nt start = declaration expression;"#,
         ), &vocab).unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            "glrm 1; start document; extern grammar body; nt document ::= body;",
+            "glrm 1; start document; extern grammar body; nt document = body;",
         ), &vocab).unwrap();
         let begin = Instant::now();
         let bound = parent.bind_grammar("body", &body).unwrap();
@@ -156,13 +156,13 @@ fn main() {
         let special_id = t("dead-special");
         let ids_with_special: Vec<_> = ids.iter().copied().chain([5000]).collect();
         let child = ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token SPECIAL; nt child ::= ("a" | SPECIAL)?;"#,
+            r#"glrm 1; start child; extern token SPECIAL; nt child = ("a" | SPECIAL)?;"#,
         ), &vocab).unwrap().bind_token("SPECIAL", [special_id, 5000]).unwrap().build().unwrap().compile().unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            "glrm 1; start document; extern grammar child; nt document ::= \"X\" child \"!\";",
+            "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
         ), &vocab).unwrap();
         let reference = ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start document; extern token SPECIAL; nt document ::= "X" ("a" | SPECIAL)? "!";"#,
+            r#"glrm 1; start document; extern token SPECIAL; nt document = "X" ("a" | SPECIAL)? "!";"#,
         ), &vocab).unwrap().bind_token("SPECIAL", [special_id, 5000]).unwrap().build().unwrap().compile().unwrap();
         let bound = parent.bind_grammar("child", &child).unwrap();
         let prefixes = [("root", vec![]), ("entry", vec![t("X")]),

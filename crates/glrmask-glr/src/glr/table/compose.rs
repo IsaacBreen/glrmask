@@ -2339,15 +2339,15 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#, &[("SUB", &[999])]);
         let slot = terminal(&parent_analysis, "SUB");
         let input = SubgrammarTableInput {
@@ -2458,23 +2458,23 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#, &[("SUB", &[999])]);
         let (monolithic, monolithic_analysis) = table(
             r#"
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">" inner "!";
+                nt document = "<" inner ">" inner "!";
             "#,
         );
 
@@ -2536,7 +2536,7 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
@@ -2544,16 +2544,16 @@ mod tests {
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">" RIGHT "!";
+                nt document = "<" LEFT ">" RIGHT "!";
             "#, &[("LEFT", &[998]), ("RIGHT", &[999])]);
         let (monolithic, monolithic_analysis) = table(
             r#"
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">" inner "!";
+                nt document = "<" inner ">" inner "!";
             "#,
         );
 
@@ -2614,7 +2614,7 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
@@ -2622,7 +2622,7 @@ mod tests {
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= LEFT RIGHT;
+                nt document = LEFT RIGHT;
             "#, &[("LEFT", &[998]), ("RIGHT", &[999])]);
         let left = terminal(&parent_analysis, "LEFT");
         let right = terminal(&parent_analysis, "RIGHT");
@@ -2657,14 +2657,14 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#, &[("SUB", &[999])]);
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
@@ -2703,8 +2703,8 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
@@ -2712,7 +2712,7 @@ mod tests {
                 start document;
                 extern token SUB;
                 extern token DONE;
-                nt document ::= SUB DONE;
+                nt document = SUB DONE;
             "#, &[("SUB", &[999]), ("DONE", &[1000])]);
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
@@ -2746,14 +2746,14 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB SUB "!";
+                nt document = "X" SUB SUB "!";
             "#, &[("SUB", &[999])]);
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
@@ -2790,8 +2790,8 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
@@ -2799,7 +2799,7 @@ mod tests {
                 start document;
                 extern token SUB;
                 extern token DONE;
-                nt document ::= SUB DONE;
+                nt document = SUB DONE;
             "#, &[("SUB", &[999]), ("DONE", &[1000])]);
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
@@ -2834,19 +2834,19 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                t C_WS ::= "\t"+;
-                t A ::= "a";
-                nt child ::= A;
+                t C_WS = "\t"+;
+                t A = "a";
+                nt child = A;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                t P_WS ::= " "+;
-                t L ::= "<";
-                t R ::= ">";
-                nt document ::= L SUB R;
+                t P_WS = " "+;
+                t L = "<";
+                t R = ">";
+                nt document = L SUB R;
             "#, &[("SUB", &[999])]);
         let parent_ws = terminal(&parent_analysis, "P_WS");
         let child_ws = terminal(&child_analysis, "C_WS");
@@ -2889,14 +2889,14 @@ mod tests {
         let (leaf, leaf_analysis) = table(
             r#"
                 start leaf;
-                nt leaf ::= "a";
+                nt leaf = "a";
             "#,
         );
         let (middle_parent, middle_analysis) = table_with_tokens(
             r#"
                 start child;
                 extern token LEAF;
-                nt child ::= LEAF LEAF;
+                nt child = LEAF LEAF;
             "#, &[("LEAF", &[998])]);
         let middle_input = SubgrammarTableInput {
             placeholder_terminal: terminal(&middle_analysis, "LEAF"),
@@ -2918,7 +2918,7 @@ mod tests {
                 start document;
                 extern token CHILD;
                 extern token DONE;
-                nt document ::= CHILD DONE;
+                nt document = CHILD DONE;
             "#, &[("CHILD", &[999]), ("DONE", &[1000])]);
         let outer_input = SubgrammarTableInput {
             placeholder_terminal: terminal(&outer_analysis, "CHILD"),
@@ -2962,14 +2962,14 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB SUB "!";
+                nt document = "X" SUB SUB "!";
             "#, &[("SUB", &[999])]);
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
@@ -3002,19 +3002,19 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                t C_WS ::= "\t"+;
-                t A ::= "a";
-                nt child ::= A;
+                t C_WS = "\t"+;
+                t A = "a";
+                nt child = A;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                t P_WS ::= " "+;
-                t L ::= "<";
-                t R ::= ">";
-                nt document ::= L SUB R;
+                t P_WS = " "+;
+                t L = "<";
+                t R = ">";
+                nt document = L SUB R;
             "#, &[("SUB", &[999])]);
         let parent_ws = terminal(&parent_analysis, "P_WS");
         let child_ws = terminal(&child_analysis, "C_WS");
@@ -3080,20 +3080,20 @@ mod tests {
         let (raw_child, raw_analysis) = table(
             r#"
                 start child;
-                t C_WS ::= "\t"+;
-                t A ::= "a";
-                nt child ::= A;
-                nt wrap ::= C_WS child;
+                t C_WS = "\t"+;
+                t A = "a";
+                nt child = A;
+                nt wrap = C_WS child;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                t P_WS ::= " "+;
-                t L ::= "<";
-                t R ::= ">";
-                nt document ::= L SUB R;
+                t P_WS = " "+;
+                t L = "<";
+                t R = ">";
+                nt document = L SUB R;
             "#, &[("SUB", &[999])]);
         let raw_ws = terminal(&raw_analysis, "C_WS");
         let raw_a = terminal(&raw_analysis, "A");
@@ -3239,21 +3239,21 @@ mod tests {
         let (child, child_analysis) = table(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#, &[("SUB", &[999])]);
         let (monolithic, monolithic_analysis) = table(
             r#"
                 start document;
-                nt item ::= "a";
-                nt document ::= "X" item? "!";
+                nt item = "a";
+                nt document = "X" item? "!";
             "#,
         );
         let composed = compose_subgrammar_tables(
@@ -3296,13 +3296,13 @@ mod tests {
         let (left, left_analysis) = table(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
         );
         let (right, right_analysis) = table(
             r#"
                 start child;
-                nt child ::= "c" "d";
+                nt child = "c" "d";
             "#,
         );
         let (parent, parent_analysis) = table_with_tokens(
@@ -3310,20 +3310,20 @@ mod tests {
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">,<" RIGHT ">" "!";
+                nt document = "<" LEFT ">,<" RIGHT ">" "!";
             "#, &[("LEFT", &[998]), ("RIGHT", &[999])]);
         let (monolithic, monolithic_analysis) = table(
             r#"
                 start document;
                 grammar left {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
                 grammar right {
                     start child;
-                    nt child ::= "c" "d";
+                    nt child = "c" "d";
                 };
-                nt document ::= "<" left ">,<" right ">" "!";
+                nt document = "<" left ">,<" right ">" "!";
             "#,
         );
         let composed = compose_subgrammar_tables(

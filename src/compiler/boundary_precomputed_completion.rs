@@ -183,7 +183,7 @@ mod lifecycle_tests {
     #[test]
     fn independent_component_index_roundtrips_and_matches_raw_first_query() {
         let vocab=Vocab::new(vec![(1,b"abc".to_vec()),(2,b"xyc".to_vec()),(3,b"c!".to_vec()),(4,b"bc!".to_vec()),(5,b"abc!".to_vec()),(6,b"xyc!".to_vec()),(7,b"!".to_vec()),(8,b"a".to_vec()),(9,b"b".to_vec()),(10,b"c".to_vec())]);
-        let mut source=Constraint::from_glrm_grammar(r#"start x; nt x ::= "abc" | "xyc";"#,&vocab).unwrap();
+        let mut source=Constraint::from_glrm_grammar(r#"start x; nt x = "abc" | "xyc";"#,&vocab).unwrap();
         assert!(prepare_component(&mut source,&vocab).unwrap(),"fixture must select component-only preparation");
         let wire=source.save();
         let loaded=Constraint::load(&wire, &vocab).unwrap();

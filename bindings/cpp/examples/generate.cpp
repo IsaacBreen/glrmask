@@ -21,10 +21,10 @@ int main() {
         // Arithmetic, then the end token.
         auto arithmetic = glrmask::Grammar::from_glrm(R"glrm(
             start sum
-            t NUMBER ::= /[0-9]+/
-            nt sum ::= product | sum "+" product
-            nt product ::= atom | product "*" atom
-            nt atom ::= NUMBER | "(" sum ")"
+            t NUMBER = /[0-9]+/
+            nt sum = product | sum "+" product
+            nt product = atom | product "*" atom
+            nt atom = NUMBER | "(" sum ")"
         )glrm");
         auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({arithmetic, eos}));
         auto constraint = grammar.compile(vocab);

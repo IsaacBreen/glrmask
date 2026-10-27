@@ -500,10 +500,10 @@ mod tests {
         let named = from_glrm(
             r#"
 start start;
-t A ::= "a";
-t B ::= "b";
-nt item ::= A | B;
-nt start ::= item item? item?;
+t A = "a";
+t B = "b";
+nt item = A | B;
+nt start = item item? item?;
 "#,
         )
         .unwrap();

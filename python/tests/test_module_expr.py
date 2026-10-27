@@ -5,8 +5,8 @@ import gc
 import glrmask as g
 import pytest
 
-HOST = 'glrm 1; start start; extern grammar child; nt start ::= "x" child "y";'
-MARK = 'glrm 1; start start; extern token MARK; nt start ::= MARK;'
+HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
+MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
 
 
 def vocab(changed=False):
@@ -178,7 +178,7 @@ def test_expression_union_sequence_and_module_binding():
     closed_leaf.bind('MARK', g.TokenSet([8]))
     expr = g.Expr.choice(g.Expr.sequence(source('x'), closed_leaf), source('b'))
 
-    parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar E; nt start ::= E;'))
+    parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar E; nt start = E;'))
     parent.bind('E', expr)
     state = parent.compile(v).start()
     assert state.mask()[0] and state.mask()[2]
@@ -193,7 +193,7 @@ def test_expression_union_sequence_and_module_binding():
 def test_expression_whole_token_crosses_boundaries():
     v = vocab()
     expr = g.Expr.sequence(source('x'), g.Expr.sequence(source(), source('y')))
-    parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar S; nt start ::= S;'))
+    parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar S; nt start = S;'))
     parent.bind('S', expr)
     state = parent.compile(v).start()
     assert state.mask()[4]

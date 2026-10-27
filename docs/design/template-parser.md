@@ -13,7 +13,7 @@ parser backend.
 use glrmask::{BuildOptions, Grammar, Optimization, ParserBackend, Vocab};
 
 let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]);
-let grammar = Grammar::from_glrm(r#"start root; nt root ::= "a" "b"?;"#)?;
+let grammar = Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#)?;
 let constraint = grammar.compile_with(
     &vocab,
     BuildOptions::default()

@@ -71,7 +71,7 @@ fn parsed_source_and_explicit_optional_terminal_have_equal_body_nullability() {
         ("/a?/", true), ("/a*/ & /a*/", true), ("/a+/ & /a*/", false),
         ("/(ab|c){0,5000}/ & /(a|bc){0,4000}/", true),
     ] {
-        let source = format!("start root; t A ::= {expression}; nt root ::= A;");
+        let source = format!("start root; t A = {expression}; nt root = A;");
         let named = glrm::from_glrm(&source).unwrap();
         let flat = ast::lower(&named).unwrap();
         assert_eq!(flat.start_is_nullable(), expected, "{source}");

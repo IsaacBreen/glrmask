@@ -1019,7 +1019,7 @@ fn rescue_lowering_equals_the_normal_static_route() {
         ),
         (
             "glrm",
-            Grammar::from_glrm("start root nt root::=\"a\" \"b\"").unwrap(),
+            Grammar::from_glrm("start root nt root=\"a\" \"b\"").unwrap(),
             &v,
         ),
         (

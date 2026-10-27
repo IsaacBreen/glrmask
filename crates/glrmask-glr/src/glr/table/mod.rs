@@ -2158,7 +2158,7 @@ mod ambiguity_tests {
             "child",
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
         );
         dump(
@@ -2166,7 +2166,7 @@ mod ambiguity_tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">";
+                nt document = "<" SUB ">";
             "#,
         );
         dump(
@@ -2175,9 +2175,9 @@ mod ambiguity_tests {
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">";
+                nt document = "<" inner ">";
             "#,
         );
     }
@@ -2235,10 +2235,10 @@ mod ambiguity_tests {
     fn glrm_recursive_array_colorpalette_minimal_stackshift_mre() -> &'static str {
         r#"
             start start;
-            t JSON_ITEM_SEPARATOR ::= /(?:, )/;
-            nt json_array ::= "[" (json_value (JSON_ITEM_SEPARATOR json_value)*)? "]";
-            nt json_value ::= json_array;
-            nt start ::= "{" "\"icons\": " "{" "\"ColorPalette\": " "{" ("\"k\": " json_value)* "}" "}" "}";
+            t JSON_ITEM_SEPARATOR = /(?:, )/;
+            nt json_array = "[" (json_value (JSON_ITEM_SEPARATOR json_value)*)? "]";
+            nt json_value = json_array;
+            nt start = "{" "\"icons\": " "{" "\"ColorPalette\": " "{" ("\"k\": " json_value)* "}" "}" "}";
         "#
     }
 

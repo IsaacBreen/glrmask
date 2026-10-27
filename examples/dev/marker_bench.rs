@@ -26,17 +26,17 @@ fn workloads(marked: bool) -> Vec<Workload> {
     let m = |id| marker(marked,id);
     let mut recursive = vec![3;32]; recursive.push(5); recursive.extend(vec![4;32]);
     let mut result = vec![
-        Workload { name:"alternating_single_tokens".into(), source:format!("start root\nnt root ::= (\"a\"{}\"b\"{})*\n",m(1),m(2)), sequence:[0,1].repeat(128) },
-        Workload { name:"fused_eight_lexemes".into(), source:format!("start root\nnt root ::= (\"a\"{}\"b\"{})*\n",m(1),m(2)), sequence:vec![2;64] },
-        Workload { name:"nested_parentheses".into(), source:format!("start root\nnt root ::= \"x\" | \"(\"{}root{}\")\"\n",m(1),m(2)), sequence:recursive },
-        Workload { name:"long_fixed_lexeme_in_chunks".into(), source:format!("start root\nt WORD ::= \"{}\"\nnt root ::= {}WORD{}\n","a".repeat(256),m(1),m(2)), sequence:vec![0;256] },
-        Workload { name:"dense_16_markers".into(), source:format!("start root\nnt root ::= (\"a\"{})*\n",(0..16).map(m).collect::<String>()),sequence:vec![0;256] },
+        Workload { name:"alternating_single_tokens".into(), source:format!("start root\nnt root = (\"a\"{}\"b\"{})*\n",m(1),m(2)), sequence:[0,1].repeat(128) },
+        Workload { name:"fused_eight_lexemes".into(), source:format!("start root\nnt root = (\"a\"{}\"b\"{})*\n",m(1),m(2)), sequence:vec![2;64] },
+        Workload { name:"nested_parentheses".into(), source:format!("start root\nnt root = \"x\" | \"(\"{}root{}\")\"\n",m(1),m(2)), sequence:recursive },
+        Workload { name:"long_fixed_lexeme_in_chunks".into(), source:format!("start root\nt WORD = \"{}\"\nnt root = {}WORD{}\n","a".repeat(256),m(1),m(2)), sequence:vec![0;256] },
+        Workload { name:"dense_16_markers".into(), source:format!("start root\nnt root = (\"a\"{})*\n",(0..16).map(m).collect::<String>()),sequence:vec![0;256] },
     ];
     for count in [16usize,128,512] {
         let mut choices=vec!["\"a\"+".to_owned()];
         for id in 0..count { choices.push(format!("\"x{id}:\"{}\"b\"",m(id))); }
         result.push(Workload { name:format!("inactive_{count}_markers"),
-            source:format!("start root\nnt root ::= {}\n",choices.join(" | ")),sequence:vec![0;256] });
+            source:format!("start root\nnt root = {}\n",choices.join(" | ")),sequence:vec![0;256] });
     }
     result
 }

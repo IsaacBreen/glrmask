@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- GLRM definitions now use `::=` instead of `=`, as in `nt sum ::= product | sum "+" product`. A grammar containing `::=` no longer switches to the old dialect, so `@token(...)` and `@tokens(...)` aren't available in GLRM.
+- GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.
 
 ## 0.5.0
 

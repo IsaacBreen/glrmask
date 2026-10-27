@@ -10376,9 +10376,9 @@ mod tests {
         let vocab = Vocab::new(entries.clone());
         for nullable in [false,true] {
             let parent = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar leaf; nt root ::= "P" leaf "Q";"#), &vocab).unwrap();
-            let source = if nullable { r#"glrm 1; start leaf; nt leaf ::= ("ab" | "ac")?;"# }
-                else { r#"glrm 1; start leaf; nt leaf ::= "ab" | "ac";"# };
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P" leaf "Q";"#), &vocab).unwrap();
+            let source = if nullable { r#"glrm 1; start leaf; nt leaf = ("ab" | "ac")?;"# }
+                else { r#"glrm 1; start leaf; nt leaf = "ab" | "ac";"# };
             let child = crate::DynamicConstraint::from_glrm_with_bounded_template_parser(
                 source, &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("leaf", child).unwrap();
@@ -10427,13 +10427,13 @@ mod tests {
         let vocab = Vocab::new(entries);
         let parent = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern grammar left; extern grammar right;
-                nt root ::= "X" (left "!" | right "?");"#,
+                nt root = "X" (left "!" | right "?");"#,
         ), &vocab).unwrap();
         let left = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start left; t A ::= "a"+; nt left ::= A "b";"#,
+            r#"glrm 1; start left; t A = "a"+; nt left = A "b";"#,
         ), &vocab).unwrap();
         let right = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start right; t A ::= "a"+; nt right ::= A "c";"#,
+            r#"glrm 1; start right; t A = "a"+; nt right = A "c";"#,
         ), &vocab).unwrap();
         let bound = parent.compose_compiled_subgrammars_dynamic(
             &[("left", &left), ("right", &right)], &vocab,
@@ -10501,10 +10501,10 @@ mod tests {
         let ids = entries.iter().map(|(id,_)| *id).collect::<Vec<_>>();
         let vocab = Vocab::new(entries);
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
         let child = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start child; t A ::= "a"+; nt child ::= A;"#,
+            r#"glrm 1; start child; t A = "a"+; nt child = A;"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child",child).unwrap();
         let prepared = PreparedMaskVocabulary::new(&bound,&ids).unwrap();
@@ -10543,9 +10543,9 @@ mod tests {
         let vocab = Vocab::new(entries);
         for nullable in [false,true] {
             let parent = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar leaf; nt root ::= "P" leaf "Q";"#), &vocab).unwrap();
-            let source = if nullable { r#"glrm 1; start x; nt x ::= ("ab" | "ac")?;"# }
-                else { r#"glrm 1; start x; nt x ::= "ab" | "ac";"# };
+                r#"glrm 1; start root; extern grammar leaf; nt root = "P" leaf "Q";"#), &vocab).unwrap();
+            let source = if nullable { r#"glrm 1; start x; nt x = ("ab" | "ac")?;"# }
+                else { r#"glrm 1; start x; nt x = "ab" | "ac";"# };
             let child = crate::DynamicConstraint::from_glrm_with_bounded_template_parser(
                 source, &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("leaf", child).unwrap();
@@ -10617,15 +10617,15 @@ mod tests {
         let vocab = Vocab::new(entries);
         for separated in [false, true] {
             let groups = if separated {
-                "pragma glrmask { lexer group a ::= A; lexer group b ::= B; lexer group ws ::= WS; }"
+                "pragma glrmask { lexer group a = A; lexer group b = B; lexer group ws = WS; }"
             } else { "" };
             for pair in [
-                "t A ::= 'a'+; t B ::= 'a'+ 'b';",
-                "t A ::= 'a' 'b'; t B ::= 'a';",
-                "t A ::= 'a'+; t B ::= 'a'+ 'b'?;",
+                "t A = 'a'+; t B = 'a'+ 'b';",
+                "t A = 'a' 'b'; t B = 'a';",
+                "t A = 'a'+; t B = 'a'+ 'b'?;",
             ] {
                 let grammar = format!(
-                    "start start; ignore WS; t WS ::= (' ' | '-')+; {groups} {pair} nt item ::= A | B; nt start ::= item item? item?;"
+                    "start start; ignore WS; t WS = (' ' | '-')+; {groups} {pair} nt item = A | B; nt start = item item? item?;"
                 );
                 let static_constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
                 let dynamic = DynamicConstraint::from_glrm_grammar(&grammar, &vocab).unwrap();
@@ -10678,10 +10678,10 @@ mod tests {
         let ids=entries.iter().map(|(id,_)|*id).chain([9001]).collect::<Vec<_>>();
         let vocab=Vocab::new(entries);
         let child=crate::ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token MARK; nt child ::= MARK "a" | "a";"#),&vocab)
+            r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#),&vocab)
             .unwrap().bind_token("MARK",[7,9001]).unwrap().build().unwrap().compile().unwrap();
         let parent=Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#),&vocab).unwrap();
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#),&vocab).unwrap();
         let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
         let loaded=Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound,&loaded] {
@@ -10717,10 +10717,10 @@ mod tests {
         let ids=entries.iter().map(|(id,_)|*id).chain([9001]).collect::<Vec<_>>();
         let vocab=Vocab::new(entries);
         let child=crate::ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token MARK; nt child ::= MARK "a" | "a";"#),&vocab)
+            r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#),&vocab)
             .unwrap().bind_token("MARK",[7,9001]).unwrap().build().unwrap().compile().unwrap();
         let parent=Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#),&vocab).unwrap();
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#),&vocab).unwrap();
         let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
         let loaded=Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound,&loaded] {
@@ -10754,10 +10754,10 @@ mod tests {
             (2,b"xy!".to_vec()),(3,b"x!".to_vec()),(4,b"xz!".to_vec()),
             (5,b"!".to_vec()),(6,b"z".to_vec())]);
         for leaf in ["x", "xz"] {
-            let source=format!("glrm 1; start child; nt child ::= {leaf:?};");
+            let source=format!("glrm 1; start child; nt child = {leaf:?};");
             let child=Constraint::compile(Grammar::glrm(&source),&vocab).unwrap();
             let parent=Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar child; nt root ::= "P" child "!";"#),&vocab).unwrap();
+                r#"glrm 1; start root; extern grammar child; nt root = "P" child "!";"#),&vocab).unwrap();
             let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
             let loaded=Constraint::load(bound.save(), &vocab).unwrap();
             for constraint in [&bound,&loaded] {
@@ -10811,7 +10811,7 @@ mod tests {
             fn exact_raw_state(&self,_:u32)->Option<u32> {None}
         }
         let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
-        let constraint=Constraint::compile(Grammar::glrm(r#"glrm 1; start root; nt root ::= "a";"#),&vocab).unwrap();
+        let constraint=Constraint::compile(Grammar::glrm(r#"glrm 1; start root; nt root = "a";"#),&vocab).unwrap();
         let state=constraint.start();
         let domain=PureMaskByteDomain::for_ids(&constraint,&[0]).unwrap();
         for fail_at in [1,2] {
@@ -10836,9 +10836,9 @@ mod tests {
             (9, b"z".to_vec()),
         ]);
         let child = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start child; nt child ::= "xa";"#), &vocab).unwrap();
+            r#"glrm 1; start child; nt child = "xa";"#), &vocab).unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "P" child "!";"#), &vocab).unwrap();
+            r#"glrm 1; start root; extern grammar child; nt root = "P" child "!";"#), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound, &loaded] {
@@ -10883,11 +10883,11 @@ mod tests {
         ];
         let vocab = Vocab::new(entries);
         let child = crate::ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token SPECIAL; nt child ::= "xa" | SPECIAL;"#), &vocab)
+            r#"glrm 1; start child; extern token SPECIAL; nt child = "xa" | SPECIAL;"#), &vocab)
             .unwrap().bind_token("SPECIAL", [2, 9001]).unwrap()
             .build().unwrap().compile().unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "P" child "!";"#), &vocab).unwrap();
+            r#"glrm 1; start root; extern grammar child; nt root = "P" child "!";"#), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound, &loaded] {
@@ -10935,10 +10935,10 @@ mod tests {
             (65, b"Xa!".to_vec()), (99, b"b".to_vec()), (130, b"aa".to_vec()),
         ]);
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
         let child = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start child; t A ::= "a"+; nt child ::= A;"#,
+            r#"glrm 1; start child; t A = "a"+; nt child = A;"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
@@ -10973,10 +10973,10 @@ mod tests {
             let vocab = Vocab::new(vec![(0,b"X".to_vec()),(1,word.as_bytes().to_vec()),
                 (2,b"!".to_vec()),(3,b"a!".to_vec()),(4,b"b!".to_vec())]);
             let parent = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#,
+                r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(
-                &format!("glrm 1; start child; nt child ::= {word:?};")), &vocab).unwrap();
+                &format!("glrm 1; start child; nt child = {word:?};")), &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
             let prepared = PreparedMaskVocabulary::new(&bound, &[1,3,4]).unwrap();
             let mut state = bound.start(); assert!(state.commit_bytes(b"X"));
@@ -10996,10 +10996,10 @@ mod tests {
         let vocab = Vocab::new(vec![(0,Vec::new()),(1,b"X".to_vec()),(2,b"a".to_vec()),
             (3,b"!".to_vec()),(7,Vec::new()),(31,Vec::new()),(40,b"a!".to_vec())]);
         let child = crate::ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token MARK; nt child ::= MARK "a" | "a";"#,
+            r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#,
         ), &vocab).unwrap().bind_token("MARK",[7]).unwrap().build().unwrap().compile().unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child",child).unwrap();
         for domain in [vec![0,7,31],vec![0,31,40],vec![7],vec![2,7,40]] {
@@ -11035,14 +11035,14 @@ mod tests {
         ]);
         let leaf = Constraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start leaf; ignore WS; t WS ::= " "+; t WORD ::= /[a-c]+/; nt leaf ::= WORD;"#,
+                r#"glrm 1; start leaf; ignore WS; t WS = " "+; t WORD = /[a-c]+/; nt leaf = WORD;"#,
             ),
             &vocab,
         )
         .unwrap();
         let middle = Constraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#,
+                r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#,
             ),
             &vocab,
         )
@@ -11051,7 +11051,7 @@ mod tests {
         .unwrap();
         let bound = Constraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start outer; extern grammar middle; nt outer ::= "X" middle "!";"#,
+                r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#,
             ),
             &vocab,
         )
@@ -11157,13 +11157,13 @@ mod tests {
                 .collect(),
         );
         let middle_source =
-            r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#;
+            r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#;
         let outer_source =
-            r#"glrm 1; start outer; extern grammar middle; nt outer ::= "X" middle "!";"#;
+            r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#;
 
         for (leaf_source, prefixes) in [
             (
-                r#"glrm 1; start leaf; t WORD ::= /[a-c]{1,4}/; nt leaf ::= WORD;"#,
+                r#"glrm 1; start leaf; t WORD = /[a-c]{1,4}/; nt leaf = WORD;"#,
                 vec![
                     b"".as_slice(),
                     b"X",
@@ -11175,7 +11175,7 @@ mod tests {
                 ],
             ),
             (
-                r#"glrm 1; start leaf; ignore WS; t WS ::= " "+; t WORD ::= /[a-c]{1,4}/; nt leaf ::= WORD;"#,
+                r#"glrm 1; start leaf; ignore WS; t WS = " "+; t WORD = /[a-c]{1,4}/; nt leaf = WORD;"#,
                 vec![
                     b"".as_slice(),
                     b"X",
@@ -11187,7 +11187,7 @@ mod tests {
                 ],
             ),
             (
-                r#"glrm 1; start leaf; nt leaf ::= ("a")?;"#,
+                r#"glrm 1; start leaf; nt leaf = ("a")?;"#,
                 vec![
                     b"".as_slice(),
                     b"X",
@@ -11200,11 +11200,11 @@ mod tests {
                 ],
             ),
             (
-                r#"glrm 1; start leaf; t SHORT ::= "a"; t LONG ::= /ab?/; nt leaf ::= LONG | SHORT "b";"#,
+                r#"glrm 1; start leaf; t SHORT = "a"; t LONG = /ab?/; nt leaf = LONG | SHORT "b";"#,
                 vec![b"".as_slice(), b"X[", b"X[a", b"X[ab", b"X[ab]", b"X[ab]!"],
             ),
             (
-                r#"glrm 1; start leaf; nt leaf ::= "(" leaf ")" | "a";"#,
+                r#"glrm 1; start leaf; nt leaf = "(" leaf ")" | "a";"#,
                 vec![b"".as_slice(), b"X[", b"X[(", b"X[((a", b"X[((a)", b"X[((a))]", b"X[((a))]!"],
             ),
         ] {
@@ -11307,13 +11307,13 @@ mod tests {
             (7, b"a]!".to_vec()),
         ]);
         let leaf = Constraint::compile(
-            Grammar::glrm(r#"glrm 1; start leaf; t WORD ::= /[ab]{1,4}/; nt leaf ::= WORD;"#),
+            Grammar::glrm(r#"glrm 1; start leaf; t WORD = /[ab]{1,4}/; nt leaf = WORD;"#),
             &vocab,
         )
         .unwrap();
         let middle = Constraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#,
+                r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#,
             ),
             &vocab,
         )
@@ -11322,7 +11322,7 @@ mod tests {
         .unwrap();
         let bound = Constraint::compile(
             Grammar::glrm(
-                r#"glrm 1; start outer; extern grammar middle; nt outer ::= "X" middle "!";"#,
+                r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#,
             ),
             &vocab,
         )
@@ -11394,11 +11394,11 @@ mod tests {
             (3, b"!".to_vec()), (4, b"a!".to_vec()), (5, b"b!".to_vec()),
         ]);
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#), &vocab).unwrap();
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#), &vocab).unwrap();
         let a = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start leaf; nt leaf ::= "a";"#), &vocab).unwrap();
+            r#"glrm 1; start leaf; nt leaf = "a";"#), &vocab).unwrap();
         let b = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start leaf; nt leaf ::= "b";"#), &vocab).unwrap();
+            r#"glrm 1; start leaf; nt leaf = "b";"#), &vocab).unwrap();
         let bound_a = parent.bind_grammar_dynamic_boundary("child", a).unwrap();
         let bound_b = parent.bind_grammar_dynamic_boundary("child", b).unwrap();
         let mut state_a = bound_a.start_dynamic();
@@ -11435,15 +11435,15 @@ mod tests {
         let epsilon_child = Constraint::compile(Grammar::glrm(r#"
             start payload;
             pragma glrmask {
-                lexer group a ::= A;
-                lexer group b ::= B;
+                lexer group a = A;
+                lexer group b = B;
             }
-            t A ::= "a"+;
-            t B ::= "ab"+;
-            nt payload ::= A | B;
+            t A = "a"+;
+            t B = "ab"+;
+            nt payload = A | B;
         "#), &vocab).unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar payload; nt root ::= "X" payload "!";"#,
+            r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#,
         ), &vocab).unwrap();
         for (child, prefixes) in [
             (virtual_child, vec!["", "X", "X\"", "X\"x:", "X\"x:a", "X\"x:a\"", "X\"x:a\"!"]),
@@ -11794,10 +11794,10 @@ mod tests {
     fn root_admission_memo_is_exact_and_owner_frontier_scoped() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start s; t A ::= "a"; t B ::= "b"; nt s ::= A B;"#,
+            r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = A B;"#,
         ), &vocab).unwrap();
         let other = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start s; t A ::= "a"; t B ::= "b"; nt s ::= B A;"#,
+            r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = B A;"#,
         ), &vocab).unwrap();
         let stacks = ParserStacks::from_single_stack(vec![0], ());
         let shared = Some(Arc::new(RootAdmissionMemo {
@@ -11828,7 +11828,7 @@ mod tests {
             (0, b"a".to_vec()), (1, b"bc".to_vec()), (2, b"xyz".to_vec()),
         ]);
         let constraint = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start s; t WORD ::= "abc"; t OTHER ::= "xyz"; nt s ::= WORD | OTHER;"#,
+            r#"glrm 1; start s; t WORD = "abc"; t OTHER = "xyz"; nt s = WORD | OTHER;"#,
         ), &vocab).unwrap();
         let word = constraint.terminal_display_names.iter().position(|name| name == "WORD").unwrap() as u32;
         let other = constraint.terminal_display_names.iter().position(|name| name == "OTHER").unwrap() as u32;
@@ -11874,9 +11874,9 @@ mod tests {
         ]);
         let grammar = r#"
 start start;
-t A ::= 'a'+;
-t B ::= 'b';
-nt start ::= A B | A;
+t A = 'a'+;
+t B = 'b';
+nt start = A B | A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut cache = DynamicNfaScanCache::new(&constraint, None);
@@ -11905,9 +11905,9 @@ nt start ::= A B | A;
         let parser_source = Constraint::from_glrm_grammar(
             r#"
 start start;
-t A ::= 'a';
-t B ::= 'b';
-nt start ::= A | B | A A | A B | B A | B B;
+t A = 'a';
+t B = 'b';
+nt start = A | B | A A | A B | B A | B B;
 "#,
             &vocab,
         )
@@ -11978,9 +11978,9 @@ nt start ::= A | B | A A | A B | B A | B B;
         let dynamic = DynamicConstraint::from_glrm_grammar(
             r#"
 start start;
-t A ::= 'a'+;
-t B ::= 'b';
-nt start ::= A B | B A;
+t A = 'a'+;
+t B = 'b';
+nt start = A B | B A;
 "#,
             &vocab,
         )
@@ -12032,8 +12032,8 @@ nt start ::= A B | B A;
         let dynamic = DynamicConstraint::from_glrm_grammar(
             r#"
 start start;
-t A ::= /a+b?/;
-nt start ::= A;
+t A = /a+b?/;
+nt start = A;
 "#,
             &vocab,
         )
@@ -12072,9 +12072,9 @@ nt start ::= A;
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a'+;
-t B ::= 'b';
-nt start ::= A B | A;
+t A = 'a'+;
+t B = 'b';
+nt start = A B | A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12097,9 +12097,9 @@ nt start ::= A B | A;
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         let grammar = r#"
 start start;
-t A ::= 'a';
-t B ::= 'b';
-nt start ::= A B;
+t A = 'a';
+t B = 'b';
+nt start = A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
@@ -12117,9 +12117,9 @@ nt start ::= A B;
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a';
-t B ::= 'b';
-nt start ::= A B;
+t A = 'a';
+t B = 'b';
+nt start = A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12148,10 +12148,10 @@ nt start ::= A B;
         let grammar = r#"
 start start;
 ignore WS;
-t WS ::= ' '+;
-t A ::= 'a'+;
-t B ::= 'b';
-nt start ::= A B;
+t WS = ' '+;
+t A = 'a'+;
+t B = 'b';
+nt start = A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12195,17 +12195,17 @@ nt start ::= A B;
 start start;
 ignore WS;
 pragma glrmask {
-    lexer group ws ::= WS;
-    lexer group a ::= A;
-    lexer group b ::= B;
-    lexer group c ::= C;
+    lexer group ws = WS;
+    lexer group a = A;
+    lexer group b = B;
+    lexer group c = C;
 }
-t WS ::= " "+;
-t A ::= "a"+;
-t B ::= "b";
-t C ::= "c";
-nt item ::= A | B | C;
-nt start ::= item item? item?;
+t WS = " "+;
+t A = "a"+;
+t B = "b";
+t C = "c";
+nt item = A | B | C;
+nt start = item item? item?;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
@@ -12231,11 +12231,11 @@ nt start ::= item item? item?;
         let grammar = r#"
 start start;
 ignore WS;
-t WS ::= " "+;
-t A ::= "ab";
-t B ::= "a" | "ab";
-nt item ::= A | B;
-nt start ::= item item? item?;
+t WS = " "+;
+t A = "ab";
+t B = "a" | "ab";
+nt item = A | B;
+nt start = item item? item?;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
@@ -12282,22 +12282,22 @@ nt start ::= item item? item?;
                 .filter(|&(index, word)| mask & (1 << index) != 0).map(|(index, word)| format!("\"{word}\""))
                 .collect::<Vec<_>>()
                 .join(" | ");
-            format!("t {name} ::= {rhs};\n")
+            format!("t {name} = {rhs};\n")
         };
 
         for grouped in [false, true] {
             for ignored in [false, true] {
                 let grouping = if grouped {
                     if ignored {
-                        "lexer group ws ::= WS;\nlexer group a ::= A;\nlexer group b ::= B;\n"
+                        "lexer group ws = WS;\nlexer group a = A;\nlexer group b = B;\n"
                     } else {
-                        "lexer group a ::= A;\nlexer group b ::= B;\n"
+                        "lexer group a = A;\nlexer group b = B;\n"
                     }
                 } else {
                     ""
                 };
                 let ignore = if ignored {
-                    "ignore WS;\nt WS ::= \" \"+;\n"
+                    "ignore WS;\nt WS = \" \"+;\n"
                 } else {
                     ""
                 };
@@ -12308,9 +12308,9 @@ nt start ::= item item? item?;
                             continue;
                         }
                         for start_rule in [
-                            "nt item ::= A | B;\nnt start ::= item item? item?;",
-                            "nt start ::= A A | B B;",
-                            "nt start ::= A B | B A;",
+                            "nt item = A | B;\nnt start = item item? item?;",
+                            "nt start = A A | B B;",
+                            "nt start = A B | B A;",
                         ] {
                             let grammar = format!(
                                 "start start;\n{ignore}{grouping}{}{}{start_rule}\n",
@@ -12328,7 +12328,7 @@ nt start ::= item item? item?;
                 }
 
                 let grammar = format!(
-                    "start start;\n{ignore}{grouping}t A ::= \"a\"+;\nt B ::= \"b\"+;\nnt item ::= A | B;\nnt start ::= item item? item?;\n"
+                    "start start;\n{ignore}{grouping}t A = \"a\"+;\nt B = \"b\"+;\nnt item = A | B;\nnt start = item item? item?;\n"
                 );
                 let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
                 let context = format!(
@@ -12337,7 +12337,7 @@ nt start ::= item item? item?;
                 assert_dynamic_parity_on_reachable_states(&constraint, 4, &context);
 
                 let grammar = format!(
-                    "start start;\n{ignore}{grouping}t A ::= \"a\"+ \"b\";\nt B ::= \"a\"+;\nnt item ::= A | B;\nnt start ::= item item? item?;\n"
+                    "start start;\n{ignore}{grouping}t A = \"a\"+ \"b\";\nt B = \"a\"+;\nnt item = A | B;\nnt start = item item? item?;\n"
                 );
                 let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
                 let context = format!(
@@ -12367,11 +12367,11 @@ nt start ::= item item? item?;
         let grammar = r#"
 start start;
 ignore WS;
-t WS ::= ' '+;
-t A ::= 'a'+;
-t B ::= 'b'+;
-t C ::= 'c';
-nt start ::= A B C | B A C | A C | B C;
+t WS = ' '+;
+t A = 'a'+;
+t B = 'b'+;
+t C = 'c';
+nt start = A B C | B A C | A C | B C;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12405,8 +12405,8 @@ nt start ::= A B C | B A C | A C | B C;
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a'+;
-nt start ::= A A;
+t A = 'a'+;
+nt start = A A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12464,8 +12464,8 @@ nt start ::= A A;
             ]);
         let grammar = r#"
 start start;
-t U ::= '+';
-nt start ::= U* 'a';
+t U = '+';
+nt start = U* 'a';
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
@@ -12516,11 +12516,11 @@ nt start ::= U* 'a';
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a' | 'ab';
-t B ::= 'a';
-t C ::= 'c';
-t D ::= 'b';
-nt start ::= A C | B D;
+t A = 'a' | 'ab';
+t B = 'a';
+t C = 'c';
+t D = 'b';
+nt start = A C | B D;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
@@ -12551,8 +12551,8 @@ nt start ::= A C | B D;
         ]);
         let grammar = r#"
 start start;
-t A ::= 'a'+;
-nt start ::= A;
+t A = 'a'+;
+nt start = A;
 "#;
         let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mask_vocab = dynamic.inner.dynamic_mask_vocab_for_runtime();
@@ -12583,8 +12583,8 @@ nt start ::= A;
 
         let billion_grammar = r#"
 start start;
-t A ::= /a{0,1000000000}/;
-nt start ::= A;
+t A = /a{0,1000000000}/;
+nt start = A;
 "#;
         let billion = DynamicConstraint::from_glrm_grammar(billion_grammar, &vocab).unwrap();
         assert_eq!(
@@ -12622,8 +12622,8 @@ nt start ::= A;
         // and rejection of a vocabulary token which crosses the bound.
         let boundary_grammar = r#"
 start start;
-t A ::= /a{0,5}/;
-nt start ::= A;
+t A = /a{0,5}/;
+nt start = A;
 "#;
         let dynamic = DynamicConstraint::from_glrm_grammar(boundary_grammar, &vocab).unwrap();
         let ordinary = Constraint::from_glrm_grammar(boundary_grammar, &vocab).unwrap();
@@ -12661,9 +12661,9 @@ nt start ::= A;
         ]);
         let billion_grammar = r#"
 start start;
-t A ::= /a{0,1000000000}/;
-t B ::= 'b';
-nt start ::= B A;
+t A = /a{0,1000000000}/;
+t B = 'b';
+nt start = B A;
 "#;
         let hybrid = DynamicConstraint::from_glrm_grammar(billion_grammar, &vocab).unwrap();
         assert!(
@@ -12686,9 +12686,9 @@ nt start ::= B A;
 
         let small_grammar = r#"
 start start;
-t A ::= /a{0,5}/;
-t B ::= 'b';
-nt start ::= B A;
+t A = /a{0,5}/;
+t B = 'b';
+nt start = B A;
 "#;
         // The hybrid threshold intentionally leaves this small grammar on the
         // ordinary path; it is therefore an independent materialized oracle.
@@ -12719,16 +12719,16 @@ nt start ::= B A;
         ]);
         let mut grammar = String::from(
             "start start;
-t A ::= 'a' | 'ab';
-t X ::= 'x';
-nt start ::= A r0;
+t A = 'a' | 'ab';
+t X = 'x';
+nt start = A r0;
 ",
         );
         for index in 0..39 {
-            grammar.push_str(&format!("nt r{index} ::= X r{};
+            grammar.push_str(&format!("nt r{index} = X r{};
 ", index + 1));
         }
-        grammar.push_str("nt r39 ::= X;
+        grammar.push_str("nt r39 = X;
 ");
 
         let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
@@ -12810,8 +12810,8 @@ nt start ::= A r0;
         ]);
         let grammar = r#"
 start start;
-t A ::= 'a'+;
-nt start ::= A;
+t A = 'a'+;
+nt start = A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
@@ -12856,9 +12856,9 @@ nt start ::= A;
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a' | 'ab';
-t B ::= 'b' | 'bc';
-nt start ::= A B;
+t A = 'a' | 'ab';
+t B = 'b' | 'bc';
+nt start = A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12884,8 +12884,8 @@ nt start ::= A B;
             ]);
         let grammar = r#"
 start start;
-t A ::= 'a' | 'abc';
-nt start ::= A;
+t A = 'a' | 'abc';
+nt start = A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -12929,10 +12929,10 @@ nt start ::= A;
             }
             let vocab = Vocab::new(entries);
             let parent = Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar payload; nt root ::= "X" payload "!";"#,
+                r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#,
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(
-                r#"start payload; t A ::= "a"+; nt payload ::= A;"#,
+                r#"start payload; t A = "a"+; nt payload = A;"#,
             ), &vocab).unwrap();
             let composed = parent.bind_grammar_dynamic_boundary("payload", child).unwrap();
             let loaded = Constraint::load(composed.save(), &vocab).unwrap();
@@ -12973,11 +12973,11 @@ nt start ::= A;
             (40, b"a!".to_vec()),
         ]);
         let child = crate::ConstraintSpec::builder(Grammar::glrm(
-            r#"glrm 1; start child; extern token MARK; nt child ::= MARK "a" | "a";"#,
+            r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#,
         ), &vocab).unwrap().bind_token("MARK", [7]).unwrap()
             .build().unwrap().compile().unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start root; extern grammar child; nt root ::= "X" child "!";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
@@ -13030,7 +13030,7 @@ mod epsilon_only_reset_config_tests {
     fn fixture()->Constraint {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         Constraint::compile(Grammar::glrm(
-            r#"glrm 1; start s; t A ::= "a"; t B ::= "b"; nt s ::= A B | A;"#,
+            r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = A B | A;"#,
         ),&vocab).unwrap()
     }
 

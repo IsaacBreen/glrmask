@@ -106,7 +106,7 @@ def test_dynamic_profiled_wrapper_preserves_empty_eos(partition):
 def test_dynamic_empty_exact_special_id_remains_live():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 25: b"", 26: b""})
     compiled = DynamicConstraint.from_glrm_grammar(
-        'glrm 1; start root; extern token MARK; nt root ::= "a" MARK;',
+        'glrm 1; start root; extern token MARK; nt root = "a" MARK;',
         vocab, bindings={"MARK": [25]})
     for constraint in [compiled, DynamicConstraint.load(bytes(compiled.save()), vocab)]:
         state = constraint.start()

@@ -1350,7 +1350,7 @@ mod seed_index_tests {
 
     fn two_terminal_grammar() -> AnalyzedGrammar {
         let named = crate::grammar::glrm::from_glrm(
-            "start s; t A ::= \"a\"; t B ::= \"b\"; nt s ::= A | B;",
+            "start s; t A = \"a\"; t B = \"b\"; nt s = A | B;",
         )
         .expect("fixture grammar");
         let flat = crate::grammar::ast::lower(&named).expect("lower fixture grammar");

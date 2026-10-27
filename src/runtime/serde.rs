@@ -7210,7 +7210,7 @@ mod tests {
         // persisted grammar quotient. Select Native on the ordinary compiler
         // lane explicitly; the bounded-template frontend always partitions.
         let original = crate::import::compile_dynamic_glrm_fixture(
-            "start s; nt s ::= 'a' s? 'b';", &vocab,
+            "start s; nt s = 'a' s? 'b';", &vocab,
             crate::runtime::parser_backend::DynamicParserBackend::Native,
         ).unwrap();
         assert!(original.inner.uses_dynamic_runtime());
@@ -7449,9 +7449,9 @@ mod tests {
         Constraint::from_glrm_grammar(
             r#"
                 start start;
-                t A ::= "a";
-                t B ::= "b";
-                nt start ::= A B;
+                t A = "a";
+                t B = "b";
+                nt start = A B;
             "#,
             &Vocab::new(vec![
                 (0, b"a".to_vec()),
@@ -7555,8 +7555,8 @@ mod tests {
             r#"
                 start start;
                 ignore WS;
-                t WS ::= " "+;
-                nt start ::= "a";
+                t WS = " "+;
+                nt start = "a";
             "#,
             &Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]),
         )
@@ -7790,7 +7790,7 @@ mod tests {
     fn small_public_compile_defers_first_save_artifact() {
         let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(
-            crate::Grammar::glrm("glrm 1;\nstart start;\nt A ::= \"a\";\nnt start ::= A;\n"),
+            crate::Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
             &vocab,
         )
         .unwrap();
@@ -7888,8 +7888,8 @@ mod tests {
     fn current_constraint_artifact_preserves_static_dynamic_overlay() {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let parent = Constraint::compile(crate::Grammar::glrm(
-            "glrm 1; start root; extern grammar child; nt root ::= \"a\" child;"), &vocab).unwrap();
-        let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
+            "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
+        let child = Constraint::from_glrm_grammar("start root; nt root = \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let expected = constraint.static_dynamic_overlay.as_ref().unwrap();
@@ -8172,7 +8172,7 @@ mod tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start doc;
-                nt doc ::= "a";
+                nt doc = "a";
             "#,
             &vocab,
         )

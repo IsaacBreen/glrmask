@@ -14582,9 +14582,9 @@ mod dense_internal_token_mask_tests {
             let mut grammar = String::from("start start;\n");
             for terminal in 0..width {
                 let suffix = char::from(b'a' + terminal as u8);
-                grammar.push_str(&format!("t T{terminal} ::= /[\\x00-\\x7F]+{suffix}/;\n"));
+                grammar.push_str(&format!("t T{terminal} = /[\\x00-\\x7F]+{suffix}/;\n"));
             }
-            grammar.push_str("nt start ::= ");
+            grammar.push_str("nt start = ");
             grammar.push_str(&(0..width).map(|t| format!("T{t} T{t}"))
                 .collect::<Vec<_>>().join(" | "));
             grammar.push_str(";\n");
@@ -14613,7 +14613,7 @@ mod dense_internal_token_mask_tests {
         let vocab_b = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let vocab_bad = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         let mut constraint = Constraint::from_glrm_grammar(
-            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            "start start;\nt A = \"a\";\nnt start = A;\n",
             &vocab_a,
         )
         .unwrap();
@@ -14642,7 +14642,7 @@ mod dense_internal_token_mask_tests {
         let vocab_b = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let vocab_bad = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
-            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            "start start;\nt A = \"a\";\nnt start = A;\n",
             &vocab_a,
         )
         .unwrap();
@@ -14675,9 +14675,9 @@ mod dense_internal_token_mask_tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
-                t A ::= "a";
-                t B ::= "b";
-                nt start ::= A B;
+                t A = "a";
+                t B = "b";
+                nt start = A B;
             "#,
             &vocab,
         )
@@ -14710,9 +14710,9 @@ mod dense_internal_token_mask_tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
-                t A ::= "a";
-                t B ::= "b";
-                nt start ::= A B;
+                t A = "a";
+                t B = "b";
+                nt start = A B;
             "#,
             &vocab,
         )
@@ -14815,7 +14815,7 @@ mod dense_internal_token_mask_tests {
             (514, b"aa".to_vec()), (515, b"ab".to_vec()),
             (516, b"bb".to_vec()), (517, b"ba".to_vec())]);
         Constraint::from_glrm_grammar(
-            "start start;\nt A ::= \"a\";\nt B ::= \"b\";\nnt start ::= A B | A `start` B;\n",
+            "start start;\nt A = \"a\";\nt B = \"b\";\nnt start = A B | A `start` B;\n",
             &Vocab::new(entries),
         ).unwrap()
     }
@@ -14957,7 +14957,7 @@ mod dense_internal_token_mask_tests {
                 .collect(),
         );
         let constraint = Constraint::from_glrm_grammar(
-            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            "start start;\nt A = \"a\";\nnt start = A;\n",
             &vocab,
         )
         .unwrap();
@@ -15051,10 +15051,10 @@ mod dense_internal_token_mask_tests {
         let mut constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
-                t A ::= "a" | "ab";
-                t B ::= "b" | "ab";
-                nt item ::= A | B;
-                nt start ::= item item? item?;
+                t A = "a" | "ab";
+                t B = "b" | "ab";
+                nt item = A | B;
+                nt start = item item? item?;
             "#,
             &vocab,
         )
@@ -15132,9 +15132,9 @@ mod dense_internal_token_mask_tests {
         for byte_index in 0u32..64 {
             let literal = serde_json::to_string(&((byte_index + 32) as u8 as char).to_string())
                 .unwrap();
-            grammar.push_str(&format!("t T{byte_index} ::= {literal};\n"));
+            grammar.push_str(&format!("t T{byte_index} = {literal};\n"));
         }
-        grammar.push_str("nt start ::= ");
+        grammar.push_str("nt start = ");
         for byte_index in 0u32..64 {
             if byte_index != 0 {
                 grammar.push_str(" | ");
@@ -15300,7 +15300,7 @@ WS: /[ \t]+/
         assert_matches_reference(&mut schema, "schema");
 
         let placeholder = Grammar::from_glrm(
-            r#"glrm 1; start start; extern grammar child; nt start ::= "a" child | "b";"#,
+            r#"glrm 1; start start; extern grammar child; nt start = "a" child | "b";"#,
         ).unwrap()
         .prepare(&vocab)
         .expect("placeholder prepare");
@@ -15316,7 +15316,7 @@ WS: /[ \t]+/
         // parser terminal space spans parent and child leaves, so the two
         // widths differ by construction. This must not trip a width assertion.
         let mut host = crate::Module::new(&Grammar::from_glrm(
-            r#"glrm 1; start start; extern grammar child; nt start ::= "a" child "b";"#,
+            r#"glrm 1; start start; extern grammar child; nt start = "a" child "b";"#,
         ).unwrap());
         host.bind("child", Grammar::from_ebnf(r#"start ::= "ab""#).unwrap())
             .unwrap();
@@ -15327,7 +15327,7 @@ WS: /[ \t]+/
         // is an event adapter, so the tokenizer sees fewer terminals than the
         // composed parser.
         let mut host = crate::Module::new(&Grammar::from_glrm(
-            r#"glrm 1; start root; extern token T; nt root ::= T;"#,
+            r#"glrm 1; start root; extern token T; nt root = T;"#,
         ).unwrap());
         host.bind("T", crate::TokenSet::new([1])).unwrap();
         let mut composed = host.compile(&vocab).expect("composed token-set compile");

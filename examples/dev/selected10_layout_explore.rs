@@ -137,7 +137,7 @@ fn name_cache_path(cache_dir: &Path, index: usize) -> PathBuf {
 
 fn build_name_constraint(index: usize, vocab: &Vocab) -> Constraint {
     Constraint::compile(
-        Grammar::glrm(&format!("start name;\nnt name ::= \"tool_{index}\";\n")),
+        Grammar::glrm(&format!("start name;\nnt name = \"tool_{index}\";\n")),
         vocab,
     )
     .unwrap()
@@ -149,11 +149,11 @@ fn dispatcher_literal_names_parent_source() -> String {
     let mut source = String::from("start suffix;\n");
     for index in 0..SELECTED10.len() {
         source.push_str(&format!(
-            "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
+            "t TOOL_ARGS_SLOT_{index} = @token({});\n",
             DISPATCH_PLACEHOLDER_BASE + SELECTED10.len() as u32 + index as u32
         ));
     }
-    source.push_str("nt suffix ::=\n    ");
+    source.push_str("nt suffix =\n    ");
     for index in 0..SELECTED10.len() {
         if index != 0 { source.push_str("\n  | "); }
         source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
@@ -167,7 +167,7 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
     let mut source = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     source = source.replace("\r\n", "\n");
-    let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
+    let needle = "nt member_expression_with_suffixes =\n    primary_expression";
     let tool_alt = match layout {
         Layout::Current | Layout::PublicOpen | Layout::WrappedChild => {
             "'tools' PROGRAMMATIC_TOOL_SUFFIX"
@@ -179,7 +179,7 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
         Layout::ParentClose => "'tools' PROGRAMMATIC_TOOL_SUFFIX ')'",
     };
     let replacement = format!(
-        "nt member_expression_with_suffixes ::=\n    {tool_alt}\n  | primary_expression"
+        "nt member_expression_with_suffixes =\n    {tool_alt}\n  | primary_expression"
     );
     assert!(source.contains(needle), "JS grammar shape changed; cannot insert programmatic-tools alternative");
     source = source.replacen(needle, &replacement, 1);
@@ -187,7 +187,7 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
         source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     } else {
         source.push_str(&format!(
-            "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX ::= @token({JS_PLACEHOLDER_TOKEN});\n"
+            "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX = @token({JS_PLACEHOLDER_TOKEN});\n"
         ));
     }
     source
@@ -208,11 +208,11 @@ fn wrapped_schema_parent_source(index: usize, layout: Layout) -> String {
     };
     if layout == Layout::ParentClose {
         format!(
-            "start wrapped;\nt TOOL_ARGS_SLOT ::= @token({args_token});\nnt wrapped ::= {prefix:?} TOOL_ARGS_SLOT;\n"
+            "start wrapped;\nt TOOL_ARGS_SLOT = @token({args_token});\nnt wrapped = {prefix:?} TOOL_ARGS_SLOT;\n"
         )
     } else {
         format!(
-            "start wrapped;\nt TOOL_ARGS_SLOT ::= @token({args_token});\nnt wrapped ::= {prefix:?} TOOL_ARGS_SLOT \")\";\n"
+            "start wrapped;\nt TOOL_ARGS_SLOT = @token({args_token});\nnt wrapped = {prefix:?} TOOL_ARGS_SLOT \")\";\n"
         )
     }
 }
@@ -221,11 +221,11 @@ fn dispatcher_whole_child_parent_source() -> String {
     let mut source = String::from("start suffix;\n");
     for index in 0..SELECTED10.len() {
         source.push_str(&format!(
-            "t WRAPPED_CALL_SLOT_{index} ::= @token({});\n",
+            "t WRAPPED_CALL_SLOT_{index} = @token({});\n",
             WRAPPED_CALL_PLACEHOLDER_BASE + index as u32
         ));
     }
-    source.push_str("nt suffix ::=\n    ");
+    source.push_str("nt suffix =\n    ");
     for index in 0..SELECTED10.len() {
         if index != 0 { source.push_str("\n  | "); }
         source.push_str(&format!("WRAPPED_CALL_SLOT_{index}"));

@@ -31,7 +31,7 @@ fn main() -> glrmask::Result<()> {
         extern grammar WEATHER_ARGS
         extern grammar SEARCH_ARGS
         start call
-        nt call ::= "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
+        nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
     "#)?);
     call.precompile(&vocab)?;
     call.bind("WEATHER_ARGS", &weather)?;

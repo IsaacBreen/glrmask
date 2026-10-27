@@ -83,8 +83,8 @@ fn glrm_ignore_prefix_token_is_mask_commit_equivalent() {
     let grammar = r#"
 start start;
 ignore WS;
-t WS ::= ' '+ ;
-nt start ::= 'if' '(' 'true' ')' ;
+t WS = ' '+ ;
+nt start = 'if' '(' 'true' ')' ;
 "#;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -111,8 +111,8 @@ fn glrm_initial_ignore_is_epsiloned_after_ti() {
     let grammar = r#"
 start start;
 ignore WS;
-t WS ::= ' '+ ;
-nt start ::= 'a' ;
+t WS = ' '+ ;
+nt start = 'a' ;
 "#;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -149,10 +149,10 @@ fn certified_terminal_run_collapse_preserves_bounded_item_count() {
         ]);
     let grammar = r#"
 start start;
-t A ::= "a";
-t B ::= "b";
-nt item ::= A | B;
-nt start ::= item item? item?;
+t A = "a";
+t B = "b";
+nt item = A | B;
+nt start = item item? item?;
 "#;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -184,11 +184,11 @@ fn glrm_subtraction_space_escaped_quote_control_accepts_token() {
     let grammar = r#"
 start s;
 
-nt s ::= "\"" "a" ws+ non_ws;
-t ws_char ::= " ";
-nt ws ::= ws_char;
-nt non_ws ::= json_char - ws_char;
-t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))/;
+nt s = "\"" "a" ws+ non_ws;
+t ws_char = " ";
+nt ws = ws_char;
+nt non_ws = json_char - ws_char;
+t json_char = /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))/;
 "#;
 
     let token_id = 0u32;
@@ -220,11 +220,11 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= NON_WS WS NON_WS;
-        t NON_WS ::= CHAR - WS;
-        t CHAR ::= "a" | "\\\"";
-        t WS ::= "\\n" | " ";
+        nt s = X "$";
+        t X = NON_WS WS NON_WS;
+        t NON_WS = CHAR - WS;
+        t CHAR = "a" | "\\\"";
+        t WS = "\\n" | " ";
     "####;
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
@@ -233,11 +233,11 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= NON_WS+ WS+ NON_WS;
-        t NON_WS ::= CHAR - WS;
-        t CHAR ::= "a" | "\\\"";
-        t WS ::= "\\n" | " ";
+        nt s = X "$";
+        t X = NON_WS+ WS+ NON_WS;
+        t NON_WS = CHAR - WS;
+        t CHAR = "a" | "\\\"";
+        t WS = "\\n" | " ";
     "####;
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
@@ -246,11 +246,11 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= (NON_WS+ WS+)? NON_WS;
-        t NON_WS ::= CHAR - WS;
-        t CHAR ::= "a" | "\\\"";
-        t WS ::= "\\n" | " ";
+        nt s = X "$";
+        t X = (NON_WS+ WS+)? NON_WS;
+        t NON_WS = CHAR - WS;
+        t CHAR = "a" | "\\\"";
+        t WS = "\\n" | " ";
     "####;
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
@@ -262,11 +262,11 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= (NON_WS+ WS+)? NON_WS;
-        t NON_WS ::= CHAR - WS;
-        t CHAR ::= "a" | "\\\"";
-        t WS ::= " ";
+        nt s = X "$";
+        t X = (NON_WS+ WS+)? NON_WS;
+        t NON_WS = CHAR - WS;
+        t CHAR = "a" | "\\\"";
+        t WS = " ";
     "####;
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
@@ -280,8 +280,8 @@ fn bounded_repeat_suffix_must_not_greedily_drop_suffix_path() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= ("a"+)? "a";
+        nt s = X "$";
+        t X = ("a"+)? "a";
     "####;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -311,8 +311,8 @@ fn optional_choice_allows_viable_prefix_before_required_suffix() {
 
     let grammar = r####"
         start s;
-        nt s ::= X "$";
-        t X ::= "a"* "b" | "";
+        nt s = X "$";
+        t X = "a"* "b" | "";
     "####;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
@@ -628,10 +628,10 @@ fn bounded_analysis_byte_classes_must_not_merge_distinct_vocab_tokens() {
     let grammar = r#"
 start S;
 pragma glrmask {
-lexer group x ::= X;
+lexer group x = X;
 }
-t X ::= /./;
-nt S ::= X X "!";
+t X = /./;
+nt S = X X "!";
 "#;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();

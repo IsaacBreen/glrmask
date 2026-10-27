@@ -94,7 +94,7 @@ fn name_cache_path(cache_dir: &Path, index: usize) -> PathBuf {
 
 fn build_name_constraint(index: usize, vocab: &Vocab) -> Constraint {
     Constraint::compile(glrmask::Grammar::glrm(&format!(
-            "start name;\nnt name ::= \"tool_{index}\";\n"
+            "start name;\nnt name = \"tool_{index}\";\n"
         )), vocab)
     .unwrap()
 }
@@ -103,15 +103,15 @@ fn dispatcher_parent_source() -> String {
     let mut source = String::from("start suffix;\n");
     for index in 0..SELECTED10.len() {
         source.push_str(&format!(
-            "t TOOL_NAME_SLOT_{index} ::= @token({});\n",
+            "t TOOL_NAME_SLOT_{index} = @token({});\n",
             DISPATCH_PLACEHOLDER_BASE + index as u32
         ));
         source.push_str(&format!(
-            "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
+            "t TOOL_ARGS_SLOT_{index} = @token({});\n",
             DISPATCH_PLACEHOLDER_BASE + SELECTED10.len() as u32 + index as u32
         ));
     }
-    source.push_str("nt suffix ::=\n    ");
+    source.push_str("nt suffix =\n    ");
     for index in 0..SELECTED10.len() {
         if index != 0 {
             source.push_str("\n  | ");
@@ -129,11 +129,11 @@ fn dispatcher_literal_names_parent_source() -> String {
     let mut source = String::from("start suffix;\n");
     for index in 0..SELECTED10.len() {
         source.push_str(&format!(
-            "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
+            "t TOOL_ARGS_SLOT_{index} = @token({});\n",
             DISPATCH_PLACEHOLDER_BASE + SELECTED10.len() as u32 + index as u32
         ));
     }
-    source.push_str("nt suffix ::=\n    ");
+    source.push_str("nt suffix =\n    ");
     for index in 0..SELECTED10.len() {
         if index != 0 { source.push_str("\n  | "); }
         source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
@@ -146,12 +146,12 @@ fn js_core_source(cfa_root: &Path) -> String {
     let path = cfa_root.join("data/sources/grammars/js.glrm");
     let mut source = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
-    let replacement = "nt member_expression_with_suffixes ::=\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression";
+    let needle = "nt member_expression_with_suffixes =\n    primary_expression";
+    let replacement = "nt member_expression_with_suffixes =\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression";
     assert!(source.contains(needle), "JS grammar shape changed; cannot insert programmatic-tools alternative");
     source = source.replacen(needle, replacement, 1);
     source.push_str(&format!(
-        "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX ::= @token({JS_PLACEHOLDER_TOKEN});\n"
+        "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX = @token({JS_PLACEHOLDER_TOKEN});\n"
     ));
     source
 }

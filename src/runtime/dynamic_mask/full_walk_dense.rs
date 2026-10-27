@@ -8595,7 +8595,7 @@ mod full_walk_acceleration_tests {
         let vocab = Vocab::new(["a", "b", "aa", "ab", " "].into_iter().enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec())).collect());
         let dynamic = DynamicConstraint::compile(Grammar::glrm(
-            "start s; ignore WS; t WS ::= ' '+; t A ::= 'a'+; t B ::= 'b'; nt s ::= A B;"), &vocab).unwrap();
+            "start s; ignore WS; t WS = ' '+; t A = 'a'+; t B = 'b'; nt s = A B;"), &vocab).unwrap();
         let constraint = &dynamic.inner;
         let tokenizer = &constraint.tokenizer;
         let states = tokenizer.num_states() as usize;
@@ -8751,9 +8751,9 @@ mod full_walk_acceleration_tests {
         ].into_iter().enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec())).collect());
         let grammars = [
-            "start s; t A ::= 'a'; t B ::= 'b'; t C ::= 'c'; nt s ::= A s B | C;",
-            "start s; t A ::= 'a'; t B ::= 'b'; t C ::= 'c'; nt s ::= A s B | A A | A B | C;",
-            "start s; ignore WS; t WS ::= ' '+; t A ::= 'a'+; t B ::= 'ab'; t C ::= 'b'+; nt s ::= A s C | B | A C;",
+            "start s; t A = 'a'; t B = 'b'; t C = 'c'; nt s = A s B | C;",
+            "start s; t A = 'a'; t B = 'b'; t C = 'c'; nt s = A s B | A A | A B | C;",
+            "start s; ignore WS; t WS = ' '+; t A = 'a'+; t B = 'ab'; t C = 'b'+; nt s = A s C | B | A C;",
         ];
         let mut positive = 0;
         let mut negative = 0;

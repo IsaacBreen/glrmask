@@ -20,7 +20,7 @@ impl Apply<PreparedGrammar> for () { fn apply(self, _: &mut PreparedGrammar) {} 
 
 fn source(slots: usize) -> Grammar {
     let mut text = (0..slots).map(|i| format!("extern token E{i}\n")).collect::<String>();
-    text.push_str("start root nt root::=E0");
+    text.push_str("start root nt root=E0");
     Grammar::from_glrm(text).unwrap()
 }
 
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             assert!(request.requirements()?.is_empty());black_box(request);Ok(())
         })?);
     }
-    let tiny=Grammar::from_glrm("start root nt root::=\"ab\"")?;
+    let tiny=Grammar::from_glrm("start root nt root=\"ab\"")?;
     for &threads in &workers {
         rows.push(measure("independent_tiny_compile", 0, threads, (jobs/4).max(1), || {
             let c=tiny.compile_with_build_options(&v,options.clone())?;
@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             assert!(s.is_accepting());black_box(c);Ok(())
         })?);
     }
-    let mut p=Grammar::from_glrm("extern token A extern token B extern token C extern token D start root nt root::=A B C D")?.prepare(&v)?;
+    let mut p=Grammar::from_glrm("extern token A extern token B extern token C extern token D start root nt root=A B C D")?.prepare(&v)?;
     for name in ["A","B","C","D"] {bind_prepared(&mut p,name,2)?;}
     for &threads in &workers {
         rows.push(measure("relink_four_events",4,threads,(jobs/4).max(1),|| {

@@ -89,7 +89,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "glrm",
             grammar: Grammar::from_glrm(
-                r#"glrm 1; start root; nt root ::= "x" "a"? "y" | "(" root ")" | "b";"#,
+                r#"glrm 1; start root; nt root = "x" "a"? "y" | "(" root ")" | "b";"#,
             )
             .unwrap(),
             vocab: vocab.clone(),
@@ -175,7 +175,7 @@ fn template_dfas_is_table_free_and_the_default_token_trie_keeps_its_table() {
     let host = || {
         let mut host = Module::new(
             &Grammar::from_glrm(
-                r#"glrm 1; start start; extern grammar child; nt start ::= "(" child ")" | "x";"#,
+                r#"glrm 1; start start; extern grammar child; nt start = "(" child ")" | "x";"#,
             )
             .unwrap(),
         );

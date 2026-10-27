@@ -487,7 +487,7 @@ mod tests {
         for nullable in [false,true] {
             let child=Grammar::from_ebnf(if nullable {r#"start ::= "a" | """#} else {r#"start ::= "a""#}).unwrap()
                 .compile(&vocab).unwrap();
-            let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root ::= "x" child "y";"#).unwrap()
+            let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("child",&child).unwrap()
                 .link_with(MaskMode::C.build_options()).unwrap();
             let prepared=prepared_root_call_candidates(&dynamic);
@@ -535,9 +535,9 @@ mod tests {
         let vocab=Vocab::new(vec![(1,Vec::new()),(3,b"a".to_vec()),(7,b"ab".to_vec()),
             (11,b"a".to_vec()),(15,b"!".to_vec()),(19,b"?".to_vec()),(23,b"b".to_vec()),
             (27,b"aa!".to_vec()),(31,b"xa".to_vec()),(37,vec![0]),(41,b" ".to_vec()),(43,b"abab".to_vec())]);
-        let left=Grammar::from_glrm(r#"glrm 1; start root; t WORD ::= /[a-z]+/; nt root ::= WORD "!";"#).unwrap()
+        let left=Grammar::from_glrm(r#"glrm 1; start root; t WORD = /[a-z]+/; nt root = WORD "!";"#).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-        let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT ::= /a[ab]*/; nt root ::= TEXT "?";"#).unwrap()
+        let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT = /a[ab]*/; nt root = TEXT "?";"#).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         let loaded_left=Constraint::load(left.save(), &vocab).unwrap();let loaded_right=Constraint::load(right.save(), &vocab).unwrap();
         for leaves in [vec![&left,&right],vec![&loaded_left,&loaded_right],vec![&left,&loaded_right]] {
@@ -582,8 +582,8 @@ mod tests {
             (2,b"aa".to_vec()),(3,b"xa".to_vec()),(4,b"xaa".to_vec()),(5,b"aaa".to_vec())]);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         for (source, inline, retain) in [
-            (r#"start root; extern grammar child; nt root ::= "x" child;"#, r#"start ::= "x" "a""#, false),
-            (r#"start root; extern grammar child; nt root ::= "x" child child;"#, r#"start ::= "x" "a" "a""#, true),
+            (r#"start root; extern grammar child; nt root = "x" child;"#, r#"start ::= "x" "a""#, false),
+            (r#"start root; extern grammar child; nt root = "x" child child;"#, r#"start ::= "x" "a" "a""#, true),
         ] {
             let options = BuildOptions::default().optimization(MaskStrategy::ParserDwa);
             let unlinked = Grammar::from_glrm(source).unwrap().prepare(&vocab).unwrap();
@@ -612,7 +612,7 @@ mod tests {
     fn existing_static_component_bodies_are_retained_without_cloning_or_rebuilding() {
         let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()), (3, b"xay".to_vec())]);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
-        let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y";"#).unwrap()
+        let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         c.install_template_parser().unwrap();

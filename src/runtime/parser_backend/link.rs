@@ -309,7 +309,7 @@ mod candidate_tests {
             (5, b"xay".to_vec()),
             (6, b"xaby".to_vec()),
         ]);
-        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "a";"#).unwrap()
+        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default().parser_backend(ParserBackend::TemplateDfa),
@@ -325,7 +325,7 @@ mod candidate_tests {
         assert!(expected.len() < vocab.len());
 
         let parent = Grammar::from_glrm(
-            r#"glrm 1; extern grammar child; start root; nt root ::= "x" child "y";"#,
+            r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#,
         ).unwrap()
         .prepare(&vocab)
         .unwrap();
@@ -368,12 +368,12 @@ mod candidate_tests {
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"xy".to_vec()),
             (5, b" xay".to_vec()), (6, b"xayxay".to_vec()), (7, b"yz".to_vec())]);
         for parent in [
-            r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y";"#,
-            r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y" "x" child "y";"#,
-            r#"start root; extern grammar child; ignore WS; t WS ::= " "+; nt root ::= "x" child "y";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
+            r#"glrm 1; start root; extern grammar child; nt root = "x" child "y" "x" child "y";"#,
+            r#"start root; extern grammar child; ignore WS; t WS = " "+; nt root = "x" child "y";"#,
         ] {
-            for child in [r#"glrm 1; start value; nt value ::= "a";"#,
-                r#"glrm 1; start value; nt value ::= "a"?;"#] {
+            for child in [r#"glrm 1; start value; nt value = "a";"#,
+                r#"glrm 1; start value; nt value = "a"?;"#] {
                 let options = MaskMode::C.build_options()
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).unwrap().compile_with_build_options(&vocab, options.clone()).unwrap();
@@ -413,10 +413,10 @@ mod candidate_tests {
     fn disabled_and_stale_deferred_wrapper_proofs_cannot_prune() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"yz".to_vec())]);
-        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "a";"#).unwrap()
+        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
             .compile(&vocab).unwrap();
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
-            nt root ::= "x" child "y";"#).unwrap()
+            nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(MaskMode::C.build_options()).unwrap();
         let disabled = linked.clone();

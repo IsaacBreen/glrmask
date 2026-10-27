@@ -17,7 +17,7 @@ fn vocab() -> Vocab {
 }
 
 fn source() -> &'static str {
-    "start p; nt p ::= unary ';'; nt unary ::= 'x' | '!' unary;"
+    "start p; nt p = unary ';'; nt unary = 'x' | '!' unary;"
 }
 
 fn compile_dynamic(vocab: &Vocab) -> DynamicConstraint {

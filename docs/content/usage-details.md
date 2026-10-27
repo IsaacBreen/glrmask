@@ -16,7 +16,7 @@ weather.precompile(vocab)
 call = glrmask.Module(glrmask.Grammar.from_glrm('''
     extern grammar ARGS
     start call
-    nt call ::= "<weather>" ARGS "</weather>"
+    nt call = "<weather>" ARGS "</weather>"
 '''))
 call.bind("ARGS", weather)
 state = call.compile(vocab).start()

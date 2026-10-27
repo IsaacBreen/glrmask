@@ -823,9 +823,9 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
         (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
     for mode in [MaskMode::C, MaskMode::ParserDwa] {
         let options = || mode.build_options().parser_backend(ParserBackend::TemplateDfa);
-        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value ::= "a"?;"#).unwrap()
+        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options()).unwrap();
-        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle ::= "[" leaf "]";"#).unwrap()
+        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
             .prepare(&vocab).unwrap();
         let middle = parent.bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
         let overlay = middle.static_dynamic_overlay.as_ref().unwrap();
@@ -1819,7 +1819,7 @@ mod tests {
     fn flat_r1_proof_reuse_checks_interface_vocabulary_nullable_and_disabled_guards() {
         let vocabulary = vocab(&[(0, b"ac"), (1, b"bc"), (2, b"ab"), (3, b"cat")]);
         let parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; extern token SUB; nt document ::= "a" SUB "b";"#,
+            r#"start document; extern token SUB; nt document = "a" SUB "b";"#,
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let expected = summarize_rules_module_r1(&parent, &BTreeMap::new(), &BTreeSet::new()).unwrap();
         assert_eq!(summarize_flat_module_r1_reusing_proof(&parent, &vocabulary, None).unwrap(), expected);
@@ -1828,7 +1828,7 @@ mod tests {
         let changed_vocab = vocab(&[(0, b"xx"), (9, b"zz"), (999, b"?")]);
         for variant in 0..5 {
             let mut modified = Constraint::from_glrm_with_token_ids(
-                r#"start document; extern token SUB; nt document ::= "a" SUB "b";"#,
+                r#"start document; extern token SUB; nt document = "a" SUB "b";"#,
                 &vocabulary, &[("SUB", 999)], &[]).unwrap();
             summarize_flat_module_r1_reusing_proof(&modified, &vocabulary, None).unwrap();
             match variant {
@@ -1872,7 +1872,7 @@ mod tests {
         let vocabulary = vocab(&[(0, b"ac"), (4, b"cat"), (19, b"z")]);
         for variant in 0..4 {
             let mut child = Constraint::from_glrm_grammar(
-                r#"start document; nt document ::= "cat";"#, &vocabulary).unwrap();
+                r#"start document; nt document = "cat";"#, &vocabulary).unwrap();
             let before = bincode::serialize(child.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()).unwrap();
             let expected = component_entry_prefix_cover(&child);
             assert_eq!(component_entry_prefix_cover_reusing_proof(&child, &vocabulary, None), expected);
@@ -1919,8 +1919,8 @@ mod tests {
     fn root_call_query_tokens_and_cached_entry_keep_original_candidates() {
         let vocabulary = vocab(&[(0, b"ac"), (4, b"acatb"), (19, b"ax"), (900, b"cat")]);
         let parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; extern token SUB; nt document ::= "a" SUB "b";"#, &vocabulary, &[("SUB", 999)], &[]).unwrap();
-        let child = Constraint::from_glrm_grammar(r#"start document; nt document ::= "cat";"#, &vocabulary).unwrap();
+            r#"start document; extern token SUB; nt document = "a" SUB "b";"#, &vocabulary, &[("SUB", 999)], &[]).unwrap();
+        let child = Constraint::from_glrm_grammar(r#"start document; nt document = "cat";"#, &vocabulary).unwrap();
         let slot = parent.terminal_display_names.iter().position(|name| name == "SUB").unwrap() as u32;
         let expected = build_root_call_candidates(&parent, &[&child], &[slot], &vocabulary).unwrap().candidate_ids;
         let parent_query = crate::compiler::boundary_candidates::fingerprint_for_query(&parent, &vocabulary).unwrap();
@@ -1939,7 +1939,7 @@ mod tests {
     fn flat_r1_original_vocab_mapping_is_shared_and_keeps_distinct_sparse_ids() {
         let vocabulary = vocab(&[(0, b"a"), (4, b"ab"), (19, b"ab"), (900, b"acatb"), (1001, b"bc")]);
         let parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; extern token SUB; nt document ::= "a" SUB "b";"#,
+            r#"start document; extern token SUB; nt document = "a" SUB "b";"#,
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let expected = build_boundary_tail_r1(&parent, &vocabulary).unwrap();
         let grammar = parent.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
@@ -1961,7 +1961,7 @@ mod tests {
         assert_eq!(build_boundary_tail_r1_with_fingerprint(&parent, &vocabulary, Some(wrong_vocab_token)).unwrap().candidate_ids,
             expected.candidate_ids);
         let other_parent = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "z";"#, &vocabulary).unwrap();
+            r#"start document; nt document = "z";"#, &vocabulary).unwrap();
         let wrong_component_token = crate::compiler::boundary_candidates::fingerprint_for_query_for_test(&other_parent, &vocabulary).unwrap();
         assert_eq!(build_boundary_tail_r1_with_fingerprint(&parent, &vocabulary, Some(wrong_component_token)).unwrap().candidate_ids,
             expected.candidate_ids);
@@ -1971,10 +1971,10 @@ mod tests {
     fn flat_r1_proof_cache_is_transient_and_root_calls_match_original_overrides() {
         let vocabulary = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"a"), (3, b"bc"), (4, b"acatb")]);
         let mut parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; extern token SUB; nt document ::= "a" SUB "b";"#,
+            r#"start document; extern token SUB; nt document = "a" SUB "b";"#,
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "cat";"#, &vocabulary).unwrap();
+            r#"start document; nt document = "cat";"#, &vocabulary).unwrap();
         let parser = std::sync::Arc::get_mut(parent.template_parser.as_mut().unwrap()).unwrap();
         let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());
         let _ = grammar.flat_boundary_tail_r1.take();
@@ -2012,7 +2012,7 @@ mod tests {
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "a";
+                nt document = "a";
             "#,
             &vocab,
         )
@@ -2085,9 +2085,9 @@ mod tests {
         ]);
         let parent = Constraint::from_glrm_with_token_ids(
             r#"start document; extern token SUB;
-               nt document ::= "a" SUB "b";"#, &vocab, &[("SUB", 999)], &[]).unwrap();
+               nt document = "a" SUB "b";"#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "cat";"#, &vocab,
+            r#"start document; nt document = "cat";"#, &vocab,
         ).unwrap();
         let reusable = build_boundary_tail_r1(&parent, &vocab).unwrap();
         let refined = probe_root_call_candidates(&parent, &[&child], &vocab);
@@ -2106,11 +2106,11 @@ mod tests {
             (3, b" \tdog"), (4, b" "), (5, b"c cat"),
         ]);
         let parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; ignore WS; t WS ::= " "+;
-               extern token SUB; nt document ::= SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
+            r#"start document; ignore WS; t WS = " "+;
+               extern token SUB; nt document = SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
-            r#"start document; ignore TAB; t TAB ::= "\t"+;
-               nt document ::= "cat";"#, &vocab,
+            r#"start document; ignore TAB; t TAB = "\t"+;
+               nt document = "cat";"#, &vocab,
         ).unwrap();
         let result = probe_root_call_candidates(&parent, &[&child], &vocab);
         assert!(result.candidate_ids.contains(&0));
@@ -2126,13 +2126,13 @@ mod tests {
         let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"a"), (3, b"bc")]);
         let parent = Constraint::from_glrm_with_token_ids(
             r#"start document; extern token SUB;
-               nt document ::= "a" SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
+               nt document = "a" SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let nullable = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "cat"?;"#, &vocab,
+            r#"start document; nt document = "cat"?;"#, &vocab,
         ).unwrap();
         let unknown = Constraint::from_glrm_with_token_ids(
             r#"start document; extern token LATER;
-               nt document ::= LATER;"#, &vocab, &[("LATER", 998)], &[]).unwrap();
+               nt document = LATER;"#, &vocab, &[("LATER", 998)], &[]).unwrap();
         for child in [&nullable, &unknown] {
             let result = probe_root_call_candidates(&parent, &[child], &vocab);
             assert_eq!(result.entry_prefix_count, None);
@@ -2145,9 +2145,9 @@ mod tests {
         let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"ad"), (3, b"axy")]);
         let parent = Constraint::from_glrm_with_token_ids(
             r#"start document; extern token SUB;
-               nt document ::= "a" SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
+               nt document = "a" SUB;"#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "x"? "cat";"#, &vocab,
+            r#"start document; nt document = "x"? "cat";"#, &vocab,
         ).unwrap();
         let result = probe_root_call_candidates(&parent, &[&child], &vocab);
         assert!(result.candidate_ids.contains(&0));
@@ -2163,9 +2163,9 @@ mod tests {
         let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"a"), (999, b"?")]);
         let parent = Constraint::from_glrm_with_token_ids(
             r#"start document; extern token SUB;
-               nt document ::= "a" SUB "b";"#, &vocab, &[("SUB", 999)], &[]).unwrap();
+               nt document = "a" SUB "b";"#, &vocab, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "cat";"#, &vocab,
+            r#"start document; nt document = "cat";"#, &vocab,
         ).unwrap();
         let result = probe_root_call_candidates(&parent, &[&child], &vocab);
         assert_eq!(result.candidate_ids, vec![0]);
@@ -2178,9 +2178,9 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= SUB;
+                nt document = SUB;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -2206,14 +2206,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "prefix(" SUB ")";
+                nt document = "prefix(" SUB ")";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "anything";
+                nt document = "anything";
             "#,
             &vocab,
         )
@@ -2252,14 +2252,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= SUB ")";
+                nt document = SUB ")";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "}";
+                nt document = "}";
             "#,
             &vocab,
         )
@@ -2299,16 +2299,16 @@ mod tests {
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= SUB ")";
+                nt document = SUB ")";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "anything";
+                nt document = "anything";
             "#,
             &vocab,
         )

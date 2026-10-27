@@ -5,7 +5,7 @@ fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())])}
 
 #[test]
 fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
-    let mut g=Grammar::from_glrm("extern token MARK start root nt root::=MARK").unwrap();
+    let mut g=Grammar::from_glrm("extern token MARK start root nt root=MARK").unwrap();
     let untouched=g.clone();
     let result:()=g.bind("MARK",TokenSet::from(17)).unwrap();assert_eq!(result,());
     assert!(g.requirements().unwrap().is_empty());assert_eq!(untouched.requirements().unwrap().len(),1);
@@ -15,8 +15,8 @@ fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
 }
 #[test]
 fn source_and_prepared_children_are_snapshots_not_live_handles() {
-    let v=vocab();let text="extern token MARK start root nt root::=MARK";
-    let parent_text="extern grammar LEFT extern grammar RIGHT start root nt root::=LEFT RIGHT";
+    let v=vocab();let text="extern token MARK start root nt root=MARK";
+    let parent_text="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT";
     let mut child=Grammar::from_glrm(text).unwrap();
     let mut parent=Grammar::from_glrm(parent_text).unwrap();parent.bind("LEFT",&child).unwrap();parent.bind("RIGHT",&child).unwrap();
     child.bind("MARK",TokenSet::from(29)).unwrap();
@@ -37,9 +37,9 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
     let v=vocab();
     for mode in MaskMode::ALL {
         let opt=mode.build_options();
-        let mut a=Grammar::from_glrm("extern grammar VALUE start root nt root::=VALUE").unwrap();
+        let mut a=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap();
         a.bind("VALUE",TokenSet::new([17,29])).unwrap();
-        let mut b=Grammar::from_glrm("extern grammar VALUE start root nt root::=VALUE").unwrap().prepare(&v).unwrap();
+        let mut b=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap().prepare(&v).unwrap();
         b.bind("VALUE",TokenSet::new([17,29])).unwrap();
         let x=a.compile_with_build_options(&v,opt.clone()).unwrap();let y=b.link_with(opt).unwrap();
         assert_eq!(x.start().mask(),y.start().mask(),"{mode:?}");
@@ -48,14 +48,14 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
             let mut s=c.start();assert!(s.commit_token(17));assert!(s.is_accepting());
         }
     }
-    let mut t=Grammar::from_glrm("extern token VALUE start root nt root::=VALUE").unwrap();
-    assert!(t.bind("VALUE",Grammar::from_glrm("start r nt r::=\"x\"").unwrap()).is_err());
+    let mut t=Grammar::from_glrm("extern token VALUE start root nt root=VALUE").unwrap();
+    assert!(t.bind("VALUE",Grammar::from_glrm("start r nt r=\"x\"").unwrap()).is_err());
     assert_eq!(t.requirements().unwrap().len(),1);
 }
 #[test]
 fn independent_concurrent_specializations_do_not_share_mutations() {
     let v=vocab();
-    let p=Grammar::from_glrm("extern token MARK start root nt root::=MARK").unwrap().prepare(&v).unwrap();
+    let p=Grammar::from_glrm("extern token MARK start root nt root=MARK").unwrap().prepare(&v).unwrap();
     std::thread::scope(|scope| {
         let jobs=(0..8).map(|i| {let p=&p;scope.spawn(move || {
             let mut request=p.clone();let id=if i%2==0{17}else{29};

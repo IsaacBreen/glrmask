@@ -23589,14 +23589,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -23605,9 +23605,9 @@ mod tests {
         let inline_parent = r#"
             start document;
             extern grammar SUB;
-            nt document ::= "X" SUB "!";
+            nt document = "X" SUB "!";
         "#;
-        let inline_children = [("SUB", "start child; nt child ::= \"a\" \"b\";")];
+        let inline_children = [("SUB", "start child; nt child = \"a\" \"b\";")];
         let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
             inline_parent,
             &inline_children,
@@ -23659,10 +23659,10 @@ mod tests {
             (6, b"Xab!".to_vec()), (7, b"XX".to_vec()), (8, b"c".to_vec()),
         ]);
         let parent = Constraint::from_glrm_with_token_ids(
-            r#"start document; extern token SUB; nt document ::= "X" SUB "!";"#,
+            r#"start document; extern token SUB; nt document = "X" SUB "!";"#,
             &vocab, &[("SUB", 999)], &[]).unwrap();
         let mut child = Constraint::from_glrm_grammar(
-            r#"start child; t A ::= "a"; t B ::= "b"; nt child ::= A B;"#, &vocab,
+            r#"start child; t A = "a"; t B = "b"; nt child = A B;"#, &vocab,
         ).unwrap();
         child.ensure_composition_reset_tokens_by_terminal();
         child.serialized_artifact_cache = None;
@@ -23678,7 +23678,7 @@ mod tests {
                 assert!(!was_materialized, "ordinary loaded child must exercise deferred link preparation");
             }
             let reference = Constraint::from_glrm_grammar(
-                &format!("start document; nt document ::= {expected_text:?};"), &vocab,
+                &format!("start document; nt document = {expected_text:?};"), &vocab,
             ).unwrap();
             for shared in [false, true] {
                 let loaded_parent = Constraint::load(&parent_bytes, &vocab).unwrap();
@@ -23731,14 +23731,14 @@ mod tests {
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -23806,7 +23806,7 @@ mod tests {
             r#"
                 start document;
                 extern token OUTER;
-                nt document ::= "X" OUTER "!";
+                nt document = "X" OUTER "!";
             "#,
             &vocab, &[("OUTER", 998)], &[])
         .unwrap();
@@ -23817,7 +23817,7 @@ mod tests {
             r#"
                 start document;
                 extern token OUTER;
-                nt document ::= "X" OUTER "!";
+                nt document = "X" OUTER "!";
             "#,
             &vocab, &[("OUTER", 998)], &[])
         .unwrap()
@@ -23841,7 +23841,7 @@ mod tests {
         let inner = Constraint::from_glrm_grammar(
             r#"
                 start inner;
-                nt inner ::= "b";
+                nt inner = "b";
             "#,
             &vocab,
         )
@@ -23850,7 +23850,7 @@ mod tests {
             r#"
                 start outer;
                 extern token INNER;
-                nt outer ::= "a" INNER;
+                nt outer = "a" INNER;
             "#,
             &vocab, &[("INNER", 998)], &[])
         .unwrap();
@@ -23861,7 +23861,7 @@ mod tests {
             r#"
                 start document;
                 extern token OUTER;
-                nt document ::= "<" OUTER ">";
+                nt document = "<" OUTER ">";
             "#,
             &vocab, &[("OUTER", 999)], &[])
         .unwrap();
@@ -23873,14 +23873,14 @@ mod tests {
             r#"
                 start document;
                 extern grammar OUTER;
-                nt document ::= "<" OUTER ">";
+                nt document = "<" OUTER ">";
             "#,
             &[
                 (
                     "OUTER",
-                    "start outer; extern grammar INNER; nt outer ::= \"a\" INNER;",
+                    "start outer; extern grammar INNER; nt outer = \"a\" INNER;",
                 ),
-                ("OUTER::INNER", "start inner; nt inner ::= \"b\";"),
+                ("OUTER::INNER", "start inner; nt inner = \"b\";"),
             ],
         )
         .unwrap();
@@ -24069,15 +24069,15 @@ mod tests {
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">,<" RIGHT ">";
+                nt document = "<" LEFT ">,<" RIGHT ">";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt value ::= "a" "b" "c";
-                nt child ::= value;
+                nt value = "a" "b" "c";
+                nt child = value;
             "#,
             &vocab,
         )
@@ -24165,9 +24165,9 @@ table: &child_tables[index],
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt value ::= "a" "b" "c";
-                nt child ::= value;
-                nt document ::= "<" child ">,<" child ">";
+                nt value = "a" "b" "c";
+                nt child = value;
+                nt document = "<" child ">,<" child ">";
             "#,
             &vocab,
         )
@@ -24193,27 +24193,27 @@ table: &child_tables[index],
         let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t P ::= "p";
-                t Q ::= "p";
-                t BANG ::= "!";
-                t QUESTION ::= "?";
+                t P = "p";
+                t Q = "p";
+                t BANG = "!";
+                t QUESTION = "?";
                 extern token LEFT;
                 extern token RIGHT;
-                nt left_prefix ::= P;
-                nt right_prefix ::= Q;
-                nt left_branch ::= left_prefix LEFT;
-                nt right_branch ::= right_prefix RIGHT;
-                nt document ::= left_branch BANG | right_branch QUESTION;
+                nt left_prefix = P;
+                nt right_prefix = Q;
+                nt left_branch = left_prefix LEFT;
+                nt right_branch = right_prefix RIGHT;
+                nt document = left_branch BANG | right_branch QUESTION;
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                t CA ::= "a";
-                t CB ::= "b";
-                t CC ::= "c";
-                nt child ::= CA CB CC;
+                t CA = "a";
+                t CB = "b";
+                t CC = "c";
+                nt child = CA CB CC;
             "#,
             &vocab,
         )
@@ -24277,19 +24277,19 @@ table: &child_tables[index],
         let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
-                t BANG ::= "!";
-                t QUESTION ::= "?";
+                t BANG = "!";
+                t QUESTION = "?";
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= LEFT BANG | RIGHT QUESTION;
+                nt document = LEFT BANG | RIGHT QUESTION;
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                t WORD ::= "abc";
-                nt child ::= WORD;
+                t WORD = "abc";
+                nt child = WORD;
             "#,
             &vocab,
         )
@@ -24353,7 +24353,7 @@ table: &child_tables[index],
         let left = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "abc" | "z";
+                nt child = "abc" | "z";
             "#,
             &vocab,
         )
@@ -24361,7 +24361,7 @@ table: &child_tables[index],
         let right = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "abd" | "z";
+                nt child = "abd" | "z";
             "#,
             &vocab,
         )
@@ -24371,7 +24371,7 @@ table: &child_tables[index],
                 start call;
                 extern token LEFT;
                 extern token RIGHT;
-                nt call ::= LEFT | RIGHT;
+                nt call = LEFT | RIGHT;
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
@@ -24401,7 +24401,7 @@ table: &child_tables[index],
             r#"
                 start document;
                 extern token CALL;
-                nt document ::= "<" CALL ">";
+                nt document = "<" CALL ">";
             "#,
             &vocab, &[("CALL", 1000)], &[])
         .unwrap();
@@ -24413,7 +24413,7 @@ table: &child_tables[index],
             r#"
                 start document;
                 extern token CALL;
-                nt document ::= "<" CALL ">";
+                nt document = "<" CALL ">";
             "#,
             &vocab, &[("CALL", 1000)], &[])
         .unwrap()
@@ -24842,14 +24842,14 @@ table: &child_tables[index],
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -25074,7 +25074,7 @@ table: &child_table,
                 r#"
                     start document;
                     extern token SUB;
-                    nt document ::= "<" SUB ">";
+                    nt document = "<" SUB ">";
                 "#,
                 &vocab, &[("SUB", 999)], &[])
             .unwrap()
@@ -25082,7 +25082,7 @@ table: &child_table,
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -25090,8 +25090,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a" "b";
-                nt document ::= "<" child ">";
+                nt child = "a" "b";
+                nt document = "<" child ">";
             "#,
             &vocab,
         )
@@ -25154,14 +25154,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "a" SUB "d";
+                nt document = "a" SUB "d";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "b" "c";
+                nt child = "b" "c";
             "#,
             &vocab,
         )
@@ -25252,14 +25252,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">";
+                nt document = "<" SUB ">";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -25303,14 +25303,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 3)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -25341,14 +25341,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" | "b";
+                nt child = "a" | "b";
             "#,
             &vocab,
         )
@@ -25356,8 +25356,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a" | "b";
-                nt document ::= "<" child ">" child "!";
+                nt child = "a" | "b";
+                nt document = "<" child ">" child "!";
             "#,
             &vocab,
         )
@@ -25390,14 +25390,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" child?;
+                nt child = "a" child?;
             "#,
             &vocab,
         )
@@ -25405,8 +25405,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a" child?;
-                nt document ::= "X" child "!";
+                nt child = "a" child?;
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -25439,16 +25439,16 @@ table: &child_table,
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -25457,8 +25457,8 @@ table: &child_table,
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
-                nt document ::= "X" "a" "!";
+                t WS = " "+;
+                nt document = "X" "a" "!";
             "#,
             &vocab,
         )
@@ -25473,11 +25473,11 @@ table: &child_table,
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern grammar SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
-            &[("SUB", "start child; nt child ::= \"a\";")],
+            &[("SUB", "start child; nt child = \"a\";")],
             &vocab,
         );
 
@@ -25516,7 +25516,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -25524,7 +25524,7 @@ table: &child_table,
             r#"
                 start child;
                 extern token END;
-                nt child ::= "a" END;
+                nt child = "a" END;
             "#,
             &vocab, &[("END", 3)], &[])
         .unwrap();
@@ -25532,7 +25532,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token END;
-                nt document ::= "X" "a" END "!";
+                nt document = "X" "a" END "!";
             "#,
             &vocab, &[("END", 3)], &[])
         .unwrap();
@@ -25589,19 +25589,19 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= "ab";
-                t X ::= "X";
-                t BANG ::= "!";
+                t PARENT_WS = "ab";
+                t X = "X";
+                t BANG = "!";
                 extern token SUB;
-                nt document ::= X SUB BANG;
+                nt document = X SUB BANG;
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                t CHILD_T ::= "t";
-                nt child ::= CHILD_T;
+                t CHILD_T = "t";
+                nt child = CHILD_T;
             "#,
             &vocab,
         )
@@ -25610,15 +25610,15 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= "ab";
-                t X ::= "X";
-                t BANG ::= "!";
+                t PARENT_WS = "ab";
+                t X = "X";
+                t BANG = "!";
                 grammar child {
                     start child;
-                    t CHILD_T ::= "t";
-                    nt child ::= CHILD_T;
+                    t CHILD_T = "t";
+                    nt child = CHILD_T;
                 };
-                nt document ::= X child BANG;
+                nt document = X child BANG;
             "#,
             &vocab,
         )
@@ -25657,15 +25657,15 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= "ab";
-                t X ::= "X";
-                t BANG ::= "!";
+                t PARENT_WS = "ab";
+                t X = "X";
+                t BANG = "!";
                 extern grammar SUB;
-                nt document ::= X SUB BANG;
+                nt document = X SUB BANG;
             "#,
             &[(
                 "SUB",
-                "start child; t CHILD_T ::= \"t\"; nt child ::= CHILD_T;",
+                "start child; t CHILD_T = \"t\"; nt child = CHILD_T;",
             )],
             &vocab,
         );
@@ -25770,7 +25770,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -25778,8 +25778,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore WS;
-                t WS ::= " "+;
-                nt child ::= "a";
+                t WS = " "+;
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -25791,11 +25791,11 @@ table: &child_table,
                 grammar child {
                     start child;
                     ignore WS;
-                    t WS ::= " "+;
-                    nt child ::= "a";
+                    t WS = " "+;
+                    nt child = "a";
                 };
 
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -25810,11 +25810,11 @@ table: &child_table,
             r#"
                 start document;
                 extern grammar SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &[(
                 "SUB",
-                "start child; ignore WS; t WS ::= \" \"+; nt child ::= \"a\";",
+                "start child; ignore WS; t WS = \" \"+; nt child = \"a\";",
             )],
             &vocab,
         );
@@ -25878,9 +25878,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -25888,8 +25888,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt child ::= "a";
+                t CHILD_WS = "\t"+;
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -25973,9 +25973,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -25983,8 +25983,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt child ::= "a";
+                t CHILD_WS = "\t"+;
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -25993,16 +25993,16 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
 
                 grammar child {
                     start child;
                     ignore CHILD_WS;
-                    t CHILD_WS ::= "\t"+;
-                    nt child ::= "a";
+                    t CHILD_WS = "\t"+;
+                    nt child = "a";
                 };
 
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -26138,31 +26138,31 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#, &[("SUB", 999)],
             &vocab);
         let child = scoped_oracle_test_source(
             r#"
                 start child;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt child ::= "a";
+                t CHILD_WS = "\t"+;
+                nt child = "a";
             "#, &[],
             &vocab);
         let monolithic = scoped_oracle_test_source(
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 grammar child {
                     start child;
                     ignore CHILD_WS;
-                    t CHILD_WS ::= "\t"+;
-                    nt child ::= "a";
+                    t CHILD_WS = "\t"+;
+                    nt child = "a";
                 };
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#, &[],
             &vocab);
         let composed = scoped_oracle_test_link(&parent, "SUB", &child, &vocab, false);
@@ -26273,7 +26273,7 @@ table: &child_table,
             r#"
                 start outer;
                 extern token INNER;
-                nt outer ::= "<" INNER ">";
+                nt outer = "<" INNER ">";
             "#, &[("INNER", 1000)],
             &vocab);
         let outer = scoped_oracle_test_link(&outer_parent, "INNER", &loaded, &vocab, false);
@@ -26284,16 +26284,16 @@ table: &child_table,
                 grammar inner {
                     start document;
                     ignore PARENT_WS;
-                    t PARENT_WS ::= " "+;
+                    t PARENT_WS = " "+;
                     grammar child {
                         start child;
                         ignore CHILD_WS;
-                        t CHILD_WS ::= "\t"+;
-                        nt child ::= "a";
+                        t CHILD_WS = "\t"+;
+                        nt child = "a";
                     };
-                    nt document ::= "X" child "!";
+                    nt document = "X" child "!";
                 };
-                nt outer ::= "<" inner ">";
+                nt outer = "<" inner ">";
             "#, &[],
             &vocab);
 
@@ -26370,9 +26370,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -26380,8 +26380,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt child ::= "a" "b";
+                t CHILD_WS = "\t"+;
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -26390,14 +26390,14 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 grammar child {
                     start child;
                     ignore CHILD_WS;
-                    t CHILD_WS ::= "\t"+;
-                    nt child ::= "a" "b";
+                    t CHILD_WS = "\t"+;
+                    nt child = "a" "b";
                 };
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -26543,15 +26543,15 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                t OPEN ::= [ab]+ - "ab";
-                nt child ::= OPEN;
+                t OPEN = [ab]+ - "ab";
+                nt child = OPEN;
             "#,
             &vocab,
         )
@@ -26576,10 +26576,10 @@ table: &child_table,
                 start document;
                 grammar child {
                     start child;
-                    t OPEN ::= [ab]+ - "ab";
-                    nt child ::= OPEN;
+                    t OPEN = [ab]+ - "ab";
+                    nt child = OPEN;
                 };
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -26727,10 +26727,10 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "X" LEFT RIGHT "!";
+                nt document = "X" LEFT RIGHT "!";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
@@ -26738,8 +26738,8 @@ table: &child_table,
             r#"
                 start left;
                 ignore LEFT_WS;
-                t LEFT_WS ::= "\t"+;
-                nt left ::= "a";
+                t LEFT_WS = "\t"+;
+                nt left = "a";
             "#,
             &vocab,
         )
@@ -26748,8 +26748,8 @@ table: &child_table,
             r#"
                 start right;
                 ignore RIGHT_WS;
-                t RIGHT_WS ::= "\n"+;
-                nt right ::= "b";
+                t RIGHT_WS = "\n"+;
+                nt right = "b";
             "#,
             &vocab,
         )
@@ -26776,22 +26776,22 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
 
                 grammar left {
                     start left;
                     ignore LEFT_WS;
-                    t LEFT_WS ::= "\t"+;
-                    nt left ::= "a";
+                    t LEFT_WS = "\t"+;
+                    nt left = "a";
                 };
                 grammar right {
                     start right;
                     ignore RIGHT_WS;
-                    t RIGHT_WS ::= "\n"+;
-                    nt right ::= "b";
+                    t RIGHT_WS = "\n"+;
+                    nt right = "b";
                 };
 
-                nt document ::= "X" left right "!";
+                nt document = "X" left right "!";
             "#,
             &vocab,
         )
@@ -26868,14 +26868,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB SUB "!";
+                nt document = "X" SUB SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -26883,8 +26883,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a";
-                nt document ::= "X" child child "!";
+                nt child = "a";
+                nt document = "X" child child "!";
             "#,
             &vocab,
         )
@@ -26934,9 +26934,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB SUB "!";
+                nt document = "X" SUB SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -26944,8 +26944,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore WS;
-                t WS ::= " "+;
-                nt child ::= "a";
+                t WS = " "+;
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -26954,9 +26954,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore WS;
-                t WS ::= " "+;
-                nt child ::= "a";
-                nt document ::= "X" child child "!";
+                t WS = " "+;
+                nt child = "a";
+                nt document = "X" child child "!";
             "#,
             &vocab,
         )
@@ -27026,9 +27026,9 @@ table: &child_table,
             r#"
                 start outer;
                 ignore WS;
-                t WS ::= " "+;
+                t WS = " "+;
                 extern token INNER;
-                nt outer ::= "<" INNER ">";
+                nt outer = "<" INNER ">";
             "#,
             &vocab, &[("INNER", 1000)], &[])
         .unwrap();
@@ -27036,9 +27036,9 @@ table: &child_table,
             r#"
                 start outer;
                 ignore WS;
-                t WS ::= " "+;
-                nt child ::= "a";
-                nt outer ::= "<" "X" child child "!" ">";
+                t WS = " "+;
+                nt child = "a";
+                nt outer = "<" "X" child child "!" ">";
             "#,
             &vocab,
         )
@@ -27088,15 +27088,15 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt second ::= SUB;
-                nt document ::= "X" SUB second "!";
+                nt second = SUB;
+                nt document = "X" SUB second "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -27104,9 +27104,9 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a";
-                nt second ::= child;
-                nt document ::= "X" child second "!";
+                nt child = "a";
+                nt second = child;
+                nt document = "X" child second "!";
             "#,
             &vocab,
         )
@@ -27143,14 +27143,14 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">,<" RIGHT ">";
+                nt document = "<" LEFT ">,<" RIGHT ">";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" | "b";
+                nt child = "a" | "b";
             "#,
             &vocab,
         )
@@ -27158,8 +27158,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a" | "b";
-                nt document ::= "<" child ">,<" child ">";
+                nt child = "a" | "b";
+                nt document = "<" child ">,<" child ">";
             "#,
             &vocab,
         )
@@ -27196,14 +27196,14 @@ table: &child_table,
                 extern token FIRST;
                 extern token SECOND;
                 extern token THIRD;
-                nt document ::= "[" FIRST "|" SECOND "|" THIRD "]";
+                nt document = "[" FIRST "|" SECOND "|" THIRD "]";
             "#,
             &vocab, &[("FIRST", 997), ("SECOND", 998), ("THIRD", 999)], &[])
         .unwrap();
         let first = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -27211,7 +27211,7 @@ table: &child_table,
         let second = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "b";
+                nt child = "b";
             "#,
             &vocab,
         )
@@ -27219,7 +27219,7 @@ table: &child_table,
         let third = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "c";
+                nt child = "c";
             "#,
             &vocab,
         )
@@ -27227,10 +27227,10 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt first ::= "a";
-                nt second ::= "b";
-                nt third ::= "c";
-                nt document ::= "[" first "|" second "|" third "]";
+                nt first = "a";
+                nt second = "b";
+                nt third = "c";
+                nt document = "[" first "|" second "|" third "]";
             "#,
             &vocab,
         )
@@ -27292,7 +27292,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)],
             &[END_TOKEN])
@@ -27300,7 +27300,7 @@ table: &child_table,
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -27308,8 +27308,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar_with_end_tokens(
             r#"
                 start document;
-                nt child ::= "a";
-                nt document ::= "X" child "!";
+                nt child = "a";
+                nt document = "X" child "!";
             "#,
             &vocab,
             &[END_TOKEN],
@@ -27363,14 +27363,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token DONE;
-                nt document ::= "X" SUB DONE;
+                nt document = "X" SUB DONE;
             "#,
             &vocab, &[("SUB", 999), ("DONE", 1000)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -27379,7 +27379,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token DONE;
-                nt document ::= "X" "a" DONE;
+                nt document = "X" "a" DONE;
             "#,
             &vocab, &[("DONE", 1000)], &[])
         .unwrap();
@@ -27414,15 +27414,15 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token DONE;
-                nt document ::= SUB DONE;
+                nt document = SUB DONE;
             "#,
             &vocab, &[("SUB", 999), ("DONE", 1000)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
             &vocab,
         )
@@ -27431,8 +27431,8 @@ table: &child_table,
             r#"
                 start document;
                 extern token DONE;
-                nt item ::= "a";
-                nt document ::= item? DONE;
+                nt item = "a";
+                nt document = item? DONE;
             "#,
             &vocab, &[("DONE", 1000)], &[])
         .unwrap();
@@ -27472,7 +27472,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)],
             &[SHARED_TOKEN])
@@ -27480,7 +27480,7 @@ table: &child_table,
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -27510,14 +27510,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar_with_end_tokens(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
             &[END_TOKEN],
@@ -27527,7 +27527,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token END;
-                nt document ::= "X" "a" END "!";
+                nt document = "X" "a" END "!";
             "#,
             &vocab, &[("END", 100)], &[])
         .unwrap();
@@ -27554,7 +27554,7 @@ table: &child_table,
             r#"
                 start outer;
                 extern token INNER;
-                nt outer ::= INNER;
+                nt outer = INNER;
             "#,
             &vocab, &[("INNER", 100)], &[])
         .unwrap();
@@ -27581,7 +27581,7 @@ table: &child_table,
             r#"
                 start middle;
                 extern token CHILD;
-                nt middle ::= CHILD;
+                nt middle = CHILD;
             "#,
             &vocab, &[("CHILD", 998)], &[])
         .unwrap();
@@ -27589,8 +27589,8 @@ table: &child_table,
         let nullable_child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
             &vocab,
         )
@@ -27609,7 +27609,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token MIDDLE;
-                nt document ::= "X" MIDDLE "!";
+                nt document = "X" MIDDLE "!";
             "#,
             &vocab, &[("MIDDLE", 999)], &[])
         .unwrap();
@@ -27619,8 +27619,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt item ::= "a";
-                nt document ::= "X" item? "!";
+                nt item = "a";
+                nt document = "X" item? "!";
             "#,
             &vocab,
         )
@@ -27641,14 +27641,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" SUB "!";
+                nt document = "<" SUB ">" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -27658,9 +27658,9 @@ table: &child_table,
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">" inner "!";
+                nt document = "<" inner ">" inner "!";
             "#,
             &vocab,
         )
@@ -27720,14 +27720,14 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">" RIGHT "!";
+                nt document = "<" LEFT ">" RIGHT "!";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -27737,9 +27737,9 @@ table: &child_table,
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">" inner "!";
+                nt document = "<" inner ">" inner "!";
             "#,
             &vocab,
         )
@@ -27855,14 +27855,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "x" SUB "z";
+                nt document = "x" SUB "z";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "y";
+                nt child = "y";
             "#,
             &vocab,
         )
@@ -27870,7 +27870,7 @@ table: &child_table,
         let reference = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "x" "y" "z";
+                nt document = "x" "y" "z";
             "#,
             &vocab,
         )
@@ -27948,15 +27948,15 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">";
+                nt document = "<" SUB ">";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
             &vocab,
         )
@@ -28020,14 +28020,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "<" SUB ">" "!";
+                nt document = "<" SUB ">" "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -28037,9 +28037,9 @@ table: &child_table,
                 start document;
                 grammar inner {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "<" inner ">" "!";
+                nt document = "<" inner ">" "!";
             "#,
             &vocab,
         )
@@ -28088,14 +28088,14 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "<" LEFT ">,<" RIGHT ">" "!";
+                nt document = "<" LEFT ">,<" RIGHT ">" "!";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let left = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -28103,7 +28103,7 @@ table: &child_table,
         let right = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "c" "d";
+                nt child = "c" "d";
             "#,
             &vocab,
         )
@@ -28113,13 +28113,13 @@ table: &child_table,
                 start document;
                 grammar left {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
                 grammar right {
                     start child;
-                    nt child ::= "c" "d";
+                    nt child = "c" "d";
                 };
-                nt document ::= "<" left ">,<" right ">" "!";
+                nt document = "<" left ">,<" right ">" "!";
             "#,
             &vocab,
         )
@@ -28190,14 +28190,14 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB "x" | "R" SUB "y";
+                nt document = "L" SUB "x" | "R" SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a";
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -28205,8 +28205,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt inner ::= "a";
-                nt document ::= "L" inner "x" | "R" inner "y";
+                nt inner = "a";
+                nt document = "L" inner "x" | "R" inner "y";
             "#,
             &vocab,
         )
@@ -28299,15 +28299,15 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
             &vocab,
         )
@@ -28315,8 +28315,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt item ::= "a";
-                nt document ::= "X" item? "!";
+                nt item = "a";
+                nt document = "X" item? "!";
             "#,
             &vocab,
         )
@@ -28358,7 +28358,7 @@ table: &child_table,
         let expr = Constraint::from_glrm_grammar(
             r#"
                 start expr;
-                nt expr ::= "x";
+                nt expr = "x";
             "#,
             &vocab,
         )
@@ -28368,7 +28368,7 @@ table: &child_table,
             r#"
                 start args;
                 extern token EXPR;
-                nt args ::= "{" "a" ":" EXPR "}" | EXPR;
+                nt args = "{" "a" ":" EXPR "}" | EXPR;
             "#,
             &vocab, &[("EXPR", 996)], &[])
         .unwrap();
@@ -28383,7 +28383,7 @@ table: &child_table,
             r#"
                 start args;
                 extern token EXPR;
-                nt args ::= "{" "b" ":" EXPR "}" | EXPR;
+                nt args = "{" "b" ":" EXPR "}" | EXPR;
             "#,
             &vocab, &[("EXPR", 996)], &[])
         .unwrap();
@@ -28399,7 +28399,7 @@ table: &child_table,
                 start call;
                 extern token ARGA;
                 extern token ARGB;
-                nt call ::= "t" "." "ta" "(" ARGA ")"
+                nt call = "t" "." "ta" "(" ARGA ")"
                           | "t" "." "tb" "(" ARGB ")";
             "#,
             &vocab, &[("ARGA", 997), ("ARGB", 998)], &[])
@@ -28422,7 +28422,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token CALL;
-                nt document ::= "X" CALL "!";
+                nt document = "X" CALL "!";
             "#,
             &vocab, &[("CALL", 999)], &[])
         .unwrap();
@@ -28442,12 +28442,12 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt expr ::= "x";
-                nt arg_a ::= "{" "a" ":" expr "}" | expr;
-                nt arg_b ::= "{" "b" ":" expr "}" | expr;
-                nt call ::= "t" "." "ta" "(" arg_a ")"
+                nt expr = "x";
+                nt arg_a = "{" "a" ":" expr "}" | expr;
+                nt arg_b = "{" "b" ":" expr "}" | expr;
+                nt call = "t" "." "ta" "(" arg_a ")"
                           | "t" "." "tb" "(" arg_b ")";
-                nt document ::= "X" call "!";
+                nt document = "X" call "!";
             "#,
             &vocab,
         )
@@ -28510,7 +28510,7 @@ table: &child_table,
         let leaf = Constraint::from_glrm_grammar(
             r#"
                 start leaf;
-                nt leaf ::= "a";
+                nt leaf = "a";
             "#,
             &vocab,
         )
@@ -28519,7 +28519,7 @@ table: &child_table,
             r#"
                 start middle;
                 extern token LEAF;
-                nt middle ::= "[" LEAF "]";
+                nt middle = "[" LEAF "]";
             "#,
             &vocab, &[("LEAF", 998)], &[])
         .unwrap();
@@ -28530,7 +28530,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token MIDDLE;
-                nt document ::= "X" MIDDLE "!";
+                nt document = "X" MIDDLE "!";
             "#,
             &vocab, &[("MIDDLE", 999)], &[])
         .unwrap();
@@ -28540,7 +28540,7 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt document ::= "X" "[" "a" "]" "!";
+                nt document = "X" "[" "a" "]" "!";
             "#,
             &vocab,
         )
@@ -28571,7 +28571,7 @@ table: &child_table,
         let leaf = Constraint::from_glrm_grammar(
             r#"
                 start leaf;
-                nt leaf ::= "a";
+                nt leaf = "a";
             "#,
             &vocab,
         )
@@ -28580,7 +28580,7 @@ table: &child_table,
             r#"
                 start middle;
                 extern token LEAF;
-                nt middle ::= LEAF?;
+                nt middle = LEAF?;
             "#,
             &vocab, &[("LEAF", 998)], &[])
         .unwrap();
@@ -28595,7 +28595,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token MIDDLE;
-                nt document ::= "X" MIDDLE "!";
+                nt document = "X" MIDDLE "!";
             "#,
             &vocab, &[("MIDDLE", 999)], &[])
         .unwrap();
@@ -28623,8 +28623,8 @@ table: &child_table,
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt item ::= "a";
-                nt document ::= "X" item? "!";
+                nt item = "a";
+                nt document = "X" item? "!";
             "#,
             &vocab,
         )
@@ -28722,7 +28722,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+                nt document = "L" SUB SUB "x" | "R" SUB SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -28730,14 +28730,14 @@ table: &child_table,
             r#"
                 start m;
                 extern token SUB2;
-                nt m ::= "m" SUB2;
+                nt m = "m" SUB2;
             "#,
             &vocab, &[("SUB2", 998)], &[])
         .unwrap();
         let grandchild = Constraint::from_glrm_grammar(
             r#"
                 start g;
-                nt g ::= "g";
+                nt g = "g";
             "#,
             &vocab,
         )
@@ -29140,7 +29140,7 @@ table: &child_table,
             r#"
                 start document;
                 extern token SUB;
-                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+                nt document = "L" SUB SUB "x" | "R" SUB SUB "y";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -29148,14 +29148,14 @@ table: &child_table,
             r#"
                 start m;
                 extern token SUB2;
-                nt m ::= "m" SUB2;
+                nt m = "m" SUB2;
             "#,
             &vocab, &[("SUB2", 998)], &[])
         .unwrap();
         let grandchild = Constraint::from_glrm_grammar(
             r#"
                 start g;
-                nt g ::= "g";
+                nt g = "g";
             "#,
             &vocab,
         )
@@ -29405,14 +29405,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token SUB2;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+                nt document = "L" SUB "x" | "R" SUB2 "y";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998)], &[])
         .unwrap();
         let child_a = Constraint::from_glrm_grammar(
             r#"
                 start a;
-                nt a ::= "x";
+                nt a = "x";
             "#,
             &vocab,
         )
@@ -29420,7 +29420,7 @@ table: &child_table,
         let child_b = Constraint::from_glrm_grammar(
             r#"
                 start b;
-                nt b ::= "y";
+                nt b = "y";
             "#,
             &vocab,
         )
@@ -29564,7 +29564,7 @@ table: &child_table,
                 extern token SUB;
                 extern token SUB2;
                 extern token SUB3;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y" | "R" SUB3 "z";
+                nt document = "L" SUB "x" | "R" SUB2 "y" | "R" SUB3 "z";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998), ("SUB3", 997)], &[])
         .unwrap();
@@ -29572,14 +29572,14 @@ table: &child_table,
             r#"
                 start a;
                 extern token SUB_A;
-                nt a ::= "x" SUB_A;
+                nt a = "x" SUB_A;
             "#,
             &vocab, &[("SUB_A", 996)], &[])
         .unwrap();
         let child_c = Constraint::from_glrm_grammar(
             r#"
                 start c;
-                nt c ::= "y";
+                nt c = "y";
             "#,
             &vocab,
         )
@@ -29590,14 +29590,14 @@ table: &child_table,
                 start bp;
                 extern token SB1;
                 extern token SB2;
-                nt bp ::= SB1 | SB2;
+                nt bp = SB1 | SB2;
             "#,
             &vocab, &[("SB1", 995), ("SB2", 994)], &[])
         .unwrap();
         let child_e = Constraint::from_glrm_grammar(
             r#"
                 start e;
-                nt e ::= "y";
+                nt e = "y";
             "#,
             &vocab,
         )
@@ -30014,7 +30014,7 @@ table: &child_table,
                 start document;
                 extern token SUB_A;
                 extern token SUB_B;
-                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+                nt document = "L" SUB_A "x" | "R" SUB_B "y";
             "#,
             &vocab, &[("SUB_A", 999), ("SUB_B", 998)], &[])
         .unwrap();
@@ -30022,14 +30022,14 @@ table: &child_table,
             r#"
                 start a;
                 extern token SUB_INNER;
-                nt a ::= "x" SUB_INNER;
+                nt a = "x" SUB_INNER;
             "#,
             &vocab, &[("SUB_INNER", 996)], &[])
         .unwrap();
         let child_b = Constraint::from_glrm_grammar(
             r#"
                 start b;
-                nt b ::= "y";
+                nt b = "y";
             "#,
             &vocab,
         )
@@ -30037,7 +30037,7 @@ table: &child_table,
         let child_c = Constraint::from_glrm_grammar(
             r#"
                 start c;
-                nt c ::= "z";
+                nt c = "z";
             "#,
             &vocab,
         )
@@ -30416,7 +30416,7 @@ table: &child_table,
                 start document;
                 extern token SUB_A;
                 extern token SUB_B;
-                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+                nt document = "L" SUB_A "x" | "R" SUB_B "y";
             "#,
             &vocab, &[("SUB_A", 999), ("SUB_B", 998)], &[])
         .unwrap();
@@ -30424,14 +30424,14 @@ table: &child_table,
             r#"
                 start a;
                 extern token SUB_INNER;
-                nt a ::= "x" SUB_INNER;
+                nt a = "x" SUB_INNER;
             "#,
             &vocab, &[("SUB_INNER", 996)], &[])
         .unwrap();
         let child_c = Constraint::from_glrm_grammar(
             r#"
                 start c;
-                nt c ::= "y";
+                nt c = "y";
             "#,
             &vocab,
         )
@@ -30736,7 +30736,7 @@ table: &child_table,
                 start document;
                 extern token SUB_A;
                 extern token SUB_B;
-                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+                nt document = "L" SUB_A "x" | "R" SUB_B "y";
             "#,
             &vocab, &[("SUB_A", 999), ("SUB_B", 998)], &[])
         .unwrap();
@@ -30744,7 +30744,7 @@ table: &child_table,
             r#"
                 start a;
                 extern token SUB_INNER;
-                nt a ::= "x" SUB_INNER;
+                nt a = "x" SUB_INNER;
             "#,
             &vocab, &[("SUB_INNER", 996)], &[])
         .unwrap();
@@ -30752,14 +30752,14 @@ table: &child_table,
             r#"
                 start c;
                 extern token SUB_D;
-                nt c ::= "y" SUB_D;
+                nt c = "y" SUB_D;
             "#,
             &vocab, &[("SUB_D", 995)], &[])
         .unwrap();
         let child_d = Constraint::from_glrm_grammar(
             r#"
                 start d;
-                nt d ::= "z";
+                nt d = "z";
             "#,
             &vocab,
         )
@@ -31132,8 +31132,8 @@ table: &child_table,
                 ignore WS;
                 extern token SUB_A;
                 extern token SUB_B;
-                t WS ::= " "+;
-                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+                t WS = " "+;
+                nt document = "L" SUB_A "x" | "R" SUB_B "y";
             "#,
             &vocab, &[("SUB_A", 999), ("SUB_B", 998)], &[])
         .unwrap();
@@ -31142,8 +31142,8 @@ table: &child_table,
                 start a;
                 ignore WS;
                 extern token SUB_INNER;
-                t WS ::= " "+;
-                nt a ::= "x" SUB_INNER;
+                t WS = " "+;
+                nt a = "x" SUB_INNER;
             "#,
             &vocab, &[("SUB_INNER", 996)], &[])
         .unwrap();
@@ -31151,8 +31151,8 @@ table: &child_table,
             r#"
                 start b;
                 ignore WS;
-                t WS ::= " "+;
-                nt b ::= "y";
+                t WS = " "+;
+                nt b = "y";
             "#,
             &vocab,
         )
@@ -31161,8 +31161,8 @@ table: &child_table,
             r#"
                 start c;
                 ignore WS;
-                t WS ::= " "+;
-                nt c ::= "z";
+                t WS = " "+;
+                nt c = "z";
             "#,
             &vocab,
         )
@@ -31489,14 +31489,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token SUB2;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+                nt document = "L" SUB "x" | "R" SUB2 "y";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998)], &[])
         .unwrap();
         let child_a = Constraint::from_glrm_grammar(
             r#"
                 start a;
-                nt a ::= "x";
+                nt a = "x";
             "#,
             &vocab,
         )
@@ -31603,14 +31603,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token SUB2;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+                nt document = "L" SUB "x" | "R" SUB2 "y";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998)], &[])
         .unwrap();
         let child_a = Constraint::from_glrm_grammar(
             r#"
                 start a;
-                nt a ::= "x";
+                nt a = "x";
             "#,
             &vocab,
         )
@@ -31618,7 +31618,7 @@ table: &child_table,
         let child_b = Constraint::from_glrm_grammar(
             r#"
                 start b;
-                nt b ::= "y";
+                nt b = "y";
             "#,
             &vocab,
         )
@@ -31892,14 +31892,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token SUB2;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+                nt document = "L" SUB "x" | "R" SUB2 "y";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998)], &[])
         .unwrap();
         let child_a = Constraint::from_glrm_grammar(
             r#"
                 start a;
-                nt a ::= "x";
+                nt a = "x";
             "#,
             &vocab,
         )
@@ -31907,7 +31907,7 @@ table: &child_table,
         let child_b = Constraint::from_glrm_grammar(
             r#"
                 start b;
-                nt b ::= "y";
+                nt b = "y";
             "#,
             &vocab,
         )
@@ -31991,14 +31991,14 @@ table: &child_table,
                 start document;
                 extern token SUB;
                 extern token SUB2;
-                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+                nt document = "L" SUB "x" | "R" SUB2 "y";
             "#,
             &vocab, &[("SUB", 999), ("SUB2", 998)], &[])
         .unwrap();
         let child_a = Constraint::from_glrm_grammar(
             r#"
                 start a;
-                nt a ::= "x";
+                nt a = "x";
             "#,
             &vocab,
         )
@@ -32006,8 +32006,8 @@ table: &child_table,
         let nullable_b = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt item ::= "a";
-                nt child ::= item?;
+                nt item = "a";
+                nt child = item?;
             "#,
             &vocab,
         )
@@ -32038,7 +32038,7 @@ table: &child_table,
             stage1, &bind2, &vocab, SegmentedBoundaryBackend::StaticParserDwa,
         ).expect("nullable second binding").constraint;
         let monolithic = Constraint::from_glrm_grammar(
-            r#"start document; nt document ::= "L" "x" "x" | "R" "a"? "y";"#,
+            r#"start document; nt document = "L" "x" "x" | "R" "a"? "y";"#,
             &vocab,
         ).unwrap();
         assert_constraints_equivalent_on_reachable_prefixes(&composed, &monolithic, &vocab, 4);
@@ -32063,14 +32063,14 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "X" (LEFT | RIGHT) "!";
+                nt document = "X" (LEFT | RIGHT) "!";
             "#,
             &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
         .unwrap();
         let left = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -32078,7 +32078,7 @@ table: &child_table,
         let right = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "c" "d";
+                nt child = "c" "d";
             "#,
             &vocab,
         )
@@ -32088,13 +32088,13 @@ table: &child_table,
                 start document;
                 grammar left {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
                 grammar right {
                     start child;
-                    nt child ::= "c" "d";
+                    nt child = "c" "d";
                 };
-                nt document ::= "X" (left | right) "!";
+                nt document = "X" (left | right) "!";
             "#,
             &vocab,
         )
@@ -32245,9 +32245,9 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern token SUB;
-                nt document ::= "X" SUB "!";
+                nt document = "X" SUB "!";
             "#,
             &vocab, &[("SUB", 999)], &[])
         .unwrap();
@@ -32255,8 +32255,8 @@ table: &child_table,
             r#"
                 start child;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt child ::= "a";
+                t CHILD_WS = "\t"+;
+                nt child = "a";
             "#,
             &vocab,
         )
@@ -32268,14 +32268,14 @@ table: &child_table,
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 grammar child {
                     start child;
                     ignore CHILD_WS;
-                    t CHILD_WS ::= "\t"+;
-                    nt child ::= "a";
+                    t CHILD_WS = "\t"+;
+                    nt child = "a";
                 };
-                nt document ::= "X" child "!";
+                nt document = "X" child "!";
             "#,
             &vocab,
         )
@@ -32327,7 +32327,7 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "{" "\"value1\": " LEFT ", \"value2\": " RIGHT "}";
+                nt document = "{" "\"value1\": " LEFT ", \"value2\": " RIGHT "}";
             "#,
             &[("LEFT", 1000000), ("RIGHT", 1000001)],
         );
@@ -32342,7 +32342,7 @@ table: &child_table,
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "{" ("\"left\": " LEFT | "\"right\": " RIGHT) "}";
+                nt document = "{" ("\"left\": " LEFT | "\"right\": " RIGHT) "}";
             "#,
             &[("LEFT", 1000000), ("RIGHT", 1000001)],
         );
@@ -36551,7 +36551,7 @@ table: &dispatch.table,
                 source.push_str(&format!("extern token {name};\n"));
                 token_ids.push((name, token_id));
             }
-            source.push_str("nt suffix ::=\n    ");
+            source.push_str("nt suffix =\n    ");
             for index in 0..PHASE1_SELECTED10_SHORT.len() {
                 if index != 0 {
                     source.push_str("\n  | ");

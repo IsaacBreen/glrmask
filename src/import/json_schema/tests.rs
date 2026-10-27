@@ -3894,7 +3894,7 @@ fn oneof_ref_allof_shared_prefix_variants_use_exact_object_variant_body() {
     let glrm = to_glrm_v1(&grammar).unwrap();
     let start_rule = glrm
         .lines()
-        .find(|line| line.starts_with("nt schema_root_0 ::="))
+        .find(|line| line.starts_with("nt schema_root_0 ="))
         .expect("start rule should be present");
     assert!(!start_rule.is_empty(), "{glrm}");
     assert!(
@@ -3958,7 +3958,7 @@ fn oneof_ref_allof_variants_preserve_mismatched_prefix_constraints() {
     let glrm = to_glrm_v1(&grammar).unwrap();
     let start_rule = glrm
         .lines()
-        .find(|line| line.starts_with("nt schema_root_0 ::="))
+        .find(|line| line.starts_with("nt schema_root_0 ="))
         .expect("start rule should be present");
     assert!(glrm.contains("plate") && glrm.contains("tipbox"), "{glrm}");
     assert!(schema_accepts_bytes(&schema, br#"{"id": "x", "kind": "plate"}"#));
@@ -4599,7 +4599,7 @@ fn discriminator_anyof_object_lowers_to_compact_body() {
     assert!(glrm.contains("t json_string_pattern_end"), "{glrm}");
     assert!(glrm.contains("nt json_string_constrained"), "{glrm}");
     assert!(!glrm.contains("\nnt json_anyof_object_body"), "{glrm}");
-    assert!(!glrm.contains("\nnt json_additional_key_colon_local ::= "), "{glrm}");
+    assert!(!glrm.contains("\nnt json_additional_key_colon_local = "), "{glrm}");
     assert!(!glrm.contains("__exact_sub_json_additional"), "{glrm}");
     assert!(schema_accepts_bytes(
         &schema,
@@ -6999,7 +6999,7 @@ fn anyof_pattern_with_sibling_string_type_does_not_broaden_to_json_string() {
     let glrm = to_glrm_v1(&grammar).unwrap();
     let start_line = glrm
         .lines()
-        .find(|line| line.starts_with("nt schema_root_0 ::="))
+        .find(|line| line.starts_with("nt schema_root_0 ="))
         .unwrap_or_else(|| panic!("{glrm}"));
     assert!(!start_line.contains("| JSON_STRING"), "{glrm}");
     assert!(schema_accepts_bytes(&schema, br#""/x""#));
@@ -7302,7 +7302,7 @@ fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm_v1(&grammar).unwrap();
-    assert!(glrm.contains("nt schema_root_0 ::= json_object"), "{glrm}");
+    assert!(glrm.contains("nt schema_root_0 = json_object"), "{glrm}");
     assert!(
         !glrm.contains("\\\"a\\\":") && !glrm.contains(r#"/"a": "#),
         "{glrm}"
@@ -7456,10 +7456,10 @@ fn anyof_nested_object_allof_refs_factor_into_single_body() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm_v1(&grammar).unwrap();
     assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
-    assert!(glrm.contains("nt schema_root_0 ::= \"{\" json_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("nt schema_root_0 = \"{\" json_anyof_object_body"), "{glrm}");
     assert!(
         !glrm.lines().any(|line| {
-            line.starts_with("nt schema_root_0 ::=")
+            line.starts_with("nt schema_root_0 =")
                 && line.contains("|")
                 && line.contains("json_closed_object_body")
         }),
@@ -9032,7 +9032,7 @@ fn shadow_owner_ref_branch_context_uses_shared_open_object_body() {
     assert!(
         glrm.lines().any(|line| {
             line.starts_with("nt schema_ref_")
-                && line.contains(" ::= \"{\" json_anyof_object_body")
+                && line.contains(" = \"{\" json_anyof_object_body")
         }),
         "{glrm}"
     );

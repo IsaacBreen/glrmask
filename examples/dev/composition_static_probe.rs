@@ -104,16 +104,16 @@ fn main() {
     let depth = args.get(3).map(|s| s.parse::<usize>().expect("vocab depth")).unwrap_or(2);
     let v = vocabulary(depth);
     eprintln!("PROBE_CONFIG vocabulary_depth={depth} repeats={repeats}");
-    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle ::= \"[\" leaf \"]\";";
-    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer ::= \"X\" middle \"!\";";
+    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";";
+    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";";
     println!("case,prefix,repeats,mask_p50_us,mask_p90_us,mask_max_us,tbm_p50_us,tbm_p90_us,tbm_max_us,allowed,hash");
     for (fixture, leaf_source, monolithic_source, prefixes) in [
-        ("literal", "glrm 1; start leaf; nt leaf ::= \"a\";",
-         "glrm 1; start outer; nt outer ::= \"X\" \"[\" \"a\" \"]\" \"!\";",
+        ("literal", "glrm 1; start leaf; nt leaf = \"a\";",
+         "glrm 1; start outer; nt outer = \"X\" \"[\" \"a\" \"]\" \"!\";",
          vec![("root", b"".as_slice()), ("outer", b"X"), ("leaf", b"X["),
               ("return", b"X[a"), ("outer_return", b"X[a]"), ("done", b"X[a]!")]),
-        ("text", "glrm 1; start leaf; t TEXT ::= /[a-c ]{1,8}/; nt leaf ::= TEXT;",
-         "glrm 1; start outer; t TEXT ::= /[a-c ]{1,8}/; nt outer ::= \"X\" \"[\" TEXT \"]\" \"!\";",
+        ("text", "glrm 1; start leaf; t TEXT = /[a-c ]{1,8}/; nt leaf = TEXT;",
+         "glrm 1; start outer; t TEXT = /[a-c ]{1,8}/; nt outer = \"X\" \"[\" TEXT \"]\" \"!\";",
          vec![("root", b"".as_slice()), ("outer", b"X"), ("leaf", b"X["),
               ("text", b"X[abc"), ("limit", b"X[abcabcab"), ("outer_return", b"X[abc]"), ("done", b"X[abc]!")]),
     ] {

@@ -14,8 +14,8 @@ fn with_prepared_cut(mut c:Constraint,v:&Vocab)->Constraint{
 #[test]
 fn prepared_cut_roundtrip_pins_source_and_matches_actual_union_filter(){
     let v=Vocab::new(vec![(1,b"abc!".to_vec()),(2,b"bc!".to_vec()),(3,b"c!".to_vec()),(4,b"abc !".to_vec()),(5,b"c!".to_vec()),(6,b"!a".to_vec()),(7,b"a!".to_vec()),(8,b"ab".to_vec()),(9,Vec::new())]);
-    let a=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x ::= "abc" | "ab" | "a";"#,&v).unwrap(),&v);
-    let b=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x ::= "!" | " a" | "abc";"#,&v).unwrap(),&v);
+    let a=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "abc" | "ab" | "a";"#,&v).unwrap(),&v);
+    let b=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "!" | " a" | "abc";"#,&v).unwrap(),&v);
     let mut components=Vec::new();
     for original in [a,b]{
         let wire=original.save();let loaded=Constraint::load(&wire,&v).unwrap();assert_eq!(loaded.save(),wire);
@@ -47,13 +47,13 @@ fn prepared_cut_roundtrip_pins_source_and_matches_actual_union_filter(){
 #[test]
 fn prepared_cut_wire_is_bounded_and_rejects_corruption_and_other_source(){
     let v=Vocab::new(vec![(1,b"ab!".to_vec()),(2,b"b!".to_vec()),(3,b"xy!".to_vec())]);
-    let c=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x ::= "ab" | "xy";"#,&v).unwrap(),&v);
+    let c=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "ab" | "xy";"#,&v).unwrap(),&v);
     let bytes=saved_wire(&c).unwrap();let(a,b)=split_cut_wire(bytes).unwrap();let reset=b.unwrap();assert!(!a.is_empty()&&!reset.is_empty());
     for end in 8..bytes.len(){assert!(split_cut_wire(&bytes[..end]).is_err(),"truncation{end}");}
     let mut trailing=bytes.to_vec();trailing.push(0);assert!(split_cut_wire(&trailing).is_err());
     let mut huge=bytes.to_vec();huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());assert!(split_cut_wire(&huge).is_err());
     let mut corrupt=bytes.to_vec();*corrupt.last_mut().unwrap()^=1;assert!(PreparedCompletion::load(Arc::clone(&c.tokenizer),Arc::from(corrupt)).is_err());
-    let other=Constraint::from_glrm_grammar(r#"start x; nt x ::= "az" | "xy";"#,&v).unwrap();assert!(PreparedCompletion::load(Arc::clone(&other.tokenizer),Arc::from(bytes)).is_err());
+    let other=Constraint::from_glrm_grammar(r#"start x; nt x = "az" | "xy";"#,&v).unwrap();assert!(PreparedCompletion::load(Arc::clone(&other.tokenizer),Arc::from(bytes)).is_err());
     let legacy=PreparedCompletion::load(Arc::clone(&c.tokenizer),Arc::from(a)).unwrap();assert!(legacy.cut.is_none());assert_eq!(legacy.wire.as_ref(),a);
     fn send_sync<T:Send+Sync>(){}send_sync::<PreparedCompletion>();
 }

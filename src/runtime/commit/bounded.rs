@@ -576,7 +576,7 @@ mod tests {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(3,b"ab".to_vec()),(4,b"aa".to_vec()),
             (9,b"ab".to_vec()),(13,b"ba".to_vec()),(69,b"aba".to_vec()),(128,Vec::new())]);
         for body in ["\"ab\"","\"a\" | \"ab\" | \"aba\"","eps | \"ab\"","/a+/ \"b\"","/a|ab/ \"a\"?","/a*/ \"b\"","(/a+/ & /aa*/ ) \"b\"","(/a+/ - /aaa+/) \"b\""] {
-            let source=format!("start root nt root ::= {body}");
+            let source=format!("start root nt root = {body}");
             for mode in MODES {
                 let c=Grammar::from_glrm(&source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
                 explore(&c,&format!("{mode:?} {body}"));
@@ -589,7 +589,7 @@ mod tests {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"a".to_vec()),
             (3,b"ab".to_vec()),(17,Vec::new())]);
         for body in ["M \"a\"", "M | \"ab\"", "M \"b\" | \"ab\"", "M? \"ab\"", "M M?"] {
-            let source=format!("extern token M start root nt root::={body}");
+            let source=format!("extern token M start root nt root={body}");
             for tokens in [vec![0],vec![17],vec![29],vec![29,30,31],vec![0,17,29,4096]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source).unwrap();g.bind("M",TokenSet::new(tokens.clone())).unwrap();
@@ -604,13 +604,13 @@ mod tests {
         let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,vec![0xc3]),(7,vec![0xa9]),
             (8,vec![0xc3,0xa9]),(10,b"x".to_vec())]);
-        let mut child=Grammar::from_glrm("extern token M start item ignore SPACE t SPACE::=/ +/ nt item::=\"a\" M?").unwrap();
+        let mut child=Grammar::from_glrm("extern token M start item ignore SPACE t SPACE=/ +/ nt item=\"a\" M?").unwrap();
         child.bind("M",TokenSet::new([9])).unwrap();
-        let mut p=Grammar::from_glrm("extern grammar C start root nt root::=\"P\" C \" X\"").unwrap().prepare(&v).unwrap();
+        let mut p=Grammar::from_glrm("extern grammar C start root nt root=\"P\" C \" X\"").unwrap().prepare(&v).unwrap();
         p.bind("C",child.prepare(&v).unwrap()).unwrap();
         for mode in MODES {
             explore(&p.link_with(mode.build_options()).unwrap(),&format!("composed {mode:?}"));
-            let c=Grammar::from_glrm("start root nt root::=\"\\u{e9}x\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
+            let c=Grammar::from_glrm("start root nt root=\"\\u{e9}x\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
             explore(&c,&format!("unicode {mode:?}"));
         }
     }
@@ -618,8 +618,8 @@ mod tests {
     fn union_counts_distinct_original_ids_not_owner_occurrences() {
         let v=Vocab::new(vec![(17,b"a".to_vec()),(29,b"b".to_vec()),(33,b"c".to_vec())]);
         for mode in MODES {
-            let a=Grammar::from_glrm("start r nt r::=\"ab\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
-            let b=Grammar::from_glrm("start r nt r::=\"ac\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
+            let a=Grammar::from_glrm("start r nt r=\"ab\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
+            let b=Grammar::from_glrm("start r nt r=\"ac\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
             let states=[a.start(),b.start()];
             assert_eq!(one(states.iter().map(View::of)).unwrap(),AtMostOne::One(17));
             assert_eq!(forced_tokens(&states).unwrap(),[17]);
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn ambiguous_query_stops_after_two_final_witnesses_without_filling_cache() {
         let v=Vocab::new((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
-        let c=Grammar::from_glrm("start r nt r::=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
+        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
         let s=c.start();let before=s.mask_cache.lock().unwrap().is_some();
         BYTE_PROOFS.with(|n|n.set(0));assert_eq!(s.probe_one_token().unwrap(),AtMostOne::MoreThanOne);
         let examined=BYTE_PROOFS.with(|n|n.get());assert!(examined<40,"performed {examined} byte proofs for a two-witness query");
@@ -643,8 +643,8 @@ mod tests {
         for id in 256..8192 {entries.push((id,format!("word{id:07}").into_bytes()));}
         let v=Vocab::new(entries);
         for (source,expected) in [
-            ("grammar CHILD { start inner nt inner::=\"!?\" } start root nt root::=CHILD \"!\"",vec![33,63,33]),
-            ("start root nt root::=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
+            ("grammar CHILD { start inner nt inner=\"!?\" } start root nt root=CHILD \"!\"",vec![33,63,33]),
+            ("start root nt root=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
         ] {
             for mode in MODES {
                 let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
@@ -670,9 +670,9 @@ mod tests {
     fn physical_alphabet_union_keeps_parent_suffix_child_ignore_and_nullable_returns() {
         let v=Vocab::new((0..256u32).map(|id|(id,vec![id as u8])).collect());
         for source in [
-            "grammar C { start r ignore WS t WS::=/ +/ nt r::=\"a\"? } start r nt r::=C \"Z\"",
-            "grammar C { start r ignore WS t WS::=/\\t+/ nt r::=\"a\" | \"ab\" } start r ignore WS t WS::=/ +/ nt r::=\"P\" C \"Z\"",
-            "grammar C { start r nt r::=\"(\" r \")\" | eps } start r nt r::=C \"Z\"",
+            "grammar C { start r ignore WS t WS=/ +/ nt r=\"a\"? } start r nt r=C \"Z\"",
+            "grammar C { start r ignore WS t WS=/\\t+/ nt r=\"a\" | \"ab\" } start r ignore WS t WS=/ +/ nt r=\"P\" C \"Z\"",
+            "grammar C { start r nt r=\"(\" r \")\" | eps } start r nt r=C \"Z\"",
         ] {
             for mode in MODES {
                 let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
@@ -745,15 +745,15 @@ mod differential_tests {
             (32,vec![0xc3]),(33,vec![0xa9]),(34,"\u{e9}".as_bytes().to_vec()),(67,b"a".to_vec()),
         ]);
         for source in [
-            "start root nt root::=\"ab\" \"c\"?",
-            "start root nt root::=\"a\" | \"ab\" | \"abc\"",
-            "start root t WORD::=/a|ab/ nt root::=WORD \"c\"?",
-            "start root t A::=/[ab]+/ t B::=/ab/ nt root::=A \"c\" | B",
-            "start root ignore WS t WS::=/ +/ nt root::=\"ab\"",
-            "start root t X::=(/a|ab/ - (/a|ab/ b/./s+)) nt root::=X \"b\"?",
-            "start root nt root::=\"(\" root \" )\" | \"()\"",
-            "start root nt root::=\"\u{e9}\" \"a\"?",
-            "start root nt root::=eps",
+            "start root nt root=\"ab\" \"c\"?",
+            "start root nt root=\"a\" | \"ab\" | \"abc\"",
+            "start root t WORD=/a|ab/ nt root=WORD \"c\"?",
+            "start root t A=/[ab]+/ t B=/ab/ nt root=A \"c\" | B",
+            "start root ignore WS t WS=/ +/ nt root=\"ab\"",
+            "start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=X \"b\"?",
+            "start root nt root=\"(\" root \" )\" | \"()\"",
+            "start root nt root=\"\u{e9}\" \"a\"?",
+            "start root nt root=eps",
         ] {
             for mode in MODES {
                 for eos in [Vec::new(),vec![130],vec![4]] {
@@ -775,7 +775,7 @@ mod differential_tests {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),
             (4,b"a".to_vec()),(5,b"ab".to_vec()),(7,Vec::new())]);
         for body in ["MARK", "MARK \"a\"", "\"ab\" | MARK \"c\"", "\"a\" MARK?", "MARK? \"b\""] {
-            let source=format!("extern token MARK start root nt root::={body}");
+            let source=format!("extern token MARK start root nt root={body}");
             for set in [vec![],vec![0],vec![4],vec![7],vec![99],vec![99,130],vec![0,4,7,99]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source).unwrap();g.bind("MARK",TokenSet::new(set.iter().copied())).unwrap();
@@ -790,8 +790,8 @@ mod differential_tests {
         let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,b"\t".to_vec()),
             (7,b"a X".to_vec()),(8,b"a".to_vec())]);
-        let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE::=/ +/ nt item::=\"a\" MARK?").unwrap().prepare(&v).unwrap();
-        let mut parent=Grammar::from_glrm("extern grammar CHILD start root nt root::=\"P\" CHILD \" X\"").unwrap().prepare(&v).unwrap();
+        let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap().prepare(&v).unwrap();
+        let mut parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap().prepare(&v).unwrap();
         parent.bind("CHILD",&child).unwrap();parent.bind("CHILD::MARK",TokenSet::from(9)).unwrap();
         for mode in MODES {
             let c=parent.link_with(mode.build_options()).unwrap();
@@ -805,8 +805,8 @@ mod differential_tests {
     #[test]
     fn bounded_dynamic_owner_union_counts_distinct_original_ids() {
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),(9,b"a".to_vec())]);
-        let a=Grammar::from_glrm("start root nt root::=\"ab\"").unwrap().compile(&v).unwrap();
-        let b=Grammar::from_glrm("start root nt root::=\"ac\"").unwrap().compile(&v).unwrap();
+        let a=Grammar::from_glrm("start root nt root=\"ab\"").unwrap().compile(&v).unwrap();
+        let b=Grammar::from_glrm("start root nt root=\"ac\"").unwrap().compile(&v).unwrap();
         let sa=a.start();let sb=b.start();
         assert_eq!(mask_for_states_at_most(&[sa.clone(),sb.clone()],2).unwrap(),Some(sa.mask()));
         assert!(mask_for_states_at_most(&[sa.clone(),sb.clone()],1).unwrap().is_none());
@@ -823,7 +823,7 @@ mod differential_tests {
         let json=r#"{"a": ["alpha", "β"], "score": -2, "enabled": true}"#;
         let lark="start: sum\n?sum: sum \"+\" atom | atom\n?atom: /[0-9]+/ | \"(\" sum \")\"\n%ignore /[ \\t]+/";
         let arithmetic="(17 + 28) + 3";
-        let regular="start root t WORD::=/[a-z]+/ - /bad/ nt root::=\"[\" WORD (\",\" WORD)* \"]\"";
+        let regular="start root t WORD=/[a-z]+/ - /bad/ nt root=\"[\" WORD (\",\" WORD)* \"]\"";
         let list="[alpha,bob]";
         let mut pieces=BTreeSet::new();
         for text in [json,arithmetic,list] {

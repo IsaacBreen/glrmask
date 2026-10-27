@@ -15,9 +15,9 @@ fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
 }
 
-const HOST: &str = "glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"y\";";
-const TOKEN_HOST: &str = "glrm 1; start start; extern token MARK; nt start ::= \"x\" MARK \"y\";";
-const OPEN: &str = "glrm 1; start start; extern grammar item; nt start ::= item;";
+const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
+const TOKEN_HOST: &str = "glrm 1; start start; extern token MARK; nt start = \"x\" MARK \"y\";";
+const OPEN: &str = "glrm 1; start start; extern grammar item; nt start = item;";
 
 #[test]
 fn immutable_source_and_compiled_bindings_cross_token_boundaries() {
@@ -251,7 +251,7 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
 fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
     let mut open = Module::new(&Grammar::from_glrm(
-        r#"glrm 1; start start; extern token CONTROL; nt start ::= "x" CONTROL "y";"#,
+        r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ).unwrap());
     open.precompile(&vocab).unwrap();
     let mut loaded_open = Module::load(open.save()).unwrap();
@@ -346,7 +346,7 @@ fn focused_4_open_child_rejection() {
 #[test]
 fn focused_5_externs_get_iter_order_len_unbound() {
     let g = Grammar::from_glrm(
-        "glrm 1; start s; extern token b; extern grammar a; extern token c; nt s ::= a b c;",
+        "glrm 1; start s; extern token b; extern grammar a; extern token c; nt s = a b c;",
     ).unwrap();
     let mut m = Module::new(&g);
     let externs = m.externs();
@@ -499,7 +499,7 @@ fn focused_10_expr_empty_choice_one_part_literal_token_leaf() {
 
     // 1. Empty choice matches nothing
     let empty_choice = Expr::choice(Vec::<Expr>::new());
-    let mut m_ec = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
+    let mut m_ec = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     m_ec.bind("E", empty_choice).unwrap();
     let c_ec = m_ec.compile(&v).unwrap();
     assert!(!c_ec.start().is_accepting());
@@ -508,21 +508,21 @@ fn focused_10_expr_empty_choice_one_part_literal_token_leaf() {
 
     // 2. One-part choice simplifies to that part
     let single_choice = Expr::choice([Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap())]);
-    let mut m_sc = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
+    let mut m_sc = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     m_sc.bind("E", single_choice).unwrap();
     let c_sc = m_sc.compile(&v).unwrap();
     assert!(allowed(&c_sc.start().mask(), 1));
 
     // 3. Literal matches exact bytes
     let lit = Expr::literal(b"a");
-    let mut m_lit = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
+    let mut m_lit = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     m_lit.bind("E", lit).unwrap();
     let c_lit = m_lit.compile(&v).unwrap();
     assert!(allowed(&c_lit.start().mask(), 1));
 
     // 4. Token leaf matches exact token ID
     let tok_leaf = Expr::from(TokenSet::from(7));
-    let mut m_tok = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
+    let mut m_tok = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     m_tok.bind("E", tok_leaf).unwrap();
     let c_tok = m_tok.compile(&v).unwrap();
     assert!(allowed(&c_tok.start().mask(), 7));
@@ -534,7 +534,7 @@ fn focused_11_grammar_compile_equals_module_new_compile() {
     let v = vocab();
     let grammars = [
         Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap(),
-        Grammar::from_glrm(r#"glrm 1; start s; nt s ::= "x" "a" "y";"#).unwrap(),
+        Grammar::from_glrm(r#"glrm 1; start s; nt s = "x" "a" "y";"#).unwrap(),
         Grammar::from_json_schema(r#"{"type": "string", "maxLength": 3}"#).unwrap(),
     ];
 

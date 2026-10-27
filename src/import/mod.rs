@@ -2372,7 +2372,7 @@ mod tests {
     fn programmatic_json_constructors_are_unsupported() {
         let vocab = vocab(&["x"]);
         let dynamic = Constraint::from_glrm_grammar(
-            "start dynamic; t IDENT ::= /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic ::= IDENT;",
+            "start dynamic; t IDENT = /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic = IDENT;",
             &vocab,
         )
         .unwrap();
@@ -2466,7 +2466,7 @@ mod tests {
     fn json_schema_dynamic_value_is_nested_but_not_root_escape() {
         let vocab = vocab(&["x", "{", "}", "\"name\"", ": ", "123"]);
         let dynamic = Constraint::from_glrm_grammar(
-            "start dynamic; t IDENT ::= /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic ::= IDENT;",
+            "start dynamic; t IDENT = /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic = IDENT;",
             &vocab,
         )
         .unwrap();
@@ -2492,7 +2492,7 @@ mod tests {
     fn json_schema_dynamic_value_applies_to_array_items() {
         let vocab = vocab(&["x", "[", "]", ", ", "1"]);
         let dynamic = Constraint::from_glrm_grammar(
-            "start dynamic; t IDENT ::= /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic ::= IDENT;",
+            "start dynamic; t IDENT = /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic = IDENT;",
             &vocab,
         )
         .unwrap();
@@ -2514,7 +2514,7 @@ mod tests {
             "result", ".status",
         ]);
         let dynamic = Constraint::from_glrm_grammar(
-            "start expr; nt expr ::= 'result' '.status';",
+            "start expr; nt expr = 'result' '.status';",
             &vocab,
         )
         .unwrap();
@@ -2538,7 +2538,7 @@ mod tests {
             "{", "}", "\"kind\"", ": ", "\"fixed\"", "\"wrong\"", "result", ".kind",
         ]);
         let dynamic = Constraint::from_glrm_grammar(
-            "start expr; nt expr ::= 'result' '.kind';",
+            "start expr; nt expr = 'result' '.kind';",
             &vocab,
         )
         .unwrap();
@@ -2671,7 +2671,7 @@ mod tests {
     #[test]
     fn glrm_import_uses_core_merged_table_by_default() {
         let constraint = Constraint::from_glrm_grammar(
-            "start start;\nt A ::= 'a' ;\nnt start ::= A ;\n",
+            "start start;\nt A = 'a' ;\nnt start = A ;\n",
             &vocab(&["a"]),
         )
         .unwrap();
@@ -2703,7 +2703,7 @@ mod tests {
                 start document;
                 extern token LEFT;
                 extern token RIGHT;
-                nt document ::= "{" "\"value\": " (LEFT | RIGHT) "}";
+                nt document = "{" "\"value\": " (LEFT | RIGHT) "}";
             "#,
             &vocab, &[("LEFT", 1000000), ("RIGHT", 1000001)], &[])
         .expect("partial terminal-family maps should merge without indexing the unmapped sentinel");
@@ -2716,16 +2716,16 @@ mod tests {
             r#"
                 start document;
                 ignore OUTER_WS;
-                t OUTER_WS ::= " "+;
+                t OUTER_WS = " "+;
 
                 grammar inner {
                     start value;
                     ignore INNER_WS;
-                    t INNER_WS ::= " "+;
-                    nt value ::= "a" "b";
+                    t INNER_WS = " "+;
+                    nt value = "a" "b";
                 };
 
-                nt document ::= "<" inner ">";
+                nt document = "<" inner ">";
             "#,
             &vocab,
         )
@@ -2747,24 +2747,24 @@ mod tests {
             r#"
                 start document;
                 ignore ROOT_WS;
-                t ROOT_WS ::= " "+;
+                t ROOT_WS = " "+;
 
                 grammar middle {
                     start wrapped;
                     ignore MIDDLE_WS;
-                    t MIDDLE_WS ::= " "+;
+                    t MIDDLE_WS = " "+;
 
                     grammar leaf {
                         start value;
                         ignore LEAF_WS;
-                        t LEAF_WS ::= " "+;
-                        nt value ::= "x";
+                        t LEAF_WS = " "+;
+                        nt value = "x";
                     };
 
-                    nt wrapped ::= "[" leaf "]";
+                    nt wrapped = "[" leaf "]";
                 };
 
-                nt document ::= "<" middle ">";
+                nt document = "<" middle ">";
             "#,
             &vocab,
         )
@@ -2783,16 +2783,16 @@ mod tests {
             r#"
                 start document;
                 ignore OUTER_WS;
-                t OUTER_WS ::= " "+;
+                t OUTER_WS = " "+;
 
                 grammar inner {
                     start value;
                     ignore INNER_WS;
-                    t INNER_WS ::= "\t"+;
-                    nt value ::= "a" "b";
+                    t INNER_WS = "\t"+;
+                    nt value = "a" "b";
                 };
 
-                nt document ::= "<" inner ">";
+                nt document = "<" inner ">";
             "#,
             &vocab,
         )
@@ -2814,14 +2814,14 @@ mod tests {
             r#"
                 start document;
                 ignore OUTER_WS;
-                t OUTER_WS ::= " "+;
+                t OUTER_WS = " "+;
 
                 grammar inner {
                     start value;
-                    nt value ::= "a" "b";
+                    nt value = "a" "b";
                 };
 
-                nt document ::= "<" inner ">";
+                nt document = "<" inner ">";
             "#,
             &vocab,
         )
@@ -2839,7 +2839,7 @@ mod tests {
         let child = Constraint::from_glrm_grammar(
             r#"
                 start child;
-                nt child ::= "a" "b";
+                nt child = "a" "b";
             "#,
             &vocab,
         )
@@ -2848,7 +2848,7 @@ mod tests {
             r#"
                 start document;
                 extern grammar payload;
-                nt document ::= "X" payload "!";
+                nt document = "X" payload "!";
             "#,
             &[("payload", &child)],
             &vocab,
@@ -2859,9 +2859,9 @@ mod tests {
                 start document;
                 grammar payload {
                     start child;
-                    nt child ::= "a" "b";
+                    nt child = "a" "b";
                 };
-                nt document ::= "X" payload "!";
+                nt document = "X" payload "!";
             "#,
             &vocab,
         )
@@ -2884,7 +2884,7 @@ mod tests {
     fn glrm_external_subgrammars_support_adjacent_reuse() {
         let vocab = vocab(&["X", "a", "!", "Xa", "aa!"]);
         let child = Constraint::from_glrm_grammar(
-            "start child; nt child ::= \"a\";",
+            "start child; nt child = \"a\";",
             &vocab,
         )
         .unwrap();
@@ -2893,7 +2893,7 @@ mod tests {
                 start document;
                 extern grammar left;
                 extern grammar right;
-                nt document ::= "X" left right "!";
+                nt document = "X" left right "!";
             "#,
             &[("left", &child), ("right", &child)],
             &vocab,
@@ -2902,8 +2902,8 @@ mod tests {
         let inline = Constraint::from_glrm_grammar(
             r#"
                 start document;
-                nt child ::= "a";
-                nt document ::= "X" child child "!";
+                nt child = "a";
+                nt document = "X" child child "!";
             "#,
             &vocab,
         )
@@ -2930,15 +2930,15 @@ mod tests {
             grammar wrapper {
                 start value;
                 extern grammar leaf;
-                nt value ::= "[" leaf "]";
+                nt value = "[" leaf "]";
             };
-            nt document ::= "<" wrapper ">";
+            nt document = "<" wrapper ">";
         "#;
         let err = Grammar::from_glrm(source).unwrap_err().to_string();
         assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
 
         let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s ::= `wrapper::leaf`;")
+        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;")
             .and_then(|g| Module::new(&g).bind("wrapper::leaf", leaf));
         assert!(bound.is_err(), "a qualified extern path must be rejected");
     }
@@ -2950,8 +2950,8 @@ mod tests {
             r#"
                 start value;
                 ignore CHILD_WS;
-                t CHILD_WS ::= "\t"+;
-                nt value ::= "a" "b";
+                t CHILD_WS = "\t"+;
+                nt value = "a" "b";
             "#,
             &vocab,
         )
@@ -2960,9 +2960,9 @@ mod tests {
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 extern grammar child;
-                nt document ::= "<" child ">";
+                nt document = "<" child ">";
             "#,
             &[("child", &child)],
             &vocab,
@@ -2972,14 +2972,14 @@ mod tests {
             r#"
                 start document;
                 ignore PARENT_WS;
-                t PARENT_WS ::= " "+;
+                t PARENT_WS = " "+;
                 grammar child {
                     start value;
                     ignore CHILD_WS;
-                    t CHILD_WS ::= "\t"+;
-                    nt value ::= "a" "b";
+                    t CHILD_WS = "\t"+;
+                    nt value = "a" "b";
                 };
-                nt document ::= "<" child ">";
+                nt document = "<" child ">";
             "#,
             &vocab,
         )
@@ -2998,11 +2998,11 @@ mod tests {
     fn glrm_external_subgrammar_api_retains_missing_slot_and_rejects_invalid_bindings() {
         let vocab = vocab(&["a"]);
         let child = Constraint::from_glrm_grammar(
-            "start child; nt child ::= \"a\";",
+            "start child; nt child = \"a\";",
             &vocab,
         )
         .unwrap();
-        let source = "start document; extern grammar child; nt document ::= child;";
+        let source = "start document; extern grammar child; nt document = child;";
 
         let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
             .expect("an unresolved extern is a valid late-binding slot");
@@ -3041,7 +3041,7 @@ mod tests {
             r#"
                 start child;
                 extern token MARK;
-                nt child ::= "a" MARK;
+                nt child = "a" MARK;
             "#,
             &vocab, &[("MARK", 2)], &[])
         .unwrap();
@@ -3049,7 +3049,7 @@ mod tests {
             r#"
                 start document;
                 extern grammar child;
-                nt document ::= child "!";
+                nt document = child "!";
             "#,
             &[("child", &child)],
             &vocab,
@@ -3072,7 +3072,7 @@ mod tests {
     #[test]
     fn typed_glrm_api_without_externals_is_the_normal_compile_path() {
         let vocab = vocab(&["a"]);
-        let source = "start document; nt document ::= \"a\";";
+        let source = "start document; nt document = \"a\";";
         let typed = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab).unwrap();
         let normal = Constraint::from_glrm_grammar(source, &vocab).unwrap();
         assert_eq!(typed.start().mask(), normal.start().mask());
@@ -3082,12 +3082,12 @@ mod tests {
     fn glrm_external_subgrammar_placeholders_avoid_end_tokens() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let child = Constraint::from_glrm_grammar(
-            "start child; nt child ::= \"a\";",
+            "start child; nt child = \"a\";",
             &vocab,
         )
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-            "start document; extern grammar child; nt document ::= child;",
+            "start document; extern grammar child; nt document = child;",
             &[("child", &child)],
             &vocab,
             &[1],

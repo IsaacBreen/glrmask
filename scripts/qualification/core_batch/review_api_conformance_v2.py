@@ -92,14 +92,14 @@ def walk(c):
 
 v=g.Vocab.from_id_to_bytes({0:b"a",1:b"b",2:b"ab",3:b"abc",4:b"a",5:b" ",6:b"c",7:b"",8:b"x",32:b"\xc3",33:b"\xa9",34:chr(233).encode(),67:b"a",99:b"",130:b""})
 for source in [
-    'start root nt root::="ab" "c"?',
-    'start root t X::=/a|ab/ nt root::=X "c"?',
-    'start root ignore SPACE t SPACE::=/ +/ nt root::="ab"',
-    'start root t X::=(/a|ab/ - (/a|ab/ b/./s+)) nt root::=X "b"?',
-    'start root nt root::="\u00e9" "a"?',
-    'start root nt root::=eps',
-    'start root nt root::=@mark(1) "a" @mark(2) "b" @mark(3)',
-    'start root t X::=(/a|ab/ - (/a|ab/ b/./s+)) nt root::=@mark(11) X @mark(12) "c"?',
+    'start root nt root="ab" "c"?',
+    'start root t X=/a|ab/ nt root=X "c"?',
+    'start root ignore SPACE t SPACE=/ +/ nt root="ab"',
+    'start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=X "b"?',
+    'start root nt root="\u00e9" "a"?',
+    'start root nt root=eps',
+    'start root nt root=@mark(1) "a" @mark(2) "b" @mark(3)',
+    'start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=@mark(11) X @mark(12) "c"?',
 ]:
     for mode in modes:
         for ends in [[],[130],[4]]:
@@ -108,10 +108,10 @@ for source in [
             restored=g.Constraint.load(c.save())
             verify_state(restored.start())
 
-for source in ['extern token M start root nt root::=M "a"?',
-               'extern token M start root nt root::="ab" | M "c"',
-               'extern grammar M start root nt root::=M "b"',
-               'extern token M start root nt root::=@mark(7) M @mark(8) "b" @mark(9)']:
+for source in ['extern token M start root nt root=M "a"?',
+               'extern token M start root nt root="ab" | M "c"',
+               'extern grammar M start root nt root=M "b"',
+               'extern token M start root nt root=@mark(7) M @mark(8) "b" @mark(9)']:
     for values in [[],[0],[4],[7],[99],[0,4,7,99]]:
         for mode in modes:
             desc=g.Grammar.from_glrm(source)
@@ -120,8 +120,8 @@ for source in ['extern token M start root nt root::=M "a"?',
 
 # Snapshot identities, aliases, save/load, strong per-bind failure semantics.
 for prepared in [False,True]:
-    child=g.Grammar.from_glrm('extern token M start root nt root::="a" M')
-    parent=g.Grammar.from_glrm('extern grammar L extern grammar R start root nt root::=L R')
+    child=g.Grammar.from_glrm('extern token M start root nt root="a" M')
+    parent=g.Grammar.from_glrm('extern grammar L extern grammar R start root nt root=L R')
     if prepared:child=child.prepare(v);parent=parent.prepare(v)
     alias=parent
     assert parent.bind("L",child) is None
@@ -150,7 +150,7 @@ for prepared in [False,True]:
         assert len(load.requirements)==2
 
 # Independent mutable handles share definitions, not updates.
-source="\n".join(f"extern token E{i}" for i in range(128))+"\nstart root nt root::=E0"
+source="\n".join(f"extern token E{i}" for i in range(128))+"\nstart root nt root=E0"
 for prepared in [False,True]:
     template=g.Grammar.from_glrm(source)
     if prepared:template=template.prepare(v)

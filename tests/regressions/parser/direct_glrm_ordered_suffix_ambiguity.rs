@@ -21,7 +21,7 @@ fn direct_ordered_suffix_glrm(n_caps: usize) -> String {
     let total_fields = 6 + n_caps;
     for field in 0..total_fields {
         let ch = field_name(field);
-        lines.push(format!("nt f_{field} ::= \"{ch}\";"));
+        lines.push(format!("nt f_{field} = \"{ch}\";"));
     }
 
     let mut variants = Vec::new();
@@ -59,11 +59,11 @@ fn direct_ordered_suffix_glrm(n_caps: usize) -> String {
         }
 
         let name = format!("v_{required_cap_index}");
-        lines.push(format!("nt {name} ::= {};", pieces.join(" ")));
+        lines.push(format!("nt {name} = {};", pieces.join(" ")));
         variants.push(name);
     }
 
-    lines.push(format!("nt start ::= {};", variants.join(" | ")));
+    lines.push(format!("nt start = {};", variants.join(" | ")));
     lines.join("\n") + "\n"
 }
 

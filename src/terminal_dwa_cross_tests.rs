@@ -70,10 +70,10 @@ mod ti_mre_tests {
     fn p7_boundary_bypass_matches_forced_full_ti_reference() {
         let grammar = r#"
 start S;
-t TRUE ::= "true";
-t FALSE ::= "false";
-t NULL ::= "null";
-nt S ::= TRUE | FALSE | NULL;
+t TRUE = "true";
+t FALSE = "false";
+t NULL = "null";
+nt S = TRUE | FALSE | NULL;
 "#;
         let vocab = Vocab::new(
             vec![
@@ -99,9 +99,9 @@ nt S ::= TRUE | FALSE | NULL;
     fn p8_boundary_bypass_matches_forced_full_ti_reference() {
         let grammar = r#"
 start S;
-t QUOTE ::= "\"";
-t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
-nt S ::= QUOTE IDENT;
+t QUOTE = "\"";
+t IDENT = /[A-Za-z_][A-Za-z0-9_]*/;
+nt S = QUOTE IDENT;
 "#;
         let vocab = Vocab::new(
             vec![
@@ -148,14 +148,14 @@ nt S ::= QUOTE IDENT;
         let grammar = r#"
 start S;
 pragma glrmask {
-lexer group a ::= A;
-lexer group b ::= B;
-lexer group c ::= C;
+lexer group a = A;
+lexer group b = B;
+lexer group c = C;
 }
-t A ::= "x";
-t B ::= b/[xy]/ & b/[xz]/;
-t C ::= "z";
-nt S ::= A | B | C;
+t A = "x";
+t B = b/[xy]/ & b/[xz]/;
+t C = "z";
+nt S = A | B | C;
 "#;
         let vocab = Vocab::new(
             vec![
@@ -183,12 +183,12 @@ nt S ::= A | B | C;
         let grammar = r#"
 start S;
 pragma glrmask {
-lexer group quote ::= QUOTE;
-lexer group ident ::= IDENT;
+lexer group quote = QUOTE;
+lexer group ident = IDENT;
 }
-t QUOTE ::= "\"";
-t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
-nt S ::= QUOTE IDENT;
+t QUOTE = "\"";
+t IDENT = /[A-Za-z_][A-Za-z0-9_]*/;
+nt S = QUOTE IDENT;
 "#;
         let vocab = Vocab::new(
             vec![
@@ -223,11 +223,11 @@ nt S ::= QUOTE IDENT;
         // `[SPACE, CLASS]`. Regression guard for that coalescing fix.
         let grammar = r#"
 start S;
-t V ::= /.+/;
-t SPACE ::= " ";
-t FROM ::= /_a_/;
-t CLASS ::= /_b_/;
-nt S ::= FROM V | SPACE V SPACE CLASS;
+t V = /.+/;
+t SPACE = " ";
+t FROM = /_a_/;
+t CLASS = /_b_/;
+nt S = FROM V | SPACE V SPACE CLASS;
 "#;
         let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())]);
 

@@ -5,8 +5,8 @@ use serde_json::{json,Value};
 use glrmask::PreparedGrammar as Prepared;
 const JSON_SOURCE:&str=r#"{"type":"object","properties":{"name":{"type":"string","pattern":"^[a-z]+$"},"events":{"type":"array","items":{"type":"integer","minimum":0,"maximum":99},"maxItems":5},"active":{"type":"boolean"}},"required":["name","events","active"],"additionalProperties":false}"#;
 const LARK_SOURCE:&str="start: expr\n?expr: expr \"+\" term | expr \"-\" term | term\n?term: term \"*\" atom | term \"/\" atom | atom\n?atom: INT | \"(\" expr \")\"\nINT: /[0-9]+/\n%ignore /[ \\t\\n]+/";
-const SIMPLE:&str="glrm 1; start root; t ITEM ::= /[a-z]+/; nt root ::= \"[\" ITEM (\",\" ITEM)* \"]\";";
-const CHILD:&str="glrm 1; start root; t WS ::= /[ \\t]+/; ignore WS; t ITEM ::= /[a-z]+/; nt root ::= \"[\" ITEM (\",\" ITEM)* \"]\";";
+const SIMPLE:&str="glrm 1; start root; t ITEM = /[a-z]+/; nt root = \"[\" ITEM (\",\" ITEM)* \"]\";";
+const CHILD:&str="glrm 1; start root; t WS = /[ \\t]+/; ignore WS; t ITEM = /[a-z]+/; nt root = \"[\" ITEM (\",\" ITEM)* \"]\";";
 const TEXTS:[(&str,&str);5]=[
     ("json_schema",r#"{"name": "alice", "events": [1, 2, 3], "active": true}"#),
     ("lark_arithmetic","((17 + 28) * (3 - 4)) / 9"),
@@ -37,13 +37,13 @@ fn grammar(case:&str,_vocab:&Vocab)->Result<Grammar,Box<dyn Error>>{
         "lark_arithmetic"=>Grammar::from_lark(LARK_SOURCE)?,
         "glrm_list"=>Grammar::from_glrm(SIMPLE)?,
         "scoped_child"=>{
-            let p=if true {"glrm 1; start root; extern grammar CHILD; nt root ::= \"BEGIN:\" CHILD \":END\";"}
-                else {"glrm 1; start root; extern CHILD; nt root ::= \"BEGIN:\" CHILD \":END\";"};
+            let p=if true {"glrm 1; start root; extern grammar CHILD; nt root = \"BEGIN:\" CHILD \":END\";"}
+                else {"glrm 1; start root; extern CHILD; nt root = \"BEGIN:\" CHILD \":END\";"};
             { let mut g=Grammar::from_glrm(p)?;g.bind("CHILD",Grammar::from_glrm(CHILD)?)?;g }
         },
         "exact_token_set"=>{
-            let p=if true {"glrm 1; start root; extern token MARK; nt root ::= MARK MARK;"}
-                else {"glrm 1; start root; extern MARK; nt root ::= MARK MARK;"};
+            let p=if true {"glrm 1; start root; extern token MARK; nt root = MARK MARK;"}
+                else {"glrm 1; start root; extern MARK; nt root = MARK MARK;"};
             { let mut g=Grammar::from_glrm(p)?;g.bind("MARK",glrmask::TokenSet::from_ranges(std::iter::once(97..=122)))?;g }
         },
         _=>unreachable!(),

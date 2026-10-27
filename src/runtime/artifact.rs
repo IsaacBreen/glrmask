@@ -11561,7 +11561,7 @@ mod immutable_tokenizer_tests {
     #[test]
     fn constraint_clone_shares_the_same_immutable_lexer() {
         let vocab=crate::Vocab::new(vec![(1,b"a".to_vec()),(2,b"b".to_vec())]);
-        let source=Constraint::from_glrm_grammar(r#"start x; nt x ::= "a" | "b";"#,&vocab).unwrap();
+        let source=Constraint::from_glrm_grammar(r#"start x; nt x = "a" | "b";"#,&vocab).unwrap();
         let copy=source.clone();assert!(Arc::ptr_eq(&source.tokenizer,&copy.tokenizer));assert_eq!(source.save(),copy.save());
     }
 }
@@ -11613,7 +11613,7 @@ mod raw_terminal_radius_tests {
         let mut positive = 0usize;
         let mut checked = 0usize;
         for (pattern, slice_pattern, atoms) in fixtures {
-            let grammar = format!("glrm 1; start s; t WORD ::= /{pattern}/; nt s ::= WORD;");
+            let grammar = format!("glrm 1; start s; t WORD = /{pattern}/; nt s = WORD;");
             let constraint = Constraint::compile(Grammar::glrm(&grammar), &vocab).unwrap();
             let terminal = constraint.terminal_display_names.iter()
                 .position(|name| name == "WORD").unwrap() as TerminalID;
