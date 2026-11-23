@@ -1663,7 +1663,7 @@ mod standard_dialect_corpus {
         if std::env::var_os("GLRMASK_WRITE_LARK_CORPUS").is_some() {
             std::fs::write("/tmp/lark-standard-corpus.golden", &actual).unwrap();
         }
-        assert_eq!(actual, include_str!("../../tests/data/lark-standard-corpus.golden"));
+        assert_eq!(actual, include_str!("../../tests/data/lark-standard-corpus.golden").replace("\r\n", "\n"));
     }
 }
 
