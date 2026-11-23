@@ -94,5 +94,5 @@ def test_empty_event_binding_recognizes_no_output():
 
 def test_glrm_markers_are_rejected_by_the_public_parser():
     with pytest.raises((ValueError, RuntimeError)) as excinfo:
-        glrmask.Grammar.from_glrm('start start;\nnt start = @mark(1) "a";')
+        glrmask.Grammar.from_glrm('start start;\nnt start ::= @mark(1) "a";')
     assert "`@mark` isn't supported" in str(excinfo.value)

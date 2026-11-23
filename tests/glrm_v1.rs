@@ -891,7 +891,7 @@ nt start ::= WORD;
 
 #[test]
 fn extern_without_a_kind_is_rejected_at_the_declaration() {
-    let source = "glrm 1;\nstart root;\nextern child;\nnt root = \"x\";\n";
+    let source = "glrm 1;\nstart root;\nextern child;\nnt root ::= \"x\";\n";
     let error = Grammar::from_glrm(source).unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -939,7 +939,7 @@ fn glrm_definition_with_coloncolon_equals_is_rejected_with_message_and_span() {
 
 #[test]
 fn glrm_token_atoms_are_rejected_by_the_public_parser() {
-    let error = Grammar::from_glrm("start start;\nnt start = @token(5);").unwrap_err();
+    let error = Grammar::from_glrm("start start;\nnt start ::= @token(5);").unwrap_err();
     assert!(
         error.to_string().contains("token IDs can't appear in GLRM"),
         "{error}"
@@ -948,7 +948,7 @@ fn glrm_token_atoms_are_rejected_by_the_public_parser() {
 
 #[test]
 fn glrm_markers_are_rejected_by_the_public_parser() {
-    let error = Grammar::from_glrm("start start;\nnt start = @mark(1) \"a\";").unwrap_err();
+    let error = Grammar::from_glrm("start start;\nnt start ::= @mark(1) \"a\";").unwrap_err();
     assert!(
         error.to_string().contains("`@mark` isn't supported"),
         "{error}"
