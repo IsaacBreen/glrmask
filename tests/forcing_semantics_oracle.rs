@@ -83,7 +83,7 @@ fn grammar_source(words: &Residuals) -> (String, BTreeSet<u32>) {
         }).collect::<Vec<_>>().join(" ")
     }).collect::<Vec<_>>().join(" | ");
     let declarations = events.iter().map(|id| format!("extern token EVENT_{id}\n")).collect::<String>();
-    (format!("start root\n{declarations}nt root = {alternatives}\n"), events)
+    (format!("start root\n{declarations}nt root ::= {alternatives}\n"), events)
 }
 
 fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: &str) -> usize {
@@ -191,7 +191,7 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
     ];
     let vocab=Vocab::new(entries.iter().filter_map(|e|
         e.bytes.as_ref().map(|bytes|(e.id,bytes.clone()))).collect());
-    let parent = Grammar::from_glrm("extern grammar CHILD start root nt root=\"(\" CHILD \")\"").unwrap();
+    let parent = Grammar::from_glrm("extern grammar CHILD start root nt root::=\"(\" CHILD \")\"").unwrap();
     let parent_prepared=parent.prepare(&vocab).unwrap();
     let leaf_cases: Vec<Residuals>=vec![
         [vec![B(b'a'),B(b'b')]].into_iter().collect(),
@@ -235,7 +235,7 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
         let vocab=Vocab::new(vec![
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"a".to_vec()),
             (highest,b"unused".to_vec())]);
-        let g=Grammar::from_glrm("extern token MARK start root nt root=\"a\" \"b\" | MARK \"b\"").unwrap()
+        let g=Grammar::from_glrm("extern token MARK start root nt root::=\"a\" \"b\" | MARK \"b\"").unwrap()
             .bind_snapshot("MARK",TokenSet::new([3])).unwrap();
         for mode in MaskMode::ALL {
             let c=g.compile_with_build_options(&vocab,mode.build_options()).unwrap();

@@ -13,10 +13,10 @@ fn main() -> glrmask::Result<()> {
     // Arithmetic, then the end token.
     let arithmetic = Grammar::from_glrm(r#"
         start sum
-        t NUMBER = /[0-9]+/
-        nt sum = product | sum "+" product
-        nt product = atom | product "*" atom
-        nt atom = NUMBER | "(" sum ")"
+        t NUMBER ::= /[0-9]+/
+        nt sum ::= product | sum "+" product
+        nt product ::= atom | product "*" atom
+        nt atom ::= NUMBER | "(" sum ")"
     "#)?;
     let grammar = Grammar::from_expr(Expr::sequence([Expr::from(arithmetic), Expr::from(TokenSet::from(eos))]))?;
     let constraint = grammar.compile(&vocab)?;

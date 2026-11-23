@@ -40,7 +40,7 @@ weather.precompile(vocab);
 glrmask::Module call(glrmask::Grammar::from_glrm(R"(
     extern grammar ARGS
     start call
-    nt call = "<weather>" ARGS "</weather>")"));
+    nt call ::= "<weather>" ARGS "</weather>")"));
 call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```

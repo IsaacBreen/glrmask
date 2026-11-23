@@ -495,8 +495,8 @@ mod tests {
             "start root\nnt root = \"x\" | \"(\" @mark(1) root @mark(2) \")\"\n",
             "start root\nnt root = \"a\" @mark(1) root \"b\" @mark(2) | eps\n",
             "start root\nnt root = (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\")*\n",
-            "start root\nignore WS\nt WS = \" \"\nnt root = (\"a\" @mark(1) \"b\" @mark(2))*\n",
-            "start root\nt WORD = /[a-c]+/\nnt root = @mark(1) WORD @mark(2) \":\" WORD @mark(3)\n",
+            "start root\nignore WS\nt WS ::= \" \"\nnt root = (\"a\" @mark(1) \"b\" @mark(2))*\n",
+            "start root\nt WORD ::= /[a-c]+/\nnt root = @mark(1) WORD @mark(2) \":\" WORD @mark(3)\n",
             "start root\nnt root = @mark(1)* (\"a\" @mark(2))* @mark(3)\n",
         ];
         let mut comparisons = 0usize;

@@ -13,8 +13,8 @@ fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
 }
 
-const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
-const OPEN: &str = "glrm 1; start start; extern grammar item; nt start = item;";
+const HOST: &str = "glrm 1; start start; extern grammar child; nt start ::= \"x\" child \"y\";";
+const OPEN: &str = "glrm 1; start start; extern grammar item; nt start ::= item;";
 
 fn a() -> Grammar {
     Grammar::from_ebnf("start ::= \"a\"").unwrap()
@@ -118,13 +118,13 @@ fn expr_crosses_boundaries_and_parentheses_do_not_change_paths() {
 fn empty_operators_have_explicit_behavior() {
     let v = vocab();
     // Empty sequence matches epsilon
-    let mut host_eps = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
+    let mut host_eps = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
     host_eps.bind("E", Expr::sequence(Vec::<Expr>::new())).unwrap();
     let eps_constraint = host_eps.compile(&v).unwrap();
     assert!(eps_constraint.start().is_accepting());
 
     // Empty choice matches nothing
-    let mut host_choice = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
+    let mut host_choice = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
     host_choice.bind("E", Expr::choice(Vec::<Expr>::new())).unwrap();
     let choice_constraint = host_choice.compile(&v).unwrap();
     assert!(!choice_constraint.start().is_accepting());
@@ -135,7 +135,7 @@ fn empty_operators_have_explicit_behavior() {
 #[test]
 fn exact_events_identity_and_kind_widening_survive_storage() {
     let v = vocab();
-    let host = Grammar::from_glrm("glrm 1; start start; extern token mark; nt start = mark;").unwrap();
+    let host = Grammar::from_glrm("glrm 1; start start; extern token mark; nt start ::= mark;").unwrap();
     let mut m = Module::new(&host);
     assert!(m.bind("mark", a()).is_err());
     m.bind("mark", TokenSet::new([7, 99])).unwrap();
@@ -286,7 +286,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     assert!(accepts(&c, &[0, 7, 3]));
     assert!(!accepts(&c, &[0, 1, 3]));
 
-    let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
+    let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s ::= mark;").unwrap());
     terminal.precompile_with(&v, trie.clone()).unwrap();
     terminal.bind("mark", TokenSet::from(99)).unwrap();
     let c = Module::load(terminal.save()).unwrap().compile_with(&v, trie).unwrap();
@@ -329,7 +329,7 @@ fn compile_succeeds_on_threads_with_small_stacks() {
         .stack_size(128 * 1024)
         .spawn(|| {
             let vocab = Vocab::new(vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())]);
-            let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M").unwrap());
+            let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r::=M").unwrap());
             template.precompile(&vocab).unwrap();
             let mut request = template.clone();
             request.bind("M", TokenSet::from(17)).unwrap();

@@ -57,7 +57,7 @@ fn markers_reject_invalid_ids_and_byte_terminal_contexts() {
     for atom in ["@mark(-1)", "@mark(4294967296)", "@mark(name)", "@mark()", "@mark(1,2)"] {
         assert!(ParsedComponent::parse_glrm_with_markers(&format!("start root\nnt root = {atom}\n")).is_err(), "{atom}");
     }
-    let result = ParsedComponent::parse_glrm_with_markers("start root\nt ITEM = @mark(1)\nnt root = ITEM\n")
+    let result = ParsedComponent::parse_glrm_with_markers("start root\nt ITEM ::= @mark(1)\nnt root = ITEM\n")
         .and_then(|p| p.lower_closed()).and_then(|n| ast::lower(&n));
     assert!(result.is_err(), "a marker must not be treated as an empty byte regex");
     assert!(ParsedComponent::parse_glrm("start root\nnt root = @token(1)\n").is_err());

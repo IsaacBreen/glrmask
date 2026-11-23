@@ -72,13 +72,13 @@ def test_json_schema_constructor_accepts_text_and_objects():
 
 def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     v = vocab()
-    g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
+    g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start ::= T C;')
     child = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(TypeError):
         _bound_snapshot(g, 'T', 'not a binding')
     with pytest.raises(ValueError):
         _bound_snapshot(g, 'T', child)
-    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
+    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s ::= X;")
     with pytest.raises(ValueError, match="unbound externs"):
         _bound_snapshot(g, 'C', open_child)
     bound = _bound_snapshot(g, 'T', glrmask.TokenSet([7]))
@@ -114,7 +114,7 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     assert not s.commit_bytes(b'a')
 def test_description_owns_source_bindings_after_collection():
     v = vocab()
-    parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
+    parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start ::= C;')
     child_source = glrmask.Grammar.from_lark('start: "a"')
     a = _bound_snapshot(parent, 'C', child_source)
     del parent, child_source, v
@@ -153,7 +153,7 @@ def test_token_set_has_no_introspection_accessors():
 def test_token_set_and_sparse_membership_validation():
     assert hasattr(glrmask, "Expr")
     v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
-    g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
+    g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s ::= item;")
     m = glrmask.Module.load(glrmask.Module(g).save())
     # A token set is IDs only; IDs the vocabulary does not define are allowed in
     # the set and simply never match any text.
@@ -171,7 +171,7 @@ def test_token_set_and_sparse_membership_validation():
     text = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(ValueError):
         _bound_snapshot(g, "item", text)
-    general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
+    general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s ::= item;")
     assert np.flatnonzero(_bound_snapshot(general, "item", text).compile(v).start().mask()).tolist() == [2, 7]
 
 
@@ -259,7 +259,7 @@ def test_public_reprs_are_stable_and_python_quoted():
     assert repr(wide) == "<glrmask.TokenSet: 9 tokens in 9 ranges>"
 
     grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern token TOK; extern grammar child; nt root = TOK;"
+        "glrm 1; start root; extern token TOK; extern grammar child; nt root ::= TOK;"
     )
     externs = grammar.externs
     assert repr(externs["TOK"]) == "Extern(name='TOK', kind='token')"
@@ -272,7 +272,7 @@ def test_public_reprs_are_stable_and_python_quoted():
 
 def token_extern_grammar():
     return glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern token T; nt root = T;"
+        "glrm 1; start root; extern token T; nt root ::= T;"
     )
 
 
@@ -307,7 +307,7 @@ def test_grammar_copy_binds_independently():
 
 def test_grammar_batch_bind_is_atomic():
     grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern token a; extern token b; nt root = a b;"
+        "glrm 1; start root; extern token a; extern token b; nt root ::= a b;"
     )
     with pytest.raises(ValueError):
         grammar.bind(a=0, b=glrmask.Grammar.from_lark('start: "a"'))

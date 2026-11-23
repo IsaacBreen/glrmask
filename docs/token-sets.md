@@ -14,7 +14,7 @@ vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(128)})
 grammar = glrmask.Grammar.from_glrm('''
     extern token BEGIN_CALL
     start reply
-    nt reply = /[a-z ]*/ | BEGIN_CALL "weather"
+    nt reply ::= /[a-z ]*/ | BEGIN_CALL "weather"
 ''')
 grammar.bind("BEGIN_CALL", begin_call)
 state = grammar.compile(vocab).start()

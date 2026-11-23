@@ -27,7 +27,7 @@ fn construction_and_compile_options_do_not_change_the_source_grammar() {
 #[test]
 fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
     let v = vocab();
-    let source = Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT").unwrap();
+    let source = Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root::=LEFT RIGHT").unwrap();
     let mut prepared = Module::new(&source);
     prepared.precompile(&v).unwrap();
     let saved_open = prepared.save();
@@ -54,7 +54,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\"").unwrap());
         b.precompile_with(&v, mode.compile_options()).unwrap();
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
-        let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
+        let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s ::= E;").unwrap());
         host.bind("E", expr).unwrap();
         let loaded = Module::load(host.save()).unwrap();
         let root = loaded
@@ -69,8 +69,8 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
 
 #[test]
 fn open_child_and_qualified_paths_are_strictly_rejected() {
-    let a = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;").unwrap();
-    let mut parent = Module::new(&Grammar::from_glrm("extern grammar CHILD start s nt s=CHILD;").unwrap());
+    let a = Grammar::from_glrm("extern grammar VALUE start s nt s::=VALUE;").unwrap();
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar CHILD start s nt s::=CHILD;").unwrap());
     let err = parent.bind("CHILD", Module::new(&a)).unwrap_err().to_string();
     assert!(err.contains("unbound externs"), "must reject open child: {err}");
     assert!(err.contains("VALUE"), "must list unbound externs: {err}");
@@ -86,7 +86,7 @@ fn compile_options_never_invalidate_retained_work() {
     leaf.precompile(&v).unwrap();
     let _before_save = leaf.save();
 
-    let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;").unwrap());
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s::=VALUE;").unwrap());
     parent.bind("VALUE", &leaf).unwrap();
     let root = Grammar::from_expr(Expr::sequence([
         Expr::from(parent),

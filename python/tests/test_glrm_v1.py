@@ -33,7 +33,7 @@ def _grammar():
     glrm 1;
     start start;
     extern token END;
-    nt start = "a" END;
+    nt start ::= "a" END;
     '''
 
 

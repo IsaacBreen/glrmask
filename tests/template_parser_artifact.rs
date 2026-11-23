@@ -47,9 +47,9 @@ fn compare_dynamic(left: &DynamicConstraint, right: &DynamicConstraint) {
 }
 
 const GRAMMARS: &[&str] = &[
-    r#"start root; t A = "a"; nt root = A ("," A)*;"#,
-    r#"start root; t A = "a"; nt root = A | "(" root ")";"#,
-    r#"start root; ignore WS; t WS = " "+; t A = "a"+; t B = "a"+ "b"?; nt root = A | B;"#,
+    r#"start root; t A ::= "a"; nt root ::= A ("," A)*;"#,
+    r#"start root; t A ::= "a"; nt root ::= A | "(" root ")";"#,
+    r#"start root; ignore WS; t WS ::= " "+; t A ::= "a"+; t B ::= "a"+ "b"?; nt root ::= A | B;"#,
 ];
 
 #[test]
@@ -376,7 +376,7 @@ fn compact_template_edges_reject_cycles_missing_targets_and_bad_labels() {
 fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     use glrmask::BuildOptions;
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
-    let source=Grammar::from_glrm(r#"start root; t A = "a"; nt root = A;"#).unwrap();
+    let source=Grammar::from_glrm(r#"start root; t A ::= "a"; nt root ::= A;"#).unwrap();
     let reference=source.compile_with_build_options(&v,BuildOptions::default().end_tokens([77])).unwrap();
     let template=reference.clone();
     let saved=template.save();

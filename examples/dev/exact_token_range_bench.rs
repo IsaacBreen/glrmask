@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glrmask::{Grammar, TokenSet, Vocab};
 use serde_json::{json, Value};
 
-const SOURCE: &str = "glrm 1; start start; extern token T; nt start = T;";
+const SOURCE: &str = "glrm 1; start start; extern token T; nt start ::= T;";
 
 fn ns(duration: Duration) -> f64 { duration.as_secs_f64() * 1e9 }
 
@@ -147,11 +147,11 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
     let (grammar, prepare_ns) = timed(|| -> Result<Grammar, Box<dyn std::error::Error>> {
         if mixed {
             Ok(Grammar::from_glrm(
-                "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
+                "glrm 1; start start; extern token A; extern token B; nt start ::= (A | B) (A | \"x\");",
             )?.bind_snapshot("A", TokenSet::from_ranges(std::iter::once(0..=n - 1)))?
                 .bind_snapshot("B", TokenSet::from_ranges(std::iter::once(0..=n - 2)))?)
         } else {
-            Ok(Grammar::from_glrm("glrm 1; start start; nt start = \"x\" \"x\";")?)
+            Ok(Grammar::from_glrm("glrm 1; start start; nt start ::= \"x\" \"x\";")?)
         }
     });
     let grammar = grammar?;

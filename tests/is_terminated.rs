@@ -166,7 +166,7 @@ fn special_token_on_the_normal_path_keeps_the_state_live() {
     for strategy in STRATEGIES {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let grammar = Grammar::from_glrm(
-            "glrm 1; start root; extern token eos; nt root = \"a\" eos;",
+            "glrm 1; start root; extern token eos; nt root ::= \"a\" eos;",
         ).unwrap();
         let mut module = Module::new(&grammar);
         module.bind("eos", TokenSet::new([99])).unwrap();
@@ -197,9 +197,9 @@ fn ignored_root_with_a_special_token_stays_live() {
                 glrm 1;
                 start root;
                 ignore WS;
-                t WS = " "+;
+                t WS ::= " "+;
                 extern token eos;
-                nt root = "a" eos;
+                nt root ::= "a" eos;
             "#,
         ).unwrap();
         let mut module = Module::new(&grammar);

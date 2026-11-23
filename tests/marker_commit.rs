@@ -38,7 +38,7 @@ fn initial_split_and_inside_fused_token_events_all_modes() {
 fn partial_lexemes_do_not_observe_stale_parser_boundary() {
     let v = vocab(&[b"he",b"llo:",b"hello:"]);
     for mode in MODES {
-        let c = compile("start root\nt WORD = \"hello\"\nnt root = @mark(0) WORD @mark(1) \":\" @mark(2)\n", &v, mode);
+        let c = compile("start root\nt WORD ::= \"hello\"\nnt root = @mark(0) WORD @mark(1) \":\" @mark(2)\n", &v, mode);
         let mut s=c.start(); assert_eq!(events(&s),[(0,0)]);
         assert!(s.commit_token(0)); assert!(events(&s).is_empty(), "partial {mode:?}");
         assert!(s.commit_token(1)); assert_eq!(events(&s),[(1,5),(2,6)], "suffix {mode:?}");

@@ -14,7 +14,7 @@ fn main() -> glrmask::Result<()> {
             .parser_backend(ParserBackend::TemplateDfa),
     )?;
     let parent = Grammar::from_glrm(
-        r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
+        r#"glrm 1; start root; extern grammar child; nt root ::= "x" child "y";"#,
     )?.prepare(&vocab)?;
     
     for optimization in [MaskMode::C, MaskMode::ParserDwa] {

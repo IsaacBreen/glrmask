@@ -205,7 +205,7 @@ fn separated_sequence_keeps_item_quantifiers_and_required_group_semantics() {
 #[test]
 fn all_source_frontends_reach_the_public_constructor() {
     let (v, _) = vocabulary();
-    let sources = [(Grammar::from_glrm(r#"glrm 1; start root; nt root = "a" "b"?;"#).unwrap(), b"ab".as_slice()),
+    let sources = [(Grammar::from_glrm(r#"glrm 1; start root; nt root ::= "a" "b"?;"#).unwrap(), b"ab".as_slice()),
         (Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap(), b"ab"),
         (Grammar::from_lark(r#"start: "a" "b"?"#).unwrap(), b"ab"),
         (Grammar::from_json_schema(r#"{"enum":["a","ab"]}"#).unwrap(), b"\"ab\"")];

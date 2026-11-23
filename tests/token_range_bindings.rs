@@ -1,7 +1,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 
-const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
+const ONE: &str = "glrm 1; start start; extern token T; nt start ::= T;";
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 
 fn allowed(mask: &[u32], token: u32) -> bool {
@@ -60,7 +60,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
     let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new());
     // At the start only A is live. After A only B is live. Their overlap must
     // not make either one's non-overlapping tail spuriously allowed.
-    let source = "glrm 1; start start; extern token A; extern token B; nt start = A B;";
+    let source = "glrm 1; start start; extern token A; extern token B; nt start ::= A B;";
     for mode in MODES {
         let constraint = Grammar::from_glrm(source).unwrap()
             .bind_snapshot("A", TokenSet::from_ranges(std::iter::once(10..=30))).unwrap()
@@ -80,7 +80,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
 #[test]
 fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let vocab = Vocab::new(vec![(0, b"[".to_vec()), (1, b"]".to_vec())]);
-    let child_source = "glrm 1; start start; extern token T; nt start = T T;";
+    let child_source = "glrm 1; start start; extern token T; nt start ::= T T;";
     let open = Grammar::from_glrm(child_source).unwrap().prepare(&vocab).unwrap();
     let bound = open.bind_snapshot("T", TokenSet::from_ranges([5..=15, 100..=120])).unwrap();
     let serialized = bound.save();
@@ -93,7 +93,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         // Reuse the same closed prepared body without linking it prematurely.
         // Each root link chooses its requested optimization independently.
         let prepared_child = loaded.clone();
-        let outer = Grammar::from_glrm("glrm 1; start start; extern grammar C; nt start = \"[\" C \"]\";").unwrap()
+        let outer = Grammar::from_glrm("glrm 1; start start; extern grammar C; nt start ::= \"[\" C \"]\";").unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("C", &prepared_child).unwrap()
             .link_with(options).unwrap();
         assert_mask(&outer, &[0], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
@@ -196,7 +196,7 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
     entries.extend((8..20).map(|id| (id, b"x".to_vec())));
     let vocab = Vocab::new(entries);
     let source = r#"glrm 1; start start; extern token A; extern token B;
-        nt start = ("a" A "b") | ("a" B "bb");"#;
+        nt start ::= ("a" A "b") | ("a" B "bb");"#;
     for mode in MODES {
         let constraint = Grammar::from_glrm(source).unwrap()
             .bind_snapshot("A", TokenSet::from_ranges(std::iter::once(8..=12))).unwrap()
@@ -232,7 +232,7 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
             .bind_snapshot("T", TokenSet::from_ranges(std::iter::once(5..=5))).unwrap()
             .compile_with_build_options(&vocab, mode.build_options()).unwrap();
         assert_eq!(singleton.start().forced_canonical_reference(), vec![5]);
-        let repeated = Grammar::from_glrm("glrm 1; start start; extern token T; nt start = T T;").unwrap()
+        let repeated = Grammar::from_glrm("glrm 1; start start; extern token T; nt start ::= T T;").unwrap()
             .bind_snapshot("T", TokenSet::from_ranges(std::iter::once(0..=15))).unwrap()
             .compile_with_build_options(&vocab, mode.build_options().end_tokens([8])).unwrap();
         assert_mask(&repeated, &[], 16, |id| id != 8);
@@ -271,7 +271,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
         (6, b"a".to_vec()), (7, Vec::new()), (8, b"b".to_vec()),
         (9, b"c".to_vec()), (10, b"bb".to_vec()), (11, b"x".to_vec()),
     ]);
-    let source = r#"glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");"#;
+    let source = r#"glrm 1; start start; extern token A; extern token B; nt start ::= (A | B) (A | "a");"#;
     for mode in MODES {
         for (a, b) in [(0..=0, 1..=1), (0..=5, 3..=9), (0..=11, 0..=10)] {
             let grammar = Grammar::from_glrm(source).unwrap()
@@ -298,7 +298,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
     let n = 32_768u32;
     let vocab = Vocab::new((0..n).map(|id| (id, Vec::new())).collect());
     for mode in MODES {
-        let grammar = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start = A B;").unwrap()
+        let grammar = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start ::= A B;").unwrap()
             .bind_snapshot("A", TokenSet::from_ranges(std::iter::once(0..=n - 1))).unwrap()
             .bind_snapshot("B", TokenSet::from_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1])).unwrap();
         let original = grammar.compile_with_build_options(&vocab,

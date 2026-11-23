@@ -99,7 +99,7 @@ await weather.precompile(vocab);
 const call = new Module(Grammar.fromGlrm(`
   extern grammar ARGS
   start call
-  nt call = "<weather>" ARGS "</weather>"
+  nt call ::= "<weather>" ARGS "</weather>"
 `));
 call.bind('ARGS', weather);
 const constraint = await call.compile(vocab);

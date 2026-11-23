@@ -3672,9 +3672,9 @@ mod parser_replacement_compile_tests {
             .map(|(i, word)| (i as u32, word.as_bytes().to_vec())).collect());
         let mut source = String::from("start root;\n");
         for (i, word) in words.iter().enumerate() {
-            source.push_str(&format!("t T{i} = \"{word}\";\n"));
+            source.push_str(&format!("t T{i} ::= \"{word}\";\n"));
         }
-        source.push_str("nt root = ");
+        source.push_str("nt root ::= ");
         source.push_str(&(0..words.len()).map(|i| format!("T{i}"))
             .collect::<Vec<_>>().join(" "));
         source.push(';');
@@ -4026,9 +4026,9 @@ mod tests {
         let vocab = vocab();
         let grammar = r#"
             start start;
-            t A = 'a'+;
-            t B = 'b';
-            nt start = A B;
+            t A ::= 'a'+;
+            t B ::= 'b';
+            nt start ::= A B;
         "#;
         let normal = crate::Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
@@ -4564,8 +4564,8 @@ mod tests {
         let dynamic = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
-                t A = /a{0,10000}/;
-                nt start = A;
+                t A ::= /a{0,10000}/;
+                nt start ::= A;
             "#,
             &vocab,
         )
@@ -4587,8 +4587,8 @@ mod tests {
             r#"
                 start start;
                 ignore WS;
-                t WS = " "+;
-                nt start = "a"+ "b";
+                t WS ::= " "+;
+                nt start ::= "a"+ "b";
             "#,
             &vocab,
         )
@@ -4633,9 +4633,9 @@ mod tests {
         ]);
         let grammar = r#"
             start start;
-            t A = /a{0,1000000000}/;
-            t B = 'b';
-            nt start = B A;
+            t A ::= /a{0,1000000000}/;
+            t B ::= 'b';
+            nt start ::= B A;
         "#;
         let constraint = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
         assert!(
@@ -4678,9 +4678,9 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_with_bounded_template_parser(
             r#"
                 start start;
-                t A = /a{0,10000}/;
-                t B = /b{0,9000}/;
-                nt start = A | B;
+                t A ::= /a{0,10000}/;
+                t B ::= /b{0,9000}/;
+                nt start ::= A | B;
             "#,
             &vocab,
         )
@@ -4766,9 +4766,9 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
-                t A = /a+/;
-                t B = /b+/;
-                nt start = A B;
+                t A ::= /a+/;
+                t B ::= /b+/;
+                nt start ::= A B;
             "#,
             &vocab,
         )
@@ -4813,9 +4813,9 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
-                t A = /a+/;
-                t B = /b+/;
-                nt start = A | B;
+                t A ::= /a+/;
+                t B ::= /b+/;
+                nt start ::= A | B;
             "#,
             &vocab,
         )
@@ -4870,8 +4870,8 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_with_bounded_template_parser(
             r#"
                 start start;
-                t A = /a{0,10000}/;
-                nt start = A;
+                t A ::= /a{0,10000}/;
+                nt start ::= A;
             "#,
             &vocab,
         )
@@ -4914,8 +4914,8 @@ mod tests {
         let mut constraint = crate::import::compile_dynamic_glrm_fixture(
             r#"
                 start start;
-                t A = /a{0,10000}/;
-                nt start = A;
+                t A ::= /a{0,10000}/;
+                nt start ::= A;
             "#,
             &vocab,
             crate::runtime::parser_backend::DynamicParserBackend::Native,
@@ -4992,8 +4992,8 @@ mod tests {
         let mut constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
-                t A = "a";
-                nt start = A;
+                t A ::= "a";
+                nt start ::= A;
             "#,
             &vocab,
         )
@@ -5031,8 +5031,8 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
-                t A = /a{0,10000}/;
-                nt start = A;
+                t A ::= /a{0,10000}/;
+                nt start ::= A;
             "#,
             &vocab,
         )
@@ -7117,8 +7117,8 @@ mod tests {
             r#"
                 start start;
                 ignore WS;
-                t WS = " "+;
-                nt start = "a" "b";
+                t WS ::= " "+;
+                nt start ::= "a" "b";
             "#,
             &vocab,
         )
@@ -7155,7 +7155,7 @@ mod tests {
     fn dynamic_constraint_loads_v12_payload_without_terminal_exprs() {
         let vocab = vocab();
         let constraint = DynamicConstraint::from_glrm_grammar(
-            "start start; nt start = \"a\" \"b\";",
+            "start start; nt start ::= \"a\" \"b\";",
             &vocab,
         )
         .unwrap();
@@ -7221,7 +7221,7 @@ mod tests {
         let mut constraint = crate::compiler::pipeline::compile_dynamic_owned_with_backend(
             crate::grammar::ast::lower(&crate::grammar::factoring::factor_named_grammar(
                 crate::import::parse_glrm_to_named(
-                    "start start; t A = \"abcdef\"; t B = \"abcdeg\"; nt start = A | B;",
+                    "start start; t A ::= \"abcdef\"; t B ::= \"abcdeg\"; nt start ::= A | B;",
                 ).unwrap(),
             )).unwrap(),
             &vocab,
@@ -7591,8 +7591,8 @@ mod tests {
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
 start start;
-t A = /a{0,1000000000}/;
-nt start = A;
+t A ::= /a{0,1000000000}/;
+nt start ::= A;
 "#,
             &vocab,
         )
