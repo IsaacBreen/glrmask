@@ -905,7 +905,7 @@ fn extern_without_a_kind_is_rejected_at_the_declaration() {
 }
 
 #[test]
-fn glrm_definition_forms_use_equals_and_match() {
+fn glrm_definition_forms_use_coloncolon_equals_and_match() {
     let vocab = Vocab::new(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
@@ -925,15 +925,15 @@ fn glrm_definition_forms_use_equals_and_match() {
 }
 
 #[test]
-fn glrm_definition_with_coloncolon_equals_is_rejected_with_message_and_span() {
-    let source = "start start;\nnt start ::= \"a\";";
+fn glrm_definition_with_equals_is_rejected_with_message_and_span() {
+    let source = "start start;\nnt start = \"a\";";
     let error = Grammar::from_glrm(source).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "grammar error: definitions use `=`, not `::=` (line 2, column 10)"
+        "grammar error: definitions use `::=`, not `=` (line 2, column 10)"
     );
-    let span = error.source_span().expect("the rejection points at the '::='");
-    assert_eq!(&source[span.start..span.end], "::=");
+    let span = error.source_span().expect("the rejection points at the '='");
+    assert_eq!(&source[span.start..span.end], "=");
     assert_eq!((span.line, span.column), (2, 10));
 }
 
@@ -956,14 +956,13 @@ fn glrm_markers_are_rejected_by_the_public_parser() {
 }
 
 #[test]
-fn glrm_v1_emitters_write_equals_and_round_trip() {
+fn glrm_v1_emitters_write_coloncolon_equals_and_round_trip() {
     use glrmask_grammar::__private::grammar::glrm::{from_glrm as parse_glrm, to_glrm_v1};
     let source = "glrm 1; start start; t WORD ::= /[a-z]+/; nt start ::= WORD WORD?;";
     let grammar = parse_glrm(source).unwrap();
     let dumped = to_glrm_v1(&grammar).unwrap();
     assert!(dumped.contains("t WORD ::= /[a-z]+/\n"), "{dumped}");
     assert!(dumped.contains("nt `start` ::= WORD WORD?\n"), "{dumped}");
-    assert!(!dumped.contains("::="), "{dumped}");
     let reparsed = parse_glrm(&dumped).unwrap();
     assert_eq!(reparsed.rules, grammar.rules);
     assert_eq!(reparsed.start, grammar.start);
