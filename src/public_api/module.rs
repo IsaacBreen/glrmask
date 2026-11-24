@@ -929,12 +929,12 @@ impl Module {
     }
 
     /// Compiles the module for `vocab`, reusing any precompiled work. Fails if any extern is unbound or the module was precompiled for another vocabulary.
-    pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
+    pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
 
     /// Like [`compile`](Self::compile), with `options`.
-    pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
+    pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint> {
         with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))
     }
 

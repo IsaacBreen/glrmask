@@ -97,7 +97,7 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
 
-[Native AWS benchmark details](docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.
+[Native AWS benchmark details](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.
 
 ## Installation
 
@@ -219,7 +219,7 @@ once the grammar is complete, and nothing is allowed after it. The token doesn't
 
 `forced_tokens()` returns the tokens that must come next, without committing them, so you can commit them without
 running the model. When the forced text could be tokenized in several ways, it takes the longest token at each step.
-See [forced tokens](docs/forcing.md).
+See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing.md).
 
 ## Composing grammars
 
@@ -303,7 +303,7 @@ Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. An ID doesn
 Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
 is an error.
 
-Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](docs/token-sets.md).
+Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Mask strategies
 
@@ -354,7 +354,7 @@ has one layout, the one Python's `json.dumps` writes by default: no whitespace o
 `,` and `:`, as in `{"a": [1, 2]}`.
 
 **GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, scoped grammars, and
-regular-expression intersection and subtraction. See [GLRM](docs/glrm-format.md).
+regular-expression intersection and subtraction. See [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
 
 ```glrm
 start value
@@ -363,7 +363,7 @@ nt value = INTEGER | "null"
 ```
 
 **Lark**, with GLRMask's additions: `<|name|>` for a token extern, `@name` for a grammar extern, `%json` for an inline
-JSON Schema and `[lazy]` for a terminal that ends as soon as it can. See [Lark](docs/lark-dialect.md).
+JSON Schema and `[lazy]` for a terminal that ends as soon as it can. See [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md).
 
 Features GLRMask doesn't support, such as Lark priorities, are errors. They are never silently ignored.
 

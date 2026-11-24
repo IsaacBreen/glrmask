@@ -17,7 +17,7 @@ use crate::compiler::constraint_compose::{
 use crate::runtime::Constraint as RuntimeConstraint;
 use crate::dynamic_constraint::DynamicConstraint;
 use crate::runtime::BoundaryTriggerDetail;
-use crate::{Error, TokenSet, Result, Vocab};
+use crate::{Constraint, Error, TokenSet, Result, Vocab};
 
 mod graph;
 mod snapshot_map;
@@ -879,7 +879,7 @@ impl Grammar {
     }
 
     /// Compiles the grammar for `vocab`. Fails if any extern is unbound.
-    pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
+    pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         Module::new(self).compile(vocab)
     }
 
@@ -901,7 +901,7 @@ impl Grammar {
         &self,
         vocab: &Vocab,
         options: CompileOptions,
-    ) -> Result<RuntimeConstraint> {
+    ) -> Result<Constraint> {
         Module::new(self).compile_with(vocab, options)
     }
 
