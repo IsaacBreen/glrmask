@@ -118,8 +118,8 @@ impl NativeModule {
             .parser_backend(core::parser_backend(parser_backend as u32)?)
             .merge_equivalent_tokens(merge_equivalent_tokens);
         Ok(core::compile_options(
-            core::mask_strategy(id(mode)?)?,
-            core::boundary_mask_strategy(id(boundary)?)?,
+            core::mask_strategy(uint(mode)?)?,
+            core::boundary_mask_strategy(uint(boundary)?)?,
             token_trie,
         ))
     }

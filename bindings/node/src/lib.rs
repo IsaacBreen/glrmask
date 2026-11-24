@@ -35,9 +35,15 @@ fn live<T>(value: &Handle<T>) -> core::Result<Live<'_, T>> {
     if guard.is_none() { return Err(core::Error::closed()); }
     Ok(Live(guard))
 }
-fn id(value: f64) -> core::Result<u32> {
+fn uint(value: f64) -> core::Result<u32> {
     if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
-        return Err(core::Error::invalid("token IDs must be integers in 0..4294967295"));
+        return Err(core::Error::invalid("expected an integer from 0 to 4294967295"));
+    }
+    Ok(value as u32)
+}
+fn id(value: f64) -> core::Result<u32> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=g::MAX_TOKEN_ID as f64).contains(&value) {
+        return Err(core::Error::invalid(format!("token IDs must be integers from 0 to {}", g::MAX_TOKEN_ID)));
     }
     Ok(value as u32)
 }
@@ -99,8 +105,8 @@ impl NativeTokenSet {
             let mut out = Vec::new();
             for r in ranges {
                 let first = id(r.start)?;
-                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > 4294967296.0 {
-                    return Err(core::Error::invalid("ranges must have integer half-open endpoints in 0..4294967296"));
+                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > g::MAX_TOKEN_ID as f64 + 1.0 {
+                    return Err(core::Error::invalid(format!("ranges must have integer endpoints from 0 to {}, with the end excluded", g::MAX_TOKEN_ID as u64 + 1)));
                 }
                 if r.end <= r.start { continue; }
                 out.push(first..=((r.end as u64 - 1) as u32));
@@ -125,8 +131,8 @@ fn grammar_compile_options(mode: f64, boundary: f64, parser_backend: Option<f64>
         .parser_backend(core::parser_backend(parser_backend.unwrap_or(0.0) as u32)?)
         .merge_equivalent_tokens(merge_equivalent_tokens.unwrap_or(false));
     Ok(core::compile_options(
-        core::mask_strategy(id(mode)?)?,
-        core::boundary_mask_strategy(id(boundary)?)?,
+        core::mask_strategy(uint(mode)?)?,
+        core::boundary_mask_strategy(uint(boundary)?)?,
         token_trie,
     ))
 }

@@ -11,6 +11,7 @@
 - Rust: `Grammar::bind` takes any `Binding`, like `Module::bind`, and its name is a `&str`. Binding a `Module` into a `Grammar` is an error.
 - Rust `Vocab::new` panics on a duplicate token ID, and Python's `Vocab` factories raise `ValueError`. The other bindings already rejected duplicates.
 - Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
+- Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`. Python's `mask(size=...)` is capped at 16,777,216.
 
 ## 0.5.0
 

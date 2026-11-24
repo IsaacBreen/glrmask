@@ -300,6 +300,9 @@ A `TokenSet` is a set of token IDs. In a grammar it matches any one of its token
 `TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges exclude their end in Python and
 Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. An ID doesn't need to be in the vocabulary.
 
+Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
+is an error.
+
 Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](docs/token-sets.md).
 
 ## Mask strategies

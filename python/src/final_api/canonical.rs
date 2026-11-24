@@ -327,11 +327,11 @@ fn extract_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
         return Ok(None);
     }
     match value.extract::<u32>() {
-        Ok(id) => Ok(Some(id)),
+        Ok(id) => check_token_id(id).map(Some),
         // An integer outside the u32 token-ID domain is a bad value, not a bad type.
         Err(_) => Err(PyValueError::new_err(format!(
             "token ID {value} is out of range; token IDs go from 0 to {}",
-            u32::MAX
+            glrmask::MAX_TOKEN_ID
         ))),
     }
 }

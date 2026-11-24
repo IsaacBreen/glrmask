@@ -82,7 +82,12 @@ test('token sets normalize ranges and expose no inspection accessors',()=>{
   assert.ok(new TokenSet([7,7,3]).equals(new TokenSet([3,7])));
   assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),RangeError);
   assert.throws(()=>TokenSet.fromRanges([{start:5,end:5}]),RangeError);
-  assert.equal(TokenSet.fromRanges([{start:0xffffffff,end:4294967296}]).toString(),'TokenSet[4294967295..=4294967295]');
+  assert.equal(TokenSet.fromRanges([{start:0xffffff,end:0x1000000}]).toString(),'TokenSet[16777215..=16777215]');
+  for(const bad of [2**32-1,4e9,2**24]) {
+    assert.throws(()=>new TokenSet([bad]),RangeError);
+    assert.throws(()=>TokenSet.fromRanges([{start:bad,end:bad+1}]),RangeError);
+    assert.throws(()=>new Vocab([[bad,Buffer.from('a')]]),RangeError);
+  }
 });
 
 test('async work snapshots sources and vocabulary before disposal',async()=>{

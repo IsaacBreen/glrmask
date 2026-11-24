@@ -68,9 +68,21 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Rejects a token ID above `glrmask::MAX_TOKEN_ID`, as the Rust API does.
+pub(crate) fn check_token_id(id: u32) -> PyResult<u32> {
+    if id > glrmask::MAX_TOKEN_ID {
+        return Err(PyValueError::new_err(format!(
+            "token ID {id} is larger than the maximum token ID, {}",
+            glrmask::MAX_TOKEN_ID
+        )));
+    }
+    Ok(id)
+}
+
 fn checked_vocab(entries: Vec<(u32, Vec<u8>)>) -> PyResult<glrmask::Vocab> {
     let mut ids = BTreeSet::new();
     for (id, _) in &entries {
+        check_token_id(*id)?;
         if !ids.insert(*id) {
             return Err(PyValueError::new_err(format!("duplicate vocabulary ID {id}")));
         }
@@ -265,6 +277,13 @@ fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usiz
     if size < minimum {
         return Err(PyValueError::new_err(format!(
             "size must be at least {minimum}"
+        )));
+    }
+    // A mask has one entry per token ID, so it never needs more than this.
+    let maximum = glrmask::MAX_TOKEN_ID as usize + 1;
+    if size > maximum {
+        return Err(PyValueError::new_err(format!(
+            "size must be at most {maximum}, one more than the maximum token ID"
         )));
     }
     Ok(size)

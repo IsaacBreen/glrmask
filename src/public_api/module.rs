@@ -403,6 +403,7 @@ impl Module {
                 BoundValue::Module(child)
             }
             BindingKind::TokenSet(tokens) => {
+                crate::error::check_token_set(&tokens)?;
                 check_binding_kind(name, kind, false)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
                 BoundValue::TokenSet(tokens)
@@ -591,6 +592,7 @@ impl Module {
     }
 
     fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool) -> Result<()> {
+        crate::error::check_vocab_token_ids(vocab)?;
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
         if self.index()?.iter().any(|module| module.node.prepared.values().any(|prepared| {
@@ -906,6 +908,7 @@ impl Module {
     }
 
     fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions, end_tokens: &[u32]) -> Result<RuntimeConstraint> {
+        crate::error::check_vocab_token_ids(vocab)?;
         if let Some(slot) = self.externs().unbound().iter().next() {
             return Err(error(format!("extern {:?} is unbound; bind it before compiling, or precompile to leave it open", slot.name())));
         }

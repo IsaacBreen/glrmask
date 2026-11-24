@@ -7,6 +7,12 @@ use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// The largest token ID GLRMask accepts: 16,777,215 (2^24 - 1).
+///
+/// Masks and compile-time tables grow with the largest token ID, so larger IDs
+/// are rejected with an error instead of risking a huge allocation.
+pub const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
+
 /// A set of token IDs.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
@@ -32,7 +38,8 @@ impl TokenSet {
         Self::from_pairs(ids.into_iter().map(|id| (id, id)))
     }
 
-    /// Creates a set from ranges of IDs, such as `0..10` or `0..=9`.
+    /// Creates a set from ranges of IDs, such as `0..10` or `0..=9`. A range
+    /// with no end, such as `10..`, ends at [`MAX_TOKEN_ID`].
     pub fn from_ranges<R: RangeBounds<u32>>(
         ranges: impl IntoIterator<Item = R>,
     ) -> Self {
@@ -52,7 +59,7 @@ impl TokenSet {
                     Some(end) => end,
                     None => continue,
                 },
-                Bound::Unbounded => u32::MAX,
+                Bound::Unbounded => MAX_TOKEN_ID,
             };
             if start > end {
                 continue;

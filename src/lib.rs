@@ -78,7 +78,7 @@ pub use runtime::{Constraint, ConstraintState};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::markers::{MarkerEvent, MarkerId};
-pub use glrmask_vocab::{TokenSet, Vocab};
+pub use glrmask_vocab::{TokenSet, Vocab, MAX_TOKEN_ID};
 pub use error::{Error, ErrorKind, Result};
 pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, ParserBackend, TokenTrie, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]

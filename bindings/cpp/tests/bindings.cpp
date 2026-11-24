@@ -87,7 +87,9 @@ void exact_and_unicode() {
     throws([]{ TokenSet::from_ranges({{2,0}}); }, GLRMASK_INVALID_ARGUMENT);
     auto empty = TokenSet::from_ranges({{5,5}});
     Vocab maximum({});
-    auto high = TokenSet::from_ranges({{0xffffffff, 0xffffffff}});
+    auto high = TokenSet::from_ranges({{0xffffff, 0xffffff}});
+    throws([]{ TokenSet({0xffffffff}); }, GLRMASK_INVALID_ARGUMENT);
+    throws([]{ TokenSet({4000000000u}); }, GLRMASK_INVALID_ARGUMENT);
     auto none = TokenSet(std::vector<TokenId>{});
     (void)merged; (void)duplicate; (void)high; (void)none; (void)empty;
 }

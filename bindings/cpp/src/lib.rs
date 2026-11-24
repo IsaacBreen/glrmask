@@ -121,7 +121,10 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_new(ids: *const u32, n: usize, out: *mut *mut glrmask_token_set) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_token_set(g::TokenSet::new(input(ids, n)?.iter().copied())))) })
+    ffi(|| unsafe { produce(out, || {
+        let ids = input(ids, n)?.iter().map(|&id| core::token_id(id)).collect::<Result<Vec<_>>>()?;
+        Ok(glrmask_token_set(g::TokenSet::new(ids)))
+    }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_from_ranges(r: *const glrmask_token_range, n: usize, out: *mut *mut glrmask_token_set) -> i32 {
     ffi(|| unsafe { produce(out, || {
@@ -129,6 +132,9 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
         for r in ranges {
             if r.start > r.end {
                 return Err(Error::invalid("token range start is after its end"));
+            }
+            if r.end > r.start {
+                core::token_id(r.end - 1)?;
             }
         }
         Ok(glrmask_token_set(
@@ -160,7 +166,7 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_token(p: *mut glrmask_grammar, name: *const c_char, n: usize, id: u32) -> i32 {
-    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, g::TokenSet::from(id))?; Ok(()) })
+    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, g::TokenSet::from(core::token_id(id)?))?; Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_tokens(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_token_set) -> i32 {
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })

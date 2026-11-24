@@ -49,6 +49,11 @@ pub enum ErrorKind {
     #[error("grammar error: {0}")]
     GrammarParse(String),
 
+    /// The caller passed an invalid value, such as a token ID above
+    /// [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID).
+    #[error("{0}")]
+    InvalidInput(String),
+
     /// The grammar could not be compiled.
     #[error("{0}")]
     Compilation(String),
@@ -85,6 +90,11 @@ impl Error {
     #[doc(hidden)]
     pub fn Compilation(message: String) -> Self {
         Self::new(ErrorKind::Compilation(message))
+    }
+
+    /// The caller passed an invalid value.
+    pub(crate) fn InvalidInput(message: String) -> Self {
+        Self::new(ErrorKind::InvalidInput(message))
     }
 
     /// An internal compiler invariant was violated, which indicates a bug.
@@ -171,6 +181,50 @@ impl Error {
 }
 
 pub type GlrMaskError = Error;
+
+/// Rejects a token ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID).
+pub(crate) fn check_token_id(id: u32) -> Result<()> {
+    if id > glrmask_vocab::MAX_TOKEN_ID {
+        return Err(Error::InvalidInput(format!(
+            "token ID {id} is larger than the maximum token ID, {}",
+            glrmask_vocab::MAX_TOKEN_ID
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects a token set with an ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID).
+pub(crate) fn check_token_set(tokens: &glrmask_vocab::TokenSet) -> Result<()> {
+    match tokens.range_pairs().last() {
+        Some(&(_, end)) => check_token_id(end),
+        None => Ok(()),
+    }
+}
+
+/// Rejects a vocabulary with an ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID),
+/// and checks that this machine can allocate the per-token-ID tables a compile
+/// builds, so a lack of memory is an error rather than an abort.
+pub(crate) fn check_vocab_token_ids(vocab: &glrmask_vocab::Vocab) -> Result<()> {
+    let Some(max) = vocab.max_event_token_id() else {
+        return Ok(());
+    };
+    check_token_id(max)?;
+    let len = max as usize + 1;
+    Vec::<u32>::new().try_reserve_exact(len).map_err(|_| token_table_error(len))
+}
+
+fn token_table_error(len: usize) -> Error {
+    Error::ResourceLimit(format!("not enough memory for a table of {len} token IDs"))
+}
+
+/// A vector of `len` copies of `value`, sized by a token ID. A failed
+/// allocation is a `ResourceLimit` error instead of an abort.
+pub(crate) fn try_token_table<T: Clone>(len: usize, value: T) -> Result<Vec<T>> {
+    let mut table = Vec::new();
+    table.try_reserve_exact(len).map_err(|_| token_table_error(len))?;
+    table.resize(len, value);
+    Ok(table)
+}
 
 /// A result with a GLRMask [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;

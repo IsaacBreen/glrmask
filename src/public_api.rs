@@ -824,6 +824,7 @@ impl Grammar {
     }
 
     fn bind_value(&self, name:&str, mut value:GrammarValue) -> Result<Self> {
+        if let GrammarValue::TokenSet(tokens)=&value { crate::error::check_token_set(tokens)?; }
         let declared = self.declarations()?;
         let previous = graph::source_summary(self)?;
         if !declared.kinds.contains_key(name) {
@@ -915,6 +916,7 @@ impl Grammar {
         vocab: &Vocab,
         options: BuildOptions,
     ) -> Result<RuntimeConstraint> {
+        crate::error::check_vocab_token_ids(vocab)?;
         graph::source_preflight(self)?;
         let engine = options.engine()?;
         if matches!(self.source,GrammarSource::Lark(_)){return self.resolve_lark(vocab)?.compile_with_build_options(vocab,options);}
@@ -1702,7 +1704,7 @@ impl VocabPartition {
         // `class_of()` / `original_to_class()`. Materialize it once at this
         // boundary rather than forcing every internal fast path to carry it.
         let original_to_class = if map.original_to_internal.is_empty() && !classes.is_empty() {
-            let mut dense = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+            let mut dense = crate::error::try_token_table(vocab.max_token_id() as usize + 1, u32::MAX)?;
             for (class_id, class) in classes.iter().enumerate() {
                 for &token_id in class {
                     dense[token_id as usize] = class_id as u32;

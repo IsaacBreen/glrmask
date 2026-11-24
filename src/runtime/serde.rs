@@ -5911,6 +5911,7 @@ impl Constraint {
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
+        crate::error::check_vocab_token_ids(vocab)?;
         crate::with_deep_stack(|| {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);

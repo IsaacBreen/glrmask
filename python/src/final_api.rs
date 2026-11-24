@@ -1,6 +1,6 @@
 //! Python's source/module/root lifecycle, backed by the production Rust API.
 mod canonical;
-use super::{PyConstraint, PyVocab};
+use super::{check_token_id, PyConstraint, PyVocab};
 use glrmask::__private::ConstraintExt as _;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -231,9 +231,13 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
     if start >= stop {
         return Ok(None);
     }
-    let convert = |id: i128| u32::try_from(id).map_err(|_| {
-        PyValueError::new_err("TokenSet.from_ranges range contains an ID outside the u32 token-ID domain")
-    });
+    let convert = |id: i128| match u32::try_from(id) {
+        Ok(id) => check_token_id(id),
+        Err(_) => Err(PyValueError::new_err(format!(
+            "token ID {id} is out of range; token IDs go from 0 to {}",
+            glrmask::MAX_TOKEN_ID
+        ))),
+    };
     Ok(Some(convert(start)?..=convert(stop - 1)?))
 }
 
@@ -245,7 +249,7 @@ impl PyTokenSet {
     fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
         let ids = ids
             .try_iter()?
-            .map(|item| item?.extract::<u32>())
+            .map(|item| item?.extract::<u32>().and_then(check_token_id))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             inner: glrmask::TokenSet::new(ids),

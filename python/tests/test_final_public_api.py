@@ -162,9 +162,10 @@ def test_token_set_and_sparse_membership_validation():
         bound = _bound_snapshot(g, "item", value)
         assert bound.compile(v) is not None
         assert _bound_snapshot(m, "item", value).compile(v) is not None
-    # u32::MAX is accepted by the set and by binding; compiling it would size the
-    # mask to 2**32 bits, so only the binding result is asserted.
-    assert _bound_snapshot(g, "item", glrmask.TokenSet([2**32-1])) is not None
+    # The largest token ID is accepted; one above it is an error, not a huge mask.
+    assert _bound_snapshot(g, "item", glrmask.TokenSet([2**24 - 1])) is not None
+    with pytest.raises(ValueError, match="maximum token ID"):
+        glrmask.TokenSet([2**24])
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
         assert np.flatnonzero(c.start().mask()).tolist() == [id]

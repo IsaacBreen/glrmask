@@ -1462,11 +1462,14 @@ fn build_direct_component_token_coordinates(
     let original_token_count = original_token_ids
         .last()
         .map_or(0, |token| *token as usize + 1);
-    let mut selected_original = vec![false; original_token_count];
+    let token_table_error = |error: crate::Error| error.to_string();
+    let mut selected_original =
+        crate::error::try_token_table(original_token_count, false).map_err(token_table_error)?;
     for &original in original_token_ids {
         selected_original[original as usize] = true;
     }
-    let mut token_to_global = vec![u32::MAX; original_token_count];
+    let mut token_to_global =
+        crate::error::try_token_table(original_token_count, u32::MAX).map_err(token_table_error)?;
     let mut global_to_tokens = Vec::<Vec<u32>>::new();
     let mut token_representatives = Vec::<u32>::new();
     let mut local_to_global_tokens = components

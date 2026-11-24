@@ -24,9 +24,11 @@ function string(value, name = 'source') {
   if (typeof value !== 'string') throw new TypeError(`${name} must be a string`);
   return value;
 }
+// The largest token ID GLRMask accepts, 2 ** 24 - 1, as in every language.
+const MAX_TOKEN_ID = 0xffffff;
 function tokenId(value) {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
-    throw new RangeError('Token IDs must be integers in 0..4294967295');
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_TOKEN_ID) {
+    throw new RangeError(`Token IDs must be integers from 0 to ${MAX_TOKEN_ID}`);
   }
   return value;
 }
@@ -174,7 +176,7 @@ class TokenSet extends Owned {
     const ranges = iterable(values, 'token ranges').map(r => {
       if (r === null || typeof r !== 'object') throw new TypeError('A token range must have start and end');
       const start = tokenId(r.start), end = r.end;
-      if (!Number.isInteger(end) || end <= start || end > 4294967296) throw new RangeError('Invalid half-open token range');
+      if (!Number.isInteger(end) || end <= start || end > MAX_TOKEN_ID + 1) throw new RangeError('Invalid half-open token range');
       return {start, end};
     });
     return wrap(TokenSet, invoke(() => native.NativeTokenSet.fromRanges(ranges)));

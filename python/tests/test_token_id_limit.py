@@ -1,0 +1,52 @@
+"""Token IDs above the maximum are errors, not huge allocations that abort Python."""
+import pytest
+
+import glrmask
+
+MAX_TOKEN_ID = 2**24 - 1
+HUGE_IDS = [2**32 - 1, 4 * 10**9, MAX_TOKEN_ID + 1]
+
+
+def token_extern():
+    return glrmask.Grammar.from_glrm("start s extern token E nt s = E")
+
+
+@pytest.mark.parametrize("token_id", HUGE_IDS)
+def test_vocab_rejects_a_huge_id(token_id):
+    with pytest.raises(ValueError, match=str(token_id)):
+        glrmask.Vocab.from_id_to_bytes({0: b"a", token_id: b"b"})
+
+
+@pytest.mark.parametrize("token_id", HUGE_IDS)
+def test_binding_a_huge_id_is_an_error(token_id):
+    grammar = token_extern()
+    with pytest.raises(ValueError, match="maximum token ID"):
+        grammar.bind("E", token_id)
+    module = glrmask.Module(token_extern())
+    with pytest.raises(ValueError, match="maximum token ID"):
+        module.bind("E", token_id)
+    assert "E" in module.externs.unbound
+
+
+@pytest.mark.parametrize("token_id", HUGE_IDS)
+def test_token_sets_reject_a_huge_id(token_id):
+    with pytest.raises(ValueError, match="maximum token ID"):
+        glrmask.TokenSet([1, token_id])
+    with pytest.raises(ValueError, match="maximum token ID"):
+        glrmask.TokenSet.from_ranges([range(token_id, token_id + 1)])
+
+
+def test_the_maximum_id_is_accepted():
+    grammar = token_extern()
+    grammar.bind("E", MAX_TOKEN_ID)
+    assert glrmask.TokenSet.from_ranges([range(0, MAX_TOKEN_ID + 1)]) == glrmask.TokenSet.from_ranges(
+        [range(0, MAX_TOKEN_ID + 1)]
+    )
+
+
+def test_mask_size_is_capped():
+    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    state = glrmask.Grammar.from_glrm('start s nt s = "a"').compile(vocab).start()
+    with pytest.raises(ValueError, match="at most"):
+        state.mask(size=4 * 10**9)
+    assert state.mask(size=MAX_TOKEN_ID + 1).shape == (MAX_TOKEN_ID + 1,)
