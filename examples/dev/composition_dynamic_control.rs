@@ -19,8 +19,8 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let repeats:usize=args.get(3).map(|s|s.parse()).transpose()?.unwrap_or(101);
     assert!(repeats>0);
     let encoded:BTreeMap<String,String>=serde_json::from_slice(&fs::read(&args[1])?)?;
-    let entries=encoded.into_iter().map(|(id,hex)| {
-        let bytes=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect();
+    let entries: Vec<(u32, Vec<u8>)>=encoded.into_iter().map(|(id,hex)| {
+        let bytes: Vec<u8>=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect();
         (id.parse().unwrap(),bytes)
     }).collect();
     let vocab=Vocab::new(entries).unwrap();

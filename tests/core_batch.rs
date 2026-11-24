@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Expr, Grammar, MaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{BuildOptions, Expr, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
 fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).unwrap()}
 
