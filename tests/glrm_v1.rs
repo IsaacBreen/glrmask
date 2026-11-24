@@ -971,3 +971,23 @@ fn glrm_v1_emitters_write_equals_and_round_trip() {
     assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
     assert_eq!(reparsed.lexer_literal_partitions, grammar.lexer_literal_partitions);
 }
+
+#[test]
+fn additional_reserved_words_require_escaping() {
+    for word in ["as", "fn", "let", "mod", "pub", "macro", "include"] {
+        let source = format!("start s; nt {word} = \"a\"; nt s = {word};");
+        let error = Grammar::from_glrm(&source).unwrap_err();
+        assert_eq!(error.kind(), glrmask::ErrorKind::Syntax);
+        let span = error.source_span().unwrap();
+        assert_eq!(&source[span.start..span.end], word);
+        let escaped = format!("start s; nt `{word}` = \"a\"; nt s = `{word}`;");
+        assert!(Grammar::from_glrm(escaped).is_ok());
+    }
+}
+
+#[test]
+fn glrm_allows_extra_semicolons() {
+    for source in ["; start s; nt s = \"a\";", "start s;; nt s = \"a\";;;", ";; glrm 1;;; start s; nt s = \"a\";;;"] {
+        assert!(Grammar::from_glrm(source).is_ok(), "{source}");
+    }
+}

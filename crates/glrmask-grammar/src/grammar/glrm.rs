@@ -583,7 +583,7 @@ fn format_literal(bytes: &[u8]) -> String {
 }
 
 fn is_reserved_keyword(name: &str) -> bool {
-    matches!(name, "use" | "export" | "import" | "super")
+    matches!(name, "use" | "export" | "import" | "super" | "as" | "fn" | "let" | "mod" | "pub" | "macro" | "include")
 }
 
 fn source_identifier(name: &str) -> String {
@@ -1798,7 +1798,7 @@ impl GlrmParser {
 
     fn check_declared_name(&self, name: &str, is_escaped: bool) -> Result<(), GlrMaskError> {
         if !is_escaped && is_reserved_keyword(name) {
-            return Err(err(&format!("'{name}' is a reserved keyword")));
+            return Err(self.locate(err(&format!("`{name}` is a reserved word; write `` `{name}` `` to use it as a name")), self.pos.saturating_sub(1)));
         }
         Ok(())
     }
@@ -1812,6 +1812,7 @@ impl GlrmParser {
     }
 
     fn parse_root_scope(&mut self) -> Result<ParsedGlrmScope, GlrMaskError> {
+        while matches!(self.peek(), Tok::Semi) { self.advance(); }
         if matches!(self.peek(),Tok::Ident(k) if k=="glrm") {
             self.advance();self.advance();self.consume(&Tok::Semi)?;
         }
@@ -1843,6 +1844,7 @@ impl GlrmParser {
 
         loop {
             match self.peek().clone() {
+                Tok::Semi => { self.advance(); }
                 Tok::Eof if stop_at_rbrace => {
                     return Err(err(&format!("unterminated {scope_label}")));
                 }
@@ -4715,8 +4717,8 @@ nt main = sub;
 
     #[test]
     fn reserved_keywords_rejected_as_declared_names_in_glrm_v1() {
-        for kw in ["use", "export", "import", "super"] {
-            let expected = format!("'{kw}' is a reserved keyword");
+        for kw in ["use", "export", "import", "super", "as", "fn", "let", "mod", "pub", "macro", "include"] {
+            let expected = format!("`{kw}` is a reserved word");
 
             // Nonterminal rule
             let src = format!("glrm 1; start s; nt {kw} = \"a\"; nt s = {kw};");

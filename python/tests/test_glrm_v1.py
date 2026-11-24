@@ -96,3 +96,14 @@ def test_glrm_markers_are_rejected_by_the_public_parser():
     with pytest.raises((ValueError, RuntimeError)) as excinfo:
         glrmask.Grammar.from_glrm('start start;\nnt start = @mark(1) "a";')
     assert "`@mark` isn't supported" in str(excinfo.value)
+
+@pytest.mark.parametrize("word", ["as", "fn", "let", "mod", "pub", "macro", "include"])
+def test_additional_reserved_words(word):
+    with pytest.raises(glrmask.GLRMaskError) as exc:
+        glrmask.Grammar.from_glrm(f'start s; nt {word} = "a"; nt s = {word};')
+    assert exc.value.kind == "syntax"
+    glrmask.Grammar.from_glrm(f'start s; nt `{word}` = "a"; nt s = `{word}`;')
+
+@pytest.mark.parametrize("source", ['; start s; nt s = "a";', 'start s;; nt s = "a";;;', ';; glrm 1;;; start s; nt s = "a";;;'])
+def test_extra_semicolons(source):
+    glrmask.Grammar.from_glrm(source)

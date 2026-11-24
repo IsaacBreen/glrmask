@@ -27,8 +27,7 @@ Every definition uses `=`.
 
 A rule whose language happens to be regular is still a rule, not a terminal.
 
-Names match `[A-Za-z_][A-Za-z0-9_]*`. Put a keyword in backticks to use it as a name: ``nt `start` = "a"``. `use`,
-`export`, `import` and `super` are reserved.
+Names match `[A-Za-z_][A-Za-z0-9_]*`. Put a keyword in backticks to use it as a name: ``nt `start` = "a"``. These words are reserved for future versions and can't be used as names: `use`, `export`, `import`, `super`, `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. To use one as a name, write it in backticks.
 
 Comments are `// ...` and `/* ... */`.
 
