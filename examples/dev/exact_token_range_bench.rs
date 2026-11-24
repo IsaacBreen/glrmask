@@ -142,7 +142,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
     -> Result<Value, Box<dyn std::error::Error>>
 {
     let (vocab, vocab_ns) = timed(|| Vocab::new(
-        (0..n).map(|id| (id, b"x".to_vec())).collect(),
+        (0..n).map(|id| (id, b"x".to_vec())).collect::<Vec<_>>(),
     ).unwrap());
     let (grammar, prepare_ns) = timed(|| -> Result<Grammar, Box<dyn std::error::Error>> {
         if mixed {

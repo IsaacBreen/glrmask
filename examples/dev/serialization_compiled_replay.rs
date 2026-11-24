@@ -19,7 +19,7 @@ fn load_vocab(path: &Path) -> Vocab {
         entries
             .into_iter()
             .map(|(id, hex)| (id, hex_to_bytes(&hex)))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap()
 }
 
