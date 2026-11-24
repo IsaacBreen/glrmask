@@ -4,6 +4,7 @@
 //! We may read an existing exact mask, but never construct a vocabulary-wide
 //! mask. Prepared vocabulary ordering is reused only if it already exists;
 //! otherwise exact individual recognition is the allocation-bounded fallback.
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use super::*;
@@ -52,20 +53,20 @@ impl Witnesses {
         if self.contains(id){return Ok(true);}
         // No allocation at all is needed to prove K+1 after collecting K.
         if self.ids.len()==self.max{return Ok(false);}
-        self.ids.try_reserve(1).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
+        self.ids.try_reserve(1).map_err(|_|crate::Error::Internal("bounded query witness allocation failed".into()))?;
         if self.ids.len()==8 && self.large.is_none() {
             let mut set=FxHashSet::default();
-            set.try_reserve(16).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
+            set.try_reserve(16).map_err(|_|crate::Error::Internal("bounded query witness allocation failed".into()))?;
             set.extend(self.ids.iter().copied());self.large=Some(set);
         }
         if let Some(set)=&mut self.large {
-            set.try_reserve(1).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
+            set.try_reserve(1).map_err(|_|crate::Error::Internal("bounded query witness allocation failed".into()))?;
             set.insert(id);
         }
         self.ids.push(id);Ok(true)
     }
 }
-fn state_error(message:String)->crate::Error {crate::Error::InternalInvariant(format!("bounded token proof: {message}"))}
+fn state_error(message:String)->crate::Error {crate::Error::Internal(format!("bounded token proof: {message}"))}
 fn placeholder(c:&Constraint,id:u32)->bool {
     c.special_token_terminals.iter().any(|s|s.token_id==id && c.is_late_grammar_placeholder_terminal(s.terminal_id))
 }

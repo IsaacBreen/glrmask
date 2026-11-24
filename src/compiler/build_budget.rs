@@ -194,6 +194,7 @@ impl Drop for TestBudgetLimit {
 mod tests {
     use super::*;
     use crate::error::catch_internal_invariant;
+    use crate::ErrorExt as _;
 
     #[test]
     fn charge_under_limit_is_fine() {
@@ -210,8 +211,8 @@ mod tests {
             charge("unit_test", 11);
         })
         .expect_err("the budget must decline");
-        match error.kind() {
-            crate::ErrorKind::ResourceLimit(message) => {
+        match (error.kind(), error.message()) {
+            (crate::ErrorKind::ResourceLimit, message) => {
                 assert_eq!(message, "unit_test build budget exhausted");
             }
             other => panic!("expected a resource-limit error, got {other:?}"),

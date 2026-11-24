@@ -3,6 +3,7 @@
 //! Construction may borrow temporary LR analysis. Runtime and serialized
 //! Constraints retain only native programs and table-free metadata.
 
+use crate::ErrorExt as _;
 pub(crate) mod wire;
 pub(crate) mod composition;
 pub(crate) mod embedding;

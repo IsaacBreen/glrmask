@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -566,7 +567,7 @@ impl Grammar {
             GrammarSource::Lark(source) => (source, crate::import::parse_lark_to_named),
             GrammarSource::JsonSchema(source) => (source, crate::import::parse_json_schema_to_named),
             GrammarSource::Glrm(source) => (source, crate::import::parse_glrm_to_named),
-            GrammarSource::Constructed => return crate::template_parser::PreparedParserGrammar::from_named(&self.component()?.lower_closed()?),
+            GrammarSource::Constructed => return crate::template_parser::PreparedParserGrammar::from_named(&self.component()?.lower_closed().map_err(crate::error::from_grammar)?),
         };
         crate::import::with_large_import_stack(source.len(), || {
             crate::template_parser::PreparedParserGrammar::from_named(&parse(source)?)
@@ -597,7 +598,7 @@ impl Grammar {
     #[doc(hidden)]
     pub fn glrm(source: &str) -> Self {
         let grammar=Self::new(GrammarSource::Glrm(Arc::from(source)));
-        let _=grammar.parsed_component.set(ParsedComponent::parse_glrm(source).map_err(Into::into));
+        let _=grammar.parsed_component.set(ParsedComponent::parse_glrm(source).map_err(crate::error::from_grammar));
         grammar
     }
 
@@ -636,7 +637,7 @@ impl Grammar {
     pub(crate) fn from_glrm_with_markers(source: &str) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Glrm(Arc::from(source)));
         let _ = grammar.parsed_component.set(
-            ParsedComponent::parse_glrm_with_markers(source).map_err(Into::into),
+            ParsedComponent::parse_glrm_with_markers(source).map_err(crate::error::from_grammar),
         );
         grammar.component()?;
         Ok(grammar)
@@ -652,24 +653,24 @@ impl Grammar {
 
     fn component(&self) -> Result<&ParsedComponent> {
         self.parsed_component.get_or_init(|| match &self.source {
-            GrammarSource::Glrm(source) => ParsedComponent::parse_glrm(source).map_err(Into::into),
+            GrammarSource::Glrm(source) => ParsedComponent::parse_glrm(source).map_err(crate::error::from_grammar),
             GrammarSource::Ebnf(source) => crate::import::parse_ebnf_to_named(source)
-                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
+                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(crate::error::from_grammar)),
             GrammarSource::Lark(source) => crate::import::parse_lark_to_named(source)
-                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
+                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(crate::error::from_grammar)),
             // JSON Schema lowers to an ordinary named grammar, so it can join a
             // mixed compile as a dynamic component shell. The schema pipeline
             // prepares it exactly as the static schema route does, including
             // lexer partitioning for the generated terminal classes.
             GrammarSource::JsonSchema(source) => crate::import::prepare_json_schema_named_for_component(source)
-                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
+                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(crate::error::from_grammar)),
             GrammarSource::Constructed => Err(Error::Compilation("constructed grammar has no semantic description".into())),
         }).as_ref().map_err(Clone::clone)
     }
 
     fn lark_document(&self)->Result<&LarkDocument> {
         let GrammarSource::Lark(source)=&self.source else{return Err(Error::Compilation("not a Lark description".into()));};
-        self.lark_document.get_or_init(||glrmask_grammar::parse_lark_document(source).map_err(Into::into))
+        self.lark_document.get_or_init(||glrmask_grammar::parse_lark_document(source).map_err(crate::error::from_grammar))
             .as_ref().map_err(Clone::clone)
     }
 
@@ -713,7 +714,7 @@ impl Grammar {
         let mut resolved=Self::new(GrammarSource::Constructed);
         let spans=externs.iter().filter_map(|(name,_)|document.source_spans.get(name).map(|span|(name.clone(),*span))).collect();
         let _=resolved.parsed_component.set(ParsedComponent::from_named_with_ignores(named,&externs,&document.resolved_additional_ignores())
-            .and_then(|component|component.with_source_spans(&spans)).map_err(Into::into));
+            .and_then(|component|component.with_source_spans(&spans)).map_err(crate::error::from_grammar));
         let _=resolved.component()?;
         resolved.bindings=self.bindings.clone();
         for (name,range) in &document.schemas {
@@ -781,7 +782,7 @@ impl Grammar {
             ignore:None,lexer_partitions:Default::default(),lexer_literal_partitions:Default::default(),default_lexer_partition:None,
         };
         let mut grammar=Self::new(GrammarSource::Constructed);
-        let _=grammar.parsed_component.set(ParsedComponent::from_named(named,&[]).map_err(Into::into));
+        let _=grammar.parsed_component.set(ParsedComponent::from_named(named,&[]).map_err(crate::error::from_grammar));
         grammar.exact_value=Some(tokens);grammar
     }
 
@@ -1266,14 +1267,14 @@ impl Grammar {
                 let mut children=Vec::new();let mut tokens=Vec::new();
                 for (name,value) in &self.bindings {
                     match value {
-                        GrammarValue::Source(child)=>children.push((name.as_str(),ParsedComponent::from_named(child.resolve_dynamic_source(vocab,true)?,&[])?)),
+                        GrammarValue::Source(child)=>children.push((name.as_str(),ParsedComponent::from_named(child.resolve_dynamic_source(vocab,true)?,&[]).map_err(crate::error::from_grammar)?)),
                         GrammarValue::TokenSet(ids)=>{
                             tokens.push((name.as_str(),ids.range_pairs().to_vec()));
                         },
                     }
                 }
                 let token_refs=tokens.iter().map(|(n,ids)|(*n,ids.as_slice())).collect::<Vec<_>>();
-                Ok(self.component()?.with_tokens(&token_refs)?.with_children(&children)?.lower_closed()?)
+                Ok(self.component()?.with_tokens(&token_refs).map_err(crate::error::from_grammar)?.with_children(&children).map_err(crate::error::from_grammar)?.lower_closed().map_err(crate::error::from_grammar)?)
             }
         }
     }
@@ -2754,7 +2755,7 @@ impl RuntimeConstraint {
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(self, vocab);
         if crate::env::var_os("GLRMASK_PREPARE_BOUNDARY_COMPLETION").is_some() {
             crate::compiler::boundary_precomputed_completion::prepare_component(self, vocab)
-                .map_err(crate::GlrMaskError::Compilation)?;
+                .map_err(crate::Error::Compilation)?;
         }
         Ok(())
     }
@@ -2791,7 +2792,7 @@ impl DynamicConstraint {
             GrammarSource::Glrm(source) => {
                 Self::from_glrm_grammar_with_vocab_partition(source, vocab)
             }
-            GrammarSource::Constructed=>crate::import::compile_bounded_template_from_named(grammar.component()?.lower_closed()?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None),
+            GrammarSource::Constructed=>crate::import::compile_bounded_template_from_named(grammar.component()?.lower_closed().map_err(crate::error::from_grammar)?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None),
         }
     }
 
@@ -3459,7 +3460,7 @@ fn native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> Result<DynamicCons
             let named = crate::import::parse_ebnf_to_named(source)?;
             let factored = crate::grammar::factoring::factor_named_grammar(named);
             crate::compiler::pipeline::compile_dynamic_owned_with_backend(
-                crate::grammar::ast::lower(&factored)?, vocab,
+                crate::grammar::ast::lower(&factored).map_err(crate::error::from_grammar)?, vocab,
                 crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
                 crate::runtime::parser_backend::DynamicParserBackend::Native,
             )?
@@ -3469,7 +3470,7 @@ fn native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> Result<DynamicCons
         )?,
         GrammarSource::Lark(source) => DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab)?,
         GrammarSource::JsonSchema(source) => DynamicConstraint::from_json_schema_with_bounded_template_parser(source, vocab)?,
-        GrammarSource::Constructed=>crate::import::compile_bounded_template_from_named(grammar.component()?.lower_closed()?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None)?,
+        GrammarSource::Constructed=>crate::import::compile_bounded_template_from_named(grammar.component()?.lower_closed().map_err(crate::error::from_grammar)?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None)?,
     };
     assert!(constraint.clone_constraints().iter().all(|body|
         body.has_template_parser() && !body.table.is_present() && body.uses_dynamic_runtime()));
@@ -4326,7 +4327,7 @@ mod tests {
         for error in [spec.compile().unwrap_err(), spec.compile_dynamic().unwrap_err(),
             parent.bind_grammar("child", &child).unwrap_err(),
             parent.bind_grammar_dynamic_boundary("child", &child).unwrap_err()] {
-            assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
+            assert_eq!(error.kind(), crate::ErrorKind::Compilation);
             let message=error.to_string();
             assert!(message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }
@@ -4334,7 +4335,7 @@ mod tests {
         let native_child = RuntimeConstraint::compile(Grammar::ebnf("start ::= 'y'"), &vocab).unwrap();
         for error in [lr_parent.bind_grammar("child", &native_child).unwrap_err(),
             lr_parent.bind_grammar_dynamic_boundary("child", &native_child).unwrap_err()] {
-            assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
+            assert_eq!(error.kind(), crate::ErrorKind::Compilation);
             let message=error.to_string();
             assert!(message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }

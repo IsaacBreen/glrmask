@@ -14,6 +14,7 @@ internal-api = []
 [dependencies]
 glrmask-finite-automata = { version = "=0.2.0", path = "../glrmask-finite-automata" }
 glrmask-lexer = { version = "=0.3.0", path = "../glrmask-lexer", features = ["internal-api"] }
+glrmask-vocab = { version = "=0.3.0", path = "../glrmask-vocab" }
 rayon = "1"
 rustc-hash = "1"
 range-set-blaze = "0.8.0"

@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, SegmentedBoundaryBackend, compose_constraints_owned_parent_segmented,
 };
-use crate::{Constraint, GlrMaskError, Vocab};
+use crate::{Constraint, Error, ErrorExt as _, Vocab};
 
 const JAVASCRIPT_GLRM: &str = include_str!("programmatic_js/javascript.glrm");
 const PARENT_PLACEHOLDER_NAME: &str = "PROGRAMMATIC_TOOL_SUFFIX";
@@ -119,7 +119,7 @@ impl ProgrammaticJsCompiler {
             .position(|name| name == PARENT_PLACEHOLDER_NAME)
             .map(|index| index as u32)
             .ok_or_else(|| {
-                GlrMaskError::Compilation(
+                Error::Compilation(
                     "programmatic JavaScript parent has no dispatcher linker terminal".into(),
                 )
             })?;
@@ -159,7 +159,7 @@ impl ProgrammaticJsCompiler {
     ) -> crate::Result<Constraint> {
         validate_tool_names(tools.iter().map(|(name, _)| *name))?;
         if tools.is_empty() {
-            return Err(GlrMaskError::Compilation(
+            return Err(Error::Compilation(
                 "programmatic JavaScript requires at least one tool".into(),
             ));
         }
@@ -194,7 +194,7 @@ impl ProgrammaticJsCompiler {
             SegmentedBoundaryBackend::StaticParserDwa,
         )
         .map(|composition| composition.constraint)
-        .map_err(GlrMaskError::Compilation)
+        .map_err(Error::Compilation)
     }
 
     /// Compose already-compiled tool schemas into a named dispatcher and link
@@ -247,7 +247,7 @@ fn reserve_tools_identifier(grammar: &mut crate::grammar::ast::NamedGrammar) -> 
         .iter_mut()
         .find(|rule| rule.name == "IDENTIFIER")
         .ok_or_else(|| {
-            GlrMaskError::Compilation("bundled JavaScript grammar has no IDENTIFIER terminal".into())
+            Error::Compilation("bundled JavaScript grammar has no IDENTIFIER terminal".into())
         })?;
     identifier.expr = GrammarExpr::Exclude {
         expr: Box::new(identifier.expr.clone()),
@@ -260,7 +260,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     let mut source = JAVASCRIPT_GLRM.to_owned();
     let start = "start program;";
     if !source.starts_with(start) {
-        return Err(GlrMaskError::Compilation(
+        return Err(Error::Compilation(
             "bundled JavaScript grammar start rule changed unexpectedly".into(),
         ));
     }
@@ -288,7 +288,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     crate::grammar::right_linear::retain_reachable_rules(&mut grammar);
     grammar.rules.retain(|rule| rule.name != synthetic);
     grammar.start = original_start;
-    Ok(crate::grammar::glrm::to_glrm_v1(&grammar)?)
+    Ok(crate::grammar::glrm::to_glrm_v1(&grammar).map_err(crate::error::from_grammar)?)
 }
 
 fn dynamic_value_source() -> crate::Result<String> {
@@ -314,7 +314,7 @@ fn programmatic_parent_source(
         .rules
         .iter_mut()
         .find(|rule| rule.name == "member_expression_with_suffixes")
-        .ok_or_else(|| GlrMaskError::Compilation(
+        .ok_or_else(|| Error::Compilation(
             "bundled JavaScript grammar has no member_expression_with_suffixes rule".into(),
         ))?;
     let tool_expr = GrammarExpr::Sequence(vec![
@@ -328,7 +328,7 @@ fn programmatic_parent_source(
         }
         other => GrammarExpr::Choice(vec![tool_expr, other]),
     };
-    let mut source = crate::grammar::glrm::to_glrm_v1(&grammar)?;
+    let mut source = crate::grammar::glrm::to_glrm_v1(&grammar).map_err(crate::error::from_grammar)?;
     source = format!("extern token {PARENT_PLACEHOLDER_NAME};\n{source}");
     let ids = [(PARENT_PLACEHOLDER_NAME, placeholder_token_id)];
     Ok((source, ids))
@@ -354,12 +354,12 @@ fn validate_tool_names<'a>(names: impl IntoIterator<Item = &'a str>) -> crate::R
     let mut seen = BTreeSet::new();
     for name in names {
         if !is_ascii_identifier_name(name) {
-            return Err(GlrMaskError::Compilation(format!(
+            return Err(Error::Compilation(format!(
                 "programmatic tool name {name:?} is not an ASCII JavaScript identifier name"
             )));
         }
         if !seen.insert(name) {
-            return Err(GlrMaskError::Compilation(format!(
+            return Err(Error::Compilation(format!(
                 "programmatic tool name {name:?} was supplied more than once"
             )));
         }
@@ -924,8 +924,8 @@ mod tests {
             None,
         )
         .expect_err("legacy None schema composition must be unsupported");
-        match legacy_error.kind() {
-            crate::ErrorKind::Compilation(message) => assert!(
+        match (legacy_error.kind(), legacy_error.message()) {
+            (crate::ErrorKind::Compilation, message) => assert!(
                 message.contains("legacy owned-parent composition is unsupported"),
                 "unexpected legacy None error: {message}",
             ),

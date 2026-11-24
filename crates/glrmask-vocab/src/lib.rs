@@ -7,6 +7,9 @@ use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod error;
+pub use error::{Error, ErrorKind, SourceSpan};
+
 /// The largest token ID GLRMask accepts: 16,777,215 (2^24 - 1).
 ///
 /// Masks and compile-time tables grow with the largest token ID, so larger IDs
@@ -417,6 +420,7 @@ pub(crate) mod vocab_prefix_tree;
 #[doc(hidden)]
 pub mod __private {
     pub use super::derived_artifact::VocabDerivedArtifact;
+    pub use super::error::internal::{error_message, new_error, with_source_span};
     pub use super::Vocab;
 
     pub mod vocab_prefix_tree {

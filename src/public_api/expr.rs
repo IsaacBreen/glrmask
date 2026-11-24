@@ -144,7 +144,7 @@ impl Expr {
             default_lexer_partition: None,
         };
         let grammar = Grammar::new(GrammarSource::Constructed);
-        let _ = grammar.parsed_component.set(ParsedComponent::from_named(named, &externs).map_err(Into::into));
+        let _ = grammar.parsed_component.set(ParsedComponent::from_named(named, &externs).map_err(crate::error::from_grammar));
         grammar.component()?;
         Ok((grammar, leaves))
     }

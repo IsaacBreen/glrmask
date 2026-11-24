@@ -1,5 +1,6 @@
 //! Borrowed stack-coordinate views. Component graphs and their derived local
 //! domain/runtime data remain immutable and shared across every link.
+use crate::ErrorExt as _;
 use std::{ops::ControlFlow, sync::Arc};
 use super::{CommitTemplateDfas, Constraint, TemplateDomain, TopAdmission, DomainProbe};
 use crate::compiler::glr::{labels::DEFAULT_LABEL, parser::ParserGSS};

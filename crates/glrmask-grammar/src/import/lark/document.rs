@@ -2,6 +2,7 @@
 //! The host compiler resolves them through the same component/event IR as GLRM.
 use super::*;
 use std::collections::BTreeSet;
+use crate::source::SourceSpanExt as _;
 use std::ops::Range;
 
 /// A declaration written in a Lark source.

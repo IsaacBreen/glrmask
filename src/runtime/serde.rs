@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 // PRE-RELEASE COMPATIBILITY POLICY
@@ -2693,7 +2694,7 @@ impl DecodedStaticVirtualResidualMask {
                 let tokenizer = crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes(
                     &mask_tokenizer_bytes,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
                 (tokenizer, projections, false)
             }
             Self::Backed {
@@ -2703,12 +2704,12 @@ impl DecodedStaticVirtualResidualMask {
                 projections,
             } => {
                 let end = tokenizer_start.checked_add(tokenizer_len).ok_or_else(|| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "static residual tokenizer range overflow".to_owned(),
                     )
                 })?;
                 let bytes = backing.get(tokenizer_start..end).ok_or_else(|| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "static residual tokenizer is outside artifact backing".to_owned(),
                     )
                 })?;
@@ -2718,7 +2719,7 @@ impl DecodedStaticVirtualResidualMask {
                         std::sync::Arc::clone(&backing),
                         tokenizer_start,
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
                 (tokenizer, projections, true)
             }
         };
@@ -2738,7 +2739,7 @@ impl DecodedStaticVirtualResidualMask {
                     projections,
                 )
         }
-        .map_err(crate::GlrMaskError::Serialization)?;
+        .map_err(crate::Error::Serialization)?;
         constraint
             .dynamic_mask_vocab
             .set_virtual_residuals_mask_projection(mask_tokenizer, restored);
@@ -3376,7 +3377,7 @@ fn restore_boundary_terminal_trie_v22(
         .iter()
         .any(|&root| root != u32::MAX && root as usize >= node_count)
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized boundary terminal trie references an invalid root node".to_owned(),
         ));
     }
@@ -3385,7 +3386,7 @@ fn restore_boundary_terminal_trie_v22(
         .iter()
         .any(|&tsid| tsid != u32::MAX && tsid as usize >= boundary.root_by_tsid.len())
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized boundary terminal trie references an invalid TSID".to_owned(),
         ));
     }
@@ -3396,7 +3397,7 @@ fn restore_boundary_terminal_trie_v22(
             .iter()
             .any(|&(_, child)| child as usize >= node_count)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized boundary terminal trie node {node_index} references an invalid child"
             )));
         }
@@ -3405,7 +3406,7 @@ fn restore_boundary_terminal_trie_v22(
             .iter()
             .any(|&token| token as usize >= internal_token_count)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized boundary terminal trie node {node_index} references an invalid token class"
             )));
         }
@@ -3414,20 +3415,20 @@ fn restore_boundary_terminal_trie_v22(
     if let Some(symbolic_nwa) = boundary.symbolic_nwa.as_ref() {
         let symbolic_node_count = symbolic_nwa.nodes.len();
         if symbolic_nwa.topological_order.len() != symbolic_node_count {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "serialized boundary terminal NWA has an incomplete topological order".to_owned(),
             ));
         }
         let mut position = vec![usize::MAX; symbolic_node_count];
         for (index, &state) in symbolic_nwa.topological_order.iter().enumerate() {
             let Some(slot) = position.get_mut(state as usize) else {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "serialized boundary terminal NWA topological order references an invalid state"
                         .to_owned(),
                 ));
             };
             if *slot != usize::MAX {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "serialized boundary terminal NWA topological order contains a duplicate state"
                         .to_owned(),
                 ));
@@ -3439,7 +3440,7 @@ fn restore_boundary_terminal_trie_v22(
             .iter()
             .any(|&state| state as usize >= symbolic_node_count)
         {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "serialized boundary terminal NWA references an invalid start state".to_owned(),
             ));
         }
@@ -3451,7 +3452,7 @@ fn restore_boundary_terminal_trie_v22(
                     internal_token_count,
                 )
             }) {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "serialized boundary terminal NWA state {source} has an out-of-domain final weight"
                 )));
             }
@@ -3465,7 +3466,7 @@ fn restore_boundary_terminal_trie_v22(
                         internal_token_count,
                     )
                 {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "serialized boundary terminal NWA state {source} has an invalid labeled transition"
                     )));
                 }
@@ -3479,7 +3480,7 @@ fn restore_boundary_terminal_trie_v22(
                         internal_token_count,
                     )
                 {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "serialized boundary terminal NWA state {source} has an invalid epsilon transition"
                     )));
                 }
@@ -3516,7 +3517,7 @@ fn restore_segmented_runtime_v22(
         if !runtime.materialized_static_parser_state_domain_labels.is_empty()
             && runtime.materialized_static_parser_state_domain_labels.len() != global_state_count
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized static component parser has {} domain labels for {global_state_count} outer states",
                 runtime.materialized_static_parser_state_domain_labels.len(),
             )));
@@ -3526,20 +3527,20 @@ fn restore_segmented_runtime_v22(
         constraint.parser_state_domain_labels =
             runtime.materialized_static_parser_state_domain_labels;
     } else if !runtime.materialized_static_parser_state_domain_labels.is_empty() {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized static component parser labels exist without a parser".to_owned(),
         ));
     }
     let mut components = Vec::with_capacity(runtime.components.len());
     for (index, component) in runtime.components.into_iter().enumerate() {
         if component.global_to_local_parser_state.len() != global_state_count {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} parser-state projection has {} entries for {global_state_count} outer states",
                 component.global_to_local_parser_state.len(),
             )));
         }
         if component.root_entry_terminals.len() != global_terminal_count {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
                 component.root_entry_terminals.len(),
             )));
@@ -3550,7 +3551,7 @@ fn restore_segmented_runtime_v22(
             .checked_add(child.table.num_terminals)
             .is_none_or(|end| end as usize > global_terminal_count)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} terminal range lies outside outer terminal domain"
             )));
         }
@@ -3559,7 +3560,7 @@ fn restore_segmented_runtime_v22(
             .checked_add(child.tokenizer.num_states().saturating_sub(1))
             .is_none_or(|last| last >= global_tokenizer_states)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} tokenizer-state range lies outside outer tokenizer"
             )));
         }
@@ -3567,14 +3568,14 @@ fn restore_segmented_runtime_v22(
             .root_disallowed_terminal
             .is_some_and(|terminal| terminal >= child.table.num_terminals)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} root-disallowed terminal lies outside the component"
             )));
         }
         if component.global_to_local_parser_state.iter().any(|&local| {
             local != u32::MAX && local >= child.table.num_states
         }) {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "segmented component {index} parser-state projection references an invalid local state"
             )));
         }
@@ -3592,7 +3593,7 @@ fn restore_segmented_runtime_v22(
     if !runtime.segmented_component_union_root_dispatch.is_empty()
         && runtime.segmented_component_union_root_dispatch.len() != global_state_count
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "segmented component root dispatch has the wrong outer parser-state domain".to_owned(),
         ));
     }
@@ -3601,7 +3602,7 @@ fn restore_segmented_runtime_v22(
         .iter()
         .any(|&component| component != u32::MAX && component as usize >= components.len())
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "segmented component root dispatch references an unknown component".to_owned(),
         ));
     }
@@ -3633,7 +3634,7 @@ fn restore_boundary_parser_v23(
     let global_tokenizer_states = constraint.tokenizer.num_states();
     let tsid_count = if boundary.uses_composed_tsid_coordinate {
         if !boundary.tokenizer_state_to_tsid.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "composed-coordinate boundary shard redundantly stores a private tokenizer-state map"
                     .to_owned(),
             ));
@@ -3641,7 +3642,7 @@ fn restore_boundary_parser_v23(
         constraint.internal_tsid_count()
     } else {
         if boundary.tokenizer_state_to_tsid.len() != global_tokenizer_states as usize {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "private-coordinate boundary shard has {} tokenizer-state entries for {global_tokenizer_states} outer states",
                 boundary.tokenizer_state_to_tsid.len(),
             )));
@@ -3657,7 +3658,7 @@ fn restore_boundary_parser_v23(
     let token_count = boundary.internal_token_to_originals.len();
     let state_count = boundary.parser_dwa.num_states() as usize;
     if boundary.parser_dwa.start_state() as usize >= state_count {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized boundary parser has an invalid start state".to_owned(),
         ));
     }
@@ -3677,13 +3678,13 @@ fn restore_boundary_parser_v23(
             .as_ref()
             .is_some_and(|weight| !weight_in_domain(weight))
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized boundary parser state {state_index} has an out-of-domain final weight"
             )));
         }
         for (target, weight) in state.transitions.values() {
             if *target as usize >= state_count || !weight_in_domain(weight) {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "serialized boundary parser state {state_index} has an invalid transition"
                 )));
             }
@@ -3695,7 +3696,7 @@ fn restore_boundary_parser_v23(
             .iter()
             .any(|&tsid| tsid != u32::MAX && tsid as usize >= tsid_count)
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized boundary parser tokenizer-state map references an invalid TSID".to_owned(),
         ));
     }
@@ -3717,7 +3718,7 @@ fn restore_recursive_boundary_parser_v27(
 ) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryParser> {
     let tsid_count = if boundary.uses_composed_tsid_coordinate {
         if !boundary.tokenizer_state_to_tsid.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "recursive composed-coordinate boundary shard redundantly stores a private tokenizer-state map"
                     .to_owned(),
             ));
@@ -3729,7 +3730,7 @@ fn restore_recursive_boundary_parser_v27(
         // the recursive leaf total — not the outer composed tokenizer, which
         // may canonicalize states the leaves keep distinct.
         if boundary.tokenizer_state_to_tsid.len() != recursive_tokenizer_state_count as usize {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive private-coordinate boundary shard has {} tokenizer-state entries for {recursive_tokenizer_state_count} leaf states",
                 boundary.tokenizer_state_to_tsid.len(),
             )));
@@ -3745,7 +3746,7 @@ fn restore_recursive_boundary_parser_v27(
     let token_count = boundary.internal_token_to_originals.len();
     let state_count = boundary.parser_dwa.num_states() as usize;
     if boundary.parser_dwa.start_state() as usize >= state_count {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized recursive boundary parser has an invalid start state".to_owned(),
         ));
     }
@@ -3777,20 +3778,20 @@ fn restore_recursive_boundary_parser_v27(
             .as_ref()
             .is_some_and(|weight| !weight_in_domain(weight))
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized recursive boundary parser state {state_index} has an out-of-domain final weight"
             )));
         }
         for (&label, (target, weight)) in &state.transitions {
             if *target as usize >= state_count || !weight_in_domain(weight) {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "serialized recursive boundary parser state {state_index} has an invalid transition"
                 )));
             }
             if label != crate::compiler::glr::labels::DEFAULT_LABEL
                 && (label < 0 || label as u32 >= recursive_parser_state_count)
             {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "serialized recursive boundary parser state {state_index} references parser state {label} outside the recursive domain"
                 )));
             }
@@ -3802,7 +3803,7 @@ fn restore_recursive_boundary_parser_v27(
             .iter()
             .any(|&tsid| tsid != u32::MAX && tsid as usize >= tsid_count)
     {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized recursive boundary parser tokenizer-state map references an invalid TSID"
                 .to_owned(),
         ));
@@ -3875,14 +3876,14 @@ fn restore_segmented_runtime_v23(
         match shard.scope {
             SegmentedBoundaryShardScopeV23::Global => {
                 if shard.candidate_tokens.is_some() {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "global boundary shard {index} unexpectedly carries component trigger tokens"
                     )));
                 }
                 match backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         if global_static.replace(boundary).is_some() {
-                            return Err(crate::GlrMaskError::Serialization(
+                            return Err(crate::Error::Serialization(
                                 "serialized v23 runtime contains multiple global static boundary shards"
                                     .to_owned(),
                             ));
@@ -3890,14 +3891,14 @@ fn restore_segmented_runtime_v23(
                     }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
                         if global_dynamic.replace(boundary).is_some() {
-                            return Err(crate::GlrMaskError::Serialization(
+                            return Err(crate::Error::Serialization(
                                 "serialized v23 runtime contains multiple global dynamic boundary shards"
                                     .to_owned(),
                             ));
                         }
                     }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
-                        return Err(crate::GlrMaskError::Serialization(
+                        return Err(crate::Error::Serialization(
                             "serialized v23 runtime cannot use an unscoped direct-dynamic boundary shard"
                                 .to_owned(),
                         ));
@@ -3911,12 +3912,12 @@ fn restore_segmented_runtime_v23(
             } => {
                 let component_index = start_component as usize;
                 if component_index >= component_count {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "boundary shard {index} references unknown component {start_component}"
                     )));
                 }
                 if seen_components[component_index] {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "serialized v23 runtime contains multiple boundary shards for component {start_component}"
                     )));
                 }
@@ -3924,13 +3925,13 @@ fn restore_segmented_runtime_v23(
                 if start_parser_states.len() != global_state_count
                     && !(allow_empty_component_start_states && start_parser_states.is_empty())
                 {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "boundary shard {index} start-state set has length {} for {global_state_count} outer states",
                         start_parser_states.len(),
                     )));
                 }
                 if accepts_empty_stack && start_component != 0 {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "boundary shard {index} gives empty-stack ownership to non-root component {start_component}"
                     )));
                 }
@@ -3951,7 +3952,7 @@ fn restore_segmented_runtime_v23(
         }
     }
     if !restored_shards.is_empty() && (global_static.is_some() || global_dynamic.is_some()) {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized v23 runtime mixes global and component-scoped boundary shards".to_owned(),
         ));
     }
@@ -4028,7 +4029,7 @@ fn restore_segmented_runtime_v24(
         .as_mut()
         .expect("v24 segmented runtime restore must create overlay metadata");
     if aliases_by_component.len() != overlay.segmented_parser_components.len() {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "serialized v24 component-alias count mismatch".to_owned(),
         ));
     }
@@ -4041,7 +4042,7 @@ fn restore_segmented_runtime_v24(
         if aliases.iter().any(|&(global, local)| {
             global >= global_terminal_count || local >= component.constraint.table.num_terminals
         }) {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "serialized v24 component {index} contains an invalid terminal alias"
             )));
         }
@@ -4071,7 +4072,7 @@ fn restore_segmented_runtime_v24(
             &overlay.segmented_parser_links,
             &overlay.segmented_parser_state_offsets,
         )
-        .map_err(crate::GlrMaskError::Serialization)?;
+        .map_err(crate::Error::Serialization)?;
     }
 
     // v24 static B was compiled in the materialized composed-table parser
@@ -4146,14 +4147,14 @@ fn restore_recursive_segmented_runtime_v27(
     vocab: &crate::Vocab,
 ) -> crate::Result<()> {
     if !runtime.segmented_mask_authoritative {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "recursive v27 segmented runtime must be mask-authoritative".to_owned(),
         ));
     }
     let template_backend = constraint.has_template_parser();
     let recursive_compiler_table = runtime.recursive_compiler_table;
     if template_backend && !recursive_compiler_table.is_empty() {
-        return Err(crate::GlrMaskError::Serialization("template composition contains a packed LR compiler table".into()));
+        return Err(crate::Error::Serialization("template composition contains a packed LR compiler table".into()));
     }
     let recursive_tokenizer_internal_tsids = runtime.recursive_tokenizer_internal_tsids;
     let global_terminal_count = constraint.parser_terminal_count() as usize;
@@ -4169,14 +4170,14 @@ fn restore_recursive_segmented_runtime_v27(
         .into_par_iter()
         .map(|component| {
             let child = Constraint::load_body_external_artifact(&component.constraint_artifact, vocab)?;
-            Ok::<_, crate::GlrMaskError>((component, child))
+            Ok::<_, crate::Error>((component, child))
         })
         .collect::<crate::Result<Vec<_>>>()?;
     let mut components = Vec::with_capacity(decoded_components.len());
     let mut expected_tokenizer_state_offset = 0u32;
     for (index, (component, child)) in decoded_components.into_iter().enumerate() {
         if component.root_entry_terminals.len() != global_terminal_count {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
                 component.root_entry_terminals.len(),
             )));
@@ -4186,24 +4187,24 @@ fn restore_recursive_segmented_runtime_v27(
             .checked_add(child.parser_terminal_count())
             .is_none_or(|end| end as usize > global_terminal_count)
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 component {index} terminal range lies outside outer terminal domain"
             )));
         }
         if component.tokenizer_state_offset != expected_tokenizer_state_offset {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 component {index} tokenizer-state offset is {}, expected {expected_tokenizer_state_offset}",
                 component.tokenizer_state_offset,
             )));
         }
         let child_tokenizer_span = child
             .recursive_parser_layout()
-            .map_err(crate::GlrMaskError::Serialization)?
+            .map_err(crate::Error::Serialization)?
             .map_or(child.tokenizer.num_states(), |layout| layout.total_tokenizer_states);
         expected_tokenizer_state_offset = expected_tokenizer_state_offset
             .checked_add(child_tokenizer_span)
             .ok_or_else(|| {
-                crate::GlrMaskError::Serialization(
+                crate::Error::Serialization(
                     "recursive v27 tokenizer-state coordinate overflow".to_owned(),
                 )
             })?;
@@ -4211,14 +4212,14 @@ fn restore_recursive_segmented_runtime_v27(
             .root_disallowed_terminal
             .is_some_and(|terminal| terminal >= child.parser_terminal_count())
         {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 component {index} root-disallowed terminal lies outside the component"
             )));
         }
         if component.global_terminal_aliases.iter().any(|&(global, local)| {
             global >= constraint.parser_terminal_count() || local >= child.parser_terminal_count()
         }) {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 component {index} contains an invalid terminal alias"
             )));
         }
@@ -4234,7 +4235,7 @@ fn restore_recursive_segmented_runtime_v27(
         });
     }
     if expected_tokenizer_state_offset as usize != recursive_tokenizer_internal_tsids.len() {
-        return Err(crate::GlrMaskError::Serialization(format!(
+        return Err(crate::Error::Serialization(format!(
             "recursive v27 tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
             recursive_tokenizer_internal_tsids.len(),
         )));
@@ -4252,7 +4253,7 @@ fn restore_recursive_segmented_runtime_v27(
         })
         .collect::<Vec<_>>();
     if components.is_empty() || links.is_empty() {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "recursive v27 segmented runtime requires components and linker controls".to_owned(),
         ));
     }
@@ -4272,20 +4273,20 @@ fn restore_recursive_segmented_runtime_v27(
         if !template_backend {
             overlay.recursive_compiler_table
                 .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
-                .map_err(|_| crate::GlrMaskError::Serialization("recursive compiler table was initialized twice".into()))?;
+                .map_err(|_| crate::Error::Serialization("recursive compiler table was initialized twice".into()))?;
         }
     }
     let layout = constraint
         .recursive_parser_layout_for_pending_root()
-        .map_err(crate::GlrMaskError::Serialization)?
+        .map_err(crate::Error::Serialization)?
         .ok_or_else(|| {
-            crate::GlrMaskError::Serialization(
+            crate::Error::Serialization(
                 "recursive v27 runtime failed to derive its parser layout".to_owned(),
             )
         })?;
     constraint
         .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_internal_tsids)
-        .map_err(crate::GlrMaskError::Serialization)?;
+        .map_err(crate::Error::Serialization)?;
     let component_count = constraint
         .static_dynamic_overlay
         .as_ref()
@@ -4297,20 +4298,20 @@ fn restore_recursive_segmented_runtime_v27(
     for (index, shard) in runtime.boundary_shards.into_iter().enumerate() {
         let component_index = shard.start_component as usize;
         if component_index >= component_count {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 boundary shard {index} references unknown component {}",
                 shard.start_component,
             )));
         }
         if seen[component_index] {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 runtime contains multiple boundary shards for component {}",
                 shard.start_component,
             )));
         }
         seen[component_index] = true;
         if shard.accepts_empty_stack && shard.start_component != 0 {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "recursive v27 boundary shard {index} gives empty-stack ownership to non-root component {}",
                 shard.start_component,
             )));
@@ -4357,7 +4358,7 @@ fn restore_recursive_segmented_runtime_v27(
     }
     overlay.segmented_boundary_shards = restored_shards;
     if !constraint.uses_compact_segmented_parser_runtime() {
-        return Err(crate::GlrMaskError::Serialization(
+        return Err(crate::Error::Serialization(
             "recursive v27 segmented runtime did not restore a provider-native parser"
                 .to_owned(),
         ));
@@ -4378,12 +4379,12 @@ fn restore_segmented_runtime_v27(
             restore_segmented_runtime_v24(constraint, runtime, vocab)
         }
         SegmentedRuntimeArtifactV27::RecursiveProjected(_runtime, _observation) => {
-            Err(crate::GlrMaskError::Serialization(
+            Err(crate::Error::Serialization(
                 "experimental projected artifact lacks a full-vocabulary observation contract; rebuild it".into()))
         }
         SegmentedRuntimeArtifactV27::RecursiveObserved(runtime, observation) => {
             restore_recursive_segmented_runtime_v27(constraint, runtime, vocab)?;
-            observation.validate(constraint).map_err(crate::GlrMaskError::Serialization)?;
+            observation.validate(constraint).map_err(crate::Error::Serialization)?;
             constraint.static_dynamic_overlay.as_mut().expect("restored recursive overlay")
                 .recursive_static_observation = Some(Arc::new(observation));
             Ok(())
@@ -5923,7 +5924,7 @@ impl Constraint {
             let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
             constraint
                 .bind_vocab_exact(vocab)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             Ok(constraint)
         })
     }
@@ -6103,7 +6104,7 @@ impl Constraint {
         bytes: impl Into<Cow<'b, [u8]>>, vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
         let mut constraint = Self::load_body_with_vocab_policy(bytes.into(), Some(vocab))?;
-        constraint.bind_vocab_exact(vocab).map_err(crate::GlrMaskError::Serialization)?;
+        constraint.bind_vocab_exact(vocab).map_err(crate::Error::Serialization)?;
         Ok(constraint)
     }
 
@@ -6124,7 +6125,7 @@ impl Constraint {
             let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
             constraint
                 .bind_vocab_exact(vocab)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             Ok(constraint)
         })
     }
@@ -6164,7 +6165,7 @@ impl Constraint {
             internal_masks,
             token_mask_cache,
             composition_metadata,
-        ) = v30_sections(serialized).map_err(crate::GlrMaskError::Serialization)?;
+        ) = v30_sections(serialized).map_err(crate::Error::Serialization)?;
         let (
             weight_section,
             dwa_section,
@@ -6707,19 +6708,19 @@ impl Constraint {
                 Ok((artifact, deferred_token_bytes, packed_weights))
             },
         );
-        let parser_dwa = dwa_result.map_err(crate::GlrMaskError::Serialization)?;
+        let parser_dwa = dwa_result.map_err(crate::Error::Serialization)?;
         let (table, deferred_table_rules_blob, template_parser_seed) =
-            table_result.map_err(crate::GlrMaskError::Serialization)?;
-        let runtime = runtime_result.map_err(crate::GlrMaskError::Serialization)?;
-        let tokenizer = tokenizer_result.map_err(crate::GlrMaskError::Serialization)?;
+            table_result.map_err(crate::Error::Serialization)?;
+        let runtime = runtime_result.map_err(crate::Error::Serialization)?;
+        let tokenizer = tokenizer_result.map_err(crate::Error::Serialization)?;
         let original_token_map =
-            original_token_map_result.map_err(crate::GlrMaskError::Serialization)?;
+            original_token_map_result.map_err(crate::Error::Serialization)?;
         let external_internal_token_buf_masks =
-            internal_token_buf_masks_result.map_err(crate::GlrMaskError::Serialization)?;
+            internal_token_buf_masks_result.map_err(crate::Error::Serialization)?;
         let token_mask_cache =
-            token_mask_cache_result.map_err(crate::GlrMaskError::Serialization)?;
+            token_mask_cache_result.map_err(crate::Error::Serialization)?;
         let (artifact, deferred_token_bytes, packed_weights) =
-            core_result.map_err(crate::GlrMaskError::Serialization)?;
+            core_result.map_err(crate::Error::Serialization)?;
         let token_bytes_started = profile.then(std::time::Instant::now);
         let external_token_bytes = if external_layout {
             if !token_bytes_section.is_some_and(<[u8]>::is_empty) {
@@ -6733,7 +6734,7 @@ impl Constraint {
             let start = (token_bytes_section.as_ptr() as usize)
                 .checked_sub(section_bytes.as_ptr() as usize)
                 .ok_or_else(|| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "token-byte section does not belong to artifact backing".to_owned(),
                     )
                 })?;
@@ -6743,7 +6744,7 @@ impl Constraint {
                     start,
                     token_bytes_section.len(),
                 )
-                .map_err(crate::GlrMaskError::Serialization)?,
+                .map_err(crate::Error::Serialization)?,
             ))
         } else {
             None
@@ -6769,7 +6770,7 @@ impl Constraint {
         let attach_weights_started = profile.then(std::time::Instant::now);
         if let Some((pool, ids)) = packed_weights {
             attach_packed_non_dwa_weights(&mut constraint, pool, ids)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
         }
         let attach_weights_ms = attach_weights_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -6789,7 +6790,7 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         constraint.table = table;
         if let Some(seed) = template_parser_seed {
-            seed.install(&mut constraint).map_err(crate::GlrMaskError::Serialization)?;
+            seed.install(&mut constraint).map_err(crate::Error::Serialization)?;
         }
         constraint.deferred_table_rules_blob = deferred_table_rules_blob;
         constraint.deferred_table_rules = Default::default();
@@ -6799,7 +6800,7 @@ impl Constraint {
                 &constraint.original_token_to_internal,
                 artifact.internal_token_buf_masks.len(),
             )
-            .map_err(crate::GlrMaskError::Serialization)?;
+            .map_err(crate::Error::Serialization)?;
         }
         let invert_ms = invert_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -6809,28 +6810,28 @@ impl Constraint {
         constraint.deferred_terminal_exprs = Default::default();
         constraint.deferred_composition_metadata_blob = if let Some(section) = composition_metadata_section {
             let (_, prepared)=crate::compiler::boundary_precomputed_completion::split_envelope(section)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             *prepared_completion_wire=prepared.map(Arc::from);
             validate_composition_metadata_wire(section)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             if section.is_empty() {
                 None
             } else if let Some(backing) = current_backing.as_ref() {
                 let start = (section.as_ptr() as usize)
                     .checked_sub(backing.as_ptr() as usize)
                     .ok_or_else(|| {
-                        crate::GlrMaskError::Serialization(
+                        crate::Error::Serialization(
                             "composition metadata section does not belong to artifact backing"
                                 .to_owned(),
                         )
                     })?;
                 let end = start.checked_add(section.len()).ok_or_else(|| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "composition metadata backing range overflow".to_owned(),
                     )
                 })?;
                 if backing.get(start..end) != Some(section) {
-                    return Err(crate::GlrMaskError::Serialization(
+                    return Err(crate::Error::Serialization(
                         "composition metadata bytes do not match artifact backing".to_owned(),
                     ));
                 }
@@ -6883,7 +6884,7 @@ impl Constraint {
         let total_started = profile.then(std::time::Instant::now);
         let decompress_ms = 0.0;
         if bytes.len() < CONSTRAINT_HEADER_LEN || !bytes.starts_with(&CONSTRAINT_MAGIC) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid constraint artifact header".to_owned(),
             ));
         }
@@ -6894,7 +6895,7 @@ impl Constraint {
                 | EXTERNAL_LR_CONSTRAINT_VERSION
                 | EXTERNAL_DWA_CONSTRAINT_VERSION
         ) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "they were saved by another GLRMask version".to_owned(),
             ));
         }
@@ -6906,12 +6907,12 @@ impl Constraint {
                 .expect("constraint artifact header has fixed width"),
         ))
         .map_err(|_| {
-            crate::GlrMaskError::Serialization(
+            crate::Error::Serialization(
                 "constraint artifact payload length does not fit this platform".to_owned(),
             )
         })?;
         if bytes.len() != CONSTRAINT_HEADER_LEN.saturating_add(payload_len) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid constraint artifact payload length".to_owned(),
             ));
         }
@@ -6951,7 +6952,7 @@ impl Constraint {
             if !deferred
                 && let Some(cache) = token_mask_cache {
                     install_token_mask_cache(&mut constraint, cache)
-                        .map_err(crate::GlrMaskError::Serialization)?;
+                        .map_err(crate::Error::Serialization)?;
                 }
             let mut virtual_runtimes = Vec::new();
             let mut static_virtual_residual_mask = None;
@@ -6977,7 +6978,7 @@ impl Constraint {
                         ids,
                         rows,
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
                     constraint.packed_dwa_token_dense_masks = cache;
                     loaded_packed_dwa_dense_masks = true;
                 }
@@ -6987,7 +6988,7 @@ impl Constraint {
                             Some(dynamic_mask_vocab), vocab)?
                     } else {
                         crate::runtime::artifact::DynamicMaskVocab::from_artifact(dynamic_mask_vocab)
-                            .map_err(crate::GlrMaskError::Serialization)?
+                            .map_err(crate::Error::Serialization)?
                     };
                 } else if reuse_omitted_vocab {
                     // This is the existing exact full-Vocab constructor, not
@@ -7020,7 +7021,7 @@ impl Constraint {
             let restore_exprs_started = profile.then(std::time::Instant::now);
             if virtual_runtimes.is_empty() {
                 Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(terminal_exprs)
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
             } else {
                 let compiled_static_residual = static_virtual_residual_mask.as_ref().is_some_and(|static_mask| {
                         static_mask.projections().len() == virtual_runtimes.len()
@@ -7057,7 +7058,7 @@ impl Constraint {
                         )
                     }
                 };
-                restore_result.map_err(crate::GlrMaskError::Serialization)?;
+                restore_result.map_err(crate::Error::Serialization)?;
             }
             if let Some(static_mask) = static_virtual_residual_mask {
                 static_mask.restore_projections(&mut constraint)?;
@@ -7077,16 +7078,16 @@ impl Constraint {
         let deserialize_ms = deserialize_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if constraint.table.is_present() && !constraint.uses_dynamic_runtime() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "retained LR artifacts are supported only for ordinary Dynamic runtimes".into(),
             ));
         }
         if constraint.has_template_parser() {
-            constraint.validate_template_composition_layout().map_err(crate::GlrMaskError::Serialization)?;
+            constraint.validate_template_composition_layout().map_err(crate::Error::Serialization)?;
         }
         if !constraint.parser_state_domain_labels.is_empty() {
             if constraint.parser_state_domain_labels.len() != constraint.parser_symbol_count() as usize {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "parser-state domain map has {} entries for {} parser states",
                     constraint.parser_state_domain_labels.len(),
                     constraint.parser_symbol_count(),
@@ -7100,7 +7101,7 @@ impl Constraint {
                 }
                 let label64 = label as i64;
                 if label64 < first_synthetic || label64 >= default_label {
-                    return Err(crate::GlrMaskError::Serialization(format!(
+                    return Err(crate::Error::Serialization(format!(
                         "invalid parser-state domain label {label} for {} parser states",
                         constraint.parser_symbol_count(),
                     )));
@@ -7184,7 +7185,7 @@ impl Constraint {
             let started=std::time::Instant::now();
             let prepared=crate::compiler::boundary_precomputed_completion::PreparedCompletion::load(
                 Arc::clone(&constraint.tokenizer),wire,
-            ).map_err(crate::GlrMaskError::Serialization)?;
+            ).map_err(crate::Error::Serialization)?;
             constraint.boundary_completion_index=Some(Arc::new(prepared));
             if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
                 eprintln!("[glrmask/profile][component_completion_load] certified=true ms={:.3}",started.elapsed().as_secs_f64()*1000.0);

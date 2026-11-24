@@ -4,7 +4,7 @@ use glrmask::{Expr, Grammar, Module, TokenSet, Vocab, MAX_TOKEN_ID};
 const HUGE_IDS: [u32; 3] = [u32::MAX, 4_000_000_000, MAX_TOKEN_ID + 1];
 
 fn is_invalid_input(error: &glrmask::Error) -> bool {
-    matches!(error.kind(), glrmask::ErrorKind::InvalidInput(_))
+    error.kind() == glrmask::ErrorKind::InvalidInput
 }
 
 fn small_vocab() -> Vocab {

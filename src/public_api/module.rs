@@ -1859,8 +1859,8 @@ mod boundary_error_tests {
             )
         };
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
-        match error.kind() {
-            crate::ErrorKind::ResourceLimit(message) => {
+        match (error.kind(), error.message()) {
+            (crate::ErrorKind::ResourceLimit, message) => {
                 assert_eq!(message, crate::error::BOUNDARY_DWA_DECLINE);
                 assert!(message.contains("TokenTrie"));
             }

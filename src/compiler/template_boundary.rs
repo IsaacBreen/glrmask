@@ -3,6 +3,7 @@
 //! Reuse the ordinary boundary lexical walk, signed-template substitution,
 //! exact cancellation/normalization, and StaticParser runtime publication.
 //! The only parser input is the persisted finite relation inventory.
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::{collections::BTreeMap, sync::Arc};
@@ -28,7 +29,7 @@ pub(crate) const TEMPLATE_DECLINE_PREFIX: &str = "shared template constructor de
 /// a resource budget. Callers that selected the static backend heuristically
 /// may keep the exact segmented dynamic boundary instead of failing.
 pub(crate) fn is_template_budget_decline(error: &Error) -> bool {
-    matches!(error.kind(), crate::ErrorKind::Compilation(message) if message.starts_with(TEMPLATE_DECLINE_PREFIX))
+    error.kind() == crate::ErrorKind::Compilation && error.message().starts_with(TEMPLATE_DECLINE_PREFIX)
 }
 
 /// PM deliberately leaves tokens/states with no delayed-terminal matches

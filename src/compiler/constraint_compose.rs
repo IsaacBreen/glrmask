@@ -23519,6 +23519,7 @@ pub(crate) fn load_vocab(path: &str) -> Vocab {
 
 #[cfg(test)]
 mod tests {
+    use crate::ErrorExt as _;
     use super::*;
     use crate::compiler::glr::table::{
         GlrTableConstruction, SubgrammarTableInput, compose_subgrammar_tables,
@@ -23953,7 +23954,7 @@ mod tests {
             for &(name, child) in children {
                 let placeholder_terminal = terminal(self, name);
                 if !seen.insert(placeholder_terminal) {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "parent placeholder terminal {name:?} was supplied more than once",
                     )));
                 }
@@ -23970,7 +23971,7 @@ mod tests {
                 SegmentedBoundaryBackend::StaticParserDwa,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::Error::Compilation)
         }
 
         fn compose_linked_children_for_test_owned(
@@ -23983,7 +23984,7 @@ mod tests {
             for &(name, child) in children {
                 let placeholder_terminal = terminal(&self, name);
                 if !seen.insert(placeholder_terminal) {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "parent placeholder terminal {name:?} was supplied more than once",
                     )));
                 }
@@ -24000,7 +24001,7 @@ mod tests {
                 SegmentedBoundaryBackend::StaticParserDwa,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::Error::Compilation)
         }
 
         #[allow(deprecated)]
@@ -24014,7 +24015,7 @@ mod tests {
             for &(name, child) in children {
                 let placeholder_terminal = terminal(self, name);
                 if !seen.insert(placeholder_terminal) {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "parent placeholder terminal {name:?} was supplied more than once",
                     )));
                 }
@@ -24026,7 +24027,7 @@ mod tests {
             }
             compose_constraints(self, &inputs, vocab)
                 .map(|composition| composition.constraint)
-                .map_err(crate::GlrMaskError::Compilation)
+                .map_err(crate::Error::Compilation)
         }
 
         fn compose_linked_children_for_test_dynamic(
@@ -24039,7 +24040,7 @@ mod tests {
             for &(name, child) in children {
                 let placeholder_terminal = terminal(self, name);
                 if !seen.insert(placeholder_terminal) {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "parent placeholder terminal {name:?} was supplied more than once",
                     )));
                 }
@@ -24056,7 +24057,7 @@ mod tests {
                 SegmentedBoundaryBackend::Dynamic,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::Error::Compilation)
         }
     }
 

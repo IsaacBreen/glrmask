@@ -25,6 +25,7 @@ mod component;
 pub use component::ParsedComponent;
 
 use crate::SourceSpan;
+use crate::source::SourceSpanExt as _;
 use range_set_blaze::RangeSetBlaze;
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;

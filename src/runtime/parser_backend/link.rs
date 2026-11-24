@@ -1,6 +1,7 @@
 //! Link table-free components through shared programs and offset descriptors.
 //! Lexer execution, vocabulary walking and CALL/RETURN closure stay in the
 //! common recursive runtime. No LR action/goto representation is constructed.
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::{collections::BTreeSet, sync::Arc};

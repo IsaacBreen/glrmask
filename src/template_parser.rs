@@ -17,6 +17,7 @@
 //! only to repository tooling through the `internal-api` feature. Public
 //! built-in grammar APIs select their parser representation internally.
 
+use crate::ErrorExt as _;
 pub(crate) mod static_compile;
 mod grammar_constructor;
 

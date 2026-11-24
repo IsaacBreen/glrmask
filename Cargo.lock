@@ -627,6 +627,7 @@ version = "0.3.0"
 dependencies = [
  "glrmask-finite-automata",
  "glrmask-lexer",
+ "glrmask-vocab",
  "range-set-blaze",
  "rayon",
  "rustc-hash 1.1.0",

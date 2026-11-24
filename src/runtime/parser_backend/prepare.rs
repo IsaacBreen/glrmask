@@ -4,6 +4,7 @@
 //! Immutable source identity, domain, and fast view travel together until
 //! terminal fanout. No executable LR data is retained.
 
+use crate::ErrorExt as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;

@@ -9,6 +9,7 @@
 //! rather than recompiling with TokenTrie. Without the switch, compilation
 //! returns the normal route's decline unchanged.
 
+use crate::ErrorExt as _;
 #[cfg(test)]
 use std::cell::Cell;
 

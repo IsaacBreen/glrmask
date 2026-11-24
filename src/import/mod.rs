@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 pub use crate::grammar::ast as ast;
 pub(crate) use glrmask_grammar::__private::import::ebnf;
 pub mod json_schema;
@@ -28,7 +29,7 @@ use crate::runtime::Constraint;
 use crate::dynamic_constraint::DynamicConstraint;
 
 pub(crate) fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(ebnf::parse_ebnf_to_named(source)?)
+    Ok(ebnf::parse_ebnf_to_named(source).map_err(crate::error::from_grammar)?)
 }
 
 /// Rejects token IDs written in grammar text that name special tokens.
@@ -57,7 +58,7 @@ pub(crate) fn validate_ebnf_source(source: &str, vocab: &crate::Vocab) -> crate:
 }
 
 pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate::Result<()> {
-    let comp = crate::grammar::glrm::ParsedComponent::parse_glrm(source)?;
+    let comp = crate::grammar::glrm::ParsedComponent::parse_glrm(source).map_err(crate::error::from_grammar)?;
     let ranges = comp.inline_token_ranges();
     for &(start, end) in &ranges {
         if !vocab.contains_token_range(start, end) {
@@ -73,11 +74,11 @@ pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate:
 }
 
 pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(lark::parse_lark_to_named(source)?)
+    Ok(lark::parse_lark_to_named(source).map_err(crate::error::from_grammar)?)
 }
 
 pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm(source)?)
+    Ok(crate::grammar::glrm::from_glrm(source).map_err(crate::error::from_grammar)?)
 }
 
 fn parse_glrm_with_external_terminal_bindings(
@@ -87,11 +88,11 @@ fn parse_glrm_with_external_terminal_bindings(
     Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
         source,
         bindings,
-    )?)
+    ).map_err(crate::error::from_grammar)?)
 }
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
-    Ok(json_schema::prepare_named_grammar(grammar)?)
+    Ok(json_schema::prepare_named_grammar(grammar).map_err(crate::error::from_grammar)?)
 }
 
 /// Parse, factor and prepare one JSON Schema document exactly as the static
@@ -235,7 +236,7 @@ pub(crate) fn lower_factored_named_grammar(
     let grammar = ast::lower(&factored);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    Ok(grammar?)
+    Ok(grammar.map_err(crate::error::from_grammar)?)
 }
 
 /// Factor/transform/lower one already-parsed named grammar. This is the exact
@@ -247,7 +248,7 @@ pub(crate) fn lower_static_named_grammar(
 ) -> crate::Result<GrammarDef> {
     let mut factored = factor_named_grammar(named);
     append_end_token_choice(&mut factored, end_token_ids);
-    Ok(ast::lower(&factored)?)
+    Ok(ast::lower(&factored).map_err(crate::error::from_grammar)?)
 }
 
 /// The static template route's EBNF input, before normalization.
@@ -334,14 +335,14 @@ fn lower_json_schema_for_vocab_partition(source: &str) -> crate::Result<GrammarD
     emit_import_phase_end("factor_named_grammar", factor_started_at);
 
     let transform_started_at = emit_import_phase_start("transform_named_grammar");
-    let resolved_terminal_exprs = json_schema::prepare_named_grammar_for_lowering(&mut factored)?;
+    let resolved_terminal_exprs = json_schema::prepare_named_grammar_for_lowering(&mut factored).map_err(crate::error::from_grammar)?;
     emit_import_phase_end("transform_named_grammar", transform_started_at);
 
     let ast_lower_started_at = emit_import_phase_start("ast_lower");
     let grammar = ast::lower_with_resolved_terminal_exprs(&factored, resolved_terminal_exprs);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    Ok(grammar?)
+    Ok(grammar.map_err(crate::error::from_grammar)?)
 }
 
 
@@ -356,9 +357,9 @@ pub(crate) fn lower_source_for_vocab_partition(
         "glrm" => {
             let named = parse_glrm_with_external_terminal_bindings(source, &[])?;
             let factored = factor_named_grammar(named);
-            Ok(ast::lower(&factored)?)
+            Ok(ast::lower(&factored).map_err(crate::error::from_grammar)?)
         }
-        other => Err(crate::Error::GrammarParse(format!(
+        other => Err(crate::Error::Syntax(format!(
             "unsupported grammar source kind {other:?}"
         ))),
     }
@@ -442,7 +443,7 @@ pub(crate) fn compile_glrm_with_protected_shift_terminals(
     with_large_import_stack(glrm.len(), || {
         let named = parse_glrm_to_named(glrm)?;
         let factored = factor_named_grammar(named);
-        let grammar = ast::lower(&factored)?;
+        let grammar = ast::lower(&factored).map_err(crate::error::from_grammar)?;
         let protected = protected_terminal_names
             .iter()
             .map(|name| (*name).to_string())
@@ -462,7 +463,7 @@ fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u3
     if let Some(next) = vocab.max_event_token_id().and_then(|id| id.checked_add(1)) {
         return Ok(next);
     }
-    vocab.next_available_token_id(0).ok_or_else(|| crate::GlrMaskError::Compilation(
+    vocab.next_available_token_id(0).ok_or_else(|| crate::Error::Compilation(
         "every u32 token ID is occupied; no external-subgrammar placeholder is available".into()))
 }
 
@@ -474,10 +475,10 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
         candidate = vocab.next_available_token_id(candidate).ok_or_else(||
-            crate::GlrMaskError::Compilation("no external-subgrammar placeholder is available".into()))?;
+            crate::Error::Compilation("no external-subgrammar placeholder is available".into()))?;
         if !reserved.contains(&candidate) { return Ok(candidate); }
         candidate = candidate.checked_add(1).ok_or_else(|| {
-            crate::GlrMaskError::Compilation(
+            crate::Error::Compilation(
                 "every u32 token ID is occupied; no external-subgrammar placeholder is available"
                     .to_string(),
             )
@@ -603,7 +604,7 @@ pub(crate) fn compile_bounded_template_from_named(
     let alternatives=dynamic_named_alternatives_from_named(named,transform,&[])?;
         let mut compiled = Vec::with_capacity(alternatives.len());
         for alternative in alternatives {
-            let grammar = ast::lower(&alternative)?;
+            let grammar = ast::lower(&alternative).map_err(crate::error::from_grammar)?;
             // Standalone normalization removes the empty start alternative.
             // A later component linker still needs its original body-language
             // nullability, just as the ordinary static and dynamic frontends do.
@@ -700,7 +701,7 @@ pub(crate) fn compile_bounded_lr_from_named(
     let alternatives=dynamic_named_alternatives_from_named(named,transform,&[])?;
     let mut compiled=Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
-        let grammar=ast::lower(&alternative)?;
+        let grammar=ast::lower(&alternative).map_err(crate::error::from_grammar)?;
         let source_start_nullable=grammar.start_is_nullable();
         let prepared=crate::compiler::grammar::transforms::prepare_grammar_transforms_only(grammar);
         let component=compile_dynamic_owned_with_vocab_partition_lr_with_source_nullable(
@@ -719,7 +720,7 @@ pub(crate) fn compile_dynamic_named_single_merged(
 )->crate::Result<Constraint> {
     let mut named=factor_named_grammar(named);
     if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
-    let grammar=ast::lower(&named)?;
+    let grammar=ast::lower(&named).map_err(crate::error::from_grammar)?;
     let source_start_nullable=grammar.start_is_nullable();
     let dynamic=match backend {
         crate::runtime::parser_backend::DynamicParserBackend::LrTable =>
@@ -743,7 +744,7 @@ fn component_shell_named(
 )->crate::Result<crate::grammar::glrm::GlrmWithExternalSubgrammars> {
     let has_open=component.declarations().names.iter().any(|name|!token_bindings.iter().any(|(bound,_)|*bound==name));
     let first=if has_open {first_external_placeholder_token_id(vocab)?}else{0};
-    Ok(component.lower_shell(first,std::iter::empty(),token_bindings)?)
+    Ok(component.lower_shell(first,std::iter::empty(),token_bindings).map_err(crate::error::from_grammar)?)
 }
 
 fn compile_component_shell_using(
@@ -779,12 +780,12 @@ pub(crate) fn compile_dynamic_glrm_fixture(
 ) -> crate::Result<DynamicConstraint> {
     let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
         source, first_external_placeholder_token_id(vocab)?, std::iter::empty(), &[],
-    )?;
+    ).map_err(crate::error::from_grammar)?;
     let placeholders = parsed.placeholders.iter()
         .map(|slot| (slot.token_id, slot.binding_name.clone())).collect::<Vec<_>>();
     let alternatives = dynamic_named_alternatives_from_named(parsed.grammar, None, &[])?;
     let compiled = alternatives.into_iter().map(|named| {
-        compile_dynamic_owned_with_backend(ast::lower(&named)?, vocab,
+        compile_dynamic_owned_with_backend(ast::lower(&named).map_err(crate::error::from_grammar)?, vocab,
             GlrTableConstruction::ExperimentalCoreMerged, backend)
     }).collect::<crate::Result<Vec<_>>>()?;
     let mut constraint = DynamicConstraint::from_alternatives(compiled);
@@ -811,7 +812,7 @@ pub(crate) fn compile_dynamic_named_single_with_backend(
 )->crate::Result<Constraint> {
     let mut named = factor_named_grammar(named);
     if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
-    let dynamic = compile_dynamic_owned_with_backend(ast::lower(&named)?, vocab,
+    let dynamic = compile_dynamic_owned_with_backend(ast::lower(&named).map_err(crate::error::from_grammar)?, vocab,
         table_construction, backend)?;
     Ok(dynamic.into_constraint())
 }
@@ -830,7 +831,7 @@ fn compile_dynamic_from_named(
     let alternatives = dynamic_named_alternatives_from_named(named, None, end_token_ids)?;
     let mut compiled = Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
-        let grammar = ast::lower(&alternative)?;
+        let grammar = ast::lower(&alternative).map_err(crate::error::from_grammar)?;
         compiled.push(compile_dynamic_owned_with_backend(
             grammar,
             vocab,
@@ -861,7 +862,7 @@ fn compile_dynamic_from_source(
     let mut compile_ms = 0.0;
     for alternative in alternatives {
         let lower_started = profile_top.then(std::time::Instant::now);
-        let grammar = ast::lower(&alternative)?;
+        let grammar = ast::lower(&alternative).map_err(crate::error::from_grammar)?;
         lower_ms += lower_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let compile_started = profile_top.then(std::time::Instant::now);
@@ -902,7 +903,7 @@ fn compile_dynamic_from_source_with_vocab_partition(
     let alternatives = dynamic_named_alternatives(source, parse, transform, end_token_ids)?;
     let mut compiled = Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
-        let grammar = ast::lower(&alternative)?;
+        let grammar = ast::lower(&alternative).map_err(crate::error::from_grammar)?;
         let source_start_nullable = grammar.start_is_nullable();
         let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(grammar);
         compiled.push(
@@ -939,7 +940,7 @@ fn compile_dynamic_serialized_from_source_profiled(
     let mut lower_ms = 0.0;
     for alternative in alternatives {
         let lower_started = profile.then(std::time::Instant::now);
-        let grammar = ast::lower(&alternative)?;
+        let grammar = ast::lower(&alternative).map_err(crate::error::from_grammar)?;
         lower_ms += lower_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let mut constraint = if vocab_partition {
@@ -1125,7 +1126,7 @@ pub(crate) fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast
     let parse_top_started = profile_top.then(std::time::Instant::now);
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+        .map_err(|e| crate::Error::Syntax(format!("invalid JSON: {e}")))?;
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
     let parse_top_ms = parse_top_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -1141,19 +1142,19 @@ pub(crate) fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast
             started.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok(named?)
+    Ok(named.map_err(crate::error::from_grammar)?)
 }
 
 pub(crate) fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+        .map_err(|e| crate::Error::Syntax(format!("invalid JSON: {e}")))?;
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
 
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, false);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    Ok(named?)
+    Ok(named.map_err(crate::error::from_grammar)?)
 }
 
 fn parse_json_schema_to_named_dynamic_vocab_partition(
@@ -1161,13 +1162,13 @@ fn parse_json_schema_to_named_dynamic_vocab_partition(
 ) -> crate::Result<ast::NamedGrammar> {
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+        .map_err(|e| crate::Error::Syntax(format!("invalid JSON: {e}")))?;
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
 
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, true);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    Ok(named?)
+    Ok(named.map_err(crate::error::from_grammar)?)
 }
 impl Constraint {
     /// Compile an EBNF grammar for `vocab`.
@@ -1279,7 +1280,7 @@ impl Constraint {
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         // Retained for reference; this entry point is intentionally unsupported.
-        return Err(crate::GlrMaskError::Compilation(
+        return Err(crate::Error::Compilation(
             "programmatic JSON schema values are unsupported (not implemented)".into(),
         ));
         with_large_import_stack(schema.len(), || {
@@ -1293,13 +1294,13 @@ impl Constraint {
                 ),
             )?;
             let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
-                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+                crate::Error::Syntax(format!("invalid JSON: {error}"))
             })?;
             let mut named =
                 json_schema::schema_to_named_grammar_with_dynamic_value_token(
                     &schema_value,
                     placeholder_token_id,
-                )?;
+                ).map_err(crate::error::from_grammar)?;
             prepare_json_schema_named(&mut named)?;
             let parent = compile_from_named_grammar(
                 named,
@@ -1314,7 +1315,7 @@ impl Constraint {
                 .find(|special| special.token_id == placeholder_token_id)
                 .map(|special| special.terminal_id)
                 .ok_or_else(|| {
-                    crate::GlrMaskError::Compilation(
+                    crate::Error::Compilation(
                         "dynamic-value JSON Schema lost its linker terminal".to_string(),
                     )
                 })?;
@@ -1328,7 +1329,7 @@ impl Constraint {
                 vocab,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::Error::Compilation)
         })
     }
 
@@ -1345,7 +1346,7 @@ impl Constraint {
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
         // Retained for reference; this entry point is intentionally unsupported.
-        return Err(crate::GlrMaskError::Compilation(
+        return Err(crate::Error::Compilation(
             "programmatic JSON schema values are unsupported (not implemented)".into(),
         ));
         with_large_import_stack(schema.len(), || {
@@ -1364,13 +1365,13 @@ impl Constraint {
                 child_reserved.iter().copied().chain(std::iter::once(value_token_id)),
             )?;
             let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
-                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+                crate::Error::Syntax(format!("invalid JSON: {error}"))
             })?;
             let mut named = json_schema::schema_to_named_grammar_with_programmatic_value_tokens(
                 &schema_value,
                 value_token_id,
                 condition_token_id,
-            )?;
+            ).map_err(crate::error::from_grammar)?;
             prepare_json_schema_named(&mut named)?;
             let parent = compile_from_named_grammar(
                 named,
@@ -1385,7 +1386,7 @@ impl Constraint {
                     .iter()
                     .find(|special| special.token_id == token_id)
                     .map(|special| special.terminal_id)
-                    .ok_or_else(|| crate::GlrMaskError::Compilation(format!(
+                    .ok_or_else(|| crate::Error::Compilation(format!(
                         "programmatic JSON Schema lost linker token {token_id}"
                     )))
             };
@@ -1406,13 +1407,13 @@ impl Constraint {
                 crate::compiler::constraint_compose::SegmentedBoundaryBackend::StaticParserDwa,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)?;
+            .map_err(crate::Error::Compilation)?;
             let condition_terminal = with_value
                 .special_token_terminals
                 .iter()
                 .find(|special| special.token_id == condition_token_id)
                 .map(|special| special.terminal_id)
-                .ok_or_else(|| crate::GlrMaskError::Compilation(
+                .ok_or_else(|| crate::Error::Compilation(
                     "programmatic JSON Schema lost its condition linker terminal after value composition".to_string(),
                 ))?;
             crate::compiler::constraint_compose::compose_constraints_owned_parent_segmented(
@@ -1426,7 +1427,7 @@ impl Constraint {
                 crate::compiler::constraint_compose::SegmentedBoundaryBackend::StaticParserDwa,
             )
             .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::Error::Compilation)
         })
     }
 
@@ -1460,13 +1461,13 @@ impl Constraint {
                 child_reserved.iter().copied().chain(std::iter::once(value_token_id)),
             )?;
             let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
-                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+                crate::Error::Syntax(format!("invalid JSON: {error}"))
             })?;
             let mut named = json_schema::schema_to_named_grammar_with_programmatic_value_tokens(
                 &schema_value,
                 value_token_id,
                 condition_token_id,
-            )?;
+            ).map_err(crate::error::from_grammar)?;
             prepare_json_schema_named(&mut named)?;
             let parent = compile_from_named_grammar(
                 named,
@@ -1482,7 +1483,7 @@ impl Constraint {
                     .find(|special| special.token_id == token_id)
                     .map(|special| special.terminal_id)
                     .ok_or_else(|| {
-                        crate::GlrMaskError::Compilation(format!(
+                        crate::Error::Compilation(format!(
                             "programmatic JSON Schema lost linker token {token_id}"
                         ))
                     })
@@ -1509,7 +1510,7 @@ impl Constraint {
                 };
                 composition
                     .map(|composition| composition.constraint)
-                    .map_err(crate::GlrMaskError::Compilation)
+                    .map_err(crate::Error::Compilation)
             };
             let with_value = compose(parent, value_terminal, dynamic_value)?;
             let condition_terminal = terminal_for(&with_value, condition_token_id)?;
@@ -1591,7 +1592,7 @@ impl Constraint {
                 first_placeholder_token_id,
                 end_token_ids.iter().copied(),
                 terminal_bindings,
-            )?;
+            ).map_err(crate::error::from_grammar)?;
             let mut parent = compile_from_named_grammar(
                 parsed.grammar,
                 vocab,
@@ -1607,19 +1608,19 @@ impl Constraint {
                     .filter(|special| special.token_id == placeholder.token_id)
                     .map(|special| special.terminal_id);
                 let terminal_id = matching.next().ok_or_else(|| {
-                    crate::GlrMaskError::Compilation(format!(
+                    crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {:?} lost its hidden linker terminal",
                         placeholder.binding_name,
                     ))
                 })?;
                 if matching.next().is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {:?} has multiple hidden linker terminals",
                         placeholder.binding_name,
                     )));
                 }
                 if slots.insert(placeholder.binding_name.clone(), terminal_id).is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {:?} was emitted more than once",
                         placeholder.binding_name,
                     )));
@@ -1686,12 +1687,12 @@ impl Constraint {
                         }),
                 ),
                 terminal_bindings,
-            )?;
+            ).map_err(crate::error::from_grammar)?;
 
             let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
             for &(binding_name, child) in children {
                 if children_by_name.insert(binding_name, child).is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "external subgrammar binding {binding_name:?} was supplied more than once",
                     )));
                 }
@@ -1714,7 +1715,7 @@ impl Constraint {
                 }
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
-                return Err(crate::GlrMaskError::Compilation(format!(
+                return Err(crate::Error::Compilation(format!(
                     "compiled child was supplied for unknown external subgrammar {unknown:?}",
                 )));
             }
@@ -1733,12 +1734,12 @@ impl Constraint {
                     .filter(|special| special.token_id == placeholder_token_id)
                     .map(|special| special.terminal_id);
                 let terminal_id = matching_terminals.next().ok_or_else(|| {
-                    crate::GlrMaskError::Compilation(format!(
+                    crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {binding_name:?} lost its hidden linker terminal",
                     ))
                 })?;
                 if matching_terminals.next().is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
                     )));
                 }
@@ -1762,12 +1763,12 @@ impl Constraint {
                     .filter(|special| special.token_id == placeholder_token_id)
                     .map(|special| special.terminal_id);
                 let placeholder_terminal = matching_terminals.next().ok_or_else(|| {
-                    crate::GlrMaskError::Compilation(format!(
+                    crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {binding_name:?} lost its hidden linker terminal",
                     ))
                 })?;
                 if matching_terminals.next().is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
                     )));
                 }
@@ -1786,7 +1787,7 @@ impl Constraint {
                 vocab,
                 crate::compiler::constraint_compose::SegmentedBoundaryBackend::StaticParserDwa,
             )
-            .map_err(crate::GlrMaskError::Compilation)?;
+            .map_err(crate::Error::Compilation)?;
             // Parent terminals keep offset zero. Child slots are rebased into
             // the unified table and qualified to avoid collisions.
             let mut retained_slots = parent_late_slots;
@@ -2209,12 +2210,12 @@ impl DynamicConstraint {
                         .map(|special| special.token_id)
                 }),
                 terminal_bindings,
-            )?;
+            ).map_err(crate::error::from_grammar)?;
 
             let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
             for &(binding_name, child) in children {
                 if children_by_name.insert(binding_name, child).is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "external subgrammar binding {binding_name:?} was supplied more than once",
                     )));
                 }
@@ -2237,7 +2238,7 @@ impl DynamicConstraint {
                 }
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
-                return Err(crate::GlrMaskError::Compilation(format!(
+                return Err(crate::Error::Compilation(format!(
                     "compiled child was supplied for unknown external subgrammar {unknown:?}",
                 )));
             }
@@ -2266,7 +2267,7 @@ impl DynamicConstraint {
                         continue;
                     };
                     if matching_terminals.next().is_some() {
-                        return Err(crate::GlrMaskError::Compilation(format!(
+                        return Err(crate::Error::Compilation(format!(
                             "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
                         )));
                     }
@@ -2288,7 +2289,7 @@ impl DynamicConstraint {
                             vocab,
                             crate::compiler::constraint_compose::SegmentedBoundaryBackend::Dynamic,
                         )
-                        .map_err(crate::GlrMaskError::Compilation)?
+                        .map_err(crate::Error::Compilation)?
                         .constraint,
                     );
                 }
@@ -2385,8 +2386,8 @@ mod tests {
             &vocab,
         )
         .expect_err("programmatic JSON schema values must be unsupported");
-        match error.kind() {
-            crate::ErrorKind::Compilation(message) => assert!(
+        match (error.kind(), error.message()) {
+            (crate::ErrorKind::Compilation, message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),
@@ -2399,8 +2400,8 @@ mod tests {
             &vocab,
         )
         .expect_err("dynamic-value JSON schema must be unsupported");
-        match error.kind() {
-            crate::ErrorKind::Compilation(message) => assert!(
+        match (error.kind(), error.message()) {
+            (crate::ErrorKind::Compilation, message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),
@@ -2414,8 +2415,8 @@ mod tests {
             &[],
         )
         .expect_err("dynamic-value JSON schema with end tokens must be unsupported");
-        match error.kind() {
-            crate::ErrorKind::Compilation(message) => assert!(
+        match (error.kind(), error.message()) {
+            (crate::ErrorKind::Compilation, message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),

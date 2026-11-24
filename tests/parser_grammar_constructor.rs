@@ -12,7 +12,7 @@ type Words = BTreeSet<Vec<u32>>;
 fn finite_words(grammar: &FlatParserGrammar, id: u32, active: &mut BTreeSet<u32>,
     cache: &mut BTreeMap<u32, Words>) -> glrmask::Result<Words> {
     if let Some(words) = cache.get(&id) { return Ok(words.clone()); }
-    if !active.insert(id) { return Err(glrmask::Error::Compilation("test compiler requires a finite acyclic CFG".into())); }
+    if !active.insert(id) { return Err(glrmask::__private::compilation_error("test compiler requires a finite acyclic CFG".into())); }
     let mut words = Words::new();
     for rule in grammar.rules.iter().filter(|rule| rule.lhs == id) {
         let mut prefix = Words::from([vec![]]);
@@ -24,7 +24,7 @@ fn finite_words(grammar: &FlatParserGrammar, id: u32, active: &mut BTreeSet<u32>
             let mut joined = Words::new();
             for a in &prefix { for b in &suffix {
                 if a.len() + b.len() > 128 || joined.len() > 8192 {
-                    return Err(glrmask::Error::Compilation("test finite-language budget exceeded".into()));
+                    return Err(glrmask::__private::compilation_error("test finite-language budget exceeded".into()));
                 }
                 let mut word = a.clone(); word.extend(b); joined.insert(word);
             }}
@@ -36,7 +36,7 @@ fn finite_words(grammar: &FlatParserGrammar, id: u32, active: &mut BTreeSet<u32>
 }
 
 fn finite_compiler(grammar: &ParserGrammar) -> glrmask::Result<ParserDefinition> {
-    let cfg = grammar.lower_to_cfg()?;
+    let cfg = grammar.lower_to_cfg().map_err(|e| glrmask::__private::compilation_error(e.to_string()))?;
     let words = finite_words(&cfg, cfg.start, &mut BTreeSet::new(), &mut BTreeMap::new())?;
     let mut states = vec![BTreeMap::<u32, u32>::new()];
     let mut accepts = BTreeSet::new();
@@ -244,7 +244,7 @@ fn malformed_grammar_and_compiler_results_fail_before_generation() {
     let prepared = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().prepare_parser_grammar().unwrap();
     let wrong_count = |_: &ParserGrammar| Ok(ParserDefinition { stack_symbol_count: 1, terminals: vec![], completion: StackTemplate::identity() });
     assert!(prepared.compile_parser(&wrong_count).is_err());
-    let fail = |_: &ParserGrammar| Err(glrmask::Error::Compilation("compiler's own reason".into()));
+    let fail = |_: &ParserGrammar| Err(glrmask::__private::compilation_error("compiler's own reason".into()));
     assert!(prepared.compile_parser(&fail).unwrap_err().to_string().contains("compiler's own reason"));
     let malformed = |g: &ParserGrammar| {
         let mut definition = finite_compiler(g)?; definition.terminals[0].pop = StackDfa { start: 99, states: vec![] }; Ok(definition)

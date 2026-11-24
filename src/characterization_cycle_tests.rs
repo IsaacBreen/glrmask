@@ -7,6 +7,7 @@
 //! directly and verify that its error maps to a strategy decline without an
 //! unwind.
 
+use crate::ErrorExt as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use glrmask_parser_dwa::__private::templates::characterize::

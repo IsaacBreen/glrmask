@@ -12,7 +12,7 @@ use glrmask::template_parser::{ParserCompiler, ParserDefinition, ParserExpr,
 struct TerminalLeading;
 
 fn unsupported() -> Error {
-    Error::Compilation("example compiler requires terminal-leading alternatives with atomic tails; normalize other forms in your own compiler".into())
+    glrmask::__private::compilation_error("example compiler requires terminal-leading alternatives with atomic tails; normalize other forms in your own compiler".into())
 }
 
 /// One POP symbol can have several output words. Encode their shared prefix
@@ -66,7 +66,7 @@ impl ParserCompiler for TerminalLeading {
             if !changed { break; }
         }
         if productive.iter().any(|value| !value) {
-            return Err(Error::Compilation("example compiler requires every rule to derive a finite terminal word".into()));
+            return Err(glrmask::__private::compilation_error("example compiler requires every rule to derive a finite terminal word".into()));
         }
         // 0 = initial source state; 1 = completed bottom marker; subsequent
         // symbols describe pending nonterminals and literal terminal identities.

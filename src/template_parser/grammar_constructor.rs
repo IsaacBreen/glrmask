@@ -31,7 +31,7 @@ impl PreparedParserGrammar {
     pub fn from_named(grammar: &glrmask_grammar::NamedGrammar) -> Result<Self> {
         let (grammar, lexical) = crate::error::catch_internal_invariant(|| {
             crate::grammar::ast::parser_grammar::resolve_parser_grammar(grammar)
-        })??;
+        })?.map_err(crate::error::from_grammar)?;
         Ok(Self { grammar, lexical: Arc::new(lexical) })
     }
 

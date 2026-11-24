@@ -11,6 +11,7 @@
 //! longer than the enumeration bound. It is applied to the exact TokenTrie
 //! reference of every fuzz seed so the seeds themselves stay exact even though
 //! the template strategies now decline them.
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

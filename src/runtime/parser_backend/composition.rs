@@ -4,6 +4,7 @@
 //! The existing provider closure owns their sequencing, lexer-scope routing and
 //! GSS annotation merges; this module introduces no second masking engine.
 
+use crate::ErrorExt as _;
 use std::sync::Arc;
 use smallvec::SmallVec;
 

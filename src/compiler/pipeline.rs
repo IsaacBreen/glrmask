@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -6623,7 +6624,7 @@ fn compile_dynamic_owned_with_vocab_partition_impl(
                             partition,
                             finalize_runtime,
                         )
-                        .map_err(crate::GlrMaskError::Compilation);
+                        .map_err(crate::Error::Compilation);
                     let quotient_ms = elapsed_ms(quotient_started);
                     (class_count, quotient, partition_ms, quotient_ms)
                 },

@@ -89,7 +89,7 @@ pub use public_api::{
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::BoundaryTriggerDetail;
-pub use glrmask_grammar::SourceSpan;
+pub use glrmask_vocab::SourceSpan;
 pub use glrmask_grammar::__private::grammar::glrm::ExternKind;
 
 /// Unstable compatibility surface for repository tooling and benchmark
@@ -158,7 +158,7 @@ mod terminal_ended_rescue_tests;
 #[cfg(test)]
 mod tokentrie_reduce_cycle_tests;
 
-pub(crate) use error::GlrMaskError;
+pub(crate) use error::ErrorExt;
 
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
@@ -167,7 +167,7 @@ pub(crate) fn compile_grammar_def_json(
     vocab: &Vocab,
 ) -> Result<Constraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
-        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
+        .map_err(|e| Error::Syntax(format!("invalid GrammarDef JSON: {e}")))?;
     error::catch_internal_invariant(|| {
         compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
             compiler::compile_owned(gdef, vocab)
@@ -203,11 +203,11 @@ pub(crate) fn warm_ti_pool() {
 /// subtraction lowering.
 pub(crate) fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
-    let named = import::json_schema::schema_to_named_grammar(&schema)?;
+        .map_err(|e| Error::Syntax(format!("invalid JSON: {e}")))?;
+    let named = import::json_schema::schema_to_named_grammar(&schema).map_err(crate::error::from_grammar)?;
     let mut factored = grammar::factoring::factor_named_grammar(named);
-    import::json_schema::prepare_named_grammar_for_dump(&mut factored)?;
-    Ok(grammar::glrm::to_glrm_v1(&factored)?)
+    import::json_schema::prepare_named_grammar_for_dump(&mut factored).map_err(crate::error::from_grammar)?;
+    Ok(grammar::glrm::to_glrm_v1(&factored).map_err(crate::error::from_grammar)?)
 }
 
 pub(crate) fn set_test_compat_mode(enabled: bool) {
@@ -275,6 +275,8 @@ pub mod test_modes {
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {
+    use crate::ErrorExt as _;
+    pub use crate::error::compilation_error;
     pub use crate::runtime::boundary_cpu_profile::{
         begin as begin_boundary_cpu_profile, take as take_boundary_cpu_profile, BoundaryCpuReport,
     };

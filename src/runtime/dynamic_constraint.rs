@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 // PRE-RELEASE COMPATIBILITY POLICY
 // ================================
 // GLRMask is still pre-release. Historical DynamicConstraint/transfer wire
@@ -58,11 +59,11 @@ impl TemplateDynamicProofs {
         if self.projected_terminal_quotients_prepared {
             DynamicConstraint::restore_projected_terminal_quotients(constraint, self.projected_terminal_quotients)?;
         } else if !self.projected_terminal_quotients.is_empty() {
-            return Err(crate::GlrMaskError::Serialization("unprepared projected-terminal certificate has quotient rows".to_owned()));
+            return Err(crate::Error::Serialization("unprepared projected-terminal certificate has quotient rows".to_owned()));
         }
         let source_states = constraint.tokenizer.num_states() as usize;
         constraint.dynamic_mask_vocab.restore_prepared_master_proof_artifact(self.prepared_master_proofs, source_states)
-            .map_err(crate::GlrMaskError::Serialization)
+            .map_err(crate::Error::Serialization)
     }
 }
 
@@ -879,7 +880,7 @@ impl DynamicConstraint {
         payload: LegacyDynamicConstraintPayloadV1,
     ) -> crate::Result<DynamicConstraintPayloadV1> {
         if payload.eos_token_id.is_some() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "legacy dynamic constraint artifact embeds Vocab-level EOS semantics; rebuild it with grammar-level end tokens"
                     .to_owned(),
             ));
@@ -1253,7 +1254,7 @@ impl DynamicConstraint {
                     continue;
                 };
                 if matching.next().is_some() {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
                     )));
                 }
@@ -1274,13 +1275,13 @@ impl DynamicConstraint {
 
     pub(crate) fn reconstruct_composition_grammar(constraint: &Constraint) -> crate::Result<GrammarDef> {
         let exprs = constraint.tokenizer.terminal_exprs().ok_or_else(|| {
-            crate::GlrMaskError::Compilation(
+            crate::Error::Compilation(
                 "this legacy dynamic artifact does not retain terminal expressions required for compiled-child composition; rebuild it".to_owned(),
             )
         })?;
         let num_terminals = constraint.tokenizer.num_terminals() as usize;
         if exprs.len() != num_terminals {
-            return Err(crate::GlrMaskError::Compilation(format!(
+            return Err(crate::Error::Compilation(format!(
                 "dynamic artifact terminal-expression count {} does not match tokenizer terminal count {num_terminals}",
                 exprs.len(),
             )));
@@ -1323,7 +1324,7 @@ impl DynamicConstraint {
             (0, Vec::new(), BTreeMap::new())
         } else {
             let augmented = constraint.table.rules.first().ok_or_else(|| {
-                crate::GlrMaskError::Compilation(
+                crate::Error::Compilation(
                     "dynamic artifact has no augmented-start rule for compiled-child composition"
                         .to_owned(),
                 )
@@ -1331,7 +1332,7 @@ impl DynamicConstraint {
             let start = match augmented.rhs.as_slice() {
                 [Symbol::Nonterminal(start)] => *start,
                 rhs => {
-                    return Err(crate::GlrMaskError::Compilation(format!(
+                    return Err(crate::Error::Compilation(format!(
                         "dynamic artifact augmented-start rule must contain one nonterminal, found {rhs:?}",
                     )));
                 }
@@ -1445,18 +1446,18 @@ impl DynamicConstraint {
         let mut restored = Vec::with_capacity(rows.len());
         for (terminal, classes) in rows {
             if terminal >= constraint.tokenizer.num_terminals() {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "terminal-observation certificate references terminal {terminal}, but tokenizer has {} terminals",
                     constraint.tokenizer.num_terminals(),
                 )));
             }
             if !seen.insert(terminal) {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "terminal-observation certificate repeats terminal {terminal}",
                 )));
             }
             if classes.len() != expected_states {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "terminal-observation certificate for terminal {terminal} has {} states, expected {expected_states}",
                     classes.len(),
                 )));
@@ -1476,13 +1477,13 @@ impl DynamicConstraint {
         let mut seen = BTreeSet::<TerminalID>::new();
         for (terminal, quotient) in &rows {
             if !seen.insert(*terminal) {
-                return Err(crate::GlrMaskError::Serialization(format!(
+                return Err(crate::Error::Serialization(format!(
                     "projected-terminal quotient repeats terminal {terminal}"
                 )));
             }
             quotient
                 .validate_exact_projection(&constraint.tokenizer, *terminal)
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
         }
         // Calling the setter even for an empty row set is intentional: v20/v9
         // use empty+prepared to mean compile-time analysis completed and found
@@ -1976,10 +1977,10 @@ impl DynamicConstraint {
         let framing_started = profile.then(std::time::Instant::now);
         let payload_start = DYNAMIC_CONSTRAINT_HEADER_LEN;
         let payload = backing.get(payload_start..).ok_or_else(|| {
-            crate::GlrMaskError::Serialization("missing dynamic v11 transfer payload".to_owned())
+            crate::Error::Serialization("missing dynamic v11 transfer payload".to_owned())
         })?;
         if payload.len() < DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "truncated dynamic v11 transfer payload header".to_owned(),
             ));
         }
@@ -1990,7 +1991,7 @@ impl DynamicConstraint {
         ))
         .expect("u32 alternative count fits usize on supported platforms");
         if alternative_count == 0 {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic v11 transfer artifact has no alternatives".to_owned(),
             ));
         }
@@ -2000,14 +2001,14 @@ impl DynamicConstraint {
                 .expect("dynamic v11 transfer flags have fixed width"),
         );
         if flags != 0 {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "unsupported dynamic v11 transfer flags".to_owned(),
             ));
         }
         let descriptor_bytes = alternative_count
             .checked_mul(DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN)
             .ok_or_else(|| {
-                crate::GlrMaskError::Serialization(
+                crate::Error::Serialization(
                     "dynamic v11 transfer descriptor size overflow".to_owned(),
                 )
             })?;
@@ -2015,12 +2016,12 @@ impl DynamicConstraint {
             .checked_add(DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN)
             .and_then(|value| value.checked_add(descriptor_bytes))
             .ok_or_else(|| {
-                crate::GlrMaskError::Serialization(
+                crate::Error::Serialization(
                     "dynamic v11 transfer descriptor range overflow".to_owned(),
                 )
             })?;
         if descriptor_end > backing.len() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "truncated dynamic v11 transfer descriptors".to_owned(),
             ));
         }
@@ -2037,14 +2038,14 @@ impl DynamicConstraint {
                         .expect("validated v11 descriptor has fixed-width field"),
                 );
                 *length = usize::try_from(raw).map_err(|_| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "dynamic v11 transfer section length does not fit platform".to_owned(),
                     )
                 })?;
                 pos += 8;
             }
             if lengths[0] == 0 || lengths[1] == 0 || lengths[4] == 0 {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "dynamic v11 transfer has an empty required section".to_owned(),
                 ));
             }
@@ -2056,7 +2057,7 @@ impl DynamicConstraint {
                 .try_fold(cursor, |cursor, &length| cursor.checked_add(length))
         });
         if expected_end != Some(backing.len()) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid dynamic v11 transfer section lengths".to_owned(),
             ));
         }
@@ -2082,7 +2083,7 @@ impl DynamicConstraint {
             let metadata_started = profile.then(std::time::Instant::now);
             let metadata: DynamicConstraintTransferMetadataV11 =
                 bincode::deserialize(&backing[metadata_range]).map_err(|err| {
-                    crate::GlrMaskError::Serialization(format!(
+                    crate::Error::Serialization(format!(
                         "invalid dynamic v11 transfer metadata: {err}"
                     ))
                 })?;
@@ -2139,8 +2140,8 @@ impl DynamicConstraint {
             } else {
                 (decode_table(), decode_tokenizer())
             };
-            let decoded_table = table_result.map_err(crate::GlrMaskError::Serialization)?;
-            let mut tokenizer = tokenizer_result.map_err(crate::GlrMaskError::Serialization)?;
+            let decoded_table = table_result.map_err(crate::Error::Serialization)?;
+            let mut tokenizer = tokenizer_result.map_err(crate::Error::Serialization)?;
             let table_tokenizer_ms = table_tokenizer_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -2156,13 +2157,13 @@ impl DynamicConstraint {
                 let expressions = deferred_terminal_exprs
                     .as_ref()
                     .ok_or_else(|| {
-                        crate::GlrMaskError::Serialization(
+                        crate::Error::Serialization(
                             "dynamic v11 virtual runtime metadata has no terminal expressions"
                                 .to_owned(),
                         )
                     })?
                     .decode_exprs()
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
                 tokenizer
                     .restore_terminal_exprs_with_virtual_runtime_metadata_and_oracles(
                         Some(expressions),
@@ -2170,7 +2171,7 @@ impl DynamicConstraint {
                         &metadata.residual_runtime_oracles,
                         false,
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
             }
 
             let assemble_started = profile.then(std::time::Instant::now);
@@ -2264,10 +2265,10 @@ impl DynamicConstraint {
         let payload_header_len = if version == DYNAMIC_TRANSFER_VERSION {
             let digest = bytes.get(DYNAMIC_CONSTRAINT_HEADER_LEN + 8
                 ..DYNAMIC_CONSTRAINT_HEADER_LEN + DYNAMIC_TRANSFER_V15_PAYLOAD_HEADER_LEN)
-                .ok_or_else(|| crate::GlrMaskError::Serialization(
+                .ok_or_else(|| crate::Error::Serialization(
                     "truncated dynamic v15 vocabulary digest".to_owned()))?;
             if digest != crate::compiler::compile::vocab_content_digest(vocab) {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "dynamic transfer artifact does not match supplied vocabulary".to_owned()));
             }
             DYNAMIC_TRANSFER_V15_PAYLOAD_HEADER_LEN
@@ -2280,10 +2281,10 @@ impl DynamicConstraint {
         let framing_started = profile.then(std::time::Instant::now);
         let payload_start = DYNAMIC_CONSTRAINT_HEADER_LEN;
         let payload = backing.get(payload_start..).ok_or_else(|| {
-            crate::GlrMaskError::Serialization("missing dynamic v12 transfer payload".to_owned())
+            crate::Error::Serialization("missing dynamic v12 transfer payload".to_owned())
         })?;
         if payload.len() < payload_header_len {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "truncated dynamic v12 transfer payload header".to_owned(),
             ));
         }
@@ -2294,7 +2295,7 @@ impl DynamicConstraint {
         ))
         .expect("u32 alternative count fits usize on supported platforms");
         if alternative_count == 0 {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic v12 transfer artifact has no alternatives".to_owned(),
             ));
         }
@@ -2304,14 +2305,14 @@ impl DynamicConstraint {
                 .expect("dynamic v12 transfer flags have fixed width"),
         );
         if flags != 0 {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "unsupported dynamic v12 transfer flags".to_owned(),
             ));
         }
         let descriptor_bytes = alternative_count
             .checked_mul(DYNAMIC_TRANSFER_V12_ALT_DESCRIPTOR_LEN)
             .ok_or_else(|| {
-                crate::GlrMaskError::Serialization(
+                crate::Error::Serialization(
                     "dynamic v12 transfer descriptor size overflow".to_owned(),
                 )
             })?;
@@ -2319,12 +2320,12 @@ impl DynamicConstraint {
             .checked_add(payload_header_len)
             .and_then(|value| value.checked_add(descriptor_bytes))
             .ok_or_else(|| {
-                crate::GlrMaskError::Serialization(
+                crate::Error::Serialization(
                     "dynamic v12 transfer descriptor range overflow".to_owned(),
                 )
             })?;
         if descriptor_end > backing.len() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "truncated dynamic v12 transfer descriptors".to_owned(),
             ));
         }
@@ -2341,14 +2342,14 @@ impl DynamicConstraint {
                         .expect("validated v12 descriptor has fixed-width field"),
                 );
                 *length = usize::try_from(raw).map_err(|_| {
-                    crate::GlrMaskError::Serialization(
+                    crate::Error::Serialization(
                         "dynamic v12 transfer section length does not fit platform".to_owned(),
                     )
                 })?;
                 pos += 8;
             }
             if lengths[0] == 0 || lengths[1] == 0 || lengths[4] == 0 {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "dynamic v12 transfer has an empty required section".to_owned(),
                 ));
             }
@@ -2360,7 +2361,7 @@ impl DynamicConstraint {
                 .try_fold(cursor, |cursor, &length| cursor.checked_add(length))
         });
         if expected_end != Some(backing.len()) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid dynamic v12 transfer section lengths".to_owned(),
             ));
         }
@@ -2388,7 +2389,7 @@ impl DynamicConstraint {
             let (metadata, prepared_master_proofs, virtual_residual_master_slice_artifacts) = if version == DYNAMIC_TRANSFER_VERSION {
                 let wire: DynamicConstraintTransferMetadataV13 =
                     bincode::deserialize(&backing[metadata_range]).map_err(|err| {
-                        crate::GlrMaskError::Serialization(format!(
+                        crate::Error::Serialization(format!(
                             "invalid dynamic v13 transfer metadata: {err}"
                         ))
                     })?;
@@ -2400,7 +2401,7 @@ impl DynamicConstraint {
             } else {
                 let metadata: DynamicConstraintTransferMetadataV11 =
                     bincode::deserialize(&backing[metadata_range]).map_err(|err| {
-                        crate::GlrMaskError::Serialization(format!(
+                        crate::Error::Serialization(format!(
                             "invalid dynamic v12 transfer metadata: {err}"
                         ))
                     })?;
@@ -2429,7 +2430,7 @@ impl DynamicConstraint {
                     .restore_virtual_residual_master_slice_artifacts(
                         virtual_residual_master_slice_artifacts,
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
                 if metadata.projected_terminal_quotients_prepared {
                     Self::restore_projected_terminal_quotients(
                         &mut inner,
@@ -2444,7 +2445,7 @@ impl DynamicConstraint {
                             prepared_master_proofs,
                             source_state_count,
                         )
-                        .map_err(crate::GlrMaskError::Serialization)?;
+                        .map_err(crate::Error::Serialization)?;
                 }
                 inner.boundary_trigger = metadata.boundary_trigger.into_trigger();
                 alternatives.push(Self {
@@ -2480,8 +2481,8 @@ impl DynamicConstraint {
                 },
                 || (),
             );
-            let decoded_table = table_result.map_err(crate::GlrMaskError::Serialization)?;
-            let mut tokenizer = tokenizer_result.map_err(crate::GlrMaskError::Serialization)?;
+            let decoded_table = table_result.map_err(crate::Error::Serialization)?;
+            let mut tokenizer = tokenizer_result.map_err(crate::Error::Serialization)?;
             let table_tokenizer_ms = table_tokenizer_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -2507,7 +2508,7 @@ impl DynamicConstraint {
                         &backing[virtual_residual_range.clone()],
                         Arc::clone(&backing),
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?,
+                    .map_err(crate::Error::Serialization)?,
                 )
             };
             let residual_decode_ms = residual_decode_started
@@ -2526,13 +2527,13 @@ impl DynamicConstraint {
                     let expressions = deferred_terminal_exprs
                         .as_ref()
                         .ok_or_else(|| {
-                            crate::GlrMaskError::Serialization(
+                            crate::Error::Serialization(
                                 "dynamic v12 virtual runtime metadata has no terminal expressions"
                                     .to_owned(),
                             )
                         })?
                         .decode_exprs()
-                        .map_err(crate::GlrMaskError::Serialization)?;
+                        .map_err(crate::Error::Serialization)?;
                     terminal_expr_decode_ms = expr_started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let can_use_compiled_dynamic_residual = metadata
@@ -2560,7 +2561,7 @@ impl DynamicConstraint {
                             )
                     }
                 };
-                restore_result.map_err(crate::GlrMaskError::Serialization)?;
+                restore_result.map_err(crate::Error::Serialization)?;
                 virtual_runtime_restore_ms = restore_started
                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -2568,7 +2569,7 @@ impl DynamicConstraint {
                 .restore_virtual_residual_master_slice_artifacts(
                     virtual_residual_master_slice_artifacts,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
 
             let assemble_started = profile.then(std::time::Instant::now);
             let dynamic_mask_vocab = Self::dynamic_vocab_from_transfer_artifact(
@@ -2615,7 +2616,7 @@ impl DynamicConstraint {
                         prepared_master_proofs,
                         source_state_count,
                     )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                    .map_err(crate::Error::Serialization)?;
             }
             inner.boundary_trigger = metadata.boundary_trigger.into_trigger();
             inner.deferred_table_rules_blob = decoded_table.deferred_rules;
@@ -2764,7 +2765,7 @@ impl DynamicConstraint {
             .map(Self::from_payload_v2)
             .collect::<Vec<_>>();
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -2787,13 +2788,13 @@ impl DynamicConstraint {
                     &alternative.virtual_runtimes,
                     allow_legacy_exact_dead_residual_roots,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             let mut constraint = Self::from_payload_v2(alternative.v2);
             constraint.inner.late_grammar_slots = alternative.late_grammar_slots;
             alternatives.push(constraint);
         }
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -2819,7 +2820,7 @@ impl DynamicConstraint {
                     &base.virtual_runtimes,
                     allow_legacy_exact_dead_residual_roots,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
                 base.v2,
                 DynamicMaskVocab::default(),
@@ -2838,7 +2839,7 @@ impl DynamicConstraint {
             });
         }
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -2858,7 +2859,7 @@ impl DynamicConstraint {
             if let Some(first) = alternatives.next() {
                 let token_bytes = &first.base.v2.v1.token_bytes;
                 if alternatives.any(|alternative| alternative.base.v2.v1.token_bytes != *token_bytes) {
-                    return Err(crate::GlrMaskError::Serialization(
+                    return Err(crate::Error::Serialization(
                         "dynamic artifact shares a vocabulary index across alternatives with different token bytes"
                             .to_owned(),
                     ));
@@ -2869,10 +2870,10 @@ impl DynamicConstraint {
             .dynamic_mask_vocab
             .map(DynamicMaskVocab::from_artifact)
             .transpose()
-            .map_err(crate::GlrMaskError::Serialization)?;
+            .map_err(crate::Error::Serialization)?;
         if let (Some(vocab), Some(first)) = (&shared_dynamic_vocab, payload.alternatives.first())
             && !vocab.matches_token_bytes_exact(&first.base.v2.v1.token_bytes) {
-                return Err(crate::GlrMaskError::Serialization(
+                return Err(crate::Error::Serialization(
                     "dynamic artifact vocabulary index does not match serialized token bytes"
                         .to_owned(),
                 ));
@@ -2884,7 +2885,7 @@ impl DynamicConstraint {
         let projected_terminal_quotients = projected_terminal_quotients
             .unwrap_or_else(|| vec![Vec::new(); payload.alternatives.len()]);
         if projected_terminal_quotients.len() != payload.alternatives.len() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic artifact projected-terminal quotient rows do not align with alternatives"
                     .to_owned(),
             ));
@@ -2908,7 +2909,7 @@ impl DynamicConstraint {
                     &base.virtual_runtimes,
                     false,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             let dynamic_mask_vocab = shared_dynamic_vocab
                 .as_ref()
                 .map(|shared| {
@@ -2946,7 +2947,7 @@ impl DynamicConstraint {
             });
         }
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -2974,7 +2975,7 @@ impl DynamicConstraint {
             Some(projected_terminal_quotients),
         )?;
         if constraint.constraints_mut().count() != metadata.len() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic artifact alternative metadata count mismatch".to_owned(),
             ));
         }
@@ -2998,7 +2999,7 @@ impl DynamicConstraint {
                         loaded.token_bytes_for_id(token_id) == Some(bytes.as_slice())
                     });
                 if !same_vocab {
-                    return Err(crate::GlrMaskError::Serialization(
+                    return Err(crate::Error::Serialization(
                         "recursive dynamic alternative artifact targets a different vocabulary"
                             .to_owned(),
                     ));
@@ -3029,7 +3030,7 @@ impl DynamicConstraint {
             })
             .collect::<Vec<_>>();
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -3051,11 +3052,11 @@ impl DynamicConstraint {
                     &alternative.virtual_runtimes,
                     false,
                 )
-                .map_err(crate::GlrMaskError::Serialization)?;
+                .map_err(crate::Error::Serialization)?;
             alternatives.push(Self::from_payload_v2(alternative.v2));
         }
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -3080,7 +3081,7 @@ impl DynamicConstraint {
             })
             .collect::<Vec<_>>();
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union artifact has no alternatives".to_owned(),
             ));
         }
@@ -3108,7 +3109,7 @@ impl DynamicConstraint {
     }
 
     fn load_template_alternatives(payload: &[u8], vocab: &Vocab) -> crate::Result<Self> {
-        let error = |message: &str| crate::GlrMaskError::Serialization(message.into());
+        let error = |message: &str| crate::Error::Serialization(message.into());
         let count = payload.get(..4).ok_or_else(|| error("truncated template dynamic count"))?;
         let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
         if count == 0 || count > payload.len().saturating_sub(4) / 26 {
@@ -3163,14 +3164,14 @@ impl DynamicConstraint {
             artifact,
             full_vocab_template.as_ref(),
         )
-        .map_err(crate::GlrMaskError::Serialization)?;
+        .map_err(crate::Error::Serialization)?;
         let from_ms = from_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let validate_started = profile.then(std::time::Instant::now);
         if quotient.source_vocab_digest()
             != Some(crate::compiler::compile::vocab_content_digest(vocab))
         {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic transfer grammar-quotient vocabulary does not match supplied vocabulary"
                     .to_owned(),
             ));
@@ -3192,7 +3193,7 @@ impl DynamicConstraint {
             .chain(&loaded.alternatives)
             .any(|constraint| !constraint.late_grammar_slots.is_empty())
         {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic constraint artifact has unresolved slots".to_owned(),
             ));
         }
@@ -3210,13 +3211,13 @@ impl DynamicConstraint {
 
     fn load_with_vocab_inner(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
         if bytes.len() < DYNAMIC_CONSTRAINT_HEADER_LEN {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid dynamic transfer artifact header".to_owned(),
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
         if !matches!(version, DYNAMIC_TRANSFER_VERSION | TEMPLATE_DYNAMIC_TRANSFER_VERSION) {
-            return Err(crate::GlrMaskError::Serialization(format!(
+            return Err(crate::Error::Serialization(format!(
                 "unsupported dynamic transfer artifact version {version}: recompile the pre-release artifact")));
         }
         let payload_len = usize::try_from(u64::from_le_bytes(
@@ -3225,12 +3226,12 @@ impl DynamicConstraint {
                 .expect("dynamic transfer header has fixed width"),
         ))
         .map_err(|_| {
-            crate::GlrMaskError::Serialization(
+            crate::Error::Serialization(
                 "dynamic transfer payload length does not fit this platform".to_owned(),
             )
         })?;
         if bytes.len() != DYNAMIC_CONSTRAINT_HEADER_LEN.saturating_add(payload_len) {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "invalid dynamic transfer artifact payload length".to_owned(),
             ));
         }
@@ -3275,7 +3276,7 @@ impl DynamicConstraint {
                 bincode::deserialize::<DynamicConstraintTransferPayloadV5>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?
                 .alternatives
                 .into_iter()
                 .map(|alternative| {
@@ -3311,7 +3312,7 @@ impl DynamicConstraint {
                 bincode::deserialize::<DynamicConstraintTransferPayloadV4>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?
                 .alternatives
                 .into_iter()
                 .map(|alternative| {
@@ -3332,7 +3333,7 @@ impl DynamicConstraint {
                 bincode::deserialize::<DynamicConstraintTransferPayloadV3>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?
                 .alternatives
                 .into_iter()
                 .map(|alternative| {
@@ -3353,7 +3354,7 @@ impl DynamicConstraint {
                 bincode::deserialize::<DynamicConstraintTransferPayloadV2>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?
                 .alternatives
                 .into_iter()
                 .map(|alternative| {
@@ -3374,7 +3375,7 @@ impl DynamicConstraint {
                 let legacy = bincode::deserialize::<DynamicConstraintTransferPayloadV1>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?;
                 legacy
                     .alternatives
                     .into_iter()
@@ -3399,7 +3400,7 @@ impl DynamicConstraint {
                 let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV3>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?;
                 legacy.alternatives.into_iter().map(|alternative| {
                     (
                         DynamicConstraintTransferAlternativeV2 {
@@ -3431,7 +3432,7 @@ impl DynamicConstraint {
                 let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV2>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?;
                 legacy.alternatives.into_iter().map(|alternative| {
                     (
                         DynamicConstraintTransferAlternativeV2 {
@@ -3463,7 +3464,7 @@ impl DynamicConstraint {
                 let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV1>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                .map_err(|err| crate::Error::Serialization(err.to_string()))?;
                 legacy.alternatives.into_iter().map(|alternative| {
                     (
                         DynamicConstraintTransferAlternativeV2 {
@@ -3532,7 +3533,7 @@ impl DynamicConstraint {
                     {
                         alternative.v1.terminal_exprs = Some(
                             compressed_terminal_exprs_serde::decode(compressed)
-                                .map_err(crate::GlrMaskError::Serialization)?,
+                                .map_err(crate::Error::Serialization)?,
                         );
                     }
                     let exprs = alternative.v1.terminal_exprs.clone();
@@ -3544,7 +3545,7 @@ impl DynamicConstraint {
                             &alternative.virtual_runtimes,
                             allow_legacy_exact_dead_residual_roots,
                         )
-                        .map_err(crate::GlrMaskError::Serialization)?;
+                        .map_err(crate::Error::Serialization)?;
                 }
                 let alternative = alternative.v1;
                 let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
@@ -3604,7 +3605,7 @@ impl DynamicConstraint {
             })
             .collect::<crate::Result<Vec<_>>>()?;
         if alternatives.is_empty() {
-            return Err(crate::GlrMaskError::Serialization(
+            return Err(crate::Error::Serialization(
                 "dynamic union transfer artifact has no alternatives".to_owned(),
             ));
         }

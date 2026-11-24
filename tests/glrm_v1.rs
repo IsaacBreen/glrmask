@@ -11,8 +11,8 @@ fn compile_native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> glrmask::R
 
 fn assert_lr_composition_rejected<T>(result: glrmask::Result<T>) {
     match result {
-        Err(error) if matches!(error.kind(), glrmask::ErrorKind::Compilation(_)) => {
-            let glrmask::ErrorKind::Compilation(message) = error.kind() else { unreachable!() };
+        Err(error) if error.kind() == glrmask::ErrorKind::Compilation => {
+            let message = error.to_string();
             assert!(
                 message.contains("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends"), "{message}");
         }

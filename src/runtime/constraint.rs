@@ -1,3 +1,4 @@
+use crate::ErrorExt as _;
 mod boundary_reset_support;
 pub(crate) mod packed_final_masks;
 mod scoped_admission_support;

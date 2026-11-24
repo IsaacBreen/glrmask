@@ -8,6 +8,7 @@
 //! constraint against the exact TokenTrie compilation of the original source.
 //! A rescue that declines is surfaced as the original typed strategy decline,
 //! never as a silent TokenTrie recompile.
+use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
