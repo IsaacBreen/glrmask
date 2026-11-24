@@ -78,7 +78,7 @@ fn parser_admission_with_root_memo(
     shared: &SharedRootAdmission,
 ) -> BitSet {
     let Some(memo) = shared.as_ref().filter(|memo| {
-        memo.owner == constraint as *const Constraint as usize && memo.gss.ptr_eq(stacks)
+        memo.owner == Arc::as_ptr(&constraint.data) as *const () as usize && memo.gss.ptr_eq(stacks)
     }) else {
         return exact_parser_admission_for_stacks(constraint, stacks);
     };
@@ -105,7 +105,7 @@ fn root_admission_memo(
     roots.iter().find(|branch| branch.gss.ptr_eq(stacks))
         .and_then(|branch| branch.shared_root_admission.clone())
         .or_else(|| Some(Arc::new(RootAdmissionMemo {
-            owner: constraint as *const Constraint as usize,
+            owner: Arc::as_ptr(&constraint.data) as *const () as usize,
             gss: stacks.clone(),
             admitted: OnceLock::new(),
         })))
@@ -11801,7 +11801,7 @@ mod tests {
         ), &vocab).unwrap();
         let stacks = ParserStacks::from_single_stack(vec![0], ());
         let shared = Some(Arc::new(RootAdmissionMemo {
-            owner: &constraint as *const Constraint as usize,
+            owner: Arc::as_ptr(&constraint.data) as *const () as usize,
             gss: stacks.clone(), admitted: OnceLock::new(),
         }));
         assert!(shared.as_ref().unwrap().admitted.get().is_none());

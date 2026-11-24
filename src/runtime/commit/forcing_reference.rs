@@ -59,7 +59,7 @@ fn same_spelling_policy(states: &[ConstraintState]) -> bool {
     states[1..].iter().all(|state| {
         let a = &first.constraint;
         let b = &state.constraint;
-        std::ptr::eq(a, b) || (a.end_tokens.as_ref() == b.end_tokens.as_ref()
+        std::sync::Arc::ptr_eq(&a.data, &b.data) || (a.end_tokens.as_ref() == b.end_tokens.as_ref()
             && a.token_bytes_count() == b.token_bytes_count()
             && a.token_bytes_iter().all(|(id, bytes)| b.token_bytes_for_id(id) == Some(bytes)))
     })
