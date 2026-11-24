@@ -59,7 +59,7 @@ fn run(tokenizer: &Tokenizer, vocab: &Vocab, active: &[bool], plan: Plan) {
 
 fn main() {
     let tokenizer = glrmask_lexer::__private::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
-    let vocab = Vocab::new(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"a".to_vec()), (3, b"aa".to_vec()), (4, b"b".to_vec())]);
+    let vocab = Vocab::from_entries_unchecked(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"a".to_vec()), (3, b"aa".to_vec()), (4, b"b".to_vec())]);
     run(&tokenizer, &vocab, &[true, true], Plan { use_implementation: Implementation::Scalar, check_against: Some(Implementation::Quotient) });
 }
 
@@ -93,7 +93,7 @@ mod tests {
     fn epsilon_nfa_implementations_are_equivalent() {
         check_both_directions(
             glrmask_lexer::__private::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer(),
-            Vocab::new(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"a".to_vec()), (3, b"aa".to_vec()), (4, b"b".to_vec()), (5, b"x".to_vec())]),
+            Vocab::from_entries_unchecked(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"a".to_vec()), (3, b"aa".to_vec()), (4, b"b".to_vec()), (5, b"x".to_vec())]),
         );
     }
 
@@ -101,6 +101,6 @@ mod tests {
     fn deterministic_implementations_are_equivalent() {
         let exprs = vec![bytes(b"a"), bytes(b"ab")];
         let tokenizer = build_regex(&exprs).into_tokenizer(2, Some(Arc::from(exprs.into_boxed_slice())));
-        check_both_directions(tokenizer, Vocab::new(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"ab".to_vec()), (3, b"aba".to_vec()), (4, b"x".to_vec())]));
+        check_both_directions(tokenizer, Vocab::from_entries_unchecked(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"ab".to_vec()), (3, b"aba".to_vec()), (4, b"x".to_vec())]));
     }
 }

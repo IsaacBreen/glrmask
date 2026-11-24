@@ -16,7 +16,7 @@ fn vocab() -> Vocab {
         (3, b"((".to_vec()),
         (7, b" ".to_vec()),
         (11, b"()".to_vec()),
-    ])
+    ]).unwrap()
 }
 
 fn fixture(optimization: MaskStrategy, _external: bool) -> Vec<u8> {
@@ -249,10 +249,10 @@ fn external_binding_accepts_reordered_identical_mapping_but_not_id_changes() {
         .iter()
         .map(|(id, bytes)| (id, bytes.to_vec()))
         .collect::<Vec<_>>();
-    let reversed = Vocab::new(mapping.iter().cloned().rev().collect());
+    let reversed = Vocab::new(mapping.iter().cloned().rev().collect::<Vec<_>>()).unwrap();
     let mut remapped = mapping.clone();
     remapped[0].0 = 23;
-    let remapped = Vocab::new(remapped);
+    let remapped = Vocab::new(remapped).unwrap();
     for optimization in [MaskStrategy::FAST_COMPILE, MaskStrategy::ParserDwa] {
         let bytes = fixture(optimization, true);
         let good = Constraint::load(bytes.clone(), &reversed).unwrap();

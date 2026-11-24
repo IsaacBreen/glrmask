@@ -3,7 +3,6 @@
 //! Private ownership and validation support shared by the C and Node bindings.
 //! No language binding reimplements the grammar compiler or decoding engine.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -66,12 +65,7 @@ pub fn token_id(id: u32) -> Result<u32> {
 }
 
 pub fn vocab(entries: Vec<(u32, Vec<u8>)>) -> Result<glrmask::Vocab> {
-    let mut ids = BTreeSet::new();
-    for (id, _) in &entries {
-        token_id(*id)?;
-        if !ids.insert(*id) { return Err(Error::invalid(format!("duplicate vocabulary ID {id}"))); }
-    }
-    guarded(|| Ok(glrmask::Vocab::new(entries)))
+    guarded(|| glrmask::Vocab::new(entries).map_err(Into::into))
 }
 
 pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {

@@ -182,7 +182,7 @@ impl L2pVocabBoundarySplit {
                 break;
             }
         }
-        let child = Vocab::new(entries);
+        let child = Vocab::from_entries_unchecked(entries);
         super::l2p::equivalence_analysis::vocab::common_atom::inherit_vocab_suffix_index(
             vocab,
             &child,
@@ -203,7 +203,7 @@ impl L2pVocabBoundarySplit {
         // `materialize_vocab`. For the usual sparse split, direct token-ID
         // lookups avoid walking the entire parent partition merely to extract
         // a few dozen entries.
-        Vocab::new(
+        Vocab::from_entries_unchecked(
             self.single_token_ids
                 .iter()
                 .filter_map(|&token_id| {
@@ -7107,7 +7107,7 @@ mod tests {
 
     #[test]
     fn prepared_suffix_trie_matches_scalar_dense_suffix_execution() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"zbc".to_vec()),
             (1, b"xbcq".to_vec()),
             (2, b"cccc".to_vec()),
@@ -7297,7 +7297,7 @@ mod tests {
         // global last-byte/first-byte overlap heuristic classified `key ` and
         // `c` as L2P. No single token actually places a `c`-starting suffix
         // after a completion of `key `. The `a|b` split in `ab` is real.
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b" xyz ".to_vec()),
                 (1, b"c".to_vec()),
@@ -7343,7 +7343,7 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let vocab = Vocab::new(vec![(0, b"a c".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a c".to_vec())]);
         let mut after_a = BitSet::all(3);
         after_a.clear(1);
         let mut after_space = BitSet::all(3);
@@ -7393,7 +7393,7 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         assert!(tokenizer.has_epsilon_transitions());
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"abc".to_vec()),
                 (1, b"aa".to_vec()),
@@ -7444,7 +7444,7 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"abb".to_vec()),
                 (1, b"bc".to_vec()),
@@ -7485,7 +7485,7 @@ mod tests {
                 expressions.len() as u32,
                 Some(Arc::from(expressions.into_boxed_slice())),
             );
-        let vocab = Vocab::new(vec![(0, b"++++++++a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"++++++++a".to_vec())]);
         let active = BitSet::all(2);
         let disallowed = BTreeMap::new();
         let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
@@ -7530,7 +7530,7 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             (0..70)
                 .map(|terminal| {
                     let next = (terminal + 1) % 70;

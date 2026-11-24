@@ -125,7 +125,7 @@ mod tests {
         let mut long=vec![b'q';600];long.extend_from_slice(b"ab");
         let expressions=vec![bytes(&long),choice(vec![bytes(b"!x"),bytes(b"!yz")]),bytes(b" ")];
         let words=vec![b"ab!".to_vec(),b"ab!x".to_vec(),b"a".to_vec(),b"ab".to_vec(),b"q!y".to_vec(),b"ab !".to_vec()];
-        let vocab=Vocab::new(words.iter().enumerate().map(|(i,w)|(100+i as u32*7,w.clone())).collect());
+        let vocab=Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|(100+i as u32*7,w.clone())).collect());
         for tokenizer in [build_regex_monolithic(&expressions).into_tokenizer(3,Some(Arc::from(expressions.clone()))),
             build_regex_partitioned(&expressions,&[0,1,2]).into_tokenizer(3,Some(Arc::from(expressions.clone())))] {
             let resets=tokenizer.deterministic_reset_states().into_vec();
@@ -152,7 +152,7 @@ mod tests {
                 compare(&initial,word);
                 for start in 0..word.len(){for end in start+1..=word.len(){compare(&resets,&word[start..end]);}}
             }
-            let empty=Vocab::new(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope).is_none());
+            let empty=Vocab::from_entries_unchecked(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope).is_none());
         }
     }
 }

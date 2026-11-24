@@ -90,7 +90,7 @@ export interface Externs extends ReadonlyMap<string, Extern> {
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
   /** Creates a vocabulary from `[id, bytes]` entries. */
-  constructor(entries: Iterable<readonly [number, Uint8Array]>);
+  constructor(entries: Iterable<readonly [number, Uint8Array]> | Readonly<Record<number, Uint8Array>>);
   /** A new handle to the same object. */
   clone(): Vocab;
   /** Frees the native handle now instead of at garbage collection. */

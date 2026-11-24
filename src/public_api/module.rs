@@ -1359,7 +1359,7 @@ mod precompile_boundary_tests {
     use crate::__private::VocabExt as _;
 
     fn vocab() -> Vocab {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"y".to_vec()),
             (2, b"xy".to_vec()),
@@ -1564,7 +1564,7 @@ mod b_shell_tests {
     use super::*;
 
     fn vocab() -> Vocab {
-        Vocab::new(vec![
+        Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),
@@ -1618,7 +1618,7 @@ mod grammar_precompile_tests {
     use super::*;
 
     fn vocab() -> Vocab {
-        Vocab::new(vec![
+        Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
         ])
@@ -1667,7 +1667,7 @@ mod boundary_gate_tests {
     use crate::__private::VocabExt as _;
 
     fn vocab() -> Vocab {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             [b"x".as_slice(), b"y", b"z", b"x!", b"ab!", b"a", b"b", b" "]
                 .into_iter()
                 .enumerate()
@@ -1795,7 +1795,7 @@ mod boundary_strategy_tests {
     use crate::__private::VocabExt as _;
 
     fn vocab() -> Vocab {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"y".to_vec()),
             (2, b"z".to_vec()),
@@ -1843,7 +1843,7 @@ mod boundary_error_tests {
     #[test]
     fn parser_dwa_budget_decline_is_typed_and_token_trie_succeeds() {
         let vocab = {
-            let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+            let vocab = Vocab::from_entries_unchecked(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
             vocab.prepare_for_compile();
             vocab
         };
@@ -1874,7 +1874,7 @@ mod boundary_error_tests {
     #[test]
     fn auto_falls_back_to_token_trie_where_parser_dwa_errors() {
         let vocab = {
-            let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+            let vocab = Vocab::from_entries_unchecked(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
             vocab.prepare_for_compile();
             vocab
         };

@@ -299,7 +299,7 @@ mod tests {
         let tokens = [
             "a", "b", "aa", "ab", "ba", "bb", "aab", "aba", "aabb", "aaba", "abab", "aaabbb",
         ];
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             tokens
                 .iter()
                 .enumerate()
@@ -509,7 +509,7 @@ mod tests {
         };
         use crate::{Constraint, MaskStrategy, Vocab};
 
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let parser = ParserProgram::new(ParserDefinition {
             stack_symbol_count: 2,
             terminals: vec![StackTemplate::read_top_and_push([0, 1], [1])],

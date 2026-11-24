@@ -157,7 +157,7 @@ fn concurrent_inventory_preparation_rejects_invalid_programs_in_terminal_order()
 
 #[test]
 fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_identity() {
-    let vocab = crate::Vocab::new(
+    let vocab = crate::Vocab::from_entries_unchecked(
         ["a", "b", "(", ")", "ab", "aa", " "].into_iter().enumerate()
             .map(|(id, value)| (id as u32, value.as_bytes().to_vec())).collect()
     );
@@ -220,7 +220,7 @@ fn immutable_source_witness_is_invalidated_by_arc_make_mut() {
 
 #[test]
 fn constructor_installs_prepared_views_without_rebuilding() {
-    let vocab = crate::Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
     let expression = crate::automata::regex::Expr::U8Seq(b"a".to_vec());
     let names = vec!["a".to_owned()];
     let tokenizer = crate::compiler::pipeline::build_tokenizer_from_exprs(
@@ -247,7 +247,7 @@ fn constructor_installs_prepared_views_without_rebuilding() {
 #[test]
 fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tables() {
     use crate::compiler::boundary_stack_support::CompilerEffects;
-    let vocab = crate::Vocab::new(
+    let vocab = crate::Vocab::from_entries_unchecked(
         ["a", "b", "(", ")", "ab"].into_iter().enumerate()
             .map(|(id, word)| (id as u32, word.as_bytes().to_vec())).collect()
     );
@@ -439,7 +439,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
         (7, b"aabb".to_vec()), (11, b"ab".to_vec()),
         (31, b" ".to_vec()), (64, Vec::new()),
     ];
-    let vocab = crate::Vocab::new(pieces.to_vec());
+    let vocab = crate::Vocab::from_entries_unchecked(pieces.to_vec());
     let source = crate::Grammar::glrm(
         r#"start root; ignore WS; t WS = " "+; nt root = "a" root "b" | "";"#
     );
@@ -481,7 +481,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
 
 #[test]
 fn dynamic_envelope_contains_exactly_the_native_constraint_bodies() {
-    let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+    let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let a = Constraint::compile(
         crate::Grammar::glrm(r#"start root; nt root = "a";"#), &vocab,
     ).unwrap();

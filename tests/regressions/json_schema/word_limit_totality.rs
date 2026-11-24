@@ -23,7 +23,7 @@ fn vocabulary() -> Vocab {
         (8, b"[".to_vec()),
         (9, b"]".to_vec()),
         (10, b"\"a a".to_vec()),
-    ])
+    ]).unwrap()
 }
 
 fn schema(words: usize) -> String {

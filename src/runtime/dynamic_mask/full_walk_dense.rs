@@ -8592,7 +8592,7 @@ mod full_walk_acceleration_tests {
     #[test]
     fn live_branch_witness_survives_finalizers_and_changing_alternatives() {
         use crate::{DynamicConstraint, Grammar, Vocab};
-        let vocab = Vocab::new(["a", "b", "aa", "ab", " "].into_iter().enumerate()
+        let vocab = Vocab::from_entries_unchecked(["a", "b", "aa", "ab", " "].into_iter().enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec())).collect());
         let dynamic = DynamicConstraint::compile(Grammar::glrm(
             "start s; ignore WS; t WS = ' '+; t A = 'a'+; t B = 'b'; nt s = A B;"), &vocab).unwrap();
@@ -8746,7 +8746,7 @@ mod full_walk_acceleration_tests {
     #[test]
     fn row_liveness_bounds_match_compiled_and_loaded_parser_frontiers() {
         use crate::{DynamicConstraint, Grammar, Vocab};
-        let vocab = Vocab::new([
+        let vocab = Vocab::from_entries_unchecked([
             "a", "b", "c", "aa", "ab", "ba", "bb", " ", "acb",
         ].into_iter().enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec())).collect());

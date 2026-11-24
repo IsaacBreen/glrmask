@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn packed_token_bytes_are_shared_across_vocab_clones() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (2, b"xyz".to_vec()),
         ]);
@@ -265,7 +265,7 @@ mod buffered_digest_tests {
                 let len = match i % 8 { 0 => 4095, 1 => 4096, 2 => 4097, 3 => 20000, _ => (next() % 100) as usize };
                 entries.push((100 + i * 17, (0..len).map(|_| next() as u8).collect()));
             }
-            let vocab = crate::Vocab::new(entries);
+            let vocab = crate::Vocab::from_entries_unchecked(entries);
             let mut transcript = b"glrmask-vocab-content-v1\0".to_vec();
             transcript.extend_from_slice(&(vocab.len() as u64).to_le_bytes());
             for (id, bytes) in vocab.iter() {
@@ -277,7 +277,7 @@ mod buffered_digest_tests {
             assert_eq!(compute_vocab_content_digest(&vocab, false), independent, "reference case={case}");
             assert_eq!(compute_vocab_content_digest(&vocab, true), independent, "buffered case={case}");
         }
-        let empty = crate::Vocab::new(Vec::new());
+        let empty = crate::Vocab::from_entries_unchecked(Vec::new());
         assert_eq!(compute_vocab_content_digest(&empty, true), compute_vocab_content_digest(&empty, false));
     }
 
@@ -302,13 +302,13 @@ mod fingerprint_tests {
 
     #[test]
     fn fingerprint_is_stable_across_calls_and_clones_and_distinct_per_vocab() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let first = vocab_fingerprint(&vocab);
         let cloned = vocab.clone();
         assert_eq!(vocab_fingerprint(&cloned), first);
         assert_eq!(vocab_fingerprint(&vocab), first);
 
-        let other = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+        let other = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         assert_ne!(vocab_fingerprint(&other), first);
     }
 }
@@ -321,7 +321,7 @@ mod empty_byte_summary_tests {
 
     #[test]
     fn empty_byte_summary_is_exact_shared_and_vocab_local() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (512, Vec::new()), (31, Vec::new()),
             (7, b"last spelling wins".to_vec()), (3, Vec::new()),
             (0, vec![0]), (2, b"a".to_vec()), (90, b"a".to_vec()),
@@ -334,18 +334,18 @@ mod empty_byte_summary_tests {
         let cloned = vocab.clone();
         assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&cloned)));
         assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&vocab)));
-        let other = Vocab::new(vec![
+        let other = Vocab::from_entries_unchecked(vec![
             (512, vec![0]), (31, b"a".to_vec()), (7, b"last spelling wins".to_vec()),
             (3, b"b".to_vec()), (0, Vec::new()), (2, b"a".to_vec()), (90, Vec::new()),
         ]);
         assert_eq!(vocab_empty_byte_token_ids(&other).as_ref(), &[0, 90]);
         assert_eq!(vocab_empty_byte_token_ids(&vocab).as_ref(), &[3, 31, 512]);
-        assert!(vocab_empty_byte_token_ids(&Vocab::new(Vec::new())).is_empty());
+        assert!(vocab_empty_byte_token_ids(&Vocab::from_entries_unchecked(Vec::new())).is_empty());
     }
 
     #[test]
     fn empty_byte_summary_concurrent_cold_clones_share_canonical_arc() {
-        let vocab = Vocab::new((0..4096u32)
+        let vocab = Vocab::from_entries_unchecked((0..4096u32)
             .map(|id| (id * 3, if id % 19 == 0 { Vec::new() } else { vec![id as u8] }))
             .collect());
         let expected = vocab.iter().filter_map(|(id, bytes)| bytes.is_empty().then_some(id))

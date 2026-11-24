@@ -16,7 +16,7 @@ fn main() {
     let repeats:usize=argv.get(2).map(|s|s.parse().unwrap()).unwrap_or(16);
     let mut words=(0..256).map(|id|(id,vec![id as u8])).collect::<Vec<_>>();
     while words.len()<4096 {let id=words.len() as u32;words.push((id,format!("token{id:06}").into_bytes()));}
-    let v=Vocab::new(words);
+    let v=Vocab::new(words).unwrap();
     let g=Grammar::from_glrm("extern token E start root nt root=E");
     let selection=TokenSet::new((0..128).map(|i|2*i+1));
     let pool=rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();

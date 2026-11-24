@@ -108,8 +108,8 @@ fn main() {
 
     // Keep method-local vocabulary caches independent while still removing the
     // vocabulary-only construction cost from each grammar build.
-    let static_vocab = Vocab::new(entries.clone());
-    let partition_vocab = Vocab::new(entries);
+    let static_vocab = Vocab::new(entries.clone()).unwrap();
+    let partition_vocab = Vocab::new(entries).unwrap();
     static_vocab.prepare_for_compile();
     partition_vocab.prepare_for_compile();
 

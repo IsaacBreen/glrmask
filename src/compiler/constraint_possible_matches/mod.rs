@@ -4283,7 +4283,7 @@ mod tests {
 
     #[test]
     fn prepared_prefix_byte_query_preserves_aliases_and_never_builds_a_missing_cache() {
-        let vocab=Vocab::new(vec![
+        let vocab=Vocab::from_entries_unchecked(vec![
             (2,Vec::new()),(7,b"ab".to_vec()),(19,b"ab".to_vec()),(41,b"b".to_vec()),
             (1_003,b"abx".to_vec()),(9_000_001,b"abxy".to_vec()),(99,b"z\xfft".to_vec())]);
         let mut query=[0u64;4];query[b'b' as usize>>6]|=1u64<<(b'b'&63);
@@ -4297,7 +4297,7 @@ mod tests {
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab.clone(),&query),Some(vec![1_003,9_000_001]));
         query=[0;4];query[b'a' as usize>>6]|=1u64<<(b'a'&63);
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab,&query),Some(vec![7,19,1_003,9_000_001]));
-        let other=Vocab::new(vec![(7,b"xy".to_vec()),(1_003,b"ax".to_vec())]);
+        let other=Vocab::from_entries_unchecked(vec![(7,b"xy".to_vec()),(1_003,b"ax".to_vec())]);
         assert!(prepared_proper_prefix_byte_candidates(&other,&query).is_none());
         assert_eq!(other.compiler_cache_entry_count(),0);
     }
@@ -4305,7 +4305,7 @@ mod tests {
     #[test]
     fn prepared_prefix_byte_query_declines_dense_original_alias_expansion() {
         let entries=(0..130u32).map(|i|(i*97+3,b"ab".to_vec())).collect::<Vec<_>>();
-        let vocab=Vocab::new(entries);
+        let vocab=Vocab::from_entries_unchecked(entries);
         let ordered=Arc::new(build_ordered_vocab(vocab.entries_map()));
         let trie=Arc::new(build_ordered_vocab_prefix_tree(&ordered));
         vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
@@ -4352,7 +4352,7 @@ mod tests {
         entries: &[(u32, Vec<u8>)],
         context: &str,
     ) {
-        let vocab = Vocab::new(entries.to_vec());
+        let vocab = Vocab::from_entries_unchecked(entries.to_vec());
         let computation = compute_constraint_possible_matches_for_vocab(
             tokenizer,
             &vocab,
@@ -4515,7 +4515,7 @@ mod tests {
             &[0, 1],
             false,
         );
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let demand = delayed_terminal_demand(&tokenizer);
         assert!(demand.terminals.is_zero());
 
@@ -4588,7 +4588,7 @@ mod tests {
         assert!(tokenizer.has_epsilon_transitions());
         assert!(!tokenizer.has_deterministic_dispatch());
 
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -4670,7 +4670,7 @@ mod tests {
         );
         assert!(tokenizer.has_epsilon_transitions());
 
-        let vocab = Vocab::new(vec![(0, vec![128]), (1, vec![129])]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, vec![128]), (1, vec![129])]);
         let full_artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
         let classes = compute_pm_vocab_equivalence_map(
             &tokenizer,

@@ -123,7 +123,7 @@ fn read_vocab(path: &Path) -> Result<(Vocab, Vec<Vec<u8>>), Box<dyn std::error::
         by_id[id as usize] = bytes.clone(); entries.push((id, bytes));
     }
     if offset != data.len() { return Err("vocabulary has trailing bytes".into()); }
-    Ok((Vocab::new(entries), by_id))
+    Ok((Vocab::new(entries).unwrap(), by_id))
 }
 
 fn assert_table_free(report: &serde_json::Value) {

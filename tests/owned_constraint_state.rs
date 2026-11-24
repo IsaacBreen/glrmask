@@ -15,7 +15,7 @@ fn public_types_are_send_sync_clone() {
 
 #[test]
 fn a_state_outlives_its_constraint_variable() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec())]).unwrap();
     let mut state = {
         let c = Constraint::compile(Grammar::json_schema(r#"{"enum":["x"]}"#), &vocab)
             .unwrap();

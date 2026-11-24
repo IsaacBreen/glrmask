@@ -49,7 +49,7 @@ fn vocab(path: &Path) -> Result<Vocab, Box<dyn std::error::Error>> {
         at += len;
     }
     assert_eq!(at, bytes.len());
-    Ok(Vocab::new(entries))
+    Ok(Vocab::new(entries).unwrap())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -10,7 +10,7 @@ fn vocab() -> Vocab {
         (7, b"a".to_vec()), (8, b"!".to_vec()), (9, b"z".to_vec()),
         (10, b"xabzy".to_vec()), (11, b"xy".to_vec()), (33, b"a".to_vec()),
         (63, b"<mark>".to_vec()), (127, b"<eos>".to_vec()),
-    ])
+    ]).unwrap()
 }
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
@@ -48,7 +48,7 @@ fn review_token_validates_membership_without_claiming_vocabulary_identity() {
     let v = vocab();
     let mut entries = v.iter().map(|(id, bytes)| (id, bytes.to_vec())).collect::<Vec<_>>();
     entries.iter_mut().find(|(id, _)| *id == 7).unwrap().1 = b"other".to_vec();
-    let different = Vocab::new(entries);
+    let different = Vocab::new(entries).unwrap();
     let token = glrmask::TokenSet::from(7);
     let g = Grammar::from_glrm(TOKEN).unwrap().bind_snapshot("MARK", token.clone()).unwrap();
     for target in [&v, &different] {
@@ -305,7 +305,7 @@ fn review_empty_byte_exact_tokens_preserve_mask_and_commit_on_valid_prefixes() {
     for (id, bytes) in &mut entries {
         if *id == 63 { bytes.clear(); }
     }
-    let v = Vocab::new(entries);
+    let v = Vocab::new(entries).unwrap();
     let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = \"x\" MARK \"y\";").unwrap();
     let expected = source.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().compile(&v).unwrap();
     let actual = source.prepare(&v).unwrap().bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().link().unwrap();
@@ -318,7 +318,7 @@ fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
     for (id, bytes) in &mut entries {
         if *id == 63 { bytes.clear(); }
     }
-    let v = Vocab::new(entries);
+    let v = Vocab::new(entries).unwrap();
     let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK \"b\" | \"a\" \"y\";").unwrap();
     let expected = source.bind_snapshot("MARK", TokenSet::new([7, 63])).unwrap().compile(&v).unwrap();
     // The parent is packed before the exact-token adapter is linked. A second

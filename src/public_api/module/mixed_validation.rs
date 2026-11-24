@@ -14,7 +14,7 @@ const PARSER_DWA: MaskMode = MaskMode::ParserDwa;
 const TOKEN_TRIE: MaskMode = MaskMode::A;
 
 fn vocab() -> Vocab {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"x".to_vec()),
@@ -563,7 +563,7 @@ fn json_vocab() -> Vocab {
     .enumerate()
     .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
     .collect::<Vec<_>>();
-    let vocab = Vocab::new(entries);
+    let vocab = Vocab::from_entries_unchecked(entries);
     vocab.prepare_for_compile();
     vocab
 }

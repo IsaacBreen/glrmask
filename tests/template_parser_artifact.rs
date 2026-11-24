@@ -6,7 +6,7 @@ use glrmask::__private::{DynamicConstraintExt, parser_backend_report, dynamic_pa
 
 fn vocab() -> Vocab {
     Vocab::new(["a", "b", ",", "(", ")", "[", "]", "{", "}", "\"", ":", " ", "1", "2", "true", "null", "\"a\"", "\"b\"", "\"x\":", "\\", "u", "\\u", "ab", "aa", "[1", "]}", "\n"]
-        .into_iter().enumerate().map(|(id, token)| (id as u32, token.as_bytes().to_vec())).collect())
+        .into_iter().enumerate().map(|(id, token)| (id as u32, token.as_bytes().to_vec())).collect::<Vec<_>>()).unwrap()
 }
 fn sequences() -> Vec<Vec<u32>> {
     let mut all = vec![vec![], vec![0], vec![1], vec![0,2,0], vec![3,0,4],
@@ -203,7 +203,7 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     compare_dynamic(&template, &<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external_again,&v).unwrap());
     let mut mapping = v.iter().map(|(id,bytes)| (id,bytes.to_vec())).collect::<std::collections::BTreeMap<_,_>>();
     mapping.insert(0,b"different token bytes".to_vec());
-    let incompatible = Vocab::new(mapping.into_iter().collect());
+    let incompatible = Vocab::new(mapping.into_iter().collect::<Vec<_>>()).unwrap();
     let error = <DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external,&incompatible).unwrap_err();
     assert!(error.to_string().contains("vocabulary"),"wrong-vocab failure: {error}");
 }
@@ -375,7 +375,7 @@ fn compact_template_edges_reject_cycles_missing_targets_and_bad_labels() {
 #[test]
 fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     use glrmask::BuildOptions;
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]).unwrap();
     let source=Grammar::from_glrm(r#"start root; t A = "a"; nt root = A;"#).unwrap();
     let reference=source.compile_with_build_options(&v,BuildOptions::default().end_tokens([77])).unwrap();
     let template=reference.clone();
@@ -393,7 +393,7 @@ fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     
     assert!(b.mask().iter().all(|&w| w == 0));
     assert!(!b.commit_token(0));
-    let missing=Vocab::new(vec![(0,b"a".to_vec()),(1,b"different".to_vec())]);
+    let missing=Vocab::new(vec![(0,b"a".to_vec()),(1,b"different".to_vec())]).unwrap();
     assert!(Constraint::load(saved,&missing).is_err());
 }
 

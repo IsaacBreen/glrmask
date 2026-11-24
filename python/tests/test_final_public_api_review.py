@@ -23,7 +23,7 @@ MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
 
 
 def vocab(entries=None):
-    return glrmask.Vocab.from_id_to_bytes(TOKENS if entries is None else entries)
+    return glrmask.Vocab(TOKENS if entries is None else entries)
 
 
 def accepting(state):

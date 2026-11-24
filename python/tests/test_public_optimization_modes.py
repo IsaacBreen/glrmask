@@ -23,7 +23,7 @@ MODES = [
 
 @pytest.mark.parametrize("mode", MODES)
 def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"(", 2: b")", 7: b"()", 15: b"(", 20: b"x", 25: b""})
     grammar = glrmask.Grammar.from_lark('start: "(" start ")" start | ""')
     reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab)
@@ -54,7 +54,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xaby", 5: b"ab", 7: b"\t"})
     parent = glrmask.Grammar.from_glrm(
         'glrm 1; start root; extern grammar child; nt root = "x" child "y";')
@@ -79,7 +79,7 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_token_identity_survives_source_compilation(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 15: b"a"})
+    vocab = glrmask.Vocab({0: b"a", 15: b"a"})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         "glrm 1; start root; extern token MARK; nt root = MARK;"), "MARK", glrmask.TokenSet([15]))
     compiled = grammar.compile(vocab, **mode)
@@ -93,7 +93,7 @@ def test_exact_token_identity_survives_source_compilation(mode):
 
 
 def test_compressed_public_lark_masks_commit_clone_and_reload():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa"})
+    vocab = glrmask.Vocab({0: b"a", 1: b"b", 2: b"aa"})
     source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(30)) + 'r30: "b"\n'
     grammar = glrmask.Grammar.from_lark(source)
     reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
@@ -122,7 +122,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
 def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
     source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(n)) + f'r{n}: "b"\n'
     word = b"a" * n + b"b"
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa", 3: word, 7: word,
+    vocab = glrmask.Vocab({0: b"a", 1: b"b", 2: b"aa", 3: word, 7: word,
                                          8: b"a" * (n-1) + b"b", 9: b"a" * (n+1) + b"b", 11: b"x"})
     grammar = glrmask.Grammar.from_lark(source)
     reference = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([100]))).compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_COMPILE)

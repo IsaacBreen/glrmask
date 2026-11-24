@@ -74,7 +74,7 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
     tokens.extend([(300, b"p\"x:a\"q".to_vec()), (303, b"a\"q".to_vec()),
         (307, b"\"q".to_vec()), (315, b"x:".to_vec()), (317, b"aaa".to_vec()),
         (400, b"p\"x:a\"q".to_vec()), (500, b"q\"".to_vec())]);
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#).unwrap()
         .compile_with_build_options(&vocab, options(MaskMode::ParserDwa)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true, "test must exercise a virtual lexer");
@@ -103,7 +103,7 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     tokens.extend([(300, b"p\"x:a\"q".to_vec()), (301, b"q.p\"x:".to_vec()),
         (303, b"a\"q!".to_vec()), (310, b"xp\"x:a\"q.p\"x:b\"q!".to_vec()),
         (320, b"aaa".to_vec()), (1000, vec![])]);
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let leaf = Grammar::from_json_schema(URI).unwrap().compile_with_build_options(&vocab, options(MaskMode::ParserDwa)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&leaf)["virtual_lexer"], true);
     let middle = Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#).unwrap()
@@ -136,7 +136,7 @@ fn virtual_parent_observation_is_not_its_component_mask_quotient() {
     source = source.replacen(&start_line, "start wrapped_root;", 1); source.push_str(&wrapper);
     let mut tokens = (0..128).map(|id| (id, vec![id as u8])).collect::<Vec<_>>();
     tokens.extend([(300, b"\"x:a\"!".to_vec()), (301, b"a\"!".to_vec()), (302, b"aaa".to_vec())]);
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let leaf = Grammar::from_ebnf(r#"start ::= "!""#).unwrap().compile_with_build_options(&vocab, options(MaskMode::ParserDwa)).unwrap();
     let parent = Grammar::glrm(&source).prepare(&vocab).unwrap().bind_snapshot("SUFFIX", &leaf).unwrap();
     let reference = parent.link_with(options(MaskMode::C)).unwrap();
@@ -170,7 +170,7 @@ fn virtual_parent_observation_is_not_its_component_mask_quotient() {
 fn malformed_projected_observation_offsets_are_rejected_on_load() {
     let tokens = vec![(0, b"p".to_vec()), (1, b"\"x:a\"".to_vec()),
         (2, b"q".to_vec()), (3, b"p\"x:a\"q".to_vec())];
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let leaf = Grammar::from_json_schema(URI).unwrap().compile_with_build_options(&vocab, options(MaskMode::ParserDwa)).unwrap();
     let candidate = Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
@@ -246,7 +246,7 @@ fn virtual_repeat_observations_preserve_literal_lower_and_upper_bounds() {
         (400, b"paaq".to_vec()), (501, b"aq".to_vec()), (502, b"pq".to_vec())]);
     let mut long_crossing = vec![b'a'; 64]; long_crossing.push(b'q');
     tokens.push((4097, long_crossing));
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     for (regex, minimum, maximum) in [("a{2,5000}", 2usize, 5000usize),
         ("a{4096,8192}", 4096, 8192)] {
         let source = format!("start root; t A = /{regex}/; nt root = A;");
@@ -297,7 +297,7 @@ fn unsupported_general_virtual_projection_fails_without_changing_dynamic_languag
     // Static construction must report that limitation, not silently use the
     // dynamic B path or reuse an unrelated component-mask projection.
     let vocab = Vocab::new(vec![(0, b"p".to_vec()), (1, b"a".to_vec()),
-        (2, b"aaa".to_vec()), (3, b"q".to_vec()), (4, b"aq".to_vec())]);
+        (2, b"aaa".to_vec()), (3, b"q".to_vec()), (4, b"aq".to_vec())]).unwrap();
     let child = Grammar::from_glrm("start root; t A = /(a|aa){1,5000}/; nt root = A;").unwrap()
         .compile_with_build_options(&vocab, options(MaskMode::C)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true);
@@ -347,7 +347,7 @@ mod product_review {
             (302, b"abc".to_vec()), (303, b"bcq".to_vec()), (304, b"cq".to_vec()),
             (305, format!("{}q", "abc".repeat(20)).into_bytes()),
             (306, "abc".repeat(20).into_bytes())]);
-        let vocab = Vocab::new(tokens.clone());
+        let vocab = Vocab::new(tokens.clone()).unwrap();
         // Lexical epsilon is lifted to a parser alternative before execution.
         // Preserve that source nullability in the reusable child's embedding;
         // requiring A? here would conceal a lost source-language alternative.

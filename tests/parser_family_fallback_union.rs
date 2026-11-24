@@ -12,7 +12,7 @@ fn cross_lexeme_vocabulary_token_does_not_hide_valid_comma() {
         for additional in [None, Some(b" =".as_slice()), Some(b" >".as_slice()), Some(b" ,".as_slice())] {
             let mut entries = vec![(0, b",".to_vec())];
             if let Some(bytes) = additional { entries.push((1, bytes.to_vec())); }
-            let vocab = Vocab::new(entries);
+            let vocab = Vocab::new(entries).unwrap();
             let constraint = Grammar::from_lark(GRAMMAR).unwrap()
                 .compile_with_build_options(&vocab, optimization.build_options()).unwrap();
             let loaded = Constraint::load(constraint.save(), &vocab).unwrap();

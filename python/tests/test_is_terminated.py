@@ -2,7 +2,7 @@ import glrmask
 
 
 def test_is_terminated_tracks_commit_admission():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    vocab = glrmask.Vocab({0: b"a"})
     state = glrmask.Grammar.from_lark('start: "a"').compile(vocab).start()
     assert not state.is_terminated()
     assert state.commit_token(0)
@@ -13,7 +13,7 @@ def test_is_terminated_tracks_commit_admission():
 
 
 def test_empty_commit_on_failed_state_returns_false():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    vocab = glrmask.Vocab({0: b"a"})
     grammar = glrmask.Grammar.from_lark('start: "a"')
 
     # Fresh state: empty commits return true

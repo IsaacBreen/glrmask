@@ -343,7 +343,7 @@ mod tests {
             for case in 0..32 {
                 let mut words = vec![b"ab!".to_vec(), b"ba".to_vec(), b"a b".to_vec(), b"!a".to_vec(), b"ab!".to_vec()];
                 for _ in 0..8 { let len = 1 + random() % 5; words.push((0..len).map(|_| b"ab! "[random() % 4]).collect()); }
-                let vocab = Vocab::new(words.into_iter().enumerate().map(|(i,w)| ((i * 7) as u32,w)).collect());
+                let vocab = Vocab::from_entries_unchecked(words.into_iter().enumerate().map(|(i,w)| ((i * 7) as u32,w)).collect());
                 let mut seeds = (0..tokenizer.num_states()).map(|_| random() % 3 != 0).collect::<Vec<_>>(); seeds[0] = true;
                 let ignore = (case % 4 == 1).then_some(2);
                 let transparent = (case % 4 == 2).then(|| { let mut v = BitSet::new(4); v.set(2); v });

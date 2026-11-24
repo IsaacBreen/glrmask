@@ -2323,7 +2323,7 @@ mod tests {
     }
 
     fn vocab(entries: &[&str]) -> Vocab {
-        Vocab::new(
+        Vocab::from_entries_unchecked(
             entries
                 .iter()
                 .enumerate()
@@ -2620,7 +2620,7 @@ mod tests {
 
     #[test]
     fn json_schema_end_token_can_also_have_byte_semantics() {
-        let vocab = Vocab::new(vec![(100, b"\"a\"".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(100, b"\"a\"".to_vec())]);
         let constraint = Constraint::from_json_schema_with_end_tokens(
             r#"{"const":"a"}"#,
             &vocab,
@@ -2697,7 +2697,7 @@ mod tests {
             (258, b"right".to_vec()),
             (259, b"}".to_vec()),
         ]);
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
 
         Constraint::from_glrm_with_token_ids(
             r#"
@@ -3037,7 +3037,7 @@ mod tests {
 
     #[test]
     fn glrm_external_subgrammar_allocator_avoids_child_special_tokens() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"!".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"!".to_vec())]);
         let child = Constraint::from_glrm_with_token_ids(
             r#"
                 start child;
@@ -3066,7 +3066,7 @@ mod tests {
 
     #[test]
     fn external_placeholder_allocator_finds_hole_below_u32_max() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (u32::MAX, b"z".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (u32::MAX, b"z".to_vec())]);
         assert_eq!(first_external_placeholder_token_id(&vocab).unwrap(), 1);
     }
 
@@ -3081,7 +3081,7 @@ mod tests {
 
     #[test]
     fn glrm_external_subgrammar_placeholders_avoid_end_tokens() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let child = Constraint::from_glrm_grammar(
             "start child; nt child = \"a\";",
             &vocab,

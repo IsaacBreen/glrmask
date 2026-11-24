@@ -1995,7 +1995,7 @@ mod tests {
     fn kbounded_certification_maps_large_repeat_to_small_repeat() {
         let full = repeat_a(64);
         let synthesized = repeat_a(10);
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaa".to_vec()),
@@ -2033,7 +2033,7 @@ mod tests {
     fn kbounded_certification_rejects_too_small_repeat() {
         let full = repeat_a(64);
         let synthesized = repeat_a(3);
-        let vocab = Vocab::new(vec![(0, b"aaaa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"aaaa".to_vec())]);
 
         assert!(
             certify_full_to_synthesized_state_map(
@@ -2051,7 +2051,7 @@ mod tests {
     fn certified_map_lifts_a_finished_synthesized_tsid_map_without_relabeling() {
         let full = repeat_a(64);
         let synthesized = repeat_a(10);
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aaaa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aaaa".to_vec())]);
         let certified = certify_full_to_synthesized_state_map(
             &full,
             &synthesized,
@@ -2097,7 +2097,7 @@ mod tests {
                 max: Some(8),
             },
         ];
-        let vocab = Vocab::new(vec![(0, b"0123456789".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"0123456789".to_vec())]);
         let horizons = VocabularyRepeatHorizonCache::new();
         let synthesized =
             synthesize_bounded_terminal_expressions(&expressions, &vocab, &horizons);
@@ -2132,7 +2132,7 @@ mod tests {
             min: 1,
             max: Some(6),
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaaa".to_vec()),

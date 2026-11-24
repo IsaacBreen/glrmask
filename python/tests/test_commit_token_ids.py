@@ -6,7 +6,7 @@ _BAD_IDS = (-1, 2**32, 2**40)
 
 
 def _vocab():
-    return glrmask.Vocab.from_dict({b"a": 0, b"b": 1})
+    return glrmask.Vocab({0: b"a", 1: b"b"})
 
 
 def _constraint():
@@ -40,14 +40,14 @@ def test_non_integer_token_id_is_a_type_error():
 
 
 def test_special_tokens_are_explicit():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"a", 3: b""})
+    vocab = glrmask.Vocab({0: b"a", 1: b"a", 3: b""})
     wildcard = glrmask.Grammar.from_lark("start: <[*]>").compile(vocab)
     mask = wildcard.start().mask()
     assert mask[0] and mask[1] and not mask[3]
     with pytest.raises(ValueError):
         glrmask.Grammar.from_lark("start: <[3]>").compile(vocab)
 
-    body = glrmask.Vocab.from_dict({b"a": 0, b"a": 1})
+    body = glrmask.Vocab({0: b"a", 1: b"a"})
     module = glrmask.Module(glrmask.Grammar.from_lark("start: <|begin|> <|body|>"))
     module.bind(begin=glrmask.TokenSet([99]), body=glrmask.TokenSet([1]))
     state = module.compile(body).start()

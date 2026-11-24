@@ -3,7 +3,7 @@ use glrmask::{Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab}
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
-fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())])}
+fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]).unwrap()}
 fn allowed(mask:&[u32],id:u32)->bool {mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn check_pair(c:&Constraint) {
     let mut s=c.start();
@@ -85,7 +85,7 @@ fn loading_a_constraint_for_a_different_vocabulary_explains_the_bytes() {
     let v = vocab();
     let grammar = Grammar::from_glrm("start root nt root=\"x\"").unwrap();
     let constraint = grammar.compile(&v).unwrap();
-    let other = Vocab::new(vec![(0, b"y".to_vec())]);
+    let other = Vocab::new(vec![(0, b"y".to_vec())]).unwrap();
     assert_eq!(
         Constraint::load(constraint.save(), &other).unwrap_err().to_string(),
         "cannot load saved bytes: the constraint was saved with a different vocabulary"

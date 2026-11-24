@@ -12,7 +12,7 @@ MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 5: b"xb", 63: b""})
+    return glrmask.Vocab({0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 5: b"xb", 63: b""})
 
 
 def test_atomic_kwargs_bind():

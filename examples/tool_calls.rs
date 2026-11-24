@@ -19,7 +19,7 @@ const SEARCH: &str = r#"{
 
 fn main() -> glrmask::Result<()> {
     // One token per byte.
-    let vocab = Vocab::new((0..=255u32).map(|b| (b, vec![b as u8])).collect());
+    let vocab = Vocab::new((0..=255u32).map(|b| (b, vec![b as u8])).collect::<Vec<_>>()).unwrap();
 
     let mut weather = Module::new(&Grammar::from_json_schema(WEATHER)?);
     weather.precompile(&vocab)?;

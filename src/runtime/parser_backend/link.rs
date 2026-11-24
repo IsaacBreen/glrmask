@@ -301,7 +301,7 @@ mod candidate_tests {
 
     #[test]
     fn direct_table_free_link_carries_persisted_candidate_sets_through_reload() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"ax".to_vec()),
@@ -365,7 +365,7 @@ mod candidate_tests {
 
     #[test]
     fn deferred_wrapper_proof_matches_eager_query_and_wire_for_nullable_and_ignore() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"xy".to_vec()),
             (5, b" xay".to_vec()), (6, b"xayxay".to_vec()), (7, b"yz".to_vec())]);
         for parent in [
@@ -393,7 +393,7 @@ mod candidate_tests {
                         parent, &bindings, &vocab).map(|p| (p.candidate_ids, p.fixed_point_widened))).unwrap();
                 crate::compiler::boundary_candidates::install_precomputed_boundary_candidate_ids(
                     &mut eager, &vocab, &ids, widened).unwrap();
-                let wrong_vocab = Vocab::new(vec![(0, b"wrong".to_vec())]);
+                let wrong_vocab = Vocab::from_entries_unchecked(vec![(0, b"wrong".to_vec())]);
                 assert!(crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(
                     &linked, &wrong_vocab).unwrap().is_none());
                 assert!(linked.boundary_candidate_summary.get().is_none());
@@ -412,7 +412,7 @@ mod candidate_tests {
 
     #[test]
     fn disabled_and_stale_deferred_wrapper_proofs_cannot_prune() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"yz".to_vec())]);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
             .compile(&vocab).unwrap();

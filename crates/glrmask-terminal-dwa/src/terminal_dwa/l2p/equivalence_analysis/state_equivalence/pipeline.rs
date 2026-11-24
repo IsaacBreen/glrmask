@@ -417,7 +417,7 @@ mod tests {
             .tokenizer;
         assert!(!tokenizer.has_epsilon_transitions());
 
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn stable_epsilon_restricted_observation_certifies_bounded_max_length() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),

@@ -43,7 +43,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
     }
     assert_eq!(offset, bytes.len(), "vocab dump has trailing bytes");
     assert_eq!(entries.len(), 128_256, "selected10 expects the CFA Llama-3.1 vocabulary");
-    Vocab::new(entries)
+    Vocab::new(entries).unwrap()
 }
 
 fn load_constraint(path: &Path, vocab: &Vocab) -> Constraint {

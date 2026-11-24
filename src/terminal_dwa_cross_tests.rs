@@ -75,7 +75,7 @@ t FALSE = "false";
 t NULL = "null";
 nt S = TRUE | FALSE | NULL;
 "#;
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b" true".to_vec()),
                 (1, b" false".to_vec()),
@@ -103,7 +103,7 @@ t QUOTE = "\"";
 t IDENT = /[A-Za-z_][A-Za-z0-9_]*/;
 nt S = QUOTE IDENT;
 "#;
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"\"A".to_vec()),
                 (1, b"\"Z".to_vec()),
@@ -123,7 +123,7 @@ nt S = QUOTE IDENT;
 
     #[test]
     fn forced_all_l2p_enum_skips_p8_first_byte_factorization() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"\"red\"".to_vec()),
                 (1, b"\"blue\"".to_vec()),
@@ -157,7 +157,7 @@ t B = b/[xy]/ & b/[xz]/;
 t C = "z";
 nt S = A | B | C;
 "#;
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"x".to_vec()),
                 (1, b"xx".to_vec()),
@@ -190,7 +190,7 @@ t QUOTE = "\"";
 t IDENT = /[A-Za-z_][A-Za-z0-9_]*/;
 nt S = QUOTE IDENT;
 "#;
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"\"A".to_vec()),
                 (1, b"\"Z".to_vec()),
@@ -229,7 +229,7 @@ t FROM = /_a_/;
 t CLASS = /_b_/;
 nt S = FROM V | SPACE V SPACE CLASS;
 "#;
-        let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b" !".to_vec()), (1, b" _".to_vec())]);
 
         let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
@@ -260,7 +260,7 @@ mod synthetic_state_facade_tests {
     #[test]
     fn synthesized_intersection_never_drops_long_live_tokens_after_min_length() {
         let _compat = LlGuidanceCompatGuard::enabled();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"{\"".to_vec()),
             (1, b"email".to_vec()),
             (2, b"\":".to_vec()),
@@ -309,7 +309,7 @@ mod synthetic_state_facade_tests {
 
     #[test]
     fn static_synthesized_pipeline_matches_exact_dynamic_runtime_through_full_bound() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -354,7 +354,7 @@ mod synthetic_state_facade_tests {
 
     #[test]
     fn independently_synthesized_identical_terminals_preserve_different_full_lifetimes() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aaaa".to_vec()),
@@ -407,7 +407,7 @@ mod synthetic_state_facade_tests {
     #[test]
     #[ignore = "profiling probe for the pathological nested-repeat/max-length product"]
     fn profile_pathological_nested_repeat_max_length() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),

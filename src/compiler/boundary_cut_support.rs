@@ -599,7 +599,7 @@ mod tests {
                     let len = 1 + next() % 7;
                     words.push((0..len).map(|_| b"abc !"[next() % 5]).collect());
                 }
-                let vocab = Vocab::new(
+                let vocab = Vocab::from_entries_unchecked(
                     words
                         .iter()
                         .enumerate()
@@ -685,7 +685,7 @@ fn cut_support_rejects_invalid_domain_and_wrong_tokenizer_table() {
     let flat = l1::build_flat_transition_table(&a);
     let prepared = PreparedSupportTransitions::new(&a, &flat).unwrap();
     let owner = BoundaryOwnership::flat(&[0], 1).unwrap();
-    let v = Vocab::new(vec![(2, b"bc!".to_vec())]);
+    let v = Vocab::from_entries_unchecked(vec![(2, b"bc!".to_vec())]);
     let seeds = vec![true; a.num_states() as usize];
     let follows = BTreeMap::new();
     assert!(
@@ -718,7 +718,7 @@ fn cut_support_rejects_invalid_domain_and_wrong_tokenizer_table() {
         )
         .is_none()
     );
-    let oversized = Vocab::new(vec![(1, vec![b'a'; 1025])]);
+    let oversized = Vocab::from_entries_unchecked(vec![(1, vec![b'a'; 1025])]);
     assert!(
         crossing_support_with_transitions(
             &a,

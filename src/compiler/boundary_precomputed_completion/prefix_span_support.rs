@@ -56,7 +56,7 @@ pub(crate) fn in_verified_span(context:&CompletionContext,offset:u32,merged:&Tok
     let ownership=BoundaryOwnership::from_leaf_layout(&offsets,tok.num_terminals(),&owners,2).unwrap();
     for owner in 0..2{for _ in 0..64{
       let mut entries=words.iter().enumerate().filter(|_|next()%3!=0).map(|(i,w)|(i as u32,w.clone())).collect::<Vec<_>>();if entries.is_empty(){entries.push((0,words[0].clone()));}
-      let vocab=Vocab::new(entries);let initial=(0..tok.num_states()).map(|_|next()%3!=0).collect::<Vec<_>>();
+      let vocab=Vocab::from_entries_unchecked(entries);let initial=(0..tok.num_states()).map(|_|next()%3!=0).collect::<Vec<_>>();
       let result=in_verified_span(&ctx,0,&tok,&vocab,&initial,&ownership,ImmediateComponentId(owner)).unwrap();
       let(reference,_)=scope::crossing_prefix_seed_support(&tok,&vocab,&flat,&ownership,ImmediateComponentId(owner)).unwrap();
       let expected=reference.into_iter().zip(&initial).map(|(a,b)|a&&*b).collect::<Vec<_>>();assert_eq!(result,expected);
@@ -70,7 +70,7 @@ pub(crate) fn in_verified_span(context:&CompletionContext,offset:u32,merged:&Tok
   let b=build_regex_monolithic(&[bytes(b"b!"),Expr::Epsilon]).into_tokenizer(2,None);
   let(merged,offsets)=Tokenizer::disjoint_union_with_terminal_offsets(&[(&b,0),(a.as_ref(),2)]);
   let words=vec![b"ab!".to_vec(),b"bb!".to_vec(),b"!".to_vec(),b"a".to_vec(),b"b".to_vec()];let ctx=prepared(Arc::clone(&a),&words);
-  let vocab=Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.clone())).collect());
+  let vocab=Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|(i as u32,w.clone())).collect());
   let ownership=BoundaryOwnership::flat(&[0,2],4).unwrap();let mut initial=vec![false;merged.num_states()as usize];
   for q in offsets[1]..offsets[1]+a.num_states(){initial[q as usize]=true;}
   let got=in_verified_span(&ctx,offsets[1],&merged,&vocab,&initial,&ownership,ImmediateComponentId(1)).unwrap();
@@ -78,7 +78,7 @@ pub(crate) fn in_verified_span(context:&CompletionContext,offset:u32,merged:&Tok
   assert_eq!(got,reference.iter().zip(&initial).map(|(a,b)|*a&&*b).collect::<Vec<_>>());
   initial[0]=true;assert!(in_verified_span(&ctx,offsets[1],&merged,&vocab,&initial,&ownership,ImmediateComponentId(1)).is_none());initial[0]=false;
   assert!(in_verified_span(&ctx,u32::MAX,&merged,&vocab,&initial,&ownership,ImmediateComponentId(1)).is_none());
-  let empty=Vocab::new(vec![(5,vec![])]);assert!(in_verified_span(&ctx,offsets[1],&merged,&empty,&initial,&ownership,ImmediateComponentId(1)).is_none());
-  let unknown=Vocab::new(vec![(5,b"unknown".to_vec())]);assert!(in_verified_span(&ctx,offsets[1],&merged,&unknown,&initial,&ownership,ImmediateComponentId(1)).is_none());
+  let empty=Vocab::from_entries_unchecked(vec![(5,vec![])]);assert!(in_verified_span(&ctx,offsets[1],&merged,&empty,&initial,&ownership,ImmediateComponentId(1)).is_none());
+  let unknown=Vocab::from_entries_unchecked(vec![(5,b"unknown".to_vec())]);assert!(in_verified_span(&ctx,offsets[1],&merged,&unknown,&initial,&ownership,ImmediateComponentId(1)).is_none());
  }
 }

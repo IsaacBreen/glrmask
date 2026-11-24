@@ -4,11 +4,11 @@ use glrmask::{
 };
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::new::<Vec<u8>>(vec![
         (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
         (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
         (7, b"a".to_vec()), (8, Vec::new()),
-    ])
+    ]).unwrap()
 }
 
 fn allowed(mask: &[u32], id: u32) -> bool {
@@ -128,7 +128,7 @@ fn unbound_exact_token_survives_save_load() {
 #[test]
 fn token_membership_and_compiled_vocabulary_are_validated() {
     let v = vocab();
-    let other = Vocab::new(vec![(7, b"different".to_vec())]);
+    let other = Vocab::new(vec![(7, b"different".to_vec())]).unwrap();
     let mut parent = Module::new(&Grammar::from_glrm(TOKEN_HOST).unwrap());
     parent.precompile(&v).unwrap();
 
@@ -249,7 +249,7 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
 
 #[test]
 fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]).unwrap();
     let mut open = Module::new(&Grammar::from_glrm(
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ).unwrap());
@@ -274,7 +274,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.commit_token(1));
     assert!(state.is_accepting());
 
-    let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"different".to_vec())]);
+    let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"different".to_vec())]).unwrap();
     assert!(Module::load(open.save()).is_ok());
     assert!(Constraint::load(constraint.save(), &missing_domain).is_err());
 }

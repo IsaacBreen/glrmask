@@ -28,7 +28,7 @@ GLRMask has four core types:
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
+vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
 grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()

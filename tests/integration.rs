@@ -68,11 +68,11 @@ fn vocab(entries: &[&str]) -> Vocab {
             .iter()
             .enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec()))
-            .collect())
+            .collect::<Vec<_>>()).unwrap()
 }
 
 fn bytes_vocab() -> Vocab {
-    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect())
+    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect::<Vec<_>>()).unwrap()
 }
 
 fn with_stable_ti_env<T>(f: impl FnOnce() -> T) -> T {
@@ -153,7 +153,7 @@ fn lark_direct_unicode_uses_original_utf8_bytes() {
         (3, b" \xe2\x80\x94".to_vec()),
         (4, b" \xc3".to_vec()),
         (5, b" \xc3\xa2".to_vec()),
-    ]);
+    ]).unwrap();
 
     let static_constraint = Constraint::compile(glrmask::Grammar::lark(r#"start: " —""#), &vocab).unwrap();
     let dynamic_constraint = DynamicConstraint::compile(glrmask::Grammar::lark(r#"start: / —/"#), &vocab).unwrap();
@@ -184,7 +184,7 @@ fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
         (8, b"\xe2\x80\x94".to_vec()),
         (9, b"\xc3".to_vec()),
         (10, b"\xc3\xa2".to_vec()),
-    ]);
+    ]).unwrap();
 
     let constraints = [
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= " —""#), &vocab).unwrap(),
@@ -237,7 +237,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
         (9, b"\xc3\xa9".to_vec()),
         (10, b"\xc3\xaa".to_vec()),
         (11, b"\xc3\xab".to_vec()),
-    ]);
+    ]).unwrap();
 
     for constraint in [
         Constraint::compile(glrmask::Grammar::lark("start: /—+/"), &vocab).unwrap(),
@@ -297,7 +297,7 @@ fn unicode_escape_spellings_preserve_runtime_prefixes() {
         (12, b"\xf0\x9f".to_vec()),
         (13, b"\xf0\x9f\x98".to_vec()),
         (14, b"\xf0\x9f\x98\x80".to_vec()),
-    ]);
+    ]).unwrap();
 
     let static_constraints = [
         Constraint::compile(glrmask::Grammar::lark(r#"start: " \u2014""#), &vocab).unwrap(),
@@ -1460,7 +1460,7 @@ fn special_token_vocab() -> Vocab {
             (2, b"SPEC".to_vec()),
             (3, b"SPECIAL".to_vec()),
             (7, b"SPECIAL".to_vec()),
-        ])
+        ]).unwrap()
 }
 
 fn assert_special_token_sequence(constraint: &Constraint) {
@@ -1510,7 +1510,7 @@ fn ebnf_and_lark_accept_special_token_atoms() {
 
 #[test]
 fn byte_less_special_token_extends_mask_token_space() {
-    let vocab = Vocab::new(Vec::new());
+    let vocab = Vocab::new::<Vec<u8>>(Vec::new()).unwrap();
     let res = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(r#"
                 start start;
@@ -1531,7 +1531,7 @@ fn grammar_def_json_supports_special_token_terminals() {
     });
     let constraint = Constraint::compile_grammar_def_json(
         &grammar.to_string(),
-        &Vocab::new(Vec::new()),
+        &Vocab::new::<Vec<u8>>(Vec::new()).unwrap(),
     )
     .unwrap();
     assert_eq!(allowed(&constraint.start().mask()), vec![100]);
@@ -1582,7 +1582,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
 
 #[test]
 fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (100, b"[100]".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (100, b"[100]".to_vec())]).unwrap();
     let grammar = || {
         Grammar::from_glrm(r#"
         start start;
@@ -1620,7 +1620,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
             (0, b"x".to_vec()),
             (1, b"z".to_vec()),
             (7, b"a".to_vec()),
-        ]);
+        ]).unwrap();
     let grammar = Grammar::from_glrm(r#"
         start start;
         extern token SPECIAL;
@@ -1650,7 +1650,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
 
 #[test]
 fn special_token_commit_profiling_entry_points_preserve_semantics() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     let mut grammar = glrmask::Grammar::from_glrm(r#"
             glrm 1;
             start start;
@@ -1695,7 +1695,7 @@ fn special_token_cannot_be_configured_as_ignore_terminal() {
 
 #[test]
 fn special_token_atoms_compose_in_parser_choices_and_repetition() {
-    let vocab = Vocab::new(vec![(100, b"A".to_vec()), (101, b"B".to_vec())]);
+    let vocab = Vocab::new(vec![(100, b"A".to_vec()), (101, b"B".to_vec())]).unwrap();
     let grammar = Grammar::from_glrm(r#"
                 start start;
                 extern token FIRST;
@@ -2506,7 +2506,7 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
 
 #[test]
 fn commit_tokens_commits_in_order_and_post_end_commits_error() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]).unwrap();
     let constraint = glrmask::Grammar::from_expr(glrmask::Expr::sequence([
         glrmask::Expr::from(glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)),
         glrmask::Expr::from(glrmask::TokenSet::new([7])),
@@ -2536,7 +2536,7 @@ fn constraint_artifacts_require_the_exact_vocabulary() {
     let loaded = Constraint::load(bytes.clone(), &vocab).unwrap();
     assert_eq!(loaded.start().mask(), constraint.start().mask());
     // Same size, different mapping.
-    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]).unwrap();
     assert!(Constraint::load(bytes, &wrong).is_err());
 }
 
@@ -2550,6 +2550,6 @@ fn module_retained_work_is_checked_against_the_compile_vocabulary() {
         loaded.compile(&vocab).unwrap().start().mask(),
         module.compile(&vocab).unwrap().start().mask(),
     );
-    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]).unwrap();
     assert!(loaded.compile(&wrong).is_err());
 }

@@ -8,7 +8,7 @@ fn is_invalid_input(error: &glrmask::Error) -> bool {
 }
 
 fn small_vocab() -> Vocab {
-    Vocab::new(vec![(0, b"a".to_vec())])
+    Vocab::new(vec![(0, b"a".to_vec())]).unwrap()
 }
 
 fn token_extern() -> Grammar {
@@ -21,17 +21,20 @@ fn max_token_id_is_two_to_the_24_minus_one() {
 }
 
 #[test]
-fn a_vocab_with_a_huge_id_is_an_error_at_compile() {
+fn a_vocab_with_a_huge_id_is_an_error_at_construction() {
     for id in HUGE_IDS {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (id, b"b".to_vec())]);
-        let grammar = Grammar::from_glrm(r#"start s nt s = "a""#).unwrap();
-        let error = grammar.compile(&vocab).unwrap_err();
+        let error = Vocab::new([(0, b"a".as_slice()), (id, b"b".as_slice())]).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
         assert!(error.to_string().contains(&id.to_string()), "{error}");
         assert!(error.to_string().contains("16777215"), "{error}");
-        let error = grammar.precompile(&vocab).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
     }
+}
+
+#[test]
+fn duplicate_vocab_ids_are_invalid_input() {
+    let error = Vocab::new([(7, b"a".as_slice()), (7, b"b".as_slice())]).unwrap_err();
+    assert!(is_invalid_input(&error));
+    assert_eq!(error.to_string(), "duplicate vocabulary ID 7");
 }
 
 #[test]

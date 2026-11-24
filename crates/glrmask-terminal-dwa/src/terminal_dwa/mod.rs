@@ -1171,7 +1171,7 @@ impl CharTypeSubVocabPartition {
                     }
                     entries.push((token_id, bytes.to_vec()));
                 }
-                let vocab = Vocab::new(entries);
+                let vocab = Vocab::from_entries_unchecked(entries);
                 classify::cache_vocab_classification_facts(&vocab, self.bytes, follow_bytes);
                 vocab
             })
@@ -1271,7 +1271,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
                 .into_iter()
                 .filter_map(|token_id| vocab.entries_map().get(&token_id).map(|bytes| (token_id, bytes.clone())))
                 .collect();
-            Vocab::new(entries)
+            Vocab::from_entries_unchecked(entries)
         })
         .collect::<Vec<_>>()
         .into()
@@ -1297,7 +1297,7 @@ fn build_char_type_sub_vocabs(
     if let Ok(variants) = cache.variants.lock()
         && let Some(cached) = variants.iter().find(|variant| variant.key == key)
     {
-        let empty = Vocab::new(Vec::new());
+        let empty = Vocab::from_entries_unchecked(Vec::new());
         return cached
             .partitions
             .iter()
@@ -1404,7 +1404,7 @@ fn build_char_type_sub_vocabs(
         partitions
     };
 
-    let empty = Vocab::new(Vec::new());
+    let empty = Vocab::from_entries_unchecked(Vec::new());
     partitions
         .iter()
         .map(|partition| {
@@ -3390,7 +3390,7 @@ mod tests {
             return;
         }
 
-        let vocab = Vocab::new(vec![(0, b"{}".to_vec()), (1, b"hello".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"{}".to_vec()), (1, b"hello".to_vec())]);
         let all = build_char_type_sub_vocabs(&vocab, false, None, None);
         let structural_partition = all
             .iter()

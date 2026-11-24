@@ -4159,7 +4159,7 @@ mod tests {
 
         // Real nested fixture through real grammars: P = "L" SUB SUB "x",
         // M = "m" SUB2, G = "g". Depth-2 chain certifies 2H = 4.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -4335,7 +4335,7 @@ mod tests {
 
     fn ignore_test_constraints() -> (Constraint, Constraint) {
         use crate::Vocab;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b" ".to_vec()),
             (2, b"\t".to_vec()),

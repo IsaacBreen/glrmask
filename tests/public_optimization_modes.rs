@@ -8,7 +8,7 @@ fn allowed(mask: &[u32], id: u32) -> bool {
 }
 fn vocab() -> Vocab {
     Vocab::new(vec![(0,b"(".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
-        (15,b"(".to_vec()),(20,b"x".to_vec()),(25,b"".to_vec())])
+        (15,b"(".to_vec()),(20,b"x".to_vec()),(25,b"".to_vec())]).unwrap()
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
     let v=Vocab::new(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
         (2,b"b".to_vec()),(3,b"y".to_vec()),(4,b"xaby".to_vec()),(5,b"ab".to_vec()),
         (6,b" ".to_vec()),(7,b"\t".to_vec()),(8,b"x ab y".to_vec()),(9,b"xab\ty".to_vec()),
-        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]);
+        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]).unwrap();
     let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";").unwrap();
     let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap(),
         Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/").unwrap(),
@@ -132,7 +132,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
 
 #[test]
 fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec())]).unwrap();
     // start + r0..r30 reaches the established 32-rule compression threshold.
     let mut source=String::from("start: r0\n");
     for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
@@ -172,7 +172,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         source.push_str(&format!("r{n}: \"b\"\n"));
         let word=|count:usize| {let mut bytes=vec![b'a';count];bytes.push(b'b');bytes};
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
-            (3,word(n)),(7,word(n)),(8,word(n-1)),(9,word(n+1)),(11,b"x".to_vec())]);
+            (3,word(n)),(7,word(n)),(8,word(n-1)),(9,word(n+1)),(11,b"x".to_vec())]).unwrap();
         let g=Grammar::from_lark(&source).unwrap();
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE).end_tokens([100])).unwrap();
         for mode in MODES {
@@ -204,7 +204,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
     let mut source=String::from("start: r0\n");
     for i in 0..30 {source.push_str(&format!("r{i}: \"a\" r{}\n",i+1));}
     source.push_str("r30: \"b\"\n");let mut word=vec![b'a';30];word.push(b'b');
-    let v=Vocab::new(vec![(3,word)]);
+    let v=Vocab::new(vec![(3,word)]).unwrap();
     for mode in MODES {
         let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
         let mut a=c.start();assert_eq!(a.mask(),vec![8]);assert!(a.commit_token(3));assert!(a.is_accepting());

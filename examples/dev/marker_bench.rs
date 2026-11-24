@@ -83,7 +83,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let mut words=vec![b"a".to_vec(),b"b".to_vec(),b"abababab".to_vec(),b"(".to_vec(),b")".to_vec(),b"x".to_vec()];
     words.extend(b"0123456789:".iter().map(|&byte| vec![byte]));
     words.extend((0..2048).map(|i|format!("unused_{i}").into_bytes()));
-    let vocab=Vocab::new(words.into_iter().enumerate().map(|(i,b)|(i as u32,b)).collect());
+    let vocab=Vocab::new(words.into_iter().enumerate().map(|(i,b)|(i as u32,b)).collect::<Vec<_>>()).unwrap();
     let mut reports=Vec::new();
     for mode in MaskMode::ALL {
         for case in workloads(marked) {

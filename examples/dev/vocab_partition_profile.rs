@@ -22,7 +22,7 @@ fn main() {
         raw.into_iter()
             .map(|(id, bytes)| (id.parse().unwrap(), decode_hex(&bytes)))
             .collect(),
-    );
+    ).unwrap();
     vocab.prepare_for_compile();
     let started = Instant::now();
     let partition = VocabPartition::compile(Grammar::json_schema(&schema), &vocab).unwrap();

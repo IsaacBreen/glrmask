@@ -30,7 +30,7 @@ def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, mask_strategy=Non
 
 
 def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"X", 1: b"ab!", 2: b"Xab!", 3: b"a", 4: b"b", 5: b"!"}
     )
     child = _prepare_glrm(
@@ -74,7 +74,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
 
 
 def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"X", 1: b"ab!", 2: b"a", 3: b"b", 4: b"!"}
     )
     child = _prepare_glrm(
@@ -122,7 +122,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
 
 
 def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"X!", 1: b"Xa!", 2: b"X", 3: b"a", 4: b"!"}
     )
     child = _prepare_glrm(
@@ -166,7 +166,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
 
 
 def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"X!", 1: b"Xa!", 2: b"X", 3: b"a", 4: b"!"}
     )
     leaf = _prepare_glrm(
@@ -220,7 +220,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
 
 
 def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {
             0: b"X a!",
             1: b"Xa!",
@@ -275,7 +275,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
 
 
 def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {
             0: b"<a>,<b>",
             1: b"<b>,<a>",
@@ -328,7 +328,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
 
 def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
     end_token = 1000
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0: b"Xa!", 1: b"X", 2: b"a", 3: b"!"}
     )
     child = _prepare_glrm(
@@ -371,7 +371,7 @@ def test_manual_subgrammar_composition_api_is_not_exposed() -> None:
 
 
 def test_compiled_parent_can_be_cached_and_rebound() -> None:
-    vocab = glrmask.Vocab.from_id_to_bytes({
+    vocab = glrmask.Vocab({
         0: b"<",
         1: b">",
         2: b"a",

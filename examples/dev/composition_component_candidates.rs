@@ -17,7 +17,7 @@ fn read_vocab(path:&Path)->Vocab{
         let end=offset.checked_add(n).expect("token length overflow");
         entries.push((id,bytes.get(offset..end).expect("truncated token").to_vec()));offset=end;
     }
-    assert_eq!(offset,bytes.len(),"vocab trailing bytes");Vocab::new(entries)
+    assert_eq!(offset,bytes.len(),"vocab trailing bytes");Vocab::new(entries).unwrap()
 }
 
 fn main(){

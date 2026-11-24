@@ -182,7 +182,7 @@ mod lifecycle_tests {
 
     #[test]
     fn independent_component_index_roundtrips_and_matches_raw_first_query() {
-        let vocab=Vocab::new(vec![(1,b"abc".to_vec()),(2,b"xyc".to_vec()),(3,b"c!".to_vec()),(4,b"bc!".to_vec()),(5,b"abc!".to_vec()),(6,b"xyc!".to_vec()),(7,b"!".to_vec()),(8,b"a".to_vec()),(9,b"b".to_vec()),(10,b"c".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(1,b"abc".to_vec()),(2,b"xyc".to_vec()),(3,b"c!".to_vec()),(4,b"bc!".to_vec()),(5,b"abc!".to_vec()),(6,b"xyc!".to_vec()),(7,b"!".to_vec()),(8,b"a".to_vec()),(9,b"b".to_vec()),(10,b"c".to_vec())]);
         let mut source=Constraint::from_glrm_grammar(r#"start x; nt x = "abc" | "xyc";"#,&vocab).unwrap();
         assert!(prepare_component(&mut source,&vocab).unwrap(),"fixture must select component-only preparation");
         let wire=source.save();
@@ -192,7 +192,7 @@ mod lifecycle_tests {
         assert_eq!(loaded.save(),wire);
         let (Some(ids),_)=super::super::boundary_candidates::boundary_candidate_ids(&loaded,&vocab)else{panic!("known prepared candidates")};
         assert!(!ids.is_empty());
-        let selected=Vocab::new(ids.into_iter().filter(|id|!vocab.entries_map()[id].is_empty()).map(|id|(id,vocab.entries_map()[&id].clone())).collect());
+        let selected=Vocab::from_entries_unchecked(ids.into_iter().filter(|id|!vocab.entries_map()[id].is_empty()).map(|id|(id,vocab.entries_map()[&id].clone())).collect());
         let other=build_regex_monolithic(&[bytes(b"!")]).into_tokenizer(1,None);
         let nt=loaded.tokenizer.num_terminals();
         let (merged,offsets)=Tokenizer::disjoint_union_with_terminal_offsets(&[(loaded.tokenizer.as_ref(),0),(&other,nt)]);
@@ -208,7 +208,7 @@ mod lifecycle_tests {
         let flat=l1::build_flat_transition_table(&merged);
         let expected=super::super::boundary_first_completion::prepare(&merged,&selected,&scope,&flat).unwrap();
         assert_eq!(actual.original_to_rep,expected.original_to_rep);assert_eq!(actual.representatives,expected.representatives);
-        let outside=Vocab::new(vec![(42,b"not-in-component-coverage".to_vec())]);assert!(span.refine(&merged,&outside,&scope).is_none());
+        let outside=Vocab::from_entries_unchecked(vec![(42,b"not-in-component-coverage".to_vec())]);assert!(span.refine(&merged,&outside,&scope).is_none());
         let mut changed=loaded.clone();changed.tokenizer=Arc::new(build_regex_monolithic(&[Expr::Epsilon,bytes(b"z")]).into_tokenizer(2,None));
         assert!(saved_wire(&changed).is_none());assert!(PreparedSourceSpan::for_component(&changed,offsets[0],0).is_none());
         assert!(saved_wire(&loaded).is_some());

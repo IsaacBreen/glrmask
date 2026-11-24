@@ -135,7 +135,7 @@ GLRMask has four core types:
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
+vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
 grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
@@ -153,9 +153,9 @@ assert state.is_accepting()
 use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::new([
         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
-    ]);
+    ])?;
     let grammar = Grammar::from_lark(r#"start: "hello" " " "world""#)?;
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
@@ -177,7 +177,7 @@ holds a grammar, its bindings and any precompiled work, so parts you reuse, such
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(256)})
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
 weather = glrmask.Module(glrmask.Grammar.from_json_schema(
     '{"type": "object", "properties": {"city": {"type": "string"}},'
     ' "required": ["city"], "additionalProperties": false}'))

@@ -52,7 +52,7 @@ mod tests{
         let expressions=vec![bytes(b"abc"),plus(bytes(b"q")),choice(vec![bytes(b"!z"),bytes(b"!x")]),bytes(b"unobservable")];
         let tok=build_regex_partitioned(&expressions,&[0,1,2,3]).into_tokenizer(4,None);
         let seeds=(0..tok.num_states()).map(|q|tok.possible_future_terminals_iter(q).any(|t|t==0)).collect::<Vec<_>>();
-        let vocab=Vocab::new(vec![(0,b"bc!".to_vec()),(1,b"bc!zq".to_vec()),(2,b"bq".to_vec()),(99,b"bc!".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"bc!".to_vec()),(1,b"bc!zq".to_vec()),(2,b"bq".to_vec()),(99,b"bc!".to_vec())]);
         let (keep,_)=query_support(&tok,&vocab,&seeds).unwrap();let mut expected=vec![false;4];
         for word in vocab.entries_map().values(){
             for cut in 0..word.len(){

@@ -95,7 +95,7 @@ fn main() {
         Some("merge-equivalent-tokens") => MaskMode::C,
         Some(other) => { eprintln!("unknown --mode {other:?}"); std::process::exit(2); }
     };
-    let vocab = Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect());
+    let vocab = Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect::<Vec<_>>()).unwrap();
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     for line in stdin.lock().lines() {

@@ -2109,7 +2109,7 @@ mod tests {
 
     #[test]
     fn sole_partial_vocab_family_still_covers_its_dead_tokens() {
-        let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),
             (2,b"x".to_vec()),(3,b"y".to_vec())]);
         let partial = ManyToOneIdMap {
             original_to_internal: vec![0,1,u32::MAX,u32::MAX],
@@ -2125,7 +2125,7 @@ mod tests {
 
     #[test]
     fn vocab_map_only_refinement_merges_tokens_unobserved_by_every_branch() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"x".to_vec()),

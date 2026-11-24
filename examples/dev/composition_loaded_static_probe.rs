@@ -28,7 +28,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
         offset = end;
     }
     assert_eq!(offset, bytes.len(), "vocab dump has trailing bytes");
-    Vocab::new(entries)
+    Vocab::new(entries).unwrap()
 }
 
 fn percentile(values: &mut [f64], q: f64) -> f64 {

@@ -51,7 +51,7 @@ fn hash_collision_merge_keeps_exact_masks_commits_and_loaded_language() {
     let mut token_bytes = b"0123456789abcdef".iter().map(|&byte| vec![byte]).collect::<Vec<_>>();
     token_bytes.extend((0..=1024).map(literal));
     token_bytes.extend(invalid.iter().cloned());
-    let vocab = crate::Vocab::new(token_bytes.iter().enumerate()
+    let vocab = crate::Vocab::from_entries_unchecked(token_bytes.iter().enumerate()
         .map(|(id, bytes)| (id as u32, bytes.clone())).collect());
     let prefixes: BTreeSet<Vec<u8>> = words.iter().flat_map(|word|
         (0..=word.len()).map(|end| word[..end].to_vec())).collect();

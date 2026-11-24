@@ -12,7 +12,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
     let vocab = Vocab::new(vec![
         (0, vec![b'a']), (1, vec![b'b']), (2, vec![b'c']),
         (3, b"ab".to_vec()), (4, b"bc".to_vec()), (5, b"ca".to_vec()),
-    ]);
+    ]).unwrap();
     let grammar = Grammar::from_lark(lark).unwrap();
     for mode in MaskMode::ALL {
         let module = Module::new(&grammar);

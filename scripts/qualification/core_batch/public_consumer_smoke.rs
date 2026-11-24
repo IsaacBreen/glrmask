@@ -1,7 +1,7 @@
 use glrmask::{Grammar, Token, Vocab};
 
 fn main() -> glrmask::Result<()> {
-    let vocab = Vocab::new(vec![(0, b"!".to_vec()), (1, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"!".to_vec()), (1, b"a".to_vec())]).unwrap();
     let mut grammar = Grammar::from_glrm("extern token MARK\nstart root\nnt root = MARK");
     let original = grammar.clone();
     grammar.bind("MARK", TokenSet::from(0))?;

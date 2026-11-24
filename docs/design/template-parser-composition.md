@@ -18,7 +18,7 @@ use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vo
 let vocab = Vocab::new(vec![
     (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()),
     (3, b"xay".to_vec()), (4, b"xy".to_vec()),
-]);
+]).unwrap();
 let child = Grammar::from_ebnf(r#"start ::= "a"?"#)?.compile_with(
     &vocab,
     BuildOptions::default()

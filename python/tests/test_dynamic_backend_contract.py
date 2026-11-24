@@ -15,7 +15,7 @@ def version(raw):
 def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE", "1")
-    vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
+    vocab = glrmask.Vocab(TOKENS)
     compiled = DynamicConstraint.from_lark(SOURCE, vocab, vocab_partition=partition)
     raw = bytes(compiled.save())
     expected = 17
@@ -37,7 +37,7 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
                     {key: value for key, value in TOKENS.items() if key != 15},
                     {**TOKENS, 15: b")"}]:
         with pytest.raises(ValueError, match="vocab"):
-            DynamicConstraint.load(raw, glrmask.Vocab.from_id_to_bytes(changed))
+            DynamicConstraint.load(raw, glrmask.Vocab(changed))
     if expected == 17:
         corrupt = bytearray(raw)
         corrupt[26] ^= 1
@@ -61,7 +61,7 @@ MODES = [
 
 @pytest.mark.parametrize("mode", MODES)
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
+    vocab = glrmask.Vocab(TOKENS)
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
@@ -84,7 +84,7 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
 
 @pytest.mark.parametrize("partition", [False, True])
 def test_dynamic_profiled_wrapper_preserves_empty_eos(partition):
-    vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
+    vocab = glrmask.Vocab(TOKENS)
     raw, _, _ = glrmask._internal.compile_lark_serialized_profiled(
         SOURCE, vocab, end_token_ids=[26], vocab_partition=partition)
     constraint = DynamicConstraint.load(bytes(raw), vocab)
@@ -104,7 +104,7 @@ def test_dynamic_profiled_wrapper_preserves_empty_eos(partition):
 
 
 def test_dynamic_empty_exact_special_id_remains_live():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 25: b"", 26: b""})
+    vocab = glrmask.Vocab({0: b"a", 25: b"", 26: b""})
     compiled = DynamicConstraint.from_glrm_grammar(
         'glrm 1; start root; extern token MARK; nt root = "a" MARK;',
         vocab, bindings={"MARK": [25]})

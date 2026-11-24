@@ -11,7 +11,7 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
     let values = (-64i64..=64).collect::<Vec<_>>();
     let vocab = Vocab::new(values.iter().enumerate().map(|(id, value)| {
         (id as u32, format!("{{\"v\": {value}}}").into_bytes())
-    }).collect::<Vec<_>>());
+    }).collect::<Vec<_>>()).unwrap();
     for divisor in [3i64, 12, 37] {
         for minimum in [None, Some(0)] {
             let mut number = serde_json::json!({"type": "integer", "multipleOf": divisor});
@@ -45,7 +45,7 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
 
 #[test]
 fn integer_multiple_exact_large_divisor_is_bounded_or_explicitly_unsupported() {
-    let vocab = Vocab::new(vec![(0, b"0".to_vec()), (1, b"1000003".to_vec()), (2, b"7".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"0".to_vec()), (1, b"1000003".to_vec()), (2, b"7".to_vec())]).unwrap();
     assert!(Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003}"#).is_err());
     // Finite exact expansion remains supported even above the generic DFA budget.
     let bounded = Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003,"minimum":0,"maximum":2000006}"#).unwrap()

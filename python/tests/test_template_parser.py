@@ -104,7 +104,7 @@ def balanced_parentheses():
 
 def words_and_vocab():
     words = [b"(", b")", b"()", b"((", b"))", b"(()", b"())", b"()()", b" ", b"( )", b"a", b"()"]
-    return words, glrmask.Vocab.from_id_to_bytes(dict(enumerate(words)))
+    return words, glrmask.Vocab(dict(enumerate(words)))
 
 
 def depth_after(word, depth=0, ignore_whitespace=True):
@@ -227,7 +227,7 @@ def test_python_template_validation_is_early_and_does_not_retain_python_callback
 @pytest.mark.parametrize("mode", [{"mask_strategy": glrmask.MaskStrategy.AUTO}] + MODES)
 def test_python_prepared_composition_uses_native_defaults(mode):
     tokens = {0: b"a", 1: b"aa", 2: b"b"}
-    vocab = glrmask.Vocab.from_id_to_bytes(tokens)
+    vocab = glrmask.Vocab(tokens)
     body = grammar_from_lark('start: "a"')
     # Standalone representations and composed representations are both native;
     # executable roots are not implicitly converted into reusable components.
@@ -274,7 +274,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_python_precompiled_nullable_composition_preserves_crossings_and_root_end(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay",
+    vocab = glrmask.Vocab({0: b"x", 1: b"a", 2: b"y", 3: b"xay",
                                           4: b"xy", 5: b"xx", 6: b""})
     child = grammar_from_lark('start: "a"?').prepare(vocab)
     parent = grammar_from_glrm(
@@ -295,7 +295,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
 
 
 def test_python_backend_selection_does_not_accept_untyped_flags():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    vocab = glrmask.Vocab({0: b"a"})
     grammar = grammar_from_lark('start: "a"')
     for value in ["TEMPLATE_DFA", True, 1, object()]:
         with pytest.raises(TypeError):
@@ -303,7 +303,7 @@ def test_python_backend_selection_does_not_accept_untyped_flags():
 
 
 def test_python_explicit_lr_merged_request_is_supported():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    vocab = glrmask.Vocab({0: b"a"})
     grammar = grammar_from_lark('start: "a"')
     compiled = compile_grammar(
         grammar, vocab,
@@ -317,7 +317,7 @@ def test_python_explicit_lr_merged_request_is_supported():
 def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     tokens = {0: b"p", 1: b'"x:a"', 2: b"q", 3: b'p"x:a"q',
               4: b'a"q', 5: b"a", 6: b"aaa", 7: b'"q', 8: b""}
-    vocab = glrmask.Vocab.from_id_to_bytes(tokens)
+    vocab = glrmask.Vocab(tokens)
     child = grammar_from_json_schema(json.dumps({
         "type": "string", "format": "uri", "minLength": 1, "maxLength": 5000,
     })).prepare(vocab)
@@ -352,7 +352,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
 def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, mode):
     tokens = {0: b"x", 1: b"a", 2: b"y", 3: b"xay", 4: b"xy",
               5: b"ay", 6: b"aa", 7: b"yx", 8: b""}
-    vocab = glrmask.Vocab.from_id_to_bytes(tokens)
+    vocab = glrmask.Vocab(tokens)
     selection = {} if backend is None else {"parser_backend": backend}
     prepared = grammar_from_glrm(
         'start root t A = /a?/ nt root = A').prepare(vocab)

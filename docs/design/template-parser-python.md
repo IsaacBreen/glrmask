@@ -14,7 +14,7 @@ environment flags or install Python callbacks in token generation.
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
+vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b"})
 grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
 constraint = glrmask._internal.compile_with_backend(
     grammar, vocab,
@@ -71,7 +71,7 @@ program = glrmask._internal.ParserProgram({
     "terminals": [identity],
     "completion": identity,
 })
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"aa", 2: b"b"})
+vocab = glrmask.Vocab({0: b"a", 1: b"aa", 2: b"b"})
 constraint = program.compile(
     vocab,
     [b"a"],

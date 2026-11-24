@@ -85,7 +85,7 @@ fn vocabulary() -> (Vocab, Vec<Vec<u8>>) {
     let mut words = (0..128).map(|byte| vec![byte]).collect::<Vec<_>>();
     words.extend([b"ab".as_slice(), b"aab", b"abc", b"a,b", b"b,c", b"\"ab\"", b"\"a\"", b" a", b"a ", b" x"].into_iter().map(Vec::from));
     let mut tokens = words.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.clone())).collect::<Vec<_>>();
-    tokens.push((512, vec![])); (Vocab::new(tokens), words)
+    tokens.push((512, vec![])); (Vocab::new(tokens).unwrap(), words)
 }
 fn bit(mask: &[u32], token: u32) -> bool { mask.get(token as usize / 32).is_some_and(|word| word & (1 << (token % 32)) != 0) }
 fn check_words(c: &Constraint, vocab: &[Vec<u8>], language: &[&[u8]]) {
@@ -222,7 +222,7 @@ fn exact_token_binding_is_not_its_vocabulary_byte_spelling() {
     let prepared = PreparedParserGrammar::from_named(&named(vec![("root", false,
         E::Sequence(vec![E::SpecialToken(70), literal(b"b")]))])).unwrap();
     let parser = prepared.compile_parser(&finite_compiler).unwrap();
-    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (70, b"a".to_vec())]);
+    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (70, b"a".to_vec())]).unwrap();
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::FAST_COMPILE] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
@@ -340,7 +340,7 @@ fn required_nullable_separated_items_match_the_existing_grammar_semantics() {
     // Compare the complete ordinary-token coordinate without an empty alias;
     // end-token behavior is independently covered by the constructor tests.
     let (_, bytes) = vocabulary();
-    let v = Vocab::new(bytes.into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes)).collect());
+    let v = Vocab::new(bytes.into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes)).collect::<Vec<_>>()).unwrap();
     for allow_empty in [false, true] {
         for optional in [None, Some(Q::Optional)] {
             let source = named(vec![("root", false, E::SeparatedSequence {

@@ -10,7 +10,7 @@ MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
 
 
 def vocab(changed=False):
-    return g.Vocab.from_id_to_bytes({0:b'x',1:b'a',2:b'b',3:b'y',4:b'xay',5:b'ab',6:b'xa',7:b'ay',8:b'z' if changed else b'a',63:b''})
+    return g.Vocab({0:b'x',1:b'a',2:b'b',3:b'y',4:b'xay',5:b'ab',6:b'xa',7:b'ay',8:b'z' if changed else b'a',63:b''})
 
 
 def source(text='a'):

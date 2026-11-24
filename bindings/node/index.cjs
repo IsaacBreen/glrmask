@@ -156,7 +156,12 @@ class Owned {
 class Vocab extends Owned {
   constructor(entries) {
     if (entries === key) { super(key, arguments[1]); return; }
-    const input = iterable(entries, 'vocabulary entries');
+    const plain = entries != null && typeof entries === 'object' &&
+      (Object.getPrototypeOf(entries) === Object.prototype || Object.getPrototypeOf(entries) === null);
+    const input = plain ? Object.entries(entries).map(([id, value]) => {
+      if (!/^(0|[1-9][0-9]*)$/.test(id)) throw new TypeError('Vocabulary keys must be integer strings');
+      return [Number(id), value];
+    }) : iterable(entries, 'vocabulary entries');
     const tokenIds = [], tokenBytes = [];
     for (const entry of input) {
       if (!Array.isArray(entry) || entry.length !== 2) throw new TypeError('Each vocabulary entry must be [id, Uint8Array]');

@@ -90,7 +90,7 @@ nt start = "a" SPECIAL "b";
 
 #[test]
 fn named_external_token_is_exact_not_a_byte_language() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (7, b"SPECIAL".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (7, b"SPECIAL".to_vec())]).unwrap();
     let spec = ConstraintSpec::builder(Grammar::glrm(EXACT_GRAMMAR), &vocab)
         .unwrap()
         .bind_token("SPECIAL", [7])
@@ -116,7 +116,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
 #[test]
 fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
-    let vocab = Vocab::new(Vec::new());
+    let vocab = Vocab::new::<Vec<u8>>(Vec::new()).unwrap();
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -142,7 +142,7 @@ fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
 
 #[test]
 fn external_token_validation_is_early_and_complete() {
-    let vocab = Vocab::new(vec![(7, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(7, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -200,7 +200,7 @@ nt start = CONTROL payload;
 
 #[test]
 fn commit_token_keeps_exact_and_decoded_byte_interpretations() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"z".to_vec()), (7, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"z".to_vec()), (7, b"a".to_vec())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -230,7 +230,7 @@ nt start = "a" SPECIAL | "x" "a" "z";
 
 #[test]
 fn exact_tokens_survive_static_and_dynamic_serialization() {
-    let vocab = Vocab::new(vec![(100, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(100, Vec::new())]).unwrap();
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -260,7 +260,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         (2, b"xy".to_vec()),
         // Relevant prefix followed by a suffix outside the language.
         (3, b"xyz".to_vec()),
-    ]);
+    ]).unwrap();
     let parent_source =
         "glrm 1; start start; extern grammar child; nt start = \"x\" child;";
     let child_grammar = Grammar::ebnf(r#"start ::= "y""#);
@@ -375,7 +375,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
         (0, b"x".to_vec()),
         (1, b"y".to_vec()),
         (2, b"xy".to_vec()),
-    ]);
+    ]).unwrap();
     let parent = Grammar::from_glrm(
         "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
     ).unwrap()
@@ -410,7 +410,7 @@ fn late_binding_multiple_adjacent_slots_handles_internal_multi_boundary_tokens()
         (4, b"yz".to_vec()),
         (5, b"xyz".to_vec()),
         (6, b"xyzz".to_vec()),
-    ]);
+    ]).unwrap();
     let parent = Grammar::glrm(
         "glrm 1; start start; extern grammar left; extern grammar right; \
          nt start = \"x\" left right;",
@@ -452,7 +452,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
         (8, b"\t\t".to_vec()),
         (9, b"  ".to_vec()),
         (10, b"a ".to_vec()),
-    ]);
+    ]).unwrap();
     let parent = Constraint::compile(
         Grammar::glrm(
             r#"
@@ -523,7 +523,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
 
 #[test]
 fn compiled_children_are_authoritative_and_compose_both_directions() {
-    let vocab = Vocab::new(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]).unwrap();
     let child_source = "glrm 1; start start; extern token VALUE; nt start = VALUE;";
     let child_spec = ConstraintSpec::builder(Grammar::glrm(child_source), &vocab)
         .unwrap()
@@ -606,7 +606,7 @@ nt document = MARK payload;
 
 #[test]
 fn loaded_direct_regular_dynamic_child_remains_composable() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]).unwrap();
     let dynamic_child = compile_native_dynamic_fixture(
         Grammar::lark("start: /a+/"),
         &vocab,
@@ -635,7 +635,7 @@ fn loaded_direct_regular_dynamic_child_remains_composable() {
 
 #[test]
 fn grammar_can_bind_source_subgrammar_before_target_selection() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]).unwrap();
     let parent = Grammar::glrm(
         "glrm 1; start start; extern grammar payload; nt start = payload;",
     )
@@ -660,7 +660,7 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
 
 #[test]
 fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings() {
-    let vocab = Vocab::new(vec![(7, Vec::new()), (8, b"z".to_vec())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(7, Vec::new()), (8, b"z".to_vec())]).unwrap();
     let leaf = Grammar::ebnf(r#"start ::= "z""#);
     let child = Grammar::glrm(
         "glrm 1; start start; extern grammar leaf; nt start = leaf;",
@@ -714,7 +714,7 @@ fn grammar_source_bindings_validate_parent_declarations() {
 
 #[test]
 fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
-    let vocab = Vocab::new(vec![(0, b"x".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"x".to_vec())]).unwrap();
     let parent = "glrm 1; start start; extern grammar child; nt start = child;";
     let source_child = Grammar::ebnf(r#"start ::= "x""#);
     let source_bound = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
@@ -788,8 +788,8 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
 
 #[test]
 fn incompatible_compiled_child_target_is_rejected_at_bind_time() {
-    let child_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
-    let parent_vocab = Vocab::new(vec![(0, b"b".to_vec())]);
+    let child_vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
+    let parent_vocab = Vocab::new(vec![(0, b"b".to_vec())]).unwrap();
     let child = Constraint::compile(
         Grammar::ebnf(r#"start ::= "a""#),
         &child_vocab,
@@ -804,7 +804,7 @@ fn incompatible_compiled_child_target_is_rejected_at_bind_time() {
 
 #[test]
 fn v1_terminal_fa_compiles_and_masks_tokens() {
-    let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -830,7 +830,7 @@ nt start = WORD;
 
 #[test]
 fn nested_external_tokens_are_rejected() {
-    let vocab = Vocab::new(vec![(123, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(123, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start document;
@@ -847,7 +847,7 @@ nt document = inner;
 
 #[test]
 fn external_token_can_label_nonterminal_fa_edges() {
-    let vocab = Vocab::new(vec![(77, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(77, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -870,7 +870,7 @@ nt start = fa {
 
 #[test]
 fn lexer_pragma_does_not_change_token_language() {
-    let vocab = Vocab::new(vec![(0, b"abc".to_vec()), (1, b"a".to_vec()), (2, b"bc".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"abc".to_vec()), (1, b"a".to_vec()), (2, b"bc".to_vec())]).unwrap();
     let plain = "glrm 1; start start; t WORD = /[a-z]+/; nt start = WORD;";
     let hinted = r#"
 glrm 1;
@@ -910,7 +910,7 @@ fn glrm_definition_forms_use_equals_and_match() {
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"ab".to_vec()),
-    ]);
+    ]).unwrap();
     let source = "glrm 1; start start; internal t LETTER = /[a-b]/; t WORD = LETTER+; nt start = WORD;";
     let constraint = Constraint::compile(Grammar::from_glrm(source).unwrap(), &vocab).unwrap();
     let mut state = constraint.start();

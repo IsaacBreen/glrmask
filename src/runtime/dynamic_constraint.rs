@@ -3673,7 +3673,7 @@ mod parser_replacement_compile_tests {
     #[test]
     fn parser_replacement_omits_only_the_discarded_lr_snapshot() {
         let words = (0..40).map(|i| format!("k{i:02};")).collect::<Vec<_>>();
-        let vocab = Vocab::new(words.iter().enumerate()
+        let vocab = Vocab::from_entries_unchecked(words.iter().enumerate()
             .map(|(i, word)| (i as u32, word.as_bytes().to_vec())).collect());
         let mut source = String::from("start root;\n");
         for (i, word) in words.iter().enumerate() {
@@ -4017,7 +4017,7 @@ mod tests {
     }
 
     fn vocab() -> Vocab {
-        Vocab::new(vec![
+        Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -4052,7 +4052,7 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_ordinary_bounded_array_item_stays_a_lazy_terminal() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"[".to_vec()),
             (1, b"]".to_vec()),
             (2, b",".to_vec()),
@@ -4134,7 +4134,7 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_ordinary_bounded_string_bound_is_symbolic() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4171,7 +4171,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _compat = CompatModeGuard::native();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4206,7 +4206,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _compat = CompatModeGuard::json_schema();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4286,7 +4286,7 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_bounded_format_uses_exact_code_liveness_oracle() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),
@@ -4333,7 +4333,7 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_pattern_format_and_length_share_exact_code_liveness_oracle() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4391,7 +4391,7 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_cross_branch_bounded_string_constraints_share_exact_code_liveness_oracle() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4459,7 +4459,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _compat = CompatModeGuard::json_schema();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4526,7 +4526,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _compat = CompatModeGuard::json_schema();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, "é".as_bytes().to_vec()),
             (2, br"\u00e9".to_vec()),
@@ -4561,7 +4561,7 @@ mod tests {
 
     #[test]
     fn static_constraint_artifact_preserves_dynamic_runtime_sidecars() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"x".to_vec()),
@@ -4611,14 +4611,14 @@ mod tests {
 
     #[test]
     fn dynamic_v20_persists_vocab_and_validates_shared_vocab() {
-        let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf_with_bounded_template_parser("start ::= 'a'+", &vocab).unwrap();
         let current = constraint.save();
         assert_eq!(u16::from_le_bytes([current[8],current[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
         let loaded = DynamicConstraint::load(&current, &vocab).unwrap();
         assert!(loaded.inner.dynamic_mask_vocab.to_artifact().is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
-        let other_vocab = Vocab::new(vec![(0,b"z".to_vec())]);
+        let other_vocab = Vocab::from_entries_unchecked(vec![(0,b"z".to_vec())]);
         let other = DynamicConstraint::from_ebnf_with_bounded_template_parser("start ::= 'z'+", &other_vocab).unwrap();
         let malformed = DynamicConstraint::from_constraints(vec![constraint.into_constraint(), other.into_constraint()]).save();
         let error = DynamicConstraint::load(&malformed, &vocab).unwrap_err();
@@ -4627,7 +4627,7 @@ mod tests {
 
     #[test]
     fn dynamic_virtual_unit_repeat_save_load_round_trip() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"b".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4673,7 +4673,7 @@ mod tests {
 
     #[test]
     fn dynamic_virtual_runtime_metadata_is_exact_and_fail_closed() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"aa".to_vec()),
@@ -4733,7 +4733,7 @@ mod tests {
 
     #[test]
     fn current_dynamic_transfer_virtual_residuals_round_trip() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -4763,7 +4763,7 @@ mod tests {
 
     #[test]
     fn current_dynamic_transfer_defers_terminal_expression_trees() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -4814,7 +4814,7 @@ mod tests {
 
     #[test]
     fn dynamic_v20_terminal_observation_certificate_is_shape_validated() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
@@ -4866,7 +4866,7 @@ mod tests {
 
     #[test]
     fn dynamic_standalone_virtual_unit_v20_and_transfer_v9_round_trip() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaa".to_vec()),
@@ -4915,7 +4915,7 @@ mod tests {
 
     #[test]
     fn dynamic_v20_combines_composition_and_residual_runtime_metadata() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let mut constraint = crate::import::compile_dynamic_glrm_fixture(
             r#"
                 start start;
@@ -4993,7 +4993,7 @@ mod tests {
     #[test]
     #[ignore = "pre-release legacy dynamic artifact compatibility is not an acceptance requirement"]
     fn dynamic_main_v14_late_slot_artifact_still_loads() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let mut constraint = DynamicConstraint::from_glrm_grammar(
             r#"
                 start start;
@@ -5028,7 +5028,7 @@ mod tests {
     #[test]
     #[ignore = "pre-release legacy dynamic artifact compatibility is not an acceptance requirement"]
     fn dynamic_virtual_runtime_legacy_v13_and_transfer_v4_still_load() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"x".to_vec()),
@@ -5123,7 +5123,7 @@ mod tests {
     }
 
     fn variable_width_repeat_intersection_vocab() -> Vocab {
-        Vocab::new(vec![
+        Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"bb".to_vec()),
             (2, b"abb".to_vec()),
@@ -5307,7 +5307,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"ac".to_vec()),
@@ -5381,7 +5381,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"ac".to_vec()),
@@ -5451,7 +5451,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"c".to_vec()),
@@ -5544,7 +5544,7 @@ mod tests {
                 ..GrammarDef::default()
             }
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"c".to_vec()),
@@ -5612,7 +5612,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaa".to_vec()),
@@ -5698,7 +5698,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"b".to_vec()),
             (1, b"bb".to_vec()),
             (2, b"bbb".to_vec()),
@@ -5778,7 +5778,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
 
         for min in [0usize, 1] {
             let dynamic =
@@ -5831,7 +5831,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -5897,7 +5897,7 @@ mod tests {
             ],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -5952,7 +5952,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -6013,7 +6013,7 @@ mod tests {
                 ..GrammarDef::default()
             }
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"c".to_vec()),
             (2, b"x".to_vec()),
@@ -6078,7 +6078,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -6139,7 +6139,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"[".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -6210,7 +6210,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"z".to_vec()),
@@ -6275,7 +6275,7 @@ mod tests {
             ],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"b".to_vec()),
@@ -6330,7 +6330,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"abcabc".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"c".to_vec()),
@@ -6403,7 +6403,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -6465,7 +6465,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"b".to_vec()),
@@ -6588,7 +6588,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, long_body.clone()),
@@ -6650,7 +6650,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar_for(10_000),
             &vocab,
@@ -6701,7 +6701,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -6752,7 +6752,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar,
             &vocab,
@@ -6802,7 +6802,7 @@ mod tests {
             ],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"aa".to_vec()),
@@ -6927,7 +6927,7 @@ mod tests {
             ],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"x".to_vec()),
             (2, b"xx".to_vec()),
@@ -7007,7 +7007,7 @@ mod tests {
             ],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"bb".to_vec()),
             (2, b"cc".to_vec()),
@@ -7078,7 +7078,7 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -7214,7 +7214,7 @@ mod tests {
         // the shared-component selector) on a two-literal fixture — no
         // reset-dispatcher sharing, no optimizer-selection assumptions, no
         // JSON lowering, no compat-mode sensitivity.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -7700,7 +7700,7 @@ nt start = A;
 
     #[test]
     fn compressed_static_unions_mixed_l1_l2p_token_lengths() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let mut grammar = String::from("start: r0\n");
         for index in 0..63 {
             grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
@@ -7751,7 +7751,7 @@ nt start = A;
         for i in 0..n {
             grammar.push_str(&format!("SRC_{i}: \" a{i}\\n\"\n"));
         }
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"h\n".to_vec()),
             (1, b"+x".to_vec()),
             (2, b"\n".to_vec()),
@@ -7834,7 +7834,7 @@ nt start = A;
 
     #[test]
     fn dynamic_forced_uses_dynamic_masks() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'", &vocab).unwrap();
         assert_eq!(constraint.start().forced_canonical_reference(), vec![0]);
     }

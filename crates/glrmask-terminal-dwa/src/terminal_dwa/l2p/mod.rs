@@ -2558,7 +2558,7 @@ mod ti_mre_tests {
             vec!["doc".into(), "augmented".into()],
             1,
         );
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"aax".to_vec()),
             (2, b"x".to_vec()),
@@ -2649,7 +2649,7 @@ mod ti_mre_tests {
             vec!["doc".into(), "augmented".into()],
             1,
         );
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"aax".to_vec()),
             (2, b"x".to_vec()),

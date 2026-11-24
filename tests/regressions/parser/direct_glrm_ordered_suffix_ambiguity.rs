@@ -2,7 +2,7 @@ use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 fn byte_vocab() -> Vocab {
-    Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect())
+    Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect::<Vec<_>>()).unwrap()
 }
 
 fn field_name(index: usize) -> char {

@@ -154,7 +154,7 @@ mod tests {
                     tok.deterministic_reset_states().into_vec(),Arc::new(BoundaryOwnership::flat(&[0,2],4).unwrap()),ImmediateComponentId((case%2) as u32),true,None).unwrap();
                 let mut entries=vec![(0,b"ab!".to_vec()),(13,b"ba".to_vec()),(47,b"ab!".to_vec())];
                 for i in 0..24 {let n=1+next()%12;entries.push((100+i*11,(0..n).map(|_|b"ab! q"[next()%5]).collect()));}
-                let vocab=Vocab::new(entries);
+                let vocab=Vocab::from_entries_unchecked(entries);
                 let a=super::super::prepare(&tok,&vocab,&scope);
                 let b=prepare(&tok,&vocab,&scope,&flat);
                 assert_eq!(a.is_some(),b.is_some(),"case={case} partitioned={partitioned}");

@@ -509,7 +509,7 @@ mod reset_projection_tests {
 
     #[test]
     fn medium_and_large_reset_projections_match_generic_lexer_execution() {
-        let vocab = Vocab::new((0u32..=255).map(|id| (id, vec![id as u8])).collect());
+        let vocab = Vocab::from_entries_unchecked((0u32..=255).map(|id| (id, vec![id as u8])).collect());
         let mut projected_cases = 0;
         for width in [16, 128, 512] {
             let source = format!("start root nt root = {}", std::iter::once("\"a\"+".to_owned())
@@ -557,7 +557,7 @@ mod reset_projection_tests {
     fn bounded_scan_keeps_all_longest_accepting_end_states() {
         use crate::automata::lexer::tokenizer::Tokenizer;
         use std::sync::Arc;
-        let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
         for cached in [false,true] {
             let mut constraint = Grammar::from_glrm("start root; t A=/ab*/; nt root=A;").unwrap()
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();

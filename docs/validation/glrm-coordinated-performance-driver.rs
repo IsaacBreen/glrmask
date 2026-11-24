@@ -60,7 +60,7 @@ fn mask_trace(c:&Constraint,ids:&[u32])->u64{
 }
 fn run(case:&str,text:&str,mode:Optimization,n:usize,reps:usize)->Result<Value,Box<dyn Error>>{
     let (entries,vocab_input_ns)=time(||input_vocab(n));let ids=trace(text,&entries,case=="exact_token_set");
-    let (v,vocab_ns)=time(||Vocab::new(entries));
+    let (v,vocab_ns)=time(||Vocab::new(entries).unwrap());
     let (g,source_ns)=time(||grammar(case,&v));let g=g?;
     let options=BuildOptions::default().optimization(mode);
     let (c,compile_ns)=time(||g.compile_with(&v,options.clone()));let c=c?;

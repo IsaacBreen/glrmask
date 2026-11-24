@@ -33,11 +33,11 @@ fn vocab() -> Vocab {
     Vocab::new(vec![
         (0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec()),
         (3, b"ab".to_vec()), (4, b"bc".to_vec()), (5, b"ca".to_vec()),
-    ])
+    ]).unwrap()
 }
 
 fn xyz_vocab() -> Vocab {
-    Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"z".to_vec())])
+    Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"z".to_vec())]).unwrap()
 }
 
 /// Commits `tokens` on a worker thread. Returns Ok(Some(accepting)) when every

@@ -73,7 +73,7 @@ fn capture_masks(c: &Constraint, ids: &[u32]) -> Value {
 }
 fn run(case:&str,text:&str,mode:MaskMode,n:usize,reps:usize)->Result<Value,Box<dyn Error>>{
     let (entries,vocab_input_ns)=time(||input_vocab(n));let ids=trace(text,&entries,case=="exact_token_set");
-    let (v,vocab_ns)=time(||Vocab::new(entries));
+    let (v,vocab_ns)=time(||Vocab::new(entries).unwrap());
     let (g,source_ns)=time(||grammar(case,&v));let g=g?;
     let options=mode.build_options();
     let (c,compile_ns)=time(||g.compile_with_build_options(&v,options.clone()));let c=c?;

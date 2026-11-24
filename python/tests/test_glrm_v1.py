@@ -20,7 +20,7 @@ from glrmask._glrmask import DynamicConstraint as LegacyDynamicConstraint
 
 
 def _vocab():
-    return glrmask.Vocab.from_id_to_bytes({
+    return glrmask.Vocab({
         0: b"a",
         1: b"b",
         77: b"<END77>",

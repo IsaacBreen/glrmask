@@ -5,7 +5,7 @@ import glrmask
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes(
+    return glrmask.Vocab(
         {0: b"a", 1: b"b", 2: b"ab", 3: b",", 4: b"a,b", 5: b""}
     )
 
@@ -74,7 +74,7 @@ def test_invalid_target_and_artifact_are_not_accepted_silently():
     m = glrmask.Module(source("a"))
     m.precompile(v)
     data = m.save()
-    different = glrmask.Vocab.from_id_to_bytes({0: b"b", 1: b"a"})
+    different = glrmask.Vocab({0: b"b", 1: b"a"})
     assert glrmask.Module.load(data) is not None
     with pytest.raises(ValueError):
         m.compile(different)

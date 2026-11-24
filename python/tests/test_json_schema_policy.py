@@ -5,7 +5,7 @@ import glrmask
 
 
 def compile_schema(schema):
-    vocab = glrmask.Vocab.from_id_to_bytes({b: bytes([b]) for b in range(256)})
+    vocab = glrmask.Vocab({b: bytes([b]) for b in range(256)})
     return glrmask.Grammar.from_json_schema(schema).compile(vocab)
 
 

@@ -91,7 +91,7 @@ mod tests {
                     let mut entries = words.iter().enumerate().filter(|_|next()%3!=0)
                         .map(|(i,w)|(i as u32,w.clone())).collect::<Vec<_>>();
                     if entries.is_empty() { entries.push((900, words[0].clone())); }
-                    let vocab = Vocab::new(entries);
+                    let vocab = Vocab::from_entries_unchecked(entries);
                     let mut seeds = vec![false; merged.num_states() as usize];
                     for q in off..off+source.num_states() {seeds[q as usize]=next()%3!=0;}
                     let (actual, fast) = in_verified_uniform_span(&ctx,off,term,&merged,&vocab,&seeds,&ownership,ImmediateComponentId(owner)).unwrap();
@@ -111,7 +111,7 @@ mod tests {
         let tok = Arc::new(build_regex_partitioned(&[bytes(b"aa"),bytes(b"b!"),Expr::Epsilon], &[0,1,2]).into_tokenizer(3,None));
         let words = vec![b"a".to_vec(),b"b!".to_vec(),b"z".to_vec()];
         let ctx = prepare(Arc::clone(&tok),&words);
-        let vocab = Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.clone())).collect());
+        let vocab = Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|(i as u32,w.clone())).collect());
         let ownership = BoundaryOwnership::flat(&[0,1],3).unwrap();
         let seeds = vec![true; tok.num_states() as usize];
         for owner in 0..2 {
@@ -124,7 +124,7 @@ mod tests {
         assert!(in_verified_uniform_span(&ctx,u32::MAX,0,&tok,&vocab,&seeds,&ownership,owner).is_none());
         assert!(in_verified_uniform_span(&ctx,0,u32::MAX,&tok,&vocab,&seeds,&ownership,owner).is_none());
         assert!(in_verified_uniform_span(&ctx,0,0,&tok,&vocab,&[true],&ownership,owner).is_none());
-        assert!(in_verified_uniform_span(&ctx,0,0,&tok,&Vocab::new(vec![(99,vec![])]),&seeds,&ownership,owner).is_none());
-        assert!(in_verified_uniform_span(&ctx,0,0,&tok,&Vocab::new(vec![(99,b"uncovered".to_vec())]),&seeds,&ownership,owner).is_none());
+        assert!(in_verified_uniform_span(&ctx,0,0,&tok,&Vocab::from_entries_unchecked(vec![(99,vec![])]),&seeds,&ownership,owner).is_none());
+        assert!(in_verified_uniform_span(&ctx,0,0,&tok,&Vocab::from_entries_unchecked(vec![(99,b"uncovered".to_vec())]),&seeds,&ownership,owner).is_none());
     }
 }

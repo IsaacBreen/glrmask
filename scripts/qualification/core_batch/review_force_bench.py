@@ -41,7 +41,7 @@ def make_vocab(n):
     while len(words)<n:
         words[len(words)]=f"word{len(words):07d}".encode()
     words[n+3]=b""
-    return g.Vocab.from_id_to_bytes(words)
+    return g.Vocab(words)
 
 v=make_vocab(args.vocab_size)
 rows=[]

@@ -37,7 +37,7 @@ fn read_vocab(path: &Path) -> Result<(Vocab, usize)> {
     if offset != data.len() || seen.iter().any(|present| !present) {
         return Err("incomplete vocabulary or trailing bytes".into());
     }
-    Ok((Vocab::new(entries), count))
+    Ok((Vocab::new(entries).unwrap(), count))
 }
 
 fn native_report(constraint: &Constraint) -> Result<serde_json::Value> {

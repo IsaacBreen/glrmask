@@ -26,7 +26,7 @@ fn load_vocab(path: &Path) -> Vocab {
             .into_iter()
             .map(|(id, hex)| (id, hex_to_bytes(&hex)))
             .collect(),
-    )
+    ).unwrap()
 }
 
 fn median_ns(mut xs: Vec<u128>) -> u128 {
@@ -62,7 +62,7 @@ fn main() {
                     .into_iter()
                     .map(|(id, hex)| (id, hex_to_bytes(&hex)))
                     .collect(),
-            );
+            ).unwrap();
             let construct_ms = started.elapsed().as_secs_f64() * 1000.0;
             let started = Instant::now();
             vocab.prepare_for_compile();

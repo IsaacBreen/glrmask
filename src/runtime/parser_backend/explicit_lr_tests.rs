@@ -10,7 +10,7 @@ use crate::public_api::{ParserBackend};
 use crate::Grammar;
 
 fn vocab_from(words: &[&str]) -> crate::Vocab {
-    crate::Vocab::new(
+    crate::Vocab::from_entries_unchecked(
         words
             .iter()
             .enumerate()
@@ -85,7 +85,7 @@ fn explicit_lr_direct_dynamic_frontend_uses_a_real_table() {
     // A right-linear/JSON frontend can retain its parser language as a direct
     // automaton. Explicit LR must still build a genuine LR table and must not
     // keep the direct-regular runtime bypass coordinate.
-    let vocab = crate::Vocab::new(vec![
+    let vocab = crate::Vocab::from_entries_unchecked(vec![
         (0, b"\"a\"".to_vec()),
         (1, b"\"ab\"".to_vec()),
     ]);

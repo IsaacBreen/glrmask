@@ -13,7 +13,7 @@ fn with_prepared_cut(mut c:Constraint,v:&Vocab)->Constraint{
 
 #[test]
 fn prepared_cut_roundtrip_pins_source_and_matches_actual_union_filter(){
-    let v=Vocab::new(vec![(1,b"abc!".to_vec()),(2,b"bc!".to_vec()),(3,b"c!".to_vec()),(4,b"abc !".to_vec()),(5,b"c!".to_vec()),(6,b"!a".to_vec()),(7,b"a!".to_vec()),(8,b"ab".to_vec()),(9,Vec::new())]);
+    let v=Vocab::from_entries_unchecked(vec![(1,b"abc!".to_vec()),(2,b"bc!".to_vec()),(3,b"c!".to_vec()),(4,b"abc !".to_vec()),(5,b"c!".to_vec()),(6,b"!a".to_vec()),(7,b"a!".to_vec()),(8,b"ab".to_vec()),(9,Vec::new())]);
     let a=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "abc" | "ab" | "a";"#,&v).unwrap(),&v);
     let b=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "!" | " a" | "abc";"#,&v).unwrap(),&v);
     let mut components=Vec::new();
@@ -46,7 +46,7 @@ fn prepared_cut_roundtrip_pins_source_and_matches_actual_union_filter(){
 
 #[test]
 fn prepared_cut_wire_is_bounded_and_rejects_corruption_and_other_source(){
-    let v=Vocab::new(vec![(1,b"ab!".to_vec()),(2,b"b!".to_vec()),(3,b"xy!".to_vec())]);
+    let v=Vocab::from_entries_unchecked(vec![(1,b"ab!".to_vec()),(2,b"b!".to_vec()),(3,b"xy!".to_vec())]);
     let c=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x = "ab" | "xy";"#,&v).unwrap(),&v);
     let bytes=saved_wire(&c).unwrap();let(a,b)=split_cut_wire(bytes).unwrap();let reset=b.unwrap();assert!(!a.is_empty()&&!reset.is_empty());
     for end in 8..bytes.len(){assert!(split_cut_wire(&bytes[..end]).is_err(),"truncation{end}");}

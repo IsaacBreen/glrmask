@@ -62,7 +62,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
     let mut tokens = (0..128u32).map(|id| (id, vec![id as u8])).collect::<Vec<_>>();
     tokens.extend(["xay", "xby", "xaby", "xy", "xa", "ay", "ab", "by", "pxayq"]
         .iter().enumerate().map(|(id, s)| (256 + id as u32, s.as_bytes().to_vec())));
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::from_entries_unchecked(tokens.clone());
     let options = |mode: MaskMode| mode.build_options().parser_backend(ParserBackend::TemplateDfa);
     for nullable in [false, true] {
         let mut child = fixture(nullable, &vocab);

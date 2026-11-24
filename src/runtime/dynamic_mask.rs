@@ -10373,7 +10373,7 @@ mod tests {
             (8,b"abQ".to_vec()),(17,b"acQ".to_vec()),(31,b"bQ".to_vec()),
             (65,b"cQ".to_vec()),(99,b"abQ".to_vec()),(4001,vec![0,255]),
             (9001,b"bad".to_vec())];
-        let vocab = Vocab::new(entries.clone());
+        let vocab = Vocab::from_entries_unchecked(entries.clone());
         for nullable in [false,true] {
             let parent = Constraint::compile(Grammar::glrm(
                 r#"glrm 1; start root; extern grammar leaf; nt root = "P" leaf "Q";"#), &vocab).unwrap();
@@ -10424,7 +10424,7 @@ mod tests {
             (65, b"aab!".to_vec()), (99, b"aac?".to_vec()), (130, b"bad".to_vec()),
         ];
         let ids = entries.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let parent = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern grammar left; extern grammar right;
                 nt root = "X" (left "!" | right "?");"#,
@@ -10499,7 +10499,7 @@ mod tests {
         entries.push((70,b"a!".to_vec()));
         entries.push((95,b"bad".to_vec()));
         let ids = entries.iter().map(|(id,_)| *id).collect::<Vec<_>>();
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let parent = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
@@ -10540,7 +10540,7 @@ mod tests {
             (9,b"Q".to_vec()),(11,b"abQ".to_vec()),(13,b"acQ".to_vec()),(17,b"bQ".to_vec()),
             (21,b"cQ".to_vec()),(24,b"x".to_vec()),(31,vec![]),(41,vec![0,255]),(97,b"abQ".to_vec())];
         let ids = entries.iter().map(|(i,_)| *i).collect::<Vec<_>>();
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         for nullable in [false,true] {
             let parent = Constraint::compile(Grammar::glrm(
                 r#"glrm 1; start root; extern grammar leaf; nt root = "P" leaf "Q";"#), &vocab).unwrap();
@@ -10614,7 +10614,7 @@ mod tests {
             .map(|(id, bytes)| (id as u32, bytes.clone())).collect::<Vec<_>>();
         entries.push((140, b"a".to_vec()));
         entries.push((201, b"a".to_vec()));
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         for separated in [false, true] {
             let groups = if separated {
                 "pragma glrmask { lexer group a = A; lexer group b = B; lexer group ws = WS; }"
@@ -10676,7 +10676,7 @@ mod tests {
             (3,b"!".to_vec()),(7,vec![]),(19,b"a".to_vec()),(40,b"a!".to_vec()),
             (50,vec![0,255]),(71,b"Xa!".to_vec()),(83,b"aaa".to_vec())];
         let ids=entries.iter().map(|(id,_)|*id).chain([9001]).collect::<Vec<_>>();
-        let vocab=Vocab::new(entries);
+        let vocab=Vocab::from_entries_unchecked(entries);
         let child=crate::ConstraintSpec::builder(Grammar::glrm(
             r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#),&vocab)
             .unwrap().bind_token("MARK",[7,9001]).unwrap().build().unwrap().compile().unwrap();
@@ -10715,7 +10715,7 @@ mod tests {
             (3,b"!".to_vec()),(7,vec![]),(19,b"a".to_vec()),(40,b"a!".to_vec()),
             (50,vec![0,255]),(71,b"Xa!".to_vec()),(83,b"aaa".to_vec())];
         let ids=entries.iter().map(|(id,_)|*id).chain([9001]).collect::<Vec<_>>();
-        let vocab=Vocab::new(entries);
+        let vocab=Vocab::from_entries_unchecked(entries);
         let child=crate::ConstraintSpec::builder(Grammar::glrm(
             r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#),&vocab)
             .unwrap().bind_token("MARK",[7,9001]).unwrap().build().unwrap().compile().unwrap();
@@ -10750,7 +10750,7 @@ mod tests {
 
     #[test]
     fn prepared_mask_vocabulary_two_byte_proof_never_crosses_a_finalizer() {
-        let vocab=Vocab::new(vec![(0,b"P".to_vec()),(1,b"x".to_vec()),
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"P".to_vec()),(1,b"x".to_vec()),
             (2,b"xy!".to_vec()),(3,b"x!".to_vec()),(4,b"xz!".to_vec()),
             (5,b"!".to_vec()),(6,b"z".to_vec())]);
         for leaf in ["x", "xz"] {
@@ -10810,7 +10810,7 @@ mod tests {
                 _:u32,_:u32,_:u32)->bool {false}
             fn exact_raw_state(&self,_:u32)->Option<u32> {None}
         }
-        let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec())]);
         let constraint=Constraint::compile(Grammar::glrm(r#"glrm 1; start root; nt root = "a";"#),&vocab).unwrap();
         let state=constraint.start();
         let domain=PureMaskByteDomain::for_ids(&constraint,&[0]).unwrap();
@@ -10830,7 +10830,7 @@ mod tests {
     #[test]
     fn prepared_mask_vocabulary_dead_head_skips_factory_then_builds_on_live_prefix() {
         use super::PreparedVocabularyPolicy;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"P".to_vec()), (1, b"x".to_vec()), (2, b"a!".to_vec()),
             (3, b"!".to_vec()), (5, b"a".to_vec()), (7, b"a!".to_vec()),
             (9, b"z".to_vec()),
@@ -10881,7 +10881,7 @@ mod tests {
             (3, b"!".to_vec()), (5, b"a".to_vec()), (7, b"a!".to_vec()),
             (8, vec![]), (9, b"z".to_vec()), (20, vec![0, 255]),
         ];
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let child = crate::ConstraintSpec::builder(Grammar::glrm(
             r#"glrm 1; start child; extern token SPECIAL; nt child = "xa" | SPECIAL;"#), &vocab)
             .unwrap().bind_token("SPECIAL", [2, 9001]).unwrap()
@@ -10929,7 +10929,7 @@ mod tests {
 
     #[test]
     fn prepared_mask_vocabulary_preserves_domain_aliases_and_reload() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, vec![]), (1, b"X".to_vec()), (7, b"a".to_vec()),
             (19, b"a".to_vec()), (22, b"!".to_vec()), (31, b"a!".to_vec()),
             (65, b"Xa!".to_vec()), (99, b"b".to_vec()), (130, b"aa".to_vec()),
@@ -10970,7 +10970,7 @@ mod tests {
     #[test]
     fn prepared_mask_vocabulary_isolated_across_bindings_and_bytes() {
         for word in ["a", "b"] {
-            let vocab = Vocab::new(vec![(0,b"X".to_vec()),(1,word.as_bytes().to_vec()),
+            let vocab = Vocab::from_entries_unchecked(vec![(0,b"X".to_vec()),(1,word.as_bytes().to_vec()),
                 (2,b"!".to_vec()),(3,b"a!".to_vec()),(4,b"b!".to_vec())]);
             let parent = Constraint::compile(Grammar::glrm(
                 r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
@@ -10993,7 +10993,7 @@ mod tests {
 
     #[test]
     fn prepared_mask_vocabulary_preserves_special_and_byte_union() {
-        let vocab = Vocab::new(vec![(0,Vec::new()),(1,b"X".to_vec()),(2,b"a".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0,Vec::new()),(1,b"X".to_vec()),(2,b"a".to_vec()),
             (3,b"!".to_vec()),(7,Vec::new()),(31,Vec::new()),(40,b"a!".to_vec())]);
         let child = crate::ConstraintSpec::builder(Grammar::glrm(
             r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#,
@@ -11020,7 +11020,7 @@ mod tests {
 
     #[test]
     fn recursive_full_walk_transition_provider_matches_exact_leaf_execution() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"[".to_vec()),
             (2, b"a".to_vec()),
@@ -11149,7 +11149,7 @@ mod tests {
             words.extend(next.iter().cloned());
             layer = next;
         }
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             words
                 .into_iter()
                 .enumerate()
@@ -11296,7 +11296,7 @@ mod tests {
         }
         let _restore =
             Restore(TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.replace(true)));
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"[".to_vec()),
             (2, b"a".to_vec()),
@@ -11389,7 +11389,7 @@ mod tests {
 
     #[test]
     fn recursive_persistent_cache_isolated_between_bindings() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"!".to_vec()), (4, b"a!".to_vec()), (5, b"b!".to_vec()),
         ]);
@@ -11427,7 +11427,7 @@ mod tests {
             b"\"!".to_vec(), b"Xab!".to_vec(), b" ".to_vec(),
             b"\\u00".to_vec(), b"\\\"".to_vec(), vec![0xc2], vec![0xc2, 0xa0],
         ];
-        let vocab = Vocab::new(words.into_iter().enumerate().map(|(i,b)| (i as u32,b)).collect());
+        let vocab = Vocab::from_entries_unchecked(words.into_iter().enumerate().map(|(i,b)| (i as u32,b)).collect());
         let virtual_child = Constraint::from_json_schema(
             r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#, &vocab,
         ).unwrap();
@@ -11480,7 +11480,7 @@ mod tests {
 
     #[test]
     fn dynamic_mask_cache_key_uses_exact_mask_projection_coordinate() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -11588,7 +11588,7 @@ mod tests {
 
     #[test]
     fn dynamic_mask_lookup_query_exact_match_with_state_key() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -11639,7 +11639,7 @@ mod tests {
 
     #[test]
     fn dynamic_mask_lookup_query_branching_and_exclusions() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"{".to_vec()),
             (1, b"}".to_vec()),
             (2, b"\"a\"".to_vec()),
@@ -11671,7 +11671,7 @@ mod tests {
 
     #[test]
     fn dynamic_mask_lookup_query_microbench() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"hello".to_vec()),
             (2, b"world".to_vec()),
@@ -11792,7 +11792,7 @@ mod tests {
 
     #[test]
     fn root_admission_memo_is_exact_and_owner_frontier_scoped() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = A B;"#,
         ), &vocab).unwrap();
@@ -11824,7 +11824,7 @@ mod tests {
 
     #[test]
     fn full_walk_future_cache_normalizes_hot_and_generic_coordinates() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()), (1, b"bc".to_vec()), (2, b"xyz".to_vec()),
         ]);
         let constraint = Constraint::compile(Grammar::glrm(
@@ -11867,7 +11867,7 @@ mod tests {
 
     #[test]
     fn deterministic_dynamic_scan_does_not_index_identity_configs() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -11892,7 +11892,7 @@ nt start = A B | A;
 
     #[test]
     fn strict_full_walk_executes_native_epsilon_nfa_configs() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"aa".to_vec()),
@@ -11968,7 +11968,7 @@ nt start = A | B | A A | A B | B A | B B;
 
     #[test]
     fn additive_and_candidate_modes_use_complete_strict_full_walk() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -12028,7 +12028,7 @@ nt start = A B | B A;
             entries.push((depth - 1, token));
         }
         entries.push((300, vec![b'a'; 301]));
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let dynamic = DynamicConstraint::from_glrm_grammar(
             r#"
 start start;
@@ -12061,7 +12061,7 @@ nt start = A;
 
     #[test]
     fn dynamic_mask_matches_normal_for_repeat_and_cross_terminal_tokens() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"aa".to_vec()),
@@ -12093,7 +12093,7 @@ nt start = A B | A;
 
     #[test]
     fn dynamic_mask_trie_is_rebuilt_after_load() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         let grammar = r#"
 start start;
@@ -12108,7 +12108,7 @@ nt start = A B;
 
     #[test]
     fn dynamic_mask_keeps_duplicate_byte_token_aliases() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -12137,7 +12137,7 @@ nt start = A B;
 
     #[test]
     fn dynamic_mask_matches_normal_across_an_ignore_terminal() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"aa".to_vec()),
@@ -12168,7 +12168,7 @@ nt start = A B;
 
     #[test]
     fn dynamic_mask_preserves_repeated_terminal_after_ignore_reset_inside_token() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -12220,7 +12220,7 @@ nt start = item item? item?;
 
     #[test]
     fn masks_preserve_overlap_continuation_after_ignore_reset() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -12264,7 +12264,7 @@ nt start = item item? item?;
     )]
     fn dynamic_mask_generated_small_language_sweep() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             [
                 "a", "b", "ab", "ba", " ", " a", "a ", " b", "b ", " a ", " b ",
             ]
@@ -12350,7 +12350,7 @@ nt start = item item? item?;
 
     #[test]
     fn dynamic_mask_matches_normal_at_every_reachable_small_state() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"aa".to_vec()),
@@ -12396,7 +12396,7 @@ nt start = A B C | B A C | A C | B C;
 
     #[test]
     fn dynamic_mask_matches_normal_when_one_repeated_terminal_crosses_tokens() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"aa".to_vec()),
@@ -12431,7 +12431,7 @@ nt start = A A;
 
     #[test]
     fn dynamic_mask_matches_normal_for_a_partial_json_string() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"\"".to_vec()),
                 (1, b"a".to_vec()),
@@ -12456,7 +12456,7 @@ nt start = A A;
 
     #[test]
     fn dynamic_mask_matches_certified_long_terminal_run() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"++++++++a".to_vec()),
                 (1, b"++++".to_vec()),
@@ -12482,7 +12482,7 @@ nt start = U* 'a';
 
     #[test]
     fn dynamic_mask_handles_monolithic_json_number() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"-".to_vec()),
                 (1, b"0".to_vec()),
@@ -12507,7 +12507,7 @@ nt start = U* 'a';
 
     #[test]
     fn dynamic_mask_keeps_other_gss_paths_when_one_path_excludes_a_terminal() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -12544,7 +12544,7 @@ nt start = A C | B D;
 
     #[test]
     fn dynamic_full_walk_accepts_long_compressed_vocab_edge() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, vec![b'a'; 300]),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),
@@ -12571,7 +12571,7 @@ nt start = A;
 
     #[test]
     fn dynamic_virtual_unit_repeat_uses_static_mask_projection_end_to_end() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaa".to_vec()),
@@ -12649,7 +12649,7 @@ nt start = A;
 
     #[test]
     fn dynamic_hybrid_virtual_repeat_coexists_with_static_terminals() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"b".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -12710,7 +12710,7 @@ nt start = B A;
 
     #[test]
     fn static_and_dynamic_direct_regular_compilation_preserve_backend_contract() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"b".to_vec()),
@@ -12800,7 +12800,7 @@ nt start = A r0;
 
     #[test]
     fn derived_single_use_terminal_possible_matches_match_dynamic_fallback() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"aaa".to_vec()),
@@ -12846,7 +12846,7 @@ nt start = A;
 
     #[test]
     fn dynamic_mask_handles_overlapping_live_terminal_paths() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"ab".to_vec()),
@@ -12874,7 +12874,7 @@ nt start = A B;
 
     #[test]
     fn dynamic_mask_handles_a_live_cross_terminal_prefix() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"ab".to_vec()),
@@ -12927,7 +12927,7 @@ nt start = A;
             for index in 0..distractors {
                 entries.push((1024 + index as u32 * 2, format!("z{index:03}").into_bytes()));
             }
-            let vocab = Vocab::new(entries);
+            let vocab = Vocab::from_entries_unchecked(entries);
             let parent = Constraint::compile(Grammar::glrm(
                 r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#,
             ), &vocab).unwrap();
@@ -12967,7 +12967,7 @@ nt start = A;
 
     #[test]
     fn recursive_zero_byte_domain_preserves_only_live_exact_special_ids() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, Vec::new()), (1, b"X".to_vec()), (2, b"a".to_vec()),
             (3, b"!".to_vec()), (7, Vec::new()), (31, Vec::new()),
             (40, b"a!".to_vec()),
@@ -13028,7 +13028,7 @@ mod epsilon_only_reset_config_tests {
     use crate::{Constraint,Grammar,Vocab};
 
     fn fixture()->Constraint {
-        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         Constraint::compile(Grammar::glrm(
             r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = A B | A;"#,
         ),&vocab).unwrap()

@@ -14532,7 +14532,7 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn early_observation_filter_matches_historical_rows_across_future_widths() {
-        let vocab = Vocab::new((0u32..128).map(|id| (id, vec![id as u8])).collect::<Vec<_>>());
+        let vocab = Vocab::from_entries_unchecked((0u32..128).map(|id| (id, vec![id as u8])).collect::<Vec<_>>());
         let mut saw_mixed = false;
         let mut saw_over_limit = false;
         for width in [1usize, 2, 3, 8, 9, 12] {
@@ -14566,9 +14566,9 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn bind_vocab_exact_rebinds_equal_vocab_and_rejects_mismatch() {
-        let vocab_a = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let vocab_b = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let vocab_bad = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+        let vocab_a = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_b = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_bad = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         let mut constraint = Constraint::from_glrm_grammar(
             "start start;\nt A = \"a\";\nnt start = A;\n",
             &vocab_a,
@@ -14595,9 +14595,9 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn loaded_constraint_binds_prepared_equal_vocab_and_rejects_mismatch() {
-        let vocab_a = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let vocab_b = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let vocab_bad = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+        let vocab_a = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_b = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_bad = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             "start start;\nt A = \"a\";\nnt start = A;\n",
             &vocab_a,
@@ -14624,7 +14624,7 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn empty_wide_frontier_lookup_does_not_materialize_deferred_dynamic_vocab() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -14659,7 +14659,7 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn nonempty_wide_frontier_lookup_does_not_materialize_vocab_for_cache_only() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -14773,7 +14773,7 @@ mod dense_internal_token_mask_tests {
             (516, b"bb".to_vec()), (517, b"ba".to_vec())]);
         Constraint::from_glrm_grammar(
             "start start;\nt A = \"a\";\nt B = \"b\";\nnt start = A B | A `start` B;\n",
-            &Vocab::new(entries),
+            &Vocab::from_entries_unchecked(entries),
         ).unwrap()
     }
 
@@ -14908,7 +14908,7 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn owned_load_preserves_heavy_token_mask_classification_for_backed_buf_masks() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             (0..200u32)
                 .map(|token| (token, b"a".to_vec()))
                 .collect(),
@@ -14998,7 +14998,7 @@ mod dense_internal_token_mask_tests {
 
     #[test]
     fn dense_or_matches_set_union_exhaustively_without_final_mapping() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -15084,7 +15084,7 @@ mod dense_internal_token_mask_tests {
                 entries.push((alias * 64 + byte_index, vec![(byte_index + 32) as u8]));
             }
         }
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let mut grammar = String::from("start start;\n");
         for byte_index in 0u32..64 {
             let literal = serde_json::to_string(&((byte_index + 32) as u8 as char).to_string())
@@ -15155,7 +15155,7 @@ mod boundary_token_trie_tests {
         .enumerate()
         .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
         .collect();
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         vocab.prepare_for_compile();
         vocab
     }
@@ -15188,7 +15188,7 @@ mod boundary_token_trie_tests {
             &std::fs::read_to_string("/tmp/jsb-probe/schemas20.json").expect("schemas"),
         )
         .expect("schemas json");
-        let vocab = Vocab::new(tokens.into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes)).collect());
+        let vocab = Vocab::from_entries_unchecked(tokens.into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes)).collect());
         vocab.prepare_for_compile();
         for (index, schema) in schemas.iter().enumerate() {
             let source = serde_json::to_string(schema).unwrap();

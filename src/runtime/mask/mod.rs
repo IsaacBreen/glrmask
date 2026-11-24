@@ -2076,7 +2076,7 @@ mod tests {
             vec![0, 3, 31, 32, 65, 96],
         ];
         for ids in vocabularies {
-            let vocab = Vocab::new(ids.iter().map(|&id| (id, b"a".to_vec())).collect());
+            let vocab = Vocab::from_entries_unchecked(ids.iter().map(|&id| (id, b"a".to_vec())).collect());
             let original = crate::ConstraintSpec::builder(
                 Grammar::glrm("glrm 1; start document; extern token SPECIAL; nt document = \"a\" | SPECIAL;"),
                 &vocab,
@@ -2106,7 +2106,7 @@ mod tests {
 
     #[test]
     fn segmented_static_result_cache_tracks_exact_scoped_state() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"[".to_vec()), (1, b"a".to_vec()), (2, b"]".to_vec()),
             (3, b"!".to_vec()), (4, b"[aa]!".to_vec()), (5, b" ".to_vec()),
         ]);
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn exact_finish_trigger_requires_a_proper_internal_offset() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"xy".to_vec()),
             (2, b"xx".to_vec()),
@@ -2188,7 +2188,7 @@ mod tests {
 
     #[test]
     fn exact_entry_trigger_requires_placeholder_readiness_after_prefix() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"xy".to_vec()),
             (2, b"y".to_vec()),
@@ -2212,7 +2212,7 @@ mod tests {
 
     #[test]
     fn recursive_exact_full_walk_ignores_outer_table_and_tokenizer() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -2357,7 +2357,7 @@ mod tests {
             entries.push((600 + i, format!("X[ab-{i:04}-suffix").into_bytes()));
         }
         let ids: Vec<u32> = entries.iter().map(|(id, _)| *id).chain([9001]).collect();
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         for nullable in [false, true] {
             let leaf_source = if nullable {
                 "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\"? | SPECIAL;"
@@ -2436,7 +2436,7 @@ mod tests {
             words.extend(next.iter().cloned());
             layer = next;
         }
-        let vocab = Vocab::new(words.into_iter().enumerate()
+        let vocab = Vocab::from_entries_unchecked(words.into_iter().enumerate()
             .map(|(id, bytes)| (id as u32, bytes)).collect::<Vec<_>>());
         for leaf_source in [
             "glrm 1; start leaf; t TEXT = /[a-c ]{1,8}/; nt leaf = TEXT;",
@@ -2543,7 +2543,7 @@ mod tests {
                 t B = "b";
                 nt start = A | B;
             "#,
-            &Vocab::new(
+            &Vocab::from_entries_unchecked(
                 vec![
                     (0, b"a".to_vec()),
                     (1, b"b".to_vec()),
@@ -2592,7 +2592,7 @@ mod tests {
 
     #[test]
     fn literal_choice_terminal_mask_keeps_multibyte_prefix_tokens() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"S".to_vec()),
             (2, b"Se".to_vec()),
@@ -2636,7 +2636,7 @@ mod tests {
 
     #[test]
     fn direct_mask_spills_past_the_inline_path_capacity() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -2670,7 +2670,7 @@ mod tests {
 
     #[test]
     fn direct_mask_declines_wide_shared_gss_without_partial_output() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             r#"start start; t A = "a"; nt start = A;"#,
             &vocab,
@@ -2737,7 +2737,7 @@ mod tests {
                 .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
         }
 
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             ["a", "b", "ab", "ba", "aa", "bb"]
                 .into_iter()
                 .enumerate()
@@ -2807,7 +2807,7 @@ mod tests {
 
     #[test]
     fn indexed_dag_cache_stays_exact_across_commits_and_restore() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             ["a", "b", "ab", "ba", "aa", "bb"]
                 .into_iter()
                 .enumerate()

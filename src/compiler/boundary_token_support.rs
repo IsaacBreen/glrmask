@@ -383,7 +383,7 @@ mod tests {
             for word in level {for byte in b"ac! " {let mut w=word.clone();w.push(*byte);next.push(w);}}
             words.extend(next.iter().cloned());level=next;
         }
-        let vocab=Vocab::new(words.into_iter().enumerate().map(|(i,w)|(11+i as u32*3,w)).collect());
+        let vocab=Vocab::from_entries_unchecked(words.into_iter().enumerate().map(|(i,w)|(11+i as u32*3,w)).collect());
         let owner=BoundaryOwnership::flat(&[0,2],4).unwrap();
         let mut blocked=BitSet::new(4);blocked.set(2);
         let follows=BTreeMap::from([(0,blocked)]);
@@ -418,7 +418,7 @@ mod tests {
                 tokenizer.possible_future_terminals_iter(q).any(|t| t<2)
                     && !tokenizer.possible_future_terminals_iter(q).any(|t| t==2)
             }).collect::<Vec<_>>();
-            let vocab=Vocab::new(vec![(1,b"mn!".to_vec()),(99,b"mn!".to_vec()),
+            let vocab=Vocab::from_entries_unchecked(vec![(1,b"mn!".to_vec()),(99,b"mn!".to_vec()),
                 (101,b"mn!xq".to_vec()),(102,b"q$".to_vec()),(103,b"q".to_vec()),
                 (104,b"mn".to_vec()),(105,b"mn~".to_vec()),(999,vec![])]);
             let support=crossing_token_support(&tokenizer,&vocab,&mask,&ownership,ImmediateComponentId(0)).unwrap();
@@ -435,7 +435,7 @@ mod tests {
         let ownership=BoundaryOwnership::flat(&[0,2],4).unwrap();
         let initial=(0..tokenizer.num_states()).map(|q| tokenizer.possible_future_terminals_iter(q).any(|t|t==0)
             && !tokenizer.possible_future_terminals_iter(q).any(|t|t>=1)).collect::<Vec<_>>();
-        let vocab=Vocab::new(vec![(1,b"a!".to_vec()),(2,b"ab!".to_vec()),(3,b"a !".to_vec()),(4,b"a".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(1,b"a!".to_vec()),(2,b"ab!".to_vec()),(3,b"a !".to_vec()),(4,b"a".to_vec())]);
         let mut blocked=BitSet::new(4);blocked.set(2);
         let disallowed=BTreeMap::from([(0,blocked)]);
         let support=crossing_token_support_with_follows(&tokenizer,&vocab,&initial,&ownership,
@@ -456,7 +456,7 @@ fn explicit_adjacency_is_not_erased_by_transparent_follow_relaxation() {
     let ownership=BoundaryOwnership::flat(&[0,2],4).unwrap();
     let initial=(0..tokenizer.num_states()).map(|q| tokenizer.possible_future_terminals_iter(q).any(|t|t==0)
         && !tokenizer.possible_future_terminals_iter(q).any(|t|t>=1)).collect::<Vec<_>>();
-    let vocab=Vocab::new(vec![(1,b"a!".to_vec()),(2,b"ab!".to_vec()),(3,b"a !".to_vec()),(4,b"a ".to_vec())]);
+    let vocab=Vocab::from_entries_unchecked(vec![(1,b"a!".to_vec()),(2,b"ab!".to_vec()),(3,b"a !".to_vec()),(4,b"a ".to_vec())]);
     let mut blocked=BitSet::new(4);blocked.set(3);
     let adjacency=BTreeMap::from([(0,blocked)]);
     let actual=crossing_token_support_with_follows_and_adjacency(&tokenizer,&vocab,&initial,

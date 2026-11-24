@@ -642,7 +642,7 @@ mod epsilon_reset_boundary_tests {
                 .map(|(i, t)| (i as u32 * 3, t)).collect();
             entries.push((7001, b"a]!".to_vec()));
             entries.push((7003, b"a]!".to_vec()));
-            let vocab = Vocab::new(entries.clone());
+            let vocab = Vocab::from_entries_unchecked(entries.clone());
             let child_source = if nullable {
                 r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W?;"#
             } else {
@@ -726,7 +726,7 @@ mod closed_admission_support_tests {
                 .map(|(i, t)| (i as u32 * 3, t)).collect();
             entries.push((7001, b"a]!".to_vec()));
             entries.push((7003, b"a]!".to_vec()));
-            let vocab = Vocab::new(entries.clone());
+            let vocab = Vocab::from_entries_unchecked(entries.clone());
             let child_source = if nullable {
                 r#"glrm 1; start leaf; t W = "a" | "ab"; nt leaf = W?;"#
             } else {

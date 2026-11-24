@@ -50,9 +50,9 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskMode)
     // Fresh vocabulary for every case. Input-vector allocation and validation
     // index construction are INCLUDED, not shifted before this timer.
     let (vocab, vocab_ns) = timed(|| match kind {
-        "exact_only" => Vocab::new(Vec::new()),
-        "byte_aliases" => Vocab::new((0..n).map(|id| (id, b"x".to_vec())).collect()),
-        "empty_aliases" => Vocab::new((0..n).map(|id| (id, Vec::new())).collect()),
+        "exact_only" => Vocab::new::<Vec<u8>>(Vec::new()).unwrap(),
+        "byte_aliases" => Vocab::new((0..n).map(|id| (id, b"x".to_vec())).collect::<Vec<_>>()).unwrap(),
+        "empty_aliases" => Vocab::new::<Vec<u8>>((0..n).map(|id| (id, Vec::new())).collect::<Vec<_>>()).unwrap(),
         _ => unreachable!(),
     });
     let pairs = || ranges.iter().cloned();
@@ -143,7 +143,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
 {
     let (vocab, vocab_ns) = timed(|| Vocab::new(
         (0..n).map(|id| (id, b"x".to_vec())).collect(),
-    ));
+    ).unwrap());
     let (grammar, prepare_ns) = timed(|| -> Result<Grammar, Box<dyn std::error::Error>> {
         if mixed {
             Ok(Grammar::from_glrm(

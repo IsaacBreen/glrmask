@@ -9,7 +9,7 @@ import glrmask
 
 chars = b"0123456789+*()"
 eos = len(chars)
-vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([c]) for i, c in enumerate(chars)})
+vocab = glrmask.Vocab({i: bytes([c]) for i, c in enumerate(chars)})
 
 arithmetic = glrmask.Grammar.from_glrm(r'''
     start sum
@@ -81,7 +81,7 @@ call_format = glrmask.Grammar.from_glrm('''
 call = call_format.copy()
 call.bind(WEATHER_ARGS=weather, SEARCH_ARGS=search)
 
-vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(256)})
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
 state = call.compile(vocab).start()
 assert state.commit_bytes(b'<weather>{"city": "Perth"}</weather>')
 assert state.is_accepting()

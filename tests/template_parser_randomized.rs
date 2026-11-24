@@ -252,7 +252,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
     pieces.push((63, b"ab".to_vec()));
     pieces.push((127, b"a".to_vec()));
     pieces.push((255, b"<END>".to_vec()));
-    let vocab = Vocab::new(pieces.clone());
+    let vocab = Vocab::new(pieces.clone()).unwrap();
     let lexer = LexerDefinition::new(
         b"ab012x"
             .iter()
@@ -451,7 +451,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
         )
     })
     .collect();
-    let vocab = Vocab::new(pieces.clone());
+    let vocab = Vocab::new(pieces.clone()).unwrap();
     let patterns = ["a", "ab", "b", "0", "1", "2", "x", " "]
         .iter()
         .map(|s| s.as_bytes().to_vec())

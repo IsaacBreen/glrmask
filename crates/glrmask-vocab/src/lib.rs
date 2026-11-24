@@ -174,12 +174,33 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Creates a vocabulary from `(id, bytes)` pairs.
+    /// Creates a vocabulary from `(id, bytes)` pairs, such as a `HashMap<u32, Vec<u8>>` or a `Vec<(u32, &[u8])>`.
+    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above `MAX_TOKEN_ID`.
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// Panics if an ID appears more than once.
-    pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
+    /// ```rust
+    /// use glrmask_vocab::Vocab;
+    /// let vocab = Vocab::new([(0, b"hello".as_slice()), (1, b"world".as_slice())])?;
+    /// # Ok::<(), glrmask_vocab::Error>(())
+    /// ```
+    pub fn new<B: Into<Vec<u8>>>(entries: impl IntoIterator<Item = (u32, B)>) -> Result<Self, Error> {
+        let mut ids = BTreeSet::new();
+        let mut validated = Vec::new();
+        for (id, bytes) in entries {
+            if id > MAX_TOKEN_ID {
+                return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("token ID {id} is larger than the maximum token ID, {MAX_TOKEN_ID}")));
+            }
+            if !ids.insert(id) {
+                return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("duplicate vocabulary ID {id}")));
+            }
+            validated.push((id, bytes.into()));
+        }
+        Ok(Self::from_entries_unchecked(validated))
+    }
+
+    #[doc(hidden)]
+    pub fn from_entries_unchecked(entries: Vec<(u32, Vec<u8>)>) -> Self {
         let mut ids = BTreeSet::new();
         for (id, _) in &entries {
             if !ids.insert(*id) {
@@ -434,7 +455,7 @@ mod tests {
 
     #[test]
     fn clones_share_pure_derived_artifact_cache() {
-        let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"bc".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"ab".to_vec()), (1, b"bc".to_vec())]);
         assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 0);
         let _ = vocab.relevant_bytes();
         assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 1);
@@ -445,14 +466,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate vocabulary ID")]
     fn duplicate_ids_are_rejected() {
-        let _ = Vocab::new(vec![(0, b"a".to_vec()), (0, b"b".to_vec())]);
+        let error = Vocab::new([(0, b"a".as_slice()), (0, b"b".as_slice())]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
     fn token_sets_are_normalized_and_validate_membership() {
-        let vocab = Vocab::new(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
         assert_eq!(TokenSet::from(2u32).range_pairs(), &[(2, 2)]);
         assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
         assert_eq!(TokenSet::new([]).range_pairs(), &[]);
@@ -495,7 +516,7 @@ mod compact_token_range_tests {
 
     #[test]
     fn full_domain_ranges_do_not_materialize_ids_until_requested() {
-        let vocab = Vocab::new((0..131_072).map(|i| (i, Vec::new())).collect());
+        let vocab = Vocab::from_entries_unchecked((0..131_072).map(|i| (i, Vec::new())).collect());
         let tokens = TokenSet::from_ranges(std::iter::once(0..131_072));
         let shared = tokens.clone();
         assert_eq!(tokens.range_pairs(), &[(0, 131_071)]);
@@ -505,7 +526,7 @@ mod compact_token_range_tests {
 
     #[test]
     fn coverage_validation_handles_gaps_and_u32_endpoint_without_expansion() {
-        let vocab = Vocab::new(vec![(0, Vec::new()), (1, Vec::new()), (3, Vec::new()), (4, Vec::new()), (u32::MAX, Vec::new())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, Vec::new()), (1, Vec::new()), (3, Vec::new()), (4, Vec::new()), (u32::MAX, Vec::new())]);
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges(std::iter::once(0..=4))), Some(2));
         let selected = TokenSet::new([3, 4, u32::MAX, 0, 1]);
         assert_eq!(selected.range_pairs(), &[(0, 1), (3, 4), (u32::MAX, u32::MAX)]);

@@ -3,11 +3,11 @@ use glrmask::{Constraint,Grammar,Module,PreparedGrammar,TokenSet,Vocab};
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || !s.commit_token(id){return false;}}s.is_accepting()}
-fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect())}
+fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect::<Vec<_>>()).unwrap()}
 fn lark(source:&str)->Grammar{Grammar::from_lark(source).unwrap()}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]);
+    let v=Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).unwrap();
     for (source,expected) in [("start: <[1]>",vec![1]),("start: <[^0]>",vec![1]),("start: <[*]>",vec![0,1]),("start: <[^0,3]>",vec![1])]{
         for mode in MODES{
             let c=lark(source).compile_with_build_options(&v,mode.build_options().end_tokens([10])).unwrap();
@@ -40,7 +40,7 @@ fn empty_event_set_is_not_epsilon() {
 }
 #[test]
 fn named_tokens_are_token_externs_and_preserve_alias_identity() {
-    let v=Vocab::new(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())]);
+    let v=Vocab::new(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())]).unwrap();
     let g=lark("start: <|end|>");
     assert!(g.compile(&v).is_err());
     let externs=g.externs();

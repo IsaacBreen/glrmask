@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn union_forcing_returns_common_prefix_not_equal_whole_vectors() {
-        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
         for mode in MaskMode::ALL {
             let options=mode.build_options();
             let first=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile_with_build_options(&vocab,options.clone()).unwrap();
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn union_with_accepting_owner_must_not_force_a_continuation() {
-        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
         let first=Grammar::from_ebnf("start ::= \"a\"?").unwrap().compile(&vocab).unwrap();
         let second=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile(&vocab).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
@@ -341,8 +341,8 @@ mod tests {
 
     #[test]
     fn different_owner_spelling_maps_cannot_be_canonicalized_together() {
-        let a=Vocab::new(vec![(0,b"a".to_vec())]);
-        let b=Vocab::new(vec![(0,b"b".to_vec())]);
+        let a=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec())]);
+        let b=Vocab::from_entries_unchecked(vec![(0,b"b".to_vec())]);
         let first=Grammar::from_ebnf("start ::= \"a\"").unwrap().compile(&a).unwrap();
         let second=Grammar::from_ebnf("start ::= \"b\"").unwrap().compile(&b).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn greedy_ab_stops_before_optional_event_after_a() {
-        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]);
         let ordinary=Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
         let guarded=Grammar::from_glrm(
             "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"").unwrap()
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn physical_byte_bound_matches_complete_alphabet_probe() {
-        let v=Vocab::new((0..=255).map(|i| (i,vec![i as u8])).collect());
+        let v=Vocab::from_entries_unchecked((0..=255).map(|i| (i,vec![i as u8])).collect());
         for source in [
             "glrm 1; start root; nt root = \"abc\";",
             "glrm 1; start root; t A=/a+/; nt root = A \"b\";",

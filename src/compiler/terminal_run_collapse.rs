@@ -489,7 +489,7 @@ mod tests {
         assert!(grammar.direct_regular_automaton.is_some());
         let table=GLRTable::build(&grammar);
         assert!(table.action.is_empty(), "fixture must use the compact admission table");
-        let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec())]);
         let caps=certify_caps(&BTreeMap::from([(0,8)]), &table,&grammar,
             &Templates::default(),&vocab,&identity_id_map());
         assert!(caps.is_empty(), "missing execution effects cannot prove stabilization");
@@ -512,7 +512,7 @@ nt start = item item? item?;
         let table = GLRTable::build(&grammar);
         let (characterizations, _) = characterize_terminals_profiled(&table, &grammar);
         let templates = Templates::from_characterizations(&characterizations);
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let terminal_a = (0..grammar.num_terminals)
             .find(|&terminal| grammar.terminal_display_name(terminal) == "A")
             .expect("terminal A");

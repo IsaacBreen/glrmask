@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn prepared_root_call_proof_matches_recomputation_and_static_runtime_after_reload() {
-        let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),(2,b"y".to_vec()),
+        let vocab=Vocab::from_entries_unchecked(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),(2,b"y".to_vec()),
             (3,b"xay".to_vec()),(4,b"xa".to_vec()),(5,b"ay".to_vec()),(6,b"xb".to_vec())]);
         for nullable in [false,true] {
             let child=Grammar::from_ebnf(if nullable {r#"start ::= "a" | """#} else {r#"start ::= "a""#}).unwrap()
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn prepared_leaf_possible_matches_equal_eager_union_for_every_cell_and_reload() {
-        let vocab=Vocab::new(vec![(1,Vec::new()),(3,b"a".to_vec()),(7,b"ab".to_vec()),
+        let vocab=Vocab::from_entries_unchecked(vec![(1,Vec::new()),(3,b"a".to_vec()),(7,b"ab".to_vec()),
             (11,b"a".to_vec()),(15,b"!".to_vec()),(19,b"?".to_vec()),(23,b"b".to_vec()),
             (27,b"aa!".to_vec()),(31,b"xa".to_vec()),(37,vec![0]),(41,b" ".to_vec()),(43,b"abab".to_vec())]);
         let left=Grammar::from_glrm(r#"glrm 1; start root; t WORD = /[a-z]+/; nt root = WORD "!";"#).unwrap()
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn exact_caller_domains_distinguish_one_call_from_adjacent_child_calls() {
-        let vocab = Vocab::new(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
             (2,b"aa".to_vec()),(3,b"xa".to_vec()),(4,b"xaa".to_vec()),(5,b"aaa".to_vec())]);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         for (source, inline, retain) in [
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn existing_static_component_bodies_are_retained_without_cloning_or_rebuilding() {
-        let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()), (3, b"xay".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()), (3, b"xay".to_vec())]);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()

@@ -1121,7 +1121,7 @@ pub(crate) fn restricted_boundary_vocab(
             .collect::<Vec<_>>(),
     };
     stats.candidate_tokens = entries.len();
-    (crate::Vocab::new(entries), summary, stats)
+    (crate::Vocab::from_entries_unchecked(entries), summary, stats)
 }
 
 pub(crate) fn prepare_boundary_candidate_summary(
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn composite_fingerprint_uses_only_matching_fresh_component_queries() {
         use crate::{Grammar, ParserBackend};
-        let vocabulary = crate::Vocab::new(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
+        let vocabulary = crate::Vocab::from_entries_unchecked(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
         let options = || MaskMode::C.build_options()
             .parser_backend(ParserBackend::TemplateDfa);
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(fingerprint_for_constraint_with_component_queries(&linked, &vocabulary, &queries).unwrap(), expected);
         let mut reversed = queries.clone(); reversed.reverse();
         assert_eq!(fingerprint_for_constraint_with_component_queries(&linked, &vocabulary, &reversed).unwrap(), expected);
-        let changed_vocab = crate::Vocab::new(vec![(0, b"zz".to_vec()), (4, b"xc".to_vec())]);
+        let changed_vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"zz".to_vec()), (4, b"xc".to_vec())]);
         assert_eq!(fingerprint_for_constraint_with_component_queries(&linked, &changed_vocab, &queries),
             fingerprint_for_constraint(&linked, &changed_vocab));
         assert_eq!(fingerprint_for_constraint_with_component_queries(&linked, &vocabulary, &[None]),
@@ -1349,7 +1349,7 @@ mod tests {
 
     #[test]
     fn indexed_initial_frontier_matches_bruteforce_with_and_without_skip() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b" ".to_vec()),
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn root_completion_requires_proper_prefix_and_preserves_duplicate_ids() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"ab".to_vec()),
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn live_out_of_vocab_special_slot_is_an_outward_portal() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"m".to_vec()),
             (1, b"mg".to_vec()),
             (2, b"mx".to_vec()),
@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn stale_known_empty_fingerprint_is_recomputed_not_trusted() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"m".to_vec()),
             (1, b"mg".to_vec()),
             (2, b"mx".to_vec()),
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn leading_component_ignore_can_precede_positive_outward_cut() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b" X a".to_vec()),
             (1, b"X a".to_vec()),
             (2, b" ".to_vec()),
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[test]
     fn ignore_commit_can_expose_outward_cut_before_next_byte() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b" \ta".to_vec()),
             (2, b" ".to_vec()),
@@ -1527,7 +1527,7 @@ mod tests {
 
     #[test]
     fn multiple_local_terminal_commits_can_precede_outward_cut() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"ab".to_vec()),
             (1, b"abx".to_vec()),
             (2, b"ax".to_vec()),
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[test]
     fn utf8_literal_prefix_uses_byte_offsets_without_rounding() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, "é".as_bytes().to_vec()),
             (1, "éx".as_bytes().to_vec()),
             (2, b"x".to_vec()),
@@ -1571,7 +1571,7 @@ mod tests {
             compose_constraints_owned_parent_segmented,
         };
 
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b")x".to_vec()),
             (1, b"})x".to_vec()),
             (2, b"a)x".to_vec()),
@@ -1643,7 +1643,7 @@ mod preparation_tests {
     use super::*;
 
     fn fixture() -> (Constraint, crate::Vocab) {
-        let vocab=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),
+        let vocab=crate::Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),
             (2,b"ax".to_vec()),(3,b"b".to_vec()),(4,b"ba".to_vec())]);
         let component=Constraint::from_glrm_with_token_ids(r#"
             start document; extern token SUB;
@@ -1692,7 +1692,7 @@ mod preparation_tests {
 
     #[test]
     fn persisted_candidates_survive_physical_table_removal_and_reload() {
-        let vocab = crate::Vocab::new(vec![
+        let vocab = crate::Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
             (2, b"ax".to_vec()),
@@ -1730,7 +1730,7 @@ mod preparation_tests {
 
     #[test]
     fn persisted_pre_nullable_fix_proof_is_rejected_before_composition() {
-        let vocab = crate::Vocab::new(vec![(0, b"X[a]!".to_vec()),
+        let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"X[a]!".to_vec()),
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
         let options = MaskMode::C.build_options()
             .parser_backend(crate::ParserBackend::TemplateDfa);
@@ -1811,7 +1811,7 @@ mod preparation_tests {
         );
         assert!(persisted_boundary_candidate_ids(&source, &vocab).unwrap().is_none());
 
-        let empty_vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let empty_vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let mut empty = Constraint::from_glrm_grammar(
             r#"glrm 1; start document; nt document = "a";"#,
             &empty_vocab,
@@ -1823,7 +1823,7 @@ mod preparation_tests {
 
     #[test]
     fn persisted_candidates_reject_sparse_byte_domain_holes_even_when_exact_only() {
-        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (2, b"ab".to_vec())]);
+        let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (2, b"ab".to_vec())]);
         let mut source = Constraint::from_glrm_grammar(
             r#"glrm 1; start document; nt document = "a";"#, &vocab,
         ).unwrap();

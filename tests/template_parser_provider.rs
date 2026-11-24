@@ -24,7 +24,7 @@ fn reconverging_push_and_pop_languages_remain_shared_across_reload() {
             StackTemplate{pop,..StackTemplate::reject()},
         ],completion:StackTemplate::read_top_and_push([0],[])}).unwrap();
         let vocabulary=Vocab::new(["a","b","ab","ba","aa","bb"].iter().enumerate()
-            .map(|(id,piece)|(id as u32,piece.as_bytes().to_vec())).collect());
+            .map(|(id,piece)|(id as u32,piece.as_bytes().to_vec())).collect::<Vec<_>>()).unwrap();
         let lex=LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec()),TerminalPattern::literal(b"b".to_vec())]);
         let fresh=parser.compile(&lex,&vocabulary).unwrap();
         let bytes=fresh.save();
@@ -64,7 +64,7 @@ fn words() -> Vec<&'static str> {
 }
 fn vocab() -> Vocab {
     let mut tokens=words().into_iter().enumerate().map(|(i,s)|(i as u32,s.as_bytes().to_vec())).collect::<Vec<_>>();
-    tokens.push((64,Vec::new())); Vocab::new(tokens)
+    tokens.push((64,Vec::new())); Vocab::new(tokens).unwrap()
 }
 fn depth(bytes:&[u8], mut d:usize)->Option<usize> {
     for &b in bytes {match b {
@@ -99,7 +99,7 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     let bytes=c.save();let restored=Constraint::load(bytes.clone(), &vocab()).unwrap();
     check_all_prefixes(&restored);assert_eq!(restored.save(),bytes);
     let external=c.save();
-    let wrong=Vocab::new(vec![(0,b"different".to_vec()),(64,Vec::new())]);
+    let wrong=Vocab::new::<Vec<u8>>(vec![(0,b"different".to_vec()),(64,Vec::new())]).unwrap();
     assert!(Constraint::load(external.clone(),&wrong).is_err());
     let restored=Constraint::load(external,&v).unwrap();check_all_prefixes(&restored);
     let mut s=c.start();assert!(!s.commit_bytes(b")"));assert!((s.mask().iter().all(|word| *word == 0)));
@@ -135,7 +135,7 @@ fn explicit_dead_edge_shadows_default_in_a_user_supplied_program() {
     let b=StackTemplate::rewrite([StackLabel::Symbol(0)],[1]);
     let p=ParserProgram::new(ParserDefinition{stack_symbol_count:2,terminals:vec![a,b],completion:StackTemplate::identity()}).unwrap();
     let l=LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec()),TerminalPattern::literal(b"b".to_vec())]);
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ba".to_vec()),(3,b"ab".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ba".to_vec()),(3,b"ab".to_vec())]).unwrap();
     let c=p.compile(&l,&v).unwrap();let mut s=c.start();let mut m=vec![0;c.mask_len()];s.fill_mask(&mut m);
     assert_eq!(m[0]&15,0b0110);assert!(s.commit_token(1));s.fill_mask(&mut m);assert_eq!(m[0]&15,1);
 }
@@ -174,7 +174,7 @@ fn invalid_lexer_or_nonidentity_ignore_never_changes_the_requested_language() {
 
 #[test]
 fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]).unwrap();
     let grammar=Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#).unwrap();
     let ordinary=grammar.compile(&v).unwrap();
     let ordinary_bytes=ordinary.save();
@@ -221,7 +221,7 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
 #[test]
 fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),
-        (3,b"\"".to_vec()),(4,b"\"ab\"".to_vec()),(5,b"x".to_vec())]);
+        (3,b"\"".to_vec()),(4,b"\"ab\"".to_vec()),(5,b"x".to_vec())]).unwrap();
     let schema=r#"{"enum":["a","ab"]}"#;
     let sources=[
         (Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#).unwrap(),"ab"),
@@ -250,7 +250,7 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
 
 #[test]
 fn source_and_precompiled_composition_use_native_defaults() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"xa".to_vec()),(2,b"x".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"xa".to_vec()),(2,b"x".to_vec())]).unwrap();
     let child=Grammar::from_glrm(r#"start root; nt root = "a";"#).unwrap();
     let parent=Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#).unwrap();
     let bound=parent.clone().bind_snapshot("child",&child).unwrap();
@@ -270,7 +270,7 @@ fn source_and_precompiled_composition_use_native_defaults() {
 
 #[test]
 fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
-    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"xa".to_vec()), (2, b"x".to_vec())]);
+    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"xa".to_vec()), (2, b"x".to_vec())]).unwrap();
     let child = Grammar::from_glrm(r#"start root; nt root = "a";"#).unwrap()
         .compile_with_build_options(&v, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa))
         .unwrap();
@@ -295,7 +295,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
 
 #[test]
 fn explicit_lr_compile_and_link_requests_panic_loudly() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec())]).unwrap();
     let grammar=Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
     let module=grammar.prepare(&vocab).unwrap();
     for link in [false,true] {
@@ -331,7 +331,7 @@ fn exponentially_many_custom_push_outputs_remain_runnable_after_roundtrip() {
         completion: StackTemplate::identity(),
     }).unwrap();
     let lexer = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec()), (2, b"b".to_vec())]);
+    let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec()), (2, b"b".to_vec())]).unwrap();
     let c = program.compile(&lexer, &v).unwrap();
     for parser in [&c, &Constraint::load(c.save(), &v).unwrap()] {
         assert_eq!(parser.parser_backend(), ParserBackend::TemplateDfa);
@@ -357,7 +357,7 @@ fn epsilon_read_links_apply_after_popping_the_last_concrete_symbol() {
         terminals:vec![a,b],completion:StackTemplate::identity()}).unwrap();
     let lexer=LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec()),TerminalPattern::literal(b"b".to_vec())]);
     let words=["a","b","ab","ba","aa","bb"];
-    let vocab=Vocab::new(words.iter().enumerate().map(|(i,s)|(i as u32,s.as_bytes().to_vec())).collect());
+    let vocab=Vocab::new(words.iter().enumerate().map(|(i,s)|(i as u32,s.as_bytes().to_vec())).collect::<Vec<_>>()).unwrap();
     let built=program.compile(&lexer,&vocab).unwrap();
     for constraint in [&built,&Constraint::load(built.save(), &vocab).unwrap(),
         &Constraint::load(built.save(),&vocab).unwrap()]
@@ -398,7 +398,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         return;
     }
     let vocab = glrmask::Vocab::new((32u8..=126)
-        .enumerate().map(|(i,byte)|(i as u32,vec![byte])).collect());
+        .enumerate().map(|(i,byte)|(i as u32,vec![byte])).collect::<Vec<_>>()).unwrap();
     let compiled = glrmask::Grammar::from_json_schema(
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#).unwrap()
         .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()
@@ -425,7 +425,7 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::__private::{ConstraintExt, parser_backend_report};
     use glrmask::{Constraint, Grammar, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
-        (2, b"t".to_vec()), (3, b"rue".to_vec())]);
+        (2, b"t".to_vec()), (3, b"rue".to_vec())]).unwrap();
     for mode in [MaskMode::C, MaskMode::ParserDwa] {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#).unwrap()
             .compile_with_build_options(&vocab, mode.build_options()

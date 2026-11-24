@@ -31,7 +31,7 @@ fn vocabulary() -> Vocab {
             .enumerate()
             .map(|(i, w)| (i as u32, w))
             .collect(),
-    )
+    ).unwrap()
 }
 
 fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
@@ -164,7 +164,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"x".to_vec()),
-    ]);
+    ]).unwrap();
     for explicit_backend in [false, true] {
         let backend = ParserBackend::TemplateDfa;
         let options = glrmask::test_modes::MaskMode::C.build_options();

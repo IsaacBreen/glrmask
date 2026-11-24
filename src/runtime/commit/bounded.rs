@@ -574,7 +574,7 @@ mod tests {
     }
     #[test]
     fn finite_byte_languages_cold_warm_and_loaded_match_full_mask_and_forcing() {
-        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(3,b"ab".to_vec()),(4,b"aa".to_vec()),
+        let v=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(3,b"ab".to_vec()),(4,b"aa".to_vec()),
             (9,b"ab".to_vec()),(13,b"ba".to_vec()),(69,b"aba".to_vec()),(128,Vec::new())]);
         for body in ["\"ab\"","\"a\" | \"ab\" | \"aba\"","eps | \"ab\"","/a+/ \"b\"","/a|ab/ \"a\"?","/a*/ \"b\"","(/a+/ & /aa*/ ) \"b\"","(/a+/ - /aaa+/) \"b\""] {
             let source=format!("start root nt root = {body}");
@@ -587,7 +587,7 @@ mod tests {
     }
     #[test]
     fn exact_events_aliases_root_controls_and_empty_spellings() {
-        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"a".to_vec()),
+        let v=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"a".to_vec()),
             (3,b"ab".to_vec()),(17,Vec::new())]);
         for body in ["M \"a\"", "M | \"ab\"", "M \"b\" | \"ab\"", "M? \"ab\"", "M M?"] {
             let source=format!("extern token M start root nt root={body}");
@@ -602,7 +602,7 @@ mod tests {
     }
     #[test]
     fn composed_and_partial_utf8_frontiers_match_final_admission() {
-        let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
+        let v=Vocab::from_entries_unchecked(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,vec![0xc3]),(7,vec![0xa9]),
             (8,vec![0xc3,0xa9]),(10,b"x".to_vec())]);
         let mut child=Grammar::from_glrm("extern token M start item ignore SPACE t SPACE=/ +/ nt item=\"a\" M?").unwrap();
@@ -617,7 +617,7 @@ mod tests {
     }
     #[test]
     fn union_counts_distinct_original_ids_not_owner_occurrences() {
-        let v=Vocab::new(vec![(17,b"a".to_vec()),(29,b"b".to_vec()),(33,b"c".to_vec())]);
+        let v=Vocab::from_entries_unchecked(vec![(17,b"a".to_vec()),(29,b"b".to_vec()),(33,b"c".to_vec())]);
         for mode in MODES {
             let a=Grammar::from_glrm("start r nt r=\"ab\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
             let b=Grammar::from_glrm("start r nt r=\"ac\"").unwrap().compile_with_build_options(&v,mode.build_options()).unwrap();
@@ -630,7 +630,7 @@ mod tests {
     }
     #[test]
     fn ambiguous_query_stops_after_two_final_witnesses_without_filling_cache() {
-        let v=Vocab::new((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
+        let v=Vocab::from_entries_unchecked((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
         let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
         let s=c.start();let before=s.mask_cache.lock().unwrap().is_some();
         BYTE_PROOFS.with(|n|n.set(0));assert_eq!(s.probe_one_token().unwrap(),AtMostOne::MoreThanOne);
@@ -642,7 +642,7 @@ mod tests {
     fn narrow_alphabets_prune_scoped_and_finalizing_frontiers_without_full_masks() {
         let mut entries=(0..256u32).map(|id|(id,vec![id as u8])).collect::<Vec<_>>();
         for id in 256..8192 {entries.push((id,format!("word{id:07}").into_bytes()));}
-        let v=Vocab::new(entries);
+        let v=Vocab::from_entries_unchecked(entries);
         for (source,expected) in [
             ("grammar CHILD { start inner nt inner=\"!?\" } start root nt root=CHILD \"!\"",vec![33,63,33]),
             ("start root nt root=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn physical_alphabet_union_keeps_parent_suffix_child_ignore_and_nullable_returns() {
-        let v=Vocab::new((0..256u32).map(|id|(id,vec![id as u8])).collect());
+        let v=Vocab::from_entries_unchecked((0..256u32).map(|id|(id,vec![id as u8])).collect());
         for source in [
             "grammar C { start r ignore WS t WS=/ +/ nt r=\"a\"? } start r nt r=C \"Z\"",
             "grammar C { start r ignore WS t WS=/\\t+/ nt r=\"a\" | \"ab\" } start r ignore WS t WS=/ +/ nt r=\"P\" C \"Z\"",
@@ -738,7 +738,7 @@ mod differential_tests {
         ignore = "slow (~15s); run with --features slow-tests"
     )]
     fn bounded_masks_and_strict_forcing_match_normal_masks_across_all_modes() {
-        let v=Vocab::new(vec![
+        let v=Vocab::from_entries_unchecked(vec![
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"abc".to_vec()),
             (4,b"a".to_vec()),(5,b" ".to_vec()),(6,b"c".to_vec()),(7,Vec::new()),
             (8,b"x".to_vec()),(9,b"(".to_vec()),(10,b")".to_vec()),(11,b"()".to_vec()),
@@ -773,7 +773,7 @@ mod differential_tests {
         ignore = "slow (~11s); run with --features slow-tests"
     )]
     fn bounded_exact_events_aliases_empty_spelling_and_root_controls() {
-        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),
+        let v=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),
             (4,b"a".to_vec()),(5,b"ab".to_vec()),(7,Vec::new())]);
         for body in ["MARK", "MARK \"a\"", "\"ab\" | MARK \"c\"", "\"a\" MARK?", "MARK? \"b\""] {
             let source=format!("extern token MARK start root nt root={body}");
@@ -788,7 +788,7 @@ mod differential_tests {
     }
     #[test]
     fn bounded_composed_calls_ignore_and_independent_event_lanes() {
-        let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
+        let v=Vocab::from_entries_unchecked(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),(2,b" ".to_vec()),
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,b"\t".to_vec()),
             (7,b"a X".to_vec()),(8,b"a".to_vec())]);
         let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap().prepare(&v).unwrap();
@@ -805,7 +805,7 @@ mod differential_tests {
     }
     #[test]
     fn bounded_dynamic_owner_union_counts_distinct_original_ids() {
-        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),(9,b"a".to_vec())]);
+        let v=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),(9,b"a".to_vec())]);
         let a=Grammar::from_glrm("start root nt root=\"ab\"").unwrap().compile(&v).unwrap();
         let b=Grammar::from_glrm("start root nt root=\"ac\"").unwrap().compile(&v).unwrap();
         let sa=a.start();let sb=b.start();
@@ -841,7 +841,7 @@ mod differential_tests {
         let mut entries=(0..256u32).map(|id|(id,vec![id as u8])).collect::<Vec<_>>();
         for piece in pieces {entries.push((entries.len() as u32,piece));}
         entries.push((entries.len() as u32,Vec::new()));
-        let v=Vocab::new(entries.clone());
+        let v=Vocab::from_entries_unchecked(entries.clone());
         for (name,grammar,text) in [
             ("json-schema",Grammar::from_json_schema(schema).unwrap(),json),
             ("lark-arithmetic",Grammar::from_lark(lark).unwrap(),arithmetic),

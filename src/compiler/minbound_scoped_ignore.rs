@@ -88,7 +88,7 @@ fn mb_scoped_ignore_variants() -> Vec<MbScopedIgnoreVariant> {
 fn mb_run_scoped_ignore_variant(
     variant: &MbScopedIgnoreVariant,
 ) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-    let vocab = Vocab::new(variant.vocab.clone());
+    let vocab = Vocab::from_entries_unchecked(variant.vocab.clone());
     let parent = Constraint::from_glrm_with_token_ids(variant.parent_explicit, &vocab, &[("SUB", 999)], &[])
         .unwrap_or_else(|error| panic!("{}: parent compile: {error}", variant.name));
     let child = Constraint::from_glrm_grammar(variant.child, &vocab)
@@ -190,7 +190,7 @@ fn mb_distinct_original_vocab() -> Vec<(u32, Vec<u8>)> {
 /// segmented-static and inline backends agree.
 fn mb_distinct_divergence(vocab_entries: &[(u32, Vec<u8>)]) -> Option<(Vec<u32>, Vec<u32>)> {
     let (parent_explicit, parent_inline, child_src) = mb_distinct_grammar();
-    let vocab = Vocab::new(vocab_entries.to_vec());
+    let vocab = Vocab::from_entries_unchecked(vocab_entries.to_vec());
     let parent = Constraint::from_glrm_with_token_ids(parent_explicit, &vocab, &[("SUB", 999)], &[]).ok()?;
     let child = Constraint::from_glrm_grammar(child_src, &vocab).ok()?;
     let composed_static = parent
@@ -341,7 +341,7 @@ fn mb_scoped_ignore_mapping_trace(
 /// the parent-side over-admission is fixed). Reports the start masks first.
 fn mb_assert_distinct_vocab_agrees(label: &str, vocab_entries: &[(u32, Vec<u8>)]) {
     let (parent_explicit, parent_inline, child_src) = mb_distinct_grammar();
-    let vocab = Vocab::new(vocab_entries.to_vec());
+    let vocab = Vocab::from_entries_unchecked(vocab_entries.to_vec());
     let parent = Constraint::from_glrm_with_token_ids(parent_explicit, &vocab, &[("SUB", 999)], &[]).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
     let composed_static = parent
@@ -409,7 +409,7 @@ fn minimal_scoped_ignore_boundary_token_classes_keep_scoped_orderings_separate()
         (1, b"Xa \t!".to_vec()),
     ];
     let (parent_explicit, parent_inline, child_src) = mb_distinct_grammar();
-    let vocab = Vocab::new(vocab_entries.clone());
+    let vocab = Vocab::from_entries_unchecked(vocab_entries.clone());
     let parent = Constraint::from_glrm_with_token_ids(parent_explicit, &vocab, &[("SUB", 999)], &[]).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
     let composed_static = parent
@@ -462,7 +462,7 @@ fn minimal_scoped_ignore_swapped_ids_reproduces() {
     mb_assert_distinct_vocab_agrees("swapped_ids_0_1", &vocab_entries);
 
     let (parent_explicit, _parent_inline, child_src) = mb_distinct_grammar();
-    let vocab = Vocab::new(vocab_entries);
+    let vocab = Vocab::from_entries_unchecked(vocab_entries);
     let parent = Constraint::from_glrm_with_token_ids(parent_explicit, &vocab, &[("SUB", 999)], &[]).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
     let composed_static = parent
@@ -514,7 +514,7 @@ fn minimal_scoped_ignore_survives_reload() {
         (1, b"Xa \t!".to_vec()),
     ];
     let (parent_explicit, _parent_inline, child_src) = mb_distinct_grammar();
-    let vocab = Vocab::new(vocab_entries);
+    let vocab = Vocab::from_entries_unchecked(vocab_entries);
     let parent = Constraint::from_glrm_with_token_ids(parent_explicit, &vocab, &[("SUB", 999)], &[]).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
     let composed_static = parent
@@ -535,7 +535,7 @@ fn minimal_scoped_ignore_survives_reload() {
 /// distinct tokens without relying on scoped ignores.
 #[test]
 fn multi_terminal_epsilon_union_without_ignores() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"Xa".to_vec()),
         (1, b"Xb".to_vec()),
     ]);
@@ -614,7 +614,7 @@ fn minimal_scoped_ignore_parent_shard_overadmits_invalid_boundary_token() {
 
     // Mapping trace for the full witness (which reproduces).
     let (parent_explicit, parent_inline, child_src) = mb_distinct_grammar();
-    let full_vocab = Vocab::new(mb_distinct_original_vocab());
+    let full_vocab = Vocab::from_entries_unchecked(mb_distinct_original_vocab());
     let full_parent = Constraint::from_glrm_with_token_ids(parent_explicit, &full_vocab, &[("SUB", 999)], &[]).unwrap();
     let full_child = Constraint::from_glrm_grammar(child_src, &full_vocab).unwrap();
     let full_static = full_parent
@@ -645,7 +645,7 @@ fn minimal_scoped_ignore_parent_shard_overadmits_invalid_boundary_token() {
 /// and dynamic backends independently of how the text is tokenized.
 #[test]
 fn minimal_scoped_ignore_byte_level_control_sequence() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"X".to_vec()),
         (1, b"a".to_vec()),
         (2, b"!".to_vec()),
@@ -706,7 +706,7 @@ fn minimal_scoped_ignore_byte_level_control_sequence() {
 /// `distinct` cause.
 #[test]
 fn minimal_scoped_visible_parent_component_overadmits_after_partial_ignore() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"Xa".to_vec()),
         (1, b"bt".to_vec()),
         (2, b"b!".to_vec()),
@@ -779,7 +779,7 @@ fn minimal_scoped_visible_parent_component_overadmits_after_partial_ignore() {
 /// retains the expected equivalence class behavior across backends.
 #[test]
 fn test_scoped_ignore_vocab_mixed_first_byte_and_distinct_equivalent_bytes() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"Xa!".to_vec()),
         (1, b"X\t a!".to_vec()),
         (2, b"X".to_vec()),
@@ -836,7 +836,7 @@ fn test_scoped_ignore_vocab_mixed_first_byte_and_distinct_equivalent_bytes() {
 /// Documents whether 3-level composition succeeds or hits the known table entry collision.
 #[test]
 fn test_three_level_nested_scopes() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"<".to_vec()),
         (1, b">".to_vec()),
         (2, b"[".to_vec()),

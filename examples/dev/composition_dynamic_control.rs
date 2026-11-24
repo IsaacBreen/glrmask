@@ -23,7 +23,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
         let bytes=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect();
         (id.parse().unwrap(),bytes)
     }).collect();
-    let vocab=Vocab::new(entries);
+    let vocab=Vocab::new(entries).unwrap();
     let mut rows=Vec::<serde_json::Value>::new();
     let mut builds=Vec::<serde_json::Value>::new();
     let case_filter=std::env::var("CONTROL_CASE").ok();

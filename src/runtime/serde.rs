@@ -6022,7 +6022,7 @@ impl Constraint {
             ));
         }
         if supplied_vocab.is_some() && !exact_ids.is_empty() {
-            let vocab = crate::Vocab::new(body.token_bytes_iter()
+            let vocab = crate::Vocab::from_entries_unchecked(body.token_bytes_iter()
                     .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
                     .collect());
             body.bind_vocab_exact(&vocab)
@@ -7204,7 +7204,7 @@ mod tests {
     fn omitted_dynamic_vocab_fixture() -> (crate::DynamicConstraint, Vocab) {
         // A push/pop grammar, not a direct-regular provider. IDs are sparse,
         // bytes have aliases, and empty/non-ASCII tokens exercise Vocab binding.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (1, b"a".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec()),
             (19, b"ab".to_vec()), (23, Vec::new()), (29, vec![0xc3, 0xa9]),
         ]);
@@ -7288,7 +7288,7 @@ mod tests {
         assert_eq!(loaded.save_without_vocab(), transfer);
         let reloaded = crate::DynamicConstraint::load_with_vocab(&loaded.save(), &vocab).unwrap();
         assert_eq!(loaded.start().mask(), reloaded.start().mask());
-        let mismatch = Vocab::new(vec![(1, b"x".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec())]);
+        let mismatch = Vocab::from_entries_unchecked(vec![(1, b"x".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec())]);
         assert!(crate::DynamicConstraint::load_with_vocab(&transfer, &mismatch).is_err());
         assert!(!loaded.inner.table.is_present());
         assert!(loaded.inner.has_template_parser());
@@ -7326,7 +7326,7 @@ mod tests {
         assert!(reloaded.inner.dynamic_mask_vocab.is_grammar_quotiented());
         assert_eq!(loaded.start().mask(), reloaded.start().mask());
         assert!(!loaded.inner.table.is_present());
-        let mismatch = Vocab::new(vec![(1, b"x".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec())]);
+        let mismatch = Vocab::from_entries_unchecked(vec![(1, b"x".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec())]);
         assert!(crate::DynamicConstraint::load_with_vocab(&transfer, &mismatch).is_err());
     }
 
@@ -7372,7 +7372,7 @@ mod tests {
     #[test]
     fn loaded_partitioned_bounded_strings_keep_first_key_prefix_live() {
         use crate::automata::lexer::Lexer;
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             [b"{\"".as_slice(), b"{", b"\"", b"a", b"b", b"\": \"", b"\", \"", b"\"}", b"x", b" ", b"xx"]
                 .into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect(),
         );
@@ -7412,7 +7412,7 @@ mod tests {
 
     #[test]
     fn packed_reencode_preserves_non_dwa_ids_after_cache_invalidation() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
             (7, b"a".to_vec()), (8, Vec::new()),
@@ -7455,7 +7455,7 @@ mod tests {
                 t B = "b";
                 nt start = A B;
             "#,
-            &Vocab::new(vec![
+            &Vocab::from_entries_unchecked(vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
                 (2, b"ab".to_vec()),
@@ -7560,7 +7560,7 @@ mod tests {
                 t WS = " "+;
                 nt start = "a";
             "#,
-            &Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]),
+            &Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]),
         )
         .unwrap()
     }
@@ -7568,7 +7568,7 @@ mod tests {
 
     #[test]
     fn static_bounded_uri_virtual_projection_roundtrips_with_packed_vocab() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"x:".to_vec()),
             (2, b"a".to_vec()),
@@ -7723,7 +7723,7 @@ mod tests {
 
     #[test]
     fn explicit_lr_envelope_roundtrips_and_cross_backend_tamper_is_rejected() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let grammar = crate::Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap();
         let lr = crate::DynamicConstraint::from_ebnf(r#"start ::= "a" "b""#, &vocab)
             .unwrap().into_constraint();
@@ -7790,7 +7790,7 @@ mod tests {
 
     #[test]
     fn small_public_compile_defers_first_save_artifact() {
-        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(
             crate::Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
             &vocab,
@@ -7888,7 +7888,7 @@ mod tests {
 
     #[test]
     fn current_constraint_artifact_preserves_static_dynamic_overlay() {
-        let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let parent = Constraint::compile(crate::Grammar::glrm(
             "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root = \"b\";", &vocab).unwrap();
@@ -8166,7 +8166,7 @@ mod tests {
 
     #[test]
     fn current_boundary_summary_preserves_duplicate_byte_token_ids() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (10, b"ab".to_vec()),
             (11, b"ab".to_vec()),
             (12, b"a".to_vec()),
@@ -8468,7 +8468,7 @@ mod tests {
         }).unwrap();
         let constraint = program.compile_with(&LexerDefinition::new(vec![
             TerminalPattern::Literal(b"a".to_vec()), TerminalPattern::Literal(b"b".to_vec()),
-        ]), &Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]), TemplateBuildOptions::default()).unwrap();
+        ]), &Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]), TemplateBuildOptions::default()).unwrap();
         let template = constraint.template_dfas_by_terminal[1].as_deref().unwrap();
         let accepted = *template.pop.states[template.pop.start_state as usize].transitions.get(&7).unwrap();
 

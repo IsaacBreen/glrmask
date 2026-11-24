@@ -7,10 +7,10 @@ fn modes() -> [MaskMode; 6] {
 }
 fn options(mode: MaskMode) -> BuildOptions { mode.build_options() }
 fn vocabulary() -> Vocab {
-    Vocab::new(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
+    Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
         (3,b"x".to_vec()), (4,b"y".to_vec()), (5,b"xab y".to_vec()),
         (6,b"xaby".to_vec()), (7,b"pxabyq".to_vec()), (8,b"p".to_vec()),
-        (9,b"q".to_vec()), (10,Vec::new()), (11,b"<event>".to_vec())])
+        (9,b"q".to_vec()), (10,Vec::new()), (11,b"<event>".to_vec())]).unwrap()
 }
 fn annotated() -> Grammar {
     glrmask::__private::grammar_from_glrm_with_markers(r#"glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);"#).unwrap()
@@ -123,7 +123,7 @@ fn batch(state: &glrmask::ConstraintState) -> Vec<(u32, u64)> {
 #[test]
 fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b" ".to_vec()),
-        (2,b"b".to_vec()),(3,b"a  b".to_vec())]);
+        (2,b"b".to_vec()),(3,b"a  b".to_vec())]).unwrap();
     let grammar = glrmask::__private::grammar_from_glrm_with_markers(r#"glrm 1; start root; ignore WS; t WS=" "; nt root="a" @mark(1) "b";"#).unwrap();
     for mode in modes() {
         let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
@@ -139,7 +139,7 @@ fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
 
 #[test]
 fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
-    let vocab = Vocab::new(vec![(0,b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0,b"a".to_vec())]).unwrap();
     for mode in modes() {
         let empty = glrmask::__private::grammar_from_glrm_with_markers("glrm 1; start root; nt root=@mark(7);").unwrap()
             .compile_with_build_options(&vocab,options(mode)).unwrap();
@@ -159,7 +159,7 @@ fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
 
 #[test]
 fn recursive_and_repeated_components_keep_positions_without_capture_pairing() {
-    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aabb".to_vec())]);
+    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aabb".to_vec())]).unwrap();
     let grammar = glrmask::__private::grammar_from_glrm_with_markers(r#"glrm 1; start root; nt root="a" @mark(1) root? "b" @mark(2);"#).unwrap();
     for mode in modes() {
         let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();

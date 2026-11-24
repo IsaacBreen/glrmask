@@ -11,7 +11,7 @@ use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Voca
 /// only as an explicit end token exercise the vocabulary surfaces shared by
 /// both backends.
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"(".to_vec()),
@@ -311,7 +311,7 @@ fn external_lr_rejects_wrong_vocabulary_with_same_ids() {
     let constraint = compile(&vocab, r#"start ::= "a" "b""#, ParserBackend::LrTable);
     let bytes = constraint.save();
     // Same IDs and byte lengths, different byte content.
-    let wrong = Vocab::new(vec![
+    let wrong = Vocab::from_entries_unchecked(vec![
         (0, b"x".to_vec()),
         (1, b"y".to_vec()),
         (2, b"(".to_vec()),
@@ -378,7 +378,7 @@ fn ordinary_lr_and_o2_static_are_isolated_across_reload() {
 
 #[test]
 fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec()),
+    let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b" ".to_vec()),
         (2, b"(".to_vec()), (3, b")".to_vec()), (20, b"Z".to_vec())]);
     let source = "start: [\"(\" start \")\"]\n%ignore / +/";
     let lr = crate::DynamicConstraint::from_lark(source, &vocab).unwrap()
@@ -404,7 +404,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
 
 #[test]
 fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (9, Vec::new()), (11, Vec::new())]);
+    let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (9, Vec::new()), (11, Vec::new())]);
     let source = "glrm 1; start start; extern token MARK; nt start = MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
@@ -424,7 +424,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
 
 #[test]
 fn focused_dynamic_empty_token_and_external_identity_regression() {
-    let vocab = Vocab::new(vec![(0, b"(".to_vec()), (2, b")".to_vec()),
+    let vocab = Vocab::from_entries_unchecked(vec![(0, b"(".to_vec()), (2, b")".to_vec()),
         (7, b"()".to_vec()), (15, b"(".to_vec()), (20, b"x".to_vec()),
         (25, Vec::new()), (26, Vec::new())]);
     let source = r#"start ::= "(" start ")" start | """#;
@@ -450,11 +450,11 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
             }
         }
         for changed in [
-            Vocab::new(vec![(0,b"[".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
+            Vocab::from_entries_unchecked(vec![(0,b"[".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
                 (15,b"(".to_vec()),(20,b"x".to_vec()),(25,Vec::new()),(26,Vec::new())]),
-            Vocab::new(vec![(0,b"(".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
+            Vocab::from_entries_unchecked(vec![(0,b"(".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
                 (15,b"(".to_vec()),(20,b"y".to_vec()),(25,Vec::new()),(26,Vec::new())]),
-            Vocab::new(vec![(0,b"(".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
+            Vocab::from_entries_unchecked(vec![(0,b"(".to_vec()),(2,b")".to_vec()),(7,b"()".to_vec()),
                 (16,b"(".to_vec()),(20,b"x".to_vec()),(25,Vec::new()),(26,Vec::new())]),
         ] {
             assert!(crate::DynamicConstraint::load_with_vocab(&transfer, &changed).is_err());
@@ -477,7 +477,7 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
 
 #[test]
 fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
-    let vocab = Vocab::new(vec![(0,b"(".to_vec()),(2,b")".to_vec()),
+    let vocab = Vocab::from_entries_unchecked(vec![(0,b"(".to_vec()),(2,b")".to_vec()),
         (25,Vec::new()),(26,Vec::new())]);
     let source = r#"start ::= "(" start ")" start | """#;
     let lr = crate::DynamicConstraint::from_ebnf(source, &vocab).unwrap()
@@ -513,7 +513,7 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
 
 #[test]
 fn focused_empty_special_token_is_live_after_prefix_across_reload() {
-    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(25,Vec::new()),(26,Vec::new())]);
+    let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(25,Vec::new()),(26,Vec::new())]);
     let source = "glrm 1; start root; extern token MARK; nt root = \"a\" MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source,&vocab,&[("MARK",&[(25, 25)])],&[]).unwrap().into_constraint();
@@ -535,7 +535,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
 
 #[test]
 fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()), (2, b"b".to_vec()), (7, Vec::new()),
         (31, Vec::new()), (42, vec![0]), (512, Vec::new()),
     ]);

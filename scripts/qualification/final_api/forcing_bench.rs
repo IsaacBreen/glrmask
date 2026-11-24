@@ -25,7 +25,7 @@ fn vocabulary(case:usize) -> Vocab {
             if i+n<=text.len() {entries.push((1100+entries.len() as u32,text[i..i+n].to_vec()));}
         }}
     }
-    Vocab::new(entries)
+    Vocab::new(entries).unwrap()
 }
 fn quantile(xs:&[u128],a:usize,b:usize)->u128 {xs[(xs.len()*a).div_ceil(b).saturating_sub(1)]}
 fn main() -> Result<(),Box<dyn std::error::Error>> {

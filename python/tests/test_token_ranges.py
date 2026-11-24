@@ -22,7 +22,7 @@ MODES = [
 
 def vocab(n=128):
     # All IDs alias the same byte spelling; ranges must not leak other IDs.
-    return glrmask.Vocab.from_id_to_bytes({i: b"x" for i in range(n)})
+    return glrmask.Vocab({i: b"x" for i in range(n)})
 
 
 def accepted_ids(state):
@@ -51,7 +51,7 @@ def test_empty_and_reversed_ranges_contribute_nothing():
 
 
 def test_range_construction_normalizes():
-    v = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"x", 3: b"x"})
+    v = glrmask.Vocab({0: b"x", 1: b"x", 3: b"x"})
     grammar = glrmask.Grammar.from_glrm(ONE)
     # A token set is IDs only; IDs the vocabulary does not define are allowed in
     # the set and simply never match any text.
@@ -98,7 +98,7 @@ def test_deferred_range_binding_and_serialization():
 def test_128k_contiguous_and_nearly_all_token_sets(mode):
     n = 131_072
     # Empty byte spellings still denote distinct exact model-token events.
-    v = glrmask.Vocab.from_id_to_bytes({i: b"" for i in range(n)})
+    v = glrmask.Vocab({i: b"" for i in range(n)})
     for tokens, excluded in [(glrmask.TokenSet(range(n)), None),
                              (glrmask.TokenSet.from_ranges([range(0, 65_535), range(65_536, n)]), 65_535)]:
         module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
@@ -130,7 +130,7 @@ def pointwise_token_grammar(ids):
 def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
     # Different model IDs may alias a spelling, including empty bytes. The
     # oracle uses one grammar alternative per exact ID, never a compact set.
-    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"ba",
+    v = glrmask.Vocab({0: b"a", 1: b"b", 2: b"ab", 3: b"ba",
                                       4: b"x", 5: b"", 6: b"a", 7: b"b",
                                       8: b"x", 9: b"x", 10: b"x", 11: b"x"})
     selections = {"A": [range(1, 4), range(6, 10)], "B": [range(3, 8)]}
@@ -169,7 +169,7 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("compact", [False, True])
 def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
-    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa", 4: b"ba",
+    v = glrmask.Vocab({0: b"a", 1: b"b", 2: b"ab", 3: b"aa", 4: b"ba",
                                       5: b"x", 6: b"a", 7: b"", 8: b"b", 9: b"c",
                                       10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
@@ -188,7 +188,7 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
 @pytest.mark.parametrize("a,b", [(range(1), range(1, 2)), (range(6), range(3, 10)),
                                   (range(12), range(11))])
 def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
-    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa",
+    v = glrmask.Vocab({0: b"a", 1: b"b", 2: b"ab", 3: b"aa",
                                       4: b"ba", 5: b"x", 6: b"a", 7: b"",
                                       8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm(

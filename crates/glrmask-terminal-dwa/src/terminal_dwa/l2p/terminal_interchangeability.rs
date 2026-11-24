@@ -12830,7 +12830,7 @@ mod tests {
         let tokenizer =
             crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
 
-        let vocab = crate::Vocab::new(
+        let vocab = crate::Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),

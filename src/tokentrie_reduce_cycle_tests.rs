@@ -14,7 +14,7 @@ use crate::{Grammar, Module, Vocab};
 const TOKEN_BYTES: [&[u8]; 6] = [b"a", b"b", b"c", b"ab", b"bc", b"ca"];
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"c".to_vec()),

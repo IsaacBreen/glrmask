@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn passive_probe_admission_and_masks_match_erased_markers_in_all_modes() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         for mode in MaskMode::ALL {
             let marked = crate::__private::grammar_from_glrm_with_markers("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
                 .compile_with_build_options(&vocab, mode.build_options()).unwrap();
@@ -489,7 +489,7 @@ mod tests {
     fn observed_commits_preserve_exact_frontier_and_masks_across_ambiguous_grammars() {
         let pieces: &[&[u8]] = &[b"a", b"b", b"c", b"x", b"ab", b"aa", b"bb", b"abc",
             b"(", b")", b"(x)", b"((x))", b" ", b"  ", b"a b", b":", b"a:a", b"aaaa", b"aaabbb"];
-        let vocab = Vocab::new(pieces.iter().enumerate().map(|(i,b)| (i as u32,b.to_vec())).collect());
+        let vocab = Vocab::from_entries_unchecked(pieces.iter().enumerate().map(|(i,b)| (i as u32,b.to_vec())).collect());
         let sources = [
             "start root\nnt root = (@mark(1) \"a\" @mark(2) \"b\" @mark(3))*\n",
             "start root\nnt root = \"x\" | \"(\" @mark(1) root @mark(2) \")\"\n",
@@ -566,7 +566,7 @@ mod tests {
     }
     #[test]
     fn observer_adapters_preserve_empty_and_mixed_stack_languages() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         // A valid admission index whose sole predicate accepts the empty word.
         // This isolates adapter semantics from any particular grammar frontend.

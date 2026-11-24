@@ -9998,7 +9998,7 @@ mod dense_product_lookup_tests {
             expr: Box::new(repeat(&[b"ab", b"c"], 64)),
             intersect: Box::new(repeat(&[b"a", b"bc"], 48)),
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec()),
             (2, b"c".to_vec()), (3, b"abc".to_vec()), (4, b"bcq".to_vec())]);
         let pair = compile_terminal_expression_pair_with_vocabulary_token_quotient(
             &expression, &expression, &vocab, &VocabularyRepeatHorizonCache::new(), 3, b"abcq")
@@ -15994,7 +15994,7 @@ mod tests {
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"aba".to_vec()),
         ])));
-        let vocab = Arc::new(Vocab::new(
+        let vocab = Arc::new(Vocab::from_entries_unchecked(
             (0..256)
                 .map(|token| {
                     let length = token as usize % 32 + 1;
@@ -16019,7 +16019,7 @@ mod tests {
     #[test]
     fn vocabulary_repeat_horizon_is_suffix_closed_and_residual_aware() {
         let body = Expr::U8Seq(b"ab".to_vec());
-        let vocab = Vocab::new(vec![(0, b"xabab".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"xabab".to_vec())]);
 
         // The token suffix "abab" crosses two body boundaries from the body
         // start state. The analysis must consider that suffix even though it is
@@ -16029,7 +16029,7 @@ mod tests {
             Some(2),
         );
 
-        let vocab = Vocab::new(vec![(0, b"babab".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"babab".to_vec())]);
         // Starting from the reachable residual after an initial 'a', this token
         // completes one pending copy and two further copies.
         assert_eq!(
@@ -16041,7 +16041,7 @@ mod tests {
     #[test]
     fn vocabulary_repeat_horizon_counts_boundaries_before_token_exit() {
         let body = Expr::U8Seq(b"a".to_vec());
-        let vocab = Vocab::new(vec![(0, b"aaaaX".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"aaaaX".to_vec())]);
 
         assert_eq!(
             super::vocabulary_repeat_boundary_horizon(&body, &vocab),
@@ -16064,7 +16064,7 @@ mod tests {
                     }
                     entries.push((id, bytes));
                 }
-                let vocab = Vocab::new(entries);
+                let vocab = Vocab::from_entries_unchecked(entries);
                 let Some(automaton) = super::build_repeat_translation_automaton(&body, &vocab.relevant_bytes()) else { continue; };
                 assert_eq!(super::max_repeat_translation_over_vocab_suffixes(&automaton, &vocab),
                     super::max_repeat_translation_over_vocab_suffixes_exhaustive(&automaton, &vocab),
@@ -16075,7 +16075,7 @@ mod tests {
         let body = super::compile_expr_to_dfa(&parse_regex("[ab]", false));
         for entries in [vec![(0, b"aaaaaaaa".to_vec()), (1, b"bbb".to_vec())],
             vec![(0, b"xxxxxxxxx".to_vec()), (1, b"aaaa".to_vec())]] {
-            let vocab = Vocab::new(entries);
+            let vocab = Vocab::from_entries_unchecked(entries);
             let automaton = super::build_repeat_translation_automaton(&body, &vocab.relevant_bytes()).unwrap();
             assert_eq!(super::max_repeat_translation_over_vocab_suffixes(&automaton, &vocab),
                 super::max_repeat_translation_over_vocab_suffixes_exhaustive(&automaton, &vocab));
@@ -16091,7 +16091,7 @@ mod tests {
         let automaton = super::RepeatTranslationAutomaton { transitions: vec![first, second] };
         for entries in [vec![(0, b"xabbb".to_vec()), (1, b"aaa".to_vec())],
             vec![(0, b"xxxxxxxx".to_vec()), (1, b"bbb".to_vec())]] {
-            let vocab = Vocab::new(entries);
+            let vocab = Vocab::from_entries_unchecked(entries);
             assert_eq!(super::max_repeat_translation_over_vocab_suffixes(&automaton, &vocab),
                 super::max_repeat_translation_over_vocab_suffixes_exhaustive(&automaton, &vocab));
         }
@@ -16115,7 +16115,7 @@ mod tests {
             offset += length;
         }
         assert_eq!(offset, bytes.len());
-        let vocab = Vocab::new(entries);
+        let vocab = Vocab::from_entries_unchecked(entries);
         let body = super::compile_expr_to_dfa(&parse_regex(r#"([^"\\\x00-\x1f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})"#, true));
         let automaton = super::build_repeat_translation_automaton(&body, &vocab.relevant_bytes()).unwrap();
         let mut original = Vec::new();
@@ -16136,7 +16136,7 @@ mod tests {
     #[test]
     fn vocabulary_repeat_horizon_respects_dominance_not_path_count() {
         let body = parse_regex("a+", false);
-        let vocab = Vocab::new(vec![(0, b"aaaaaaaa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"aaaaaaaa".to_vec())]);
 
         // Although there are paths that choose a repeat boundary after every
         // byte, the zero-boundary path at the same residual dominates all of
@@ -16196,7 +16196,7 @@ mod tests {
             .unwrap_or(0);
         assert!(max_live_count_span > 1);
 
-        let vocab = Vocab::new(vec![(0, b"aaaaaaaa".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"aaaaaaaa".to_vec())]);
         let horizons = super::VocabularyRepeatHorizonCache::new();
         assert!(
             super::zero_min_repeat_suffix_state_map(

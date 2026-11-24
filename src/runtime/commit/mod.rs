@@ -9508,7 +9508,7 @@ mod tests {
                 .then(|| apply_single_top_action_fast(&constraint, &isolated, top, terminal, action))
                 .flatten()
         }
-        let vocab = Vocab::new(["a", "b", "ab", "ba", ",", " ", "(", ")"]
+        let vocab = Vocab::from_entries_unchecked(["a", "b", "ab", "ba", ",", " ", "(", ")"]
             .into_iter().enumerate().map(|(i, token)| (i as u32, token.as_bytes().to_vec())).collect());
         let grammars = [
             r#"start start; t A = "a" | "ab"; t B = "a" | "ba";
@@ -9597,7 +9597,7 @@ mod tests {
 
     #[test]
     fn lexer_only_actionable_cache_keeps_distinct_lexer_lanes() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ab".to_vec()), (1, b"cd".to_vec()),
             (2, b"abcd".to_vec()), (3, b"abx".to_vec()),
             (4, b"zabc".to_vec()),
@@ -9632,7 +9632,7 @@ mod tests {
             b"a", b"+", b"b", b"//", b"/////", b"line", b"\n",
             b"/*", b"/***", b"body", b"*/", b" /*unfinished", b"//line\n+b",
         ];
-        let vocab = Vocab::new(fragments.iter().enumerate()
+        let vocab = Vocab::from_entries_unchecked(fragments.iter().enumerate()
             .map(|(id, bytes)| (id as u32, bytes.to_vec())).collect());
         for partitions in [
             "",
@@ -9680,7 +9680,7 @@ mod tests {
     #[test]
     fn recursive_batched_admission_matches_scalar_provider_reference() {
         use crate::ds::bitset::BitSet;
-        let vocab = Vocab::new(b"[ab]! ".iter().enumerate()
+        let vocab = Vocab::from_entries_unchecked(b"[ab]! ".iter().enumerate()
             .map(|(id,byte)|(id as u32,vec![*byte])).collect());
         for source in [
             r#"start child; t WORD = /[ab]+/; nt child = WORD;"#,
@@ -9723,7 +9723,7 @@ mod tests {
 
     #[test]
     fn unchanged_runtime_state_preserves_fill_mask_cache() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
             (2, b"b".to_vec()),
@@ -9776,7 +9776,7 @@ mod tests {
 
     #[test]
     fn unchanged_dynamic_mask_projection_preserves_fill_mask_cache() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -9816,7 +9816,7 @@ mod tests {
 
     #[test]
     fn recursive_radix_candidate_admission_matches_pointwise_exact_commit() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"X[".to_vec()),
             (2, b"X[a".to_vec()),
@@ -9895,7 +9895,7 @@ mod tests {
 
     #[test]
     fn recursive_scoped_tokenizer_exec_uses_only_the_active_leaf() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -10021,7 +10021,7 @@ mod tests {
                 nt item = A | AB | B;
                 nt start = item C;
             "#,
-            &Vocab::new(vec![
+            &Vocab::from_entries_unchecked(vec![
                 (0, b"a".to_vec()),
                 (1, b"ab".to_vec()),
                 (2, b"b".to_vec()),
@@ -10407,7 +10407,7 @@ mod tests {
                 t AB = "ab";
                 nt start = A | AB;
             "#,
-            &Vocab::new(vec![
+            &Vocab::from_entries_unchecked(vec![
                 (0, b"a".to_vec()),
                 (1, b"ab".to_vec()),
                 (2, b"b".to_vec()),
@@ -10446,7 +10446,7 @@ mod tests {
                 t ALSO_A = "a";
                 nt start = A | ALSO_A;
             "#,
-            &Vocab::new(vec![(0, b"a".to_vec())]),
+            &Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]),
         )
         .expect("same-offset trigger grammar should compile");
         let state = constraint.start();
@@ -10481,7 +10481,7 @@ mod tests {
                 t B = "b";
                 nt start = A B;
             "#,
-            &Vocab::new(vec![
+            &Vocab::from_entries_unchecked(vec![
                 (0, b"a".to_vec()),
                 (1, b"ab".to_vec()),
                 (2, b"b".to_vec()),
@@ -10524,7 +10524,7 @@ mod tests {
                 nt item = A | B;
                 nt start = item;
             "#,
-            &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+            &Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
         )
         .unwrap();
 
@@ -10556,7 +10556,7 @@ mod tests {
                 extern token EXACT_100;
                 nt start = item EXACT_100;
             "#,
-            &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+            &Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
             &[("EXACT_100", 100)],
             &[],
         )
@@ -10642,7 +10642,7 @@ mod tests {
 
     #[test]
     fn fused_exact_admission_matches_legacy_two_pass_reference() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -10783,7 +10783,7 @@ mod tests {
 
     #[test]
     fn initial_prune_advances_each_continuation_tokenizer_state() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -10834,7 +10834,7 @@ nt start = item item? item?;
 
     #[test]
     fn delayed_exclusion_survives_across_model_token_boundaries() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"@".to_vec()),
             (1, b" double".to_vec()),
             (2, b"Quote".to_vec()),
@@ -10878,7 +10878,7 @@ nt start = item item? item?;
 
     #[test]
     fn recursive_delayed_exclusion_stays_in_leaf_tokenizer_terminal_coordinate() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"@".to_vec()),
             (1, b" double".to_vec()),
             (2, b"Quote".to_vec()),
@@ -10940,7 +10940,7 @@ nt start = item item? item?;
     )]
     fn initial_prune_matches_top_local_reference_on_generated_small_languages() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             [
                 "a", "b", "ab", "ba", " ", " a", "a ", " b", "b ", " a ", " b ",
             ]
@@ -11037,7 +11037,7 @@ nt start = item item? item?;
 
     #[test]
     fn rejected_public_commits_enter_fail_state() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             r#"
@@ -11161,7 +11161,7 @@ nt start = item item? item?;
 
     #[test]
     fn flat_frontier_accepts_input_past_the_inline_state_capacity() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -11192,7 +11192,7 @@ nt start = item item? item?;
 
     #[test]
     fn flat_frontier_preserves_all_stacks_in_a_live_lexer_continuation_group() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"ab".to_vec()),
@@ -11245,7 +11245,7 @@ nt start = item item? item?;
     )]
     fn monolithic_commit_fast_paths_match_general_queue_on_small_language_space() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             WORDS
                 .iter()
                 .enumerate()
@@ -11315,7 +11315,7 @@ nt start = item item? item?;
 
     #[test]
     fn residual_bc_fast_path_matches_general_queue() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -11393,7 +11393,7 @@ nt start = item item? item?;
         ignore = "slow (~15s); run with --features slow-tests"
     )]
     fn epsilon_commit_fast_paths_match_no_fast_path_reference() {
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
@@ -11526,7 +11526,7 @@ nt start = item item? item?;
 
     #[test]
     fn epsilon_full_width_terminal_with_empty_accumulators_uses_fast_path() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;

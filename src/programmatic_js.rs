@@ -385,7 +385,7 @@ mod tests {
             "tools", ".lookup(", ")", "{", "}", "customer_id", "\"customer_id\"",
             ": ", "customer", ".id", "\"abc\"", "123", "[", "]", ", ", "x", "+", "1",
         ];
-        Vocab::new(
+        Vocab::from_entries_unchecked(
             pieces
                 .iter()
                 .enumerate()

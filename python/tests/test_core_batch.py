@@ -18,7 +18,7 @@ MODES = [
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 17: b"", 29: b""})
+    return glrmask.Vocab({0: b"a", 1: b"b", 2: b"ab", 17: b"", 29: b""})
 
 
 def test_bind_is_single_item_mutation_and_each_failure_is_atomic():

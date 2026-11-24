@@ -3,10 +3,10 @@ use glrmask::test_modes::MaskMode;
 use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::new::<Vec<u8>>(vec![
         (0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec()),
         (3, b",".to_vec()), (4, b"a,b".to_vec()), (5, Vec::new()),
-    ])
+    ]).unwrap()
 }
 
 #[test]

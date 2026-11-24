@@ -7,7 +7,7 @@ fn vocab() -> Vocab {
         (0, b"{".to_vec()),
         (1, b"}".to_vec()),
         (2, b" ".to_vec()),
-    ])
+    ]).unwrap()
 }
 
 fn body() -> Grammar {

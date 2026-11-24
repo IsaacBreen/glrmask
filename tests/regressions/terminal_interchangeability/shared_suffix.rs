@@ -19,7 +19,7 @@ fn shared_suffix_terminals_are_not_interchangeable_under_prefix_byte_partition()
         glrmask::__private::set_env_var("GLRMASK_SPLIT_L2P_VOCAB", Some("0"));
     }
     let grammar = "start: A | B\nA: \"at\"\nB: \"bt\"";
-    let v = Vocab::new(vec![(0u32, b"a".to_vec())]);
+    let v = Vocab::new(vec![(0u32, b"a".to_vec())]).unwrap();
     // The assertion inside the build panics on candidate/baseline mismatch;
     // reaching here means the artifacts agree.
     let _ = Constraint::compile(glrmask::Grammar::lark(grammar), &v).unwrap();

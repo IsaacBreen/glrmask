@@ -3,7 +3,7 @@ import pytest
 
 
 def test_clone_preserves_prefix_and_keeps_mutations_independent():
-    vocab = glrmask.Vocab.from_dict({b"a": 0, b"b": 1, b"c": 2, b"<eos>": 3})
+    vocab = glrmask.Vocab({0: b"a", 1: b"b", 2: b"c", 3: b"<eos>"})
     constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" ("b" | "c")'), glrmask.TokenSet([3]))).compile(vocab)
     state = constraint.start()
     assert state.commit_token(0)
@@ -28,7 +28,7 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
 
 
 def test_clone_preserves_rejection_without_changing_saved_prefix():
-    vocab = glrmask.Vocab.from_dict({b"a": 0, b"b": 1})
+    vocab = glrmask.Vocab({0: b"a", 1: b"b"})
     constraint = glrmask.Grammar.from_lark('start: "a"').compile(vocab)
     state = constraint.start()
     snapshot = state.copy()

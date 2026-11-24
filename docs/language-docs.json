@@ -7,8 +7,8 @@
     "rust": "cargo add glrmask"
   },
   "quickstarts": {
-    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
-    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
+    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
+    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new([\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ])?;\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
   },
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
   "python_symbols": {
@@ -32,11 +32,8 @@
     "TokenSet.from_ranges": "Creates a set from `range` objects, which must have step 1.",
     "TokenSet.__repr__": "An expression that rebuilds the set, or a summary for large sets.",
     "TokenSet.__eq__": "Whether both sets contain the same IDs.",
-    "Vocab": "A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.",
-    "Vocab.from_dict": "Creates a vocabulary from a `{token: id}` dict.\n\n`str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `GLRMaskError` if an ID appears more than once.",
-    "Vocab.from_id_to_bytes": "Creates a vocabulary from an `{id: bytes}` dict. Raises `GLRMaskError` if an ID appears more than once.",
-    "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama` model.\n\nTokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `GLRMaskError` if an ID appears more than once.",
-    "Vocab.llama_cpp_end_token_ids": "The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.",
+    "Vocab": "A model's tokens and their bytes, from an`{id: bytes}`mapping. A token ID it doesn't contain never matches text, but a token set can still allow it.",
+    "Vocab.__init__": "Creates a vocabulary from an`{id: bytes}`mapping.",
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "The extern's name.",
     "Extern.kind": "What the extern can be bound to: `\"token\"` or `\"grammar\"`.",
@@ -217,5 +214,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "aa600c3042714fa399ed8841d9c90f3f654fb23fd5ed239ccb5fb7bc31dbc957"
+  "content_sha256": "80fc211984a64230a0d8f2e44c06fdae76b204be3b4484bebd8a6a6de8f42a9e"
 }

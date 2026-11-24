@@ -7,7 +7,7 @@ import glrmask
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes({0: b'a', 1: b'b', 2: b'a', 3: b'x', 7: b'a', 8: b'', 63: b''})
+    return glrmask.Vocab({0: b'a', 1: b'b', 2: b'a', 3: b'x', 7: b'a', 8: b'', 63: b''})
 
 
 def _bound_snapshot(source, name, value):
@@ -61,7 +61,7 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
 
 
 def test_json_schema_constructor_accepts_text_and_objects():
-    v = glrmask.Vocab.from_id_to_bytes({0: b'1', 1: b'2'})
+    v = glrmask.Vocab({0: b'1', 1: b'2'})
     for schema in ['{"const":1}', {'const': 1}]:
         c = glrmask.Grammar.from_json_schema(schema).compile(v)
         s = c.start()
@@ -135,7 +135,7 @@ def test_artifact_ownership_and_existing_vocab_validation():
     assert s.mask()[130]
     with pytest.raises(ValueError):
         glrmask.Constraint.load(raw[:-1], v)
-    other = glrmask.Vocab.from_id_to_bytes({0: b'changed'})
+    other = glrmask.Vocab({0: b'changed'})
     with pytest.raises(ValueError):
         glrmask.Constraint.load(raw, other)
 
@@ -152,7 +152,7 @@ def test_token_set_has_no_introspection_accessors():
 
 def test_token_set_and_sparse_membership_validation():
     assert hasattr(glrmask, "Expr")
-    v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
+    v = glrmask.Vocab({2: b"a", 7: b"a", 63: b""})
     g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
     m = glrmask.Module.load(glrmask.Module(g).save())
     # A token set is IDs only; IDs the vocabulary does not define are allowed in
@@ -247,9 +247,9 @@ def test_module_load_takes_only_bytes_and_from_expr_is_positional():
 
 
 def test_public_reprs_are_stable_and_python_quoted():
-    one = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    one = glrmask.Vocab({0: b"a"})
     assert repr(one) == "<glrmask.Vocab: 1 token>"
-    two = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
+    two = glrmask.Vocab({0: b"a", 1: b"b"})
     assert repr(two) == "<glrmask.Vocab: 2 tokens>"
 
     assert repr(glrmask.TokenSet([])) == "TokenSet.from_ranges([])"
@@ -327,9 +327,13 @@ def test_grammar_batch_bind_is_atomic():
     assert len(grammar.externs.unbound) == 0
 
 
-def test_vocab_from_dict_rejects_duplicate_ids():
-    with pytest.raises(ValueError, match="duplicate vocabulary ID 7"):
-        glrmask.Vocab.from_dict({b"a": 7, b"b": 7})
+def test_vocab_requires_bytes_values():
+    from collections import UserDict
+    assert isinstance(glrmask.Vocab(UserDict({0: b"a"})), glrmask.Vocab)
+    for value in ("a", bytearray(b"a"), memoryview(b"a")):
+        with pytest.raises(TypeError, match="vocab values must be bytes"):
+            glrmask.Vocab({7: value})
+
 
 
 def test_equality_with_other_types_is_false_not_an_error():

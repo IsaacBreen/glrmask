@@ -36,7 +36,7 @@ fn vocabulary(words: &[&[u8]]) -> Vocab {
             .enumerate()
             .map(|(id, bytes)| (id as u32, bytes.to_vec()))
             .collect(),
-    )
+    ).unwrap()
 }
 
 fn paren_depth(bytes: &[u8], mut depth: usize) -> Option<usize> {
@@ -79,7 +79,7 @@ fn recursive_static_parser_matches_literal_prefix_oracle_in_all_artifact_forms()
         .map(|(i, w)| (i as u32, w.to_vec()))
         .collect();
     entries.push((64, vec![]));
-    let v = Vocab::new(entries);
+    let v = Vocab::new(entries).unwrap();
     let c = parser
         .compile_with(
             &lexer,
@@ -405,7 +405,7 @@ fn an_empty_model_vocabulary_has_an_empty_mask_without_an_lr_table() {
         completion: StackTemplate::identity(),
     }).unwrap();
     let l = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-    let v = Vocab::new(vec![]);
+    let v = Vocab::new::<Vec<u8>>(vec![]).unwrap();
     let c = compile_static(&p, &l, &v);
     for c in representations(&c, &v) {
         assert!(c.start().is_accepting());

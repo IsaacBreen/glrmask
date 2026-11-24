@@ -13,7 +13,7 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     let read=|pos:&mut usize|{let n=u32::from_le_bytes(raw[*pos..*pos+4].try_into().unwrap());*pos+=4;n};
     let count=read(&mut pos);let mut tokens=Vec::new();
     for _ in 0..count{let id=read(&mut pos);let n=read(&mut pos) as usize;tokens.push((id,raw[pos..pos+n].to_vec()));pos+=n;}
-    assert_eq!(pos,raw.len());let vocab=Vocab::new(tokens);
+    assert_eq!(pos,raw.len());let vocab=Vocab::new(tokens).unwrap();
     let core_bytes=fs::read(cache.join("core.bin"))?;
     let dispatch_bytes=fs::read(cache.join("dispatch-literal.bin"))?;
     println!("prepared,shared,repeat,load_ns,prepare_core_ns,prepare_child_ns,parent_clone_ns,bind_ns");

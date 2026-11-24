@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn max_length_statistic_is_cached_per_vocab() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"longer".to_vec()),
             (2, vec![0xff, b'z']),

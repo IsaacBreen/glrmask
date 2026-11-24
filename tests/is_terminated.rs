@@ -76,7 +76,7 @@ fn assert_oracle(
 #[test]
 fn complete_match_terminates_and_a_rejected_commit_stays_terminated() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let constraint = compile(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), &vocab, strategy);
         let mut state = constraint.start();
         assert!(!state.is_accepting());
@@ -96,7 +96,7 @@ fn complete_match_terminates_and_a_rejected_commit_stays_terminated() {
 #[test]
 fn ignore_lexeme_keeps_an_accepting_state_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]).unwrap();
         let grammar = Grammar::from_lark("start: \"a\"\n%ignore /[ ]+/").unwrap();
         let constraint = compile(&grammar, &vocab, strategy);
 
@@ -113,7 +113,7 @@ fn ignore_lexeme_keeps_an_accepting_state_live() {
 #[test]
 fn partial_lexeme_is_not_terminated() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]).unwrap();
         let constraint = compile(&Grammar::from_ebnf(r#"start ::= "ab""#).unwrap(), &vocab, strategy);
         let mut state = constraint.start();
         assert!(state.commit_bytes(b"a"));
@@ -128,7 +128,7 @@ fn partial_lexeme_is_not_terminated() {
 #[test]
 fn repetition_keeps_an_accepting_state_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let constraint = compile(&Grammar::from_ebnf(r#"start ::= "a"+"#).unwrap(), &vocab, strategy);
         let mut state = constraint.start();
         assert!(state.commit_token(0));
@@ -143,7 +143,7 @@ fn repetition_keeps_an_accepting_state_live() {
 #[test]
 fn end_token_root_terminates_only_after_the_end_token() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let grammar = with_end_token(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), 99);
         let constraint = compile(&grammar, &vocab, strategy);
 
@@ -164,7 +164,7 @@ fn end_token_root_terminates_only_after_the_end_token() {
 #[test]
 fn special_token_on_the_normal_path_keeps_the_state_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let grammar = Grammar::from_glrm(
             "glrm 1; start root; extern token eos; nt root = \"a\" eos;",
         ).unwrap();
@@ -191,7 +191,7 @@ fn special_token_on_the_normal_path_keeps_the_state_live() {
 #[test]
 fn ignored_root_with_a_special_token_stays_live() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]).unwrap();
         let grammar = Grammar::from_glrm(
             r#"
                 glrm 1;
@@ -221,7 +221,7 @@ fn ignored_root_with_a_special_token_stays_live() {
 
 #[test]
 fn oracle_agrees_with_commit_for_every_prefix() {
-    let vocab_a = Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab_a = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     let json_vocab = Vocab::new(vec![
         (0, b"{".to_vec()),
         (1, b"}".to_vec()),
@@ -231,8 +231,8 @@ fn oracle_agrees_with_commit_for_every_prefix() {
         (5, b"0".to_vec()),
         (6, b"1".to_vec()),
         (7, b" ".to_vec()),
-    ]);
-    let plain_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    ]).unwrap();
+    let plain_vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
 
     let json_body = Grammar::from_lark(
         "start: \"{\" pair (\",\" pair)* \"}\"\npair: \"\\\"k\\\"\" \":\" (\"0\"|\"1\")\n%ignore /[ ]+/",
@@ -274,8 +274,8 @@ fn oracle_agrees_with_commit_for_every_prefix() {
 
 #[test]
 fn dynamic_runtime_oracle_agrees_with_commit_for_every_prefix() {
-    let plain_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
-    let ignore_vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]);
+    let plain_vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
+    let ignore_vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]).unwrap();
 
     let plain = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
     let repetition = Grammar::from_ebnf(r#"start ::= "a"+"#).unwrap();
@@ -325,7 +325,7 @@ fn dynamic_oracle(state: &glrmask::DynamicConstraintState, vocab: &Vocab) -> boo
 #[test]
 fn empty_commit_on_failed_state_returns_false() {
     for strategy in STRATEGIES {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let constraint = compile(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), &vocab, strategy);
 
         // Fresh state: both empty commits return true

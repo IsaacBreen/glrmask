@@ -454,7 +454,7 @@ mod tests {
             ),
         ] {
         let n = tokenizer.num_states() as usize;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, vec![]), (3, b"mn!".to_vec()), (11, b"mn!".to_vec()),
             (24, b"!ab".to_vec()), (81, b"z!".to_vec()), (100, b"q!".to_vec()),
             (103, b"!q!".to_vec()), (109, b"!".to_vec()), (200, vec![0xc2]),
@@ -506,7 +506,7 @@ mod tests {
         let tokenizer = crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
         let flat = super::super::l1::build_flat_transition_table(&tokenizer);
         let ownership = BoundaryOwnership::flat(&[0, 1], 2).unwrap();
-        let vocab = Vocab::new(vec![(8, b"a!".to_vec()), (20, b"b!".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(8, b"a!".to_vec()), (20, b"b!".to_vec())]);
         let (support, _) = crossing_prefix_seed_support(&tokenizer, &vocab, &flat, &ownership, ImmediateComponentId(0)).unwrap();
         assert!(support[0] && support[1] && support[2] && support[4]);
         // Local acceptance at entry is not a completion of this token: the

@@ -37,7 +37,7 @@ def assert_read_only_and_replay(state):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 3:b"ab"})
+    vocab = glrmask.Vocab({0:b"a", 1:b"b", 2:b"ab", 3:b"ab"})
     compiled = glrmask.Grammar.from_lark('start: "ab"').compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
@@ -50,7 +50,7 @@ def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"ab"})
+    vocab = glrmask.Vocab({0:b"a", 1:b"ab"})
     for source, expected in [('start: "ab"', [1]), ('start: "ab" | "ac"', [])]:
         compiled = glrmask.Grammar.from_lark(source).compile(vocab, **mode)
         for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
@@ -61,7 +61,7 @@ def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_spellingless_event_is_not_erased_from_byte_proof(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 9:b""})
+    vocab = glrmask.Vocab({0:b"a", 1:b"b", 2:b"ab", 9:b""})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | MARK;'
     ), "MARK", glrmask.TokenSet([9]))
@@ -73,7 +73,7 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_force_stops_at_acceptance_not_optional_continuation(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"c"})
+    vocab = glrmask.Vocab({0:b"a", 1:b"b", 2:b"c"})
     state = glrmask.Grammar.from_lark('start: "ab" "c"?').compile(vocab,**mode).start()
     assert not hasattr(state, "forced")
     assert assert_read_only_and_replay(state) == [0,1]
@@ -82,7 +82,7 @@ def test_force_stops_at_acceptance_not_optional_continuation(mode):
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("event_bytes", [b"", b"<mark>"])
 def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_bytes):
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"c", 9:event_bytes})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
@@ -101,7 +101,7 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
 
 @pytest.mark.parametrize("mode", MODES)
 def test_long_token_cannot_cross_possible_root_acceptance(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"abc", 9:b""})
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" | "ab"'), glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
@@ -115,7 +115,7 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes(
+    vocab = glrmask.Vocab(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"c", 9:b""})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
@@ -132,7 +132,7 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
 
 
 def test_commit_forced_tokens_semantics_match_commit_tokens_replay():
-    v = glrmask.Vocab.from_id_to_bytes({0: b"first ", 1: b"second ", 2: b"third ", 3: b"fourth ", 4: b"end"})
+    v = glrmask.Vocab({0: b"first ", 1: b"second ", 2: b"third ", 3: b"fourth ", 4: b"end"})
     grammar = glrmask.Grammar.from_glrm('glrm 1; start root; nt root = "first second third fourth end";')
     constraint = grammar.compile(v)
     state = constraint.start()

@@ -42,7 +42,7 @@ fn vocab(path: &Path) -> Result<Vocab, Box<dyn std::error::Error>> {
     let read=|at:&mut usize| {let n=u32::from_le_bytes(data[*at..*at+4].try_into().unwrap());*at+=4;n};
     let count=read(&mut at);let mut entries=Vec::new();
     for _ in 0..count {let id=read(&mut at);let n=read(&mut at) as usize;entries.push((id,data[at..at+n].to_vec()));at+=n;}
-    assert_eq!(at,data.len());Ok(Vocab::new(entries))
+    assert_eq!(at,data.len());Ok(Vocab::new(entries).unwrap())
 }
 #[derive(Deserialize)]
 struct Trace {label:String,token_ids:Vec<u32>}

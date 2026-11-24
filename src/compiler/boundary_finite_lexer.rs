@@ -226,7 +226,7 @@ pub fn prepare(source:&Tokenizer,vocab:&Vocab,seeds:&[bool],owners:&BoundaryOwne
         for source in [a,b,c]{let owners=BoundaryOwnership::flat(&[0,source.num_terminals()/2],source.num_terminals()).unwrap();
             for _ in 0..64{
                 let mut words=vec![b"def!".to_vec(),b"ab!c".to_vec()];for _ in 0..8{let n=1+next()%6;words.push((0..n).map(|_|b"abcxydef!"[next()%9]).collect());}
-                let vocab=Vocab::new(words.iter().enumerate().map(|(i,w)|((i*7)as u32,w.clone())).collect());
+                let vocab=Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|((i*7)as u32,w.clone())).collect());
                 let seeds=(0..source.num_states()).map(|_|next()%3!=0).collect::<Vec<_>>();
                 for completion in [false,true]{let built=prepare(&source,&vocab,&seeds,&owners,ImmediateComponentId(0),completion).unwrap();
                     for(q,&keep)in seeds.iter().enumerate(){if !keep{continue;}

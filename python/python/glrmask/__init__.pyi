@@ -22,7 +22,7 @@ GLRMask has four core types:
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
+vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
 grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
@@ -141,28 +141,9 @@ class TokenSet:
 
 @final
 class Vocab:
-    """A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it."""
-    @staticmethod
-    def from_dict(token_to_id: dict[Union[str, bytes], int], /) -> Vocab:
-        """Creates a vocabulary from a `{token: id}` dict.
-
-        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `GLRMaskError` if an ID appears more than once.
-        """
-        ...
-    @staticmethod
-    def from_id_to_bytes(id_to_bytes: dict[int, bytes], /) -> Vocab:
-        """Creates a vocabulary from an `{id: bytes}` dict. Raises `GLRMaskError` if an ID appears more than once."""
-        ...
-    @staticmethod
-    def from_llama_cpp(llm: Any, /) -> Vocab:
-        """Creates a vocabulary from a llama-cpp-python `Llama` model.
-
-        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `GLRMaskError` if an ID appears more than once.
-        """
-        ...
-    @property
-    def llama_cpp_end_token_ids(self) -> list[int]:
-        """The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one."""
+    """A model's tokens and their bytes, from an`{id: bytes}`mapping. A token ID it doesn't contain never matches text, but a token set can still allow it."""
+    def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
+        """Creates a vocabulary from an`{id: bytes}`mapping."""
         ...
 
 @final

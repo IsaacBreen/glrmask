@@ -44,7 +44,7 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
 
 #[test]
 fn forcing_stops_when_acceptance_competes_with_more_text() {
-    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
+    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]).unwrap();
     for mode in MODES {
         let c = Grammar::from_glrm("glrm 1; start root; nt root = \"ab\" \"c\"?;").unwrap()
             .compile_with_build_options(&vocab, mode.build_options()).unwrap();
@@ -58,7 +58,7 @@ fn exact_only_event_competes_with_text_even_without_spelling() {
     for empty_spelling in [false,true] {
         let mut entries=vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())];
         if empty_spelling { entries.push((9,Vec::new())); }
-        let vocab=Vocab::new(entries);
+        let vocab=Vocab::new(entries).unwrap();
         for mode in MODES {
             let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;").unwrap()
                 .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
@@ -70,7 +70,7 @@ fn exact_only_event_competes_with_text_even_without_spelling() {
 
 #[test]
 fn same_spelling_exact_event_is_not_a_byte_prefix_alias() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(9,b"a".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(9,b"a".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
@@ -81,7 +81,7 @@ fn same_spelling_exact_event_is_not_a_byte_prefix_alias() {
 
 #[test]
 fn singleton_mixed_id_keeps_ordinary_and_exact_successors() {
-    let vocab=Vocab::new(vec![(10,b"a".to_vec()),(11,b"b".to_vec()),(12,b"c".to_vec())]);
+    let vocab=Vocab::new(vec![(10,b"a".to_vec()),(11,b"b".to_vec()),(12,b"c".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK \"c\";").unwrap()
             .bind_snapshot("MARK",TokenSet::new([10])).unwrap()
@@ -95,7 +95,7 @@ fn singleton_mixed_id_keeps_ordinary_and_exact_successors() {
 
 #[test]
 fn canonical_alias_selection_excludes_reserved_root_end_ids() {
-    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"x\";").unwrap()
             .compile_with_build_options(&vocab,mode.build_options().end_tokens([0])).unwrap();
@@ -105,7 +105,7 @@ fn canonical_alias_selection_excludes_reserved_root_end_ids() {
 
 #[test]
 fn canonical_text_forcing_is_not_token_id_uniqueness() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec()),(4,b"abc".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec()),(4,b"abc".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap()
             .compile_with_build_options(&vocab,mode.build_options()).unwrap();
@@ -118,7 +118,7 @@ fn canonical_text_forcing_is_not_token_id_uniqueness() {
 fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() {
     let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),
-    ]);
+    ]).unwrap();
     let ordinary=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap();
     let guarded=Grammar::from_glrm(
         "glrm 1; start root; extern token MARK; nt root = \"ab\" | \"a\" MARK \"b\";",
@@ -145,9 +145,9 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
 
 #[test]
 fn exact_events_before_and_after_text_keep_their_original_ids() {
-    let vocab=Vocab::new(vec![
+    let vocab=Vocab::new::<Vec<u8>>(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),(8,Vec::new()),
-    ]);
+    ]).unwrap();
     for (event,expected) in [
         (8,vec![8,1,8]),
         (9,vec![9,1,9]),
@@ -171,7 +171,7 @@ fn exact_events_before_and_after_text_keep_their_original_ids() {
 
 #[test]
 fn unicode_forcing_does_not_need_individual_utf8_byte_tokens() {
-    let vocab=Vocab::new(vec![(0,"\u{e9}".as_bytes().to_vec()),(1,"\u{e9}\u{e9}".as_bytes().to_vec())]);
+    let vocab=Vocab::new(vec![(0,"\u{e9}".as_bytes().to_vec()),(1,"\u{e9}\u{e9}".as_bytes().to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"\u{e9}\u{e9}\";").unwrap()
             .compile_with_build_options(&vocab,mode.build_options()).unwrap();
@@ -181,7 +181,7 @@ fn unicode_forcing_does_not_need_individual_utf8_byte_tokens() {
 
 #[test]
 fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
-    let vocab=Vocab::new(vec![(0,b"ab".to_vec()),(1,b"abc".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"ab".to_vec()),(1,b"abc".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\" \"c\"?;").unwrap()
             .compile_with_build_options(&vocab,mode.build_options()).unwrap();
@@ -191,7 +191,7 @@ fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
 
 #[test]
 fn exact_event_chain_retains_ids_and_never_canonicalizes_equal_bytes() {
-    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]);
+    let vocab=Vocab::new::<Vec<u8>>(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token A; extern token B; extern token C; nt root = A B C;").unwrap()
             .bind_snapshot("A",TokenSet::new([1])).unwrap()
@@ -232,7 +232,7 @@ fn finite_language_force(words: &[&[u8]], vocab: &[(u32,Vec<u8>)]) -> Vec<u32> {
 fn finite_byte_languages_match_an_independent_forcing_oracle() {
     let entries=vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
         (3,b"ab".to_vec()),(4,b"ba".to_vec()),(5,b"bb".to_vec()),(6,b"aba".to_vec()),(7,b"ab".to_vec())];
-    let vocabulary=Vocab::new(entries.clone());
+    let vocabulary=Vocab::new(entries.clone()).unwrap();
     let words: [&[u8];5]=[b"a",b"ab",b"aba",b"abb",b"baa"];
     for subset in 1..(1<<words.len()) {
         let language=words.iter().enumerate().filter(|(i,_)| subset & (1<<i)!=0).map(|(_,word)|*word).collect::<Vec<_>>();
@@ -249,7 +249,7 @@ fn finite_byte_languages_match_an_independent_forcing_oracle() {
 
 #[test]
 fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"ab".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";").unwrap()
             .compile_with_build_options(&vocab,mode.build_options()).unwrap();
@@ -266,7 +266,7 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
 
 #[test]
 fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
-    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK \"a\" \"b\"?;").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
@@ -283,7 +283,7 @@ fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
 #[test]
 fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
     let v=Vocab::new(vec![(0,vec![0xC3]),(1,vec![0xA9]),(2,b"x".to_vec()),
-        (3,b"y".to_vec()),(4,"éx".as_bytes().to_vec())]);
+        (3,b"y".to_vec()),(4,"éx".as_bytes().to_vec())]).unwrap();
     let ordinary=Grammar::from_glrm("start root t TEXT=/éx/ nt root=TEXT").unwrap();
     let dual=Grammar::from_glrm("extern token MARK start root t TEXT=/éx/ nt root=TEXT | MARK \"y\"").unwrap()
         .bind_snapshot("MARK",TokenSet::new([0])).unwrap();
@@ -306,7 +306,7 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
 fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
     let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),
         (2,b" ".to_vec()),(3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),
-        (6,b"\t".to_vec())]);
+        (6,b"\t".to_vec())]).unwrap();
     let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap();
     let parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap();
     let p=parent.prepare(&v).unwrap().bind_snapshot("CHILD",child.prepare(&v).unwrap()).unwrap()
@@ -335,7 +335,7 @@ fn long_forced_fixture() -> (Constraint, Vocab) {
         (2, b"third ".to_vec()),
         (3, b"fourth ".to_vec()),
         (4, b"end".to_vec()),
-    ]);
+    ]).unwrap();
     let grammar = Grammar::from_glrm("glrm 1; start root; nt root = \"first second third fourth end\";").unwrap();
     let constraint = grammar.compile(&vocab).unwrap();
     (constraint, vocab)
@@ -356,7 +356,7 @@ fn commit_forced_tokens_semantics_match_commit_tokens_replay() {
 
 #[test]
 fn commit_forced_tokens_stops_after_1000_tokens_and_continues() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     let parts = (0..1005).map(|_| glrmask::Expr::literal("a"));
     let grammar = Grammar::from_expr(glrmask::Expr::sequence(parts)).unwrap();
     let constraint = grammar.compile(&vocab).unwrap();
@@ -371,7 +371,7 @@ fn commit_forced_tokens_stops_after_1000_tokens_and_continues() {
 
 #[test]
 fn code_bound_token_set_with_unregistered_id_is_allowed_after_literal() {
-    let vocab = Vocab::new(vec![(0, b"hello ".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"hello ".to_vec())]).unwrap();
     assert!(!vocab.contains_token_id(99));
     let mut module = glrmask::Module::new(&Grammar::from_glrm("glrm 1; start root; extern token SPECIAL; nt root = \"hello \" SPECIAL;").unwrap());
     module.bind("SPECIAL", TokenSet::new([99])).unwrap();

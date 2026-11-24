@@ -47,7 +47,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadwriteArray1};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use glrmask::__private::{
@@ -104,45 +104,6 @@ pub(crate) fn check_token_id(id: u32) -> PyResult<u32> {
     Ok(id)
 }
 
-fn checked_vocab(entries: Vec<(u32, Vec<u8>)>) -> PyResult<glrmask::Vocab> {
-    let mut ids = BTreeSet::new();
-    for (id, _) in &entries {
-        check_token_id(*id)?;
-        if !ids.insert(*id) {
-            return Err(glrmask_error("invalid_input", format!("duplicate vocabulary ID {id}")));
-        }
-    }
-    Ok(glrmask::Vocab::new(entries))
-}
-
-fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
-    let mut entries = Vec::with_capacity(token_to_id.len());
-    for (key, value) in token_to_id.iter() {
-        let token_bytes = key
-            .cast::<PyBytes>()
-            .map_err(|_| PyTypeError::new_err("vocab keys must be Python bytes"))?
-            .as_bytes()
-            .to_vec();
-        let token_id: u32 = value.extract()?;
-        entries.push((token_id, token_bytes));
-    }
-    checked_vocab(entries)
-}
-
-fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
-    let mut entries = Vec::with_capacity(id_to_bytes.len());
-    for (key, value) in id_to_bytes.iter() {
-        let token_id: u32 = key.extract()?;
-        let token_bytes = value
-            .cast::<PyBytes>()
-            .map_err(|_| PyTypeError::new_err("vocab values must be Python bytes"))?
-            .as_bytes()
-            .to_vec();
-        entries.push((token_id, token_bytes));
-    }
-    checked_vocab(entries)
-}
-
 fn external_terminal_bindings_from_dict(
     bindings: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<(String, Vec<u32>)>> {
@@ -166,90 +127,6 @@ fn external_terminal_bindings_from_dict(
         result.push((name, token_ids));
     }
     Ok(result)
-}
-
-fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u32>)> {
-    let py = llm.py();
-    let llama_cpp = py.import("llama_cpp")?;
-    let ctypes = py.import("ctypes")?;
-    let llama_vocab = llama_cpp
-        .getattr("llama_model_get_vocab")?
-        .call1((llm.getattr("model")?,))?;
-    let n_vocab: u32 = llm.call_method0("n_vocab")?.extract()?;
-    let excluded_attrs: u32 = llama_cpp
-        .getattr("LLAMA_TOKEN_ATTR_CONTROL")?
-        .extract::<u32>()?
-        | llama_cpp
-            .getattr("LLAMA_TOKEN_ATTR_UNUSED")?
-            .extract::<u32>()?;
-    let is_eog = llama_cpp.getattr("llama_vocab_is_eog")?;
-    let get_attr = llama_cpp.getattr("llama_vocab_get_attr")?;
-    let token_to_piece = llama_cpp.getattr("llama_token_to_piece")?;
-    let create_string_buffer = ctypes.getattr("create_string_buffer")?;
-
-    let mut entries = Vec::with_capacity(n_vocab as usize);
-    let mut end_token_ids = Vec::new();
-    let mut exact_only_token_ids = Vec::new();
-    for token_id in 0..n_vocab {
-        if is_eog.call1((&llama_vocab, token_id))?.is_truthy()? {
-            end_token_ids.push(token_id);
-            exact_only_token_ids.push(token_id);
-            continue;
-        }
-
-        let attrs: u32 = get_attr.call1((&llama_vocab, token_id))?.extract()?;
-        if attrs & excluded_attrs != 0 {
-            exact_only_token_ids.push(token_id);
-            continue;
-        }
-
-        let required: isize = token_to_piece
-            .call1((&llama_vocab, token_id, py.None(), 0, 0, false))?
-            .extract()?;
-        let capacity = if required < 0 {
-            required.checked_neg().ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "llama_token_to_piece returned an invalid size for token {token_id}"
-                ))
-            })?
-        } else {
-            required
-        };
-        if capacity == 0 {
-            exact_only_token_ids.push(token_id);
-            continue;
-        }
-
-        let buffer = create_string_buffer.call1((capacity,))?;
-        let length: isize = token_to_piece
-            .call1((&llama_vocab, token_id, &buffer, capacity, 0, false))?
-            .extract()?;
-        if length < 0 || length > capacity {
-            return Err(PyValueError::new_err(format!(
-                "llama_token_to_piece returned invalid length {length} for token {token_id}"
-            )));
-        }
-        if length == 0 {
-            exact_only_token_ids.push(token_id);
-            continue;
-        }
-
-        let raw = buffer.getattr("raw")?.cast_into::<PyBytes>()?;
-        let length = length as usize;
-        let raw = raw.as_bytes();
-        if length > raw.len() {
-            return Err(PyValueError::new_err(format!(
-                "llama.cpp wrote {length} bytes for token {token_id} into a {}-byte buffer",
-                raw.len()
-            )));
-        }
-        entries.push((token_id, raw[..length].to_vec()));
-    }
-
-    Ok((
-        checked_vocab(entries)?,
-        end_token_ids,
-    ))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -605,12 +482,11 @@ fn advance_trace_step_to_dict<'py>(
 // PyVocab
 // ---------------------------------------------------------------------------
 
-/// A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.
+/// A model's tokens and their bytes, from an `{id: bytes}` mapping. A token ID it doesn't contain never matches text, but a token set can still allow it.
 #[pyclass(name = "Vocab", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
-    llama_cpp_end_token_ids: Vec<u32>,
 }
 
 #[pymethods]
@@ -624,47 +500,23 @@ impl PyVocab {
         }
     }
 
-    /// Creates a vocabulary from a `{token: id}` dict.
-    ///
-    /// `str` tokens are UTF-8 encoded; `bytes` tokens are used as is.
-    #[staticmethod]
-    #[pyo3(signature = (token_to_id, /))]
-    fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let vocab = dict_to_vocab(token_to_id)?;
-        Ok(Self {
-            inner: vocab,
-            llama_cpp_end_token_ids: Vec::new(),
-        })
-    }
-
-    /// Creates a vocabulary from an `{id: bytes}` dict.
-    #[staticmethod]
+    #[new]
     #[pyo3(signature = (id_to_bytes, /))]
-    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
-        Ok(Self {
-            inner: vocab,
-            llama_cpp_end_token_ids: Vec::new(),
-        })
-    }
-
-    /// Creates a vocabulary from a llama-cpp-python `Llama` model.
-    ///
-    /// Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them.
-    #[staticmethod]
-    #[pyo3(signature = (llm, /))]
-    fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
-        Ok(Self {
-            inner: vocab,
-            llama_cpp_end_token_ids,
-        })
-    }
-
-    /// The model's end-of-generation token IDs, or an empty list if the vocabulary was not created by `from_llama_cpp`. Put them in a `TokenSet` after the grammar to require one.
-    #[getter]
-    fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
-        self.llama_cpp_end_token_ids.clone()
+    fn new(id_to_bytes: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let items = id_to_bytes.call_method0("items").map_err(|_| PyTypeError::new_err("vocab must be a mapping"))?;
+        let mut entries = Vec::new();
+        for item in items.try_iter()? {
+            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+            if !key.is_instance_of::<pyo3::types::PyInt>() {
+                return Err(PyTypeError::new_err("vocab keys must be integers"));
+            }
+            let id = key.extract::<u32>().map_err(|_| glrmask_error("invalid_input", "vocab token ID is outside the u32 range"))?;
+            let bytes = value.cast::<PyBytes>()
+                .map_err(|_| PyTypeError::new_err("vocab values must be bytes"))?;
+            entries.push((id, bytes.as_bytes().to_vec()));
+        }
+        let inner = glrmask::Vocab::new(entries).map_err(|error| glrmask_error(kind_name(error.kind()), error.to_string()))?;
+        Ok(Self { inner })
     }
 
 }

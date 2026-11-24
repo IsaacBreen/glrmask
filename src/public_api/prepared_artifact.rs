@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn malformed_graphs_fail_before_compiled_bodies_are_loaded() {
-        let v = Vocab::new(vec![(0,b"x".to_vec())]);
+        let v = Vocab::from_entries_unchecked(vec![(0,b"x".to_vec())]);
         let child = Grammar::from_glrm("start root nt root=\"x\"").unwrap().prepare(&v).unwrap();
         let parent = Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD").unwrap()
             .prepare(&v).unwrap().bind_snapshot("CHILD",child).unwrap();

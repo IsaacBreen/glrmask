@@ -1,7 +1,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, Expr, Grammar, MaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
 fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
-fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())])}
+fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).unwrap()}
 
 #[test]
 fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
@@ -15,7 +15,7 @@ fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
 }
 #[test]
 fn grammar_bind_accepts_every_binding_kind() {
-    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(7,b"x".to_vec()),(8,b"y".to_vec()),(9,b"z".to_vec())]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(7,b"x".to_vec()),(8,b"y".to_vec()),(9,b"z".to_vec())]).unwrap();
     let owned=Grammar::from_glrm("start root nt root=\"a\"").unwrap();
     let borrowed=Grammar::from_glrm("start root nt root=\"b\"").unwrap();
     let tokens=TokenSet::new([7]);

@@ -15,7 +15,7 @@ use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
 const NULLABLE_AMBIGUOUS: &str = "start: n0\nn0: \"a\" | n0 n0 |\n";
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
+    Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
 }
 
 fn token_trie() -> crate::runtime::Constraint {

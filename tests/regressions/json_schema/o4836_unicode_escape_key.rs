@@ -45,7 +45,7 @@ fn vocab(entries: &[&[u8]]) -> Vocab {
             .iter()
             .enumerate()
             .map(|(id, bytes)| (id as u32, bytes.to_vec()))
-            .collect())
+            .collect::<Vec<_>>()).unwrap()
 }
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {

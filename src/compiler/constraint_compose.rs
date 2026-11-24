@@ -23514,7 +23514,7 @@ pub(crate) fn load_vocab(path: &str) -> Vocab {
         offset = end;
     }
     assert_eq!(offset, bytes.len());
-    Vocab::new(entries)
+    Vocab::from_entries_unchecked(entries)
 }
 
 #[cfg(test)]
@@ -23530,7 +23530,7 @@ mod tests {
     include!("minbound_scoped_ignore.rs");
 
     fn byte_vocab() -> Vocab {
-        Vocab::new(
+        Vocab::from_entries_unchecked(
             (0u32..=255)
                 .map(|byte| (byte, vec![byte as u8]))
                 .collect(),
@@ -23585,7 +23585,7 @@ mod tests {
     #[cfg(feature = "internal-api")]
     #[test]
     fn grammar_level_inline_reference_matches_segmented_static_and_dynamic() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),
@@ -23661,7 +23661,7 @@ mod tests {
 
     #[test]
     fn dynamic_recursive_unprepared_inputs_use_minimal_shared_linker() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"!".to_vec()), (4, b"Xa".to_vec()), (5, b"b!".to_vec()),
             (6, b"Xab!".to_vec()), (7, b"XX".to_vec()), (8, b"c".to_vec()),
@@ -23727,7 +23727,7 @@ mod tests {
 
     #[test]
     fn dynamic_recursive_shared_fast_matches_borrowed_and_reload() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"b".to_vec()),
@@ -24063,7 +24063,7 @@ mod tests {
 
     #[test]
     fn structural_sharing_quotients_duplicate_child_lr_regions() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<abc>,<abc>".to_vec()),
             (2, b"<".to_vec()),
             (3, b"a".to_vec()),
@@ -24275,7 +24275,7 @@ table: &child_tables[index],
     #[test]
     #[ignore = "historical unsupported compiled-artifact flattened composer"]
     fn runtime_lexer_product_coalesces_equivalent_ambiguous_child_lanes() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -25068,7 +25068,7 @@ table: &child_table,
 
     #[test]
     fn owned_parent_composition_matches_borrowed_and_monolithic() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<ab>".to_vec()),
             (1, b"<a".to_vec()),
             (2, b"b>".to_vec()),
@@ -25150,7 +25150,7 @@ table: &child_table,
     #[test]
     #[allow(deprecated)]
     fn legacy_owned_parent_composition_is_unsupported() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -25247,7 +25247,7 @@ table: &child_table,
 
     #[test]
     fn prepared_loaded_components_match_fresh_owned_composition() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<ab>".to_vec()),
             (1, b"<a".to_vec()),
             (2, b"b>".to_vec()),
@@ -25299,7 +25299,7 @@ table: &child_table,
 
     #[test]
     fn composition_rejects_placeholder_that_matches_a_real_vocab_token() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -25332,7 +25332,7 @@ table: &child_table,
 
     #[test]
     fn repeated_call_sites_match_monolithic_on_all_small_reachable_prefixes() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<a>b!".to_vec()),
             (1, b"<b>a!".to_vec()),
             (2, b"<".to_vec()),
@@ -25384,7 +25384,7 @@ table: &child_table,
 
     #[test]
     fn recursive_child_matches_monolithic_on_all_small_reachable_prefixes() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xaa!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"Xa".to_vec()),
@@ -25433,7 +25433,7 @@ table: &child_table,
 
     #[test]
     fn parent_ignore_terminal_matches_monolithic_across_child_boundaries() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X a!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"X".to_vec()),
@@ -25514,7 +25514,7 @@ table: &child_table,
 
     #[test]
     fn child_exact_special_token_survives_composition() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -25581,7 +25581,7 @@ table: &child_table,
         //   token 3 = "X" enters the child at reset;
         //   token 4 = "ta" completes child T and starts parent IGNORE;
         //   token 5 = "b!" completes IGNORE in the following model token.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa".to_vec()),
             (1, b"bt".to_vec()),
             (2, b"!".to_vec()),
@@ -25764,7 +25764,7 @@ table: &child_table,
 
     #[test]
     fn child_ignore_terminal_is_scoped_across_fused_boundaries() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X a!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"X".to_vec()),
@@ -25958,7 +25958,7 @@ table: &child_table,
 
     #[test]
     fn distinct_parent_and_child_ignore_terminals_match_inline_scoped_semantics() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X \ta!".to_vec()),
             (1, b"X\ta!".to_vec()),
             (2, b"X".to_vec()),
@@ -26116,7 +26116,7 @@ table: &child_table,
         ignore = "slow (~21s); run with --features slow-tests"
     )]
     fn scoped_ignore_oracle_survives_reload_and_nested_recomposition() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<".to_vec()),
             (1, b">".to_vec()),
             (2, b"X".to_vec()),
@@ -26359,7 +26359,7 @@ table: &child_table,
         // across static/dynamic/loaded/inline; explicit valid completions;
         // rejections with first-rejection-index agreement; save/load parity;
         // real StaticParser shards installed.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"!".to_vec()),
             (2, b"a".to_vec()),
@@ -26528,7 +26528,7 @@ table: &child_table,
         // proof: the tiny fixture does not trigger dynamic-virtual
         // optimization (see the dedicated lexer certificate unit test).
         // Prefix `Xab` stays extendible; only completed `Xab!` is forbidden.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"!".to_vec()),
             (2, b"a".to_vec()),
@@ -26713,7 +26713,7 @@ table: &child_table,
 
     #[test]
     fn adjacent_precomposed_child_can_begin_with_child_only_token() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             // End the first child at a model-token boundary, then begin the
             // already-composed second child with a token containing no parent
             // or first-child terminal at all.  A mixed-owner-only boundary
@@ -26864,7 +26864,7 @@ table: &child_table,
 
     #[test]
     fn adjacent_calls_to_same_child_accept_child_only_second_token() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -26925,7 +26925,7 @@ table: &child_table,
 
     #[test]
     fn adjacent_children_with_uniform_ignore_compile_controls_and_keep_global_ignore() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X a".to_vec()),
             (1, b" a".to_vec()),
             (2, b" !".to_vec()),
@@ -27086,7 +27086,7 @@ table: &child_table,
 
     #[test]
     fn nonterminal_mediated_adjacent_calls_use_explicit_linker() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -27133,7 +27133,7 @@ table: &child_table,
 
     #[test]
     fn same_compiled_child_can_fill_two_distinct_placeholders() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<a>,<b>".to_vec()),
             (1, b"<b>,<a>".to_vec()),
             (2, b"<".to_vec()),
@@ -27186,7 +27186,7 @@ table: &child_table,
 
     #[test]
     fn three_distinct_children_match_monolithic_across_one_fused_token() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"[a|b|c]".to_vec()),
             (1, b"[a|".to_vec()),
             (2, b"b|".to_vec()),
@@ -27290,7 +27290,7 @@ table: &child_table,
     fn composition_preserves_out_of_vocab_end_tokens() {
         const PLACEHOLDER_TOKEN: u32 = 999;
         const END_TOKEN: u32 = 1000;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa!".to_vec()),
             (1, b"X".to_vec()),
             (2, b"a".to_vec()),
@@ -27361,7 +27361,7 @@ table: &child_table,
 
     fn composition_compiles_named_special_continuation_into_static_mask() {
         const SPECIAL_TOKEN: u32 = 1000;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa".to_vec()),
             (1, b"X".to_vec()),
             (2, b"a".to_vec()),
@@ -27416,7 +27416,7 @@ table: &child_table,
     #[test]
     fn nullable_child_to_named_special_is_masked() {
         const SPECIAL_TOKEN: u32 = 1000;
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
@@ -27470,7 +27470,7 @@ table: &child_table,
 
     fn composition_rejects_placeholder_token_id_reused_by_live_end_token() {
         const SHARED_TOKEN: u32 = 999;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa!".to_vec()),
             (1, b"X".to_vec()),
             (2, b"a".to_vec()),
@@ -27508,7 +27508,7 @@ table: &child_table,
     #[test]
     fn child_end_token_survives_composition_and_blocks_nested_sentinel_reuse() {
         const END_TOKEN: u32 = 100;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
             (2, b"!".to_vec()),
@@ -27578,7 +27578,7 @@ table: &child_table,
 
     #[test]
     fn substitution_can_make_the_composed_start_nullable_for_later_embedding() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"X".to_vec()),
@@ -27851,7 +27851,7 @@ table: &child_table,
         // tests temporarily arm the process-wide strict-static trap, so its
         // readers must share the writers' lock as well.
         let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"x".to_vec()),
             (1, b"y".to_vec()),
             (2, b"z".to_vec()),
@@ -28014,7 +28014,7 @@ table: &child_table,
 
     #[test]
     fn composed_constraint_matches_monolithic_for_fused_entry_and_exit_tokens() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<a".to_vec()),
             (1, b"b>".to_vec()),
             (2, b"ab".to_vec()),
@@ -28078,7 +28078,7 @@ table: &child_table,
 
     #[test]
     fn composed_constraint_matches_monolithic_for_child_outer_child_token() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<a".to_vec()),
             (1, b"b>,<c".to_vec()),
             (2, b"d>".to_vec()),
@@ -28185,7 +28185,7 @@ table: &child_table,
         // complete the child, and after R only ay (not ax). A shared
         // child-start row that resolves the return to a single call site
         // under-admits the other site's fused token here.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"ay".to_vec()),
             (2, b"L".to_vec()),
@@ -28296,7 +28296,7 @@ table: &child_table,
 
     #[test]
     fn nullable_child_composition_matches_monolithic_across_empty_and_nonempty_paths() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"X".to_vec()),
@@ -28505,7 +28505,7 @@ table: &child_table,
 
     #[test]
     fn nested_composition_matches_flat_monolithic_across_all_boundaries() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X[a]!".to_vec()),
             (1, b"X[".to_vec()),
             (2, b"a]".to_vec()),
@@ -28569,7 +28569,7 @@ table: &child_table,
 
     #[test]
     fn nested_composition_preserves_nullable_start_through_save_load() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X!".to_vec()),
             (1, b"Xa!".to_vec()),
             (2, b"X".to_vec()),
@@ -28712,7 +28712,7 @@ table: &child_table,
         const GM: u32 = 9;
         const GX: u32 = 10;
         const GY: u32 = 11;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -29130,7 +29130,7 @@ table: &child_table,
         const RM: u32 = 7;
         const GX: u32 = 10;
         const GY: u32 = 11;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -29402,7 +29402,7 @@ table: &child_table,
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -29553,7 +29553,7 @@ table: &child_table,
         const RY: u32 = 8;
         const YY: u32 = 9;
         const YZ: u32 = 10;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -30005,7 +30005,7 @@ table: &child_table,
         const ZX: u32 = 7;
         const RY: u32 = 8;
         const YY: u32 = 9;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -30408,7 +30408,7 @@ table: &child_table,
         const XY: u32 = 6;
         const YX: u32 = 7;
         const YY: u32 = 8;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -30725,7 +30725,7 @@ table: &child_table,
         const YY: u32 = 9;
         const YZ: u32 = 10;
         const ZX: u32 = 11;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -31121,7 +31121,7 @@ table: &child_table,
         const ZX: u32 = 8;
         const RY: u32 = 9;
         const YY: u32 = 10;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -31486,7 +31486,7 @@ table: &child_table,
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -31596,7 +31596,7 @@ table: &child_table,
         const XX: u32 = 5;
         const RY: u32 = 6;
         const YY: u32 = 7;
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -31889,7 +31889,7 @@ table: &child_table,
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -31987,7 +31987,7 @@ table: &child_table,
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),
@@ -32054,7 +32054,7 @@ table: &child_table,
 
     #[test]
     fn internal_composition_matches_monolithic_for_child_alternatives() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"Xa".to_vec()),
             (1, b"b!".to_vec()),
             (2, b"Xc".to_vec()),
@@ -32164,7 +32164,7 @@ table: &child_table,
             (258, b"}}".to_vec()),
             (259, b"{\"value\": {".to_vec()),
         ]);
-        Vocab::new(entries)
+        Vocab::from_entries_unchecked(entries)
     }
 
     fn run_sizeable_json_schema_composition_benchmark(
@@ -32241,7 +32241,7 @@ table: &child_table,
     #[test]
     #[ignore]
     fn explicit_scoped_control_runtime_benchmark_probe() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"X".to_vec()),
             (1, b" ".to_vec()),
             (2, b"\t".to_vec()),
@@ -33453,7 +33453,7 @@ table: &child_table,
                     .split_whitespace()
                     .map(|value| value.parse::<u32>().expect("parse filtered token id"))
                     .collect::<BTreeSet<_>>();
-                vocab = Vocab::new(
+                vocab = Vocab::from_entries_unchecked(
                     vocab
                         .entries_map()
                         .iter()
@@ -36737,7 +36737,7 @@ table: &dispatch.table,
                 fs::write(&ti_core_path, format!("{text}\n")).expect("write T dump");
                 ti
             };
-            let ti_vocab = Vocab::new(
+            let ti_vocab = Vocab::from_entries_unchecked(
                 vocab
                     .entries_map()
                     .iter()
@@ -36919,7 +36919,7 @@ table: &dispatch.table,
                 fs::write(&ti_dispatch_path, format!("{text}\n")).expect("write T dump");
                 ti
             };
-            let ti_vocab_dispatch = Vocab::new(
+            let ti_vocab_dispatch = Vocab::from_entries_unchecked(
                 vocab
                     .entries_map()
                     .iter()
@@ -37500,7 +37500,7 @@ table: &dispatch.table,
                 fs::write(&ti_schema0_path, format!("{text}\n")).expect("write T dump");
                 ti
             };
-            let ti_vocab = Vocab::new(
+            let ti_vocab = Vocab::from_entries_unchecked(
                 vocab
                     .entries_map()
                     .iter()

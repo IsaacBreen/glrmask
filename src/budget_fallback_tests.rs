@@ -151,7 +151,7 @@ fn accepts(case: Case, word: &[u8]) -> bool {
 }
 
 fn fuzz_vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"c".to_vec()),
@@ -453,7 +453,7 @@ const REAL_GRAMMARS: &[(&str, &str)] = &[
 ];
 
 fn real_vocab() -> Vocab {
-    Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect())
+    Vocab::from_entries_unchecked((0..=255u32).map(|id| (id, vec![id as u8])).collect())
 }
 
 #[test]

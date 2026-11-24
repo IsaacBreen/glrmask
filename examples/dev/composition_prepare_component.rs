@@ -24,7 +24,7 @@ fn read_vocab(path: &Path) -> Vocab {
         offset = end;
     }
     assert_eq!(offset, input.len(), "trailing vocabulary data");
-    Vocab::new(entries)
+    Vocab::new(entries).unwrap()
 }
 
 fn main() {

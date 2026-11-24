@@ -371,7 +371,7 @@ mod finite_context_gate {
             for case in 0..32 {
                 let mut words = vec![b"def!".to_vec(),b"ab!".to_vec(),b"abc".to_vec(),b"a b".to_vec(),b"!defa".to_vec()];
                 for _ in 0..10 { let len=1+next()%6; words.push((0..len).map(|_|b"abcdef! "[next()%8]).collect()); }
-                let vocab = Vocab::new(words.iter().enumerate().map(|(i,w)|((i*7)as u32,w.clone())).collect());
+                let vocab = Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|((i*7)as u32,w.clone())).collect());
                 let mut selected = (0..tokenizer.num_states()).map(|_| next()%3 != 0).collect::<Vec<_>>();
                 selected[0] = true; // Exercise a mixed-owner epsilon dispatcher too.
                 let mut follows = BTreeMap::new();
@@ -517,7 +517,7 @@ fn build_boundary_terminal_dwa_query_jobs(
     let mut groups=Vec::new();
     for mut entries in routed.into_values(){
         entries.sort_unstable_by(|a,b|a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        for chunk in entries.chunks(size){groups.push(Vocab::new(chunk.to_vec()));}
+        for chunk in entries.chunks(size){groups.push(Vocab::from_entries_unchecked(chunk.to_vec()));}
     }
     if groups.len()<2 || groups.len()>256{return compile_one(inputs,shared);}
     let flat:Arc<[u32]>=inputs.flat_trans.cloned().unwrap_or_else(||Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer)));
@@ -1231,7 +1231,7 @@ where
                 if entries.len() != ids.len() {
                     panic!("boundary candidate summary contains token IDs outside vocabulary");
                 }
-                candidate_storage = Vocab::new(entries);
+                candidate_storage = Vocab::from_entries_unchecked(entries);
                 &candidate_storage
             }
             Some(None) | None => inputs.vocab,
@@ -1364,7 +1364,7 @@ where
                         started.elapsed().as_secs_f64() * 1000.0);
                 }
                 if !support.tokens.is_empty() && support.tokens.len() < candidate_vocab.len() {
-                    live_vocab = Some(Vocab::new(support.tokens.into_iter().map(|id| {
+                    live_vocab = Some(Vocab::from_entries_unchecked(support.tokens.into_iter().map(|id| {
                         (id, candidate_vocab.entries_map()[&id].clone())
                     }).collect()));
                 }
@@ -3915,7 +3915,7 @@ mod tests {
         );
         let _no_small_skip = EnvVarGuard::set("GLRMASK_P0_TI_SKIP_MAX_TOKENIZER_STATES", "0");
 
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -4115,7 +4115,7 @@ mod tests {
         // - "bd": pair (PB,CD) never adjacent (PB is last) -> pruned.
         // - "ab", "cd": single-component paths -> internal, not crossing.
         // - single bytes: no reset strictly inside -> never crossing.
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"c".to_vec()),
@@ -5587,7 +5587,7 @@ mod tests {
                 .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
         }
 
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"ay".to_vec()),
             (2, b"L".to_vec()),
@@ -6097,7 +6097,7 @@ mod tests {
     /// nonnullable completion, against the independent inline grammar.
     #[test]
     fn nullable_static_link_matches_dynamic_and_inline_after_reload() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()), (1, b"a".to_vec()), (2, b"x".to_vec()),
             (3, b"La".to_vec()), (4, b"ax".to_vec()), (5, b"Lx".to_vec()),
             (6, b"Lax".to_vec()),
@@ -6197,7 +6197,7 @@ mod tests {
             }
         }
 
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"ay".to_vec()),
             (2, b"L".to_vec()),
@@ -6348,7 +6348,7 @@ mod tests {
     /// with it the link succeeds.
     #[test]
     fn strict_baseline_inherits_shard_scope_on_divergent_fixture() {
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"ax".to_vec()),
             (1, b"ay".to_vec()),
             (2, b"L".to_vec()),
@@ -6548,7 +6548,7 @@ mod tests {
         const GY: u32 = 11;
 
         let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
             (2, b"x".to_vec()),

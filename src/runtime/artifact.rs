@@ -11593,7 +11593,7 @@ mod immutable_tokenizer_tests {
     }
     #[test]
     fn constraint_clone_shares_the_same_immutable_lexer() {
-        let vocab=crate::Vocab::new(vec![(1,b"a".to_vec()),(2,b"b".to_vec())]);
+        let vocab=crate::Vocab::from_entries_unchecked(vec![(1,b"a".to_vec()),(2,b"b".to_vec())]);
         let source=Constraint::from_glrm_grammar(r#"start x; nt x = "a" | "b";"#,&vocab).unwrap();
         let copy=source.clone();assert!(Arc::ptr_eq(&source.tokenizer,&copy.tokenizer));assert_eq!(source.save(),copy.save());
     }
@@ -11636,7 +11636,7 @@ mod raw_terminal_radius_tests {
 
     #[test]
     fn raw_terminal_radius_matches_exhaustive_ascii_and_multibyte_words() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()),
+        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec()),
                                     (2, "é".as_bytes().to_vec())]);
         let fixtures: [(&str, &str, Vec<&[u8]>); 3] = [
             (r"[ab]{1,4}", r"[ab]+", vec![b"a", b"b"]),

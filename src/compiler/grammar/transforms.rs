@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn dynamic_native_recursive_unary_preserves_full_masks_and_unbounded_completion() {
-        let vocab = crate::Vocab::new((0..=255).map(|id| (id, vec![id as u8])).collect());
+        let vocab = crate::Vocab::from_entries_unchecked((0..=255).map(|id| (id, vec![id as u8])).collect());
         let grammar = "start p; nt p = unary ';'; nt unary = 'x' | '!' unary;";
         let constraint = crate::DynamicConstraint::from_glrm_with_bounded_template_parser(grammar, &vocab).unwrap();
         let backend = crate::__private::dynamic_parser_backend_report(&constraint);
@@ -1838,7 +1838,7 @@ mod tests {
 
     #[test]
     fn native_empty_unary_start_completion_survives_public_and_dynamic_artifacts() {
-        let vocab = crate::Vocab::new((0..256).map(|id| (id, vec![id as u8])).collect());
+        let vocab = crate::Vocab::from_entries_unchecked((0..256).map(|id| (id, vec![id as u8])).collect());
         let source = "start s; nt s = '!' s | '';";
         let mut expected = vec![0; 8];
         expected[b'!' as usize / 32] = 1 << (b'!' % 32);
@@ -1874,7 +1874,7 @@ mod tests {
 
     #[test]
     fn native_nullable_start_rejects_incomplete_nonempty_prefixes() {
-        let vocab = crate::Vocab::new((0..256).map(|id| (id, vec![id as u8])).collect());
+        let vocab = crate::Vocab::from_entries_unchecked((0..256).map(|id| (id, vec![id as u8])).collect());
         let source = "start s; nt s = '' | '!' 'x';";
         let mut initial = vec![0; 8];
         initial[b'!' as usize / 32] = 1 << (b'!' % 32);

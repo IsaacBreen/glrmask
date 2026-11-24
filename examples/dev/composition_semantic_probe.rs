@@ -18,7 +18,7 @@ fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {
     for n in 0..256 {
         entries.push((entries.len() as u32, format!("dead-branch-{n:04}").into_bytes()));
     }
-    (Vocab::new(entries.clone()), entries)
+    (Vocab::new(entries.clone()).unwrap(), entries)
 }
 
 fn token(entries: &[(u32, Vec<u8>)], text: &str) -> u32 {

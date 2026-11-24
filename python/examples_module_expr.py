@@ -1,7 +1,7 @@
 """Small canonical assembly example; run against the installed glrmask wheel."""
 from glrmask import Expr, Grammar, Module, ParserBackend, TokenTrie, Vocab
 
-vocab = Vocab.from_id_to_bytes({0: b'xay', 1: b'xby'})
+vocab = Vocab({0: b'xay', 1: b'xby'})
 child = Module(Grammar.from_lark('start: "a"'))
 child.precompile(vocab, mask_strategy=TokenTrie(
     parser_backend=ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))

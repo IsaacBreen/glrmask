@@ -13,7 +13,7 @@ def test_invalid_input():
         g.bind("missing", 0)
     assert exc.value.kind == "invalid_input"
     with pytest.raises(glrmask.GLRMaskError) as exc:
-        g.compile(glrmask.Vocab.from_id_to_bytes({0: b"a"}))
+        g.compile(glrmask.Vocab({0: b"a"}))
     assert exc.value.kind == "invalid_input"
     g.bind("E", 0)
     with pytest.raises(glrmask.GLRMaskError) as exc:

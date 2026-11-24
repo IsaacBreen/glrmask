@@ -29,9 +29,9 @@
 //! use glrmask::{Grammar, Vocab};
 //!
 //! fn main() -> glrmask::Result<()> {
-//!     let vocab = Vocab::new(vec![
+//!     let vocab = Vocab::new([
 //!         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
-//!     ]);
+//!     ])?;
 //!     let grammar = Grammar::from_lark(r#"start: "hello" " " "world""#)?;
 //!     let constraint = grammar.compile(&vocab)?;
 //!     let mut state = constraint.start();
@@ -379,7 +379,7 @@ pub mod __private {
         // component-local boundary certificate as the public compiler does,
         // before physical table/rule removal makes recomputation impossible.
         let vocab = constraint.late_bind_vocab.get().cloned().unwrap_or_else(|| {
-            Vocab::new(
+            Vocab::from_entries_unchecked(
                 constraint
                     .token_bytes_iter()
                     .map(|(token_id, bytes)| (token_id, bytes.to_vec()))

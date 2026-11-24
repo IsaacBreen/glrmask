@@ -87,7 +87,7 @@ fn words() -> Vec<Vec<u32>> {
 #[test]
 fn minimal_right_recursion_grammar_compiles_and_masks_match_the_language() {
     let expected = language();
-    let vocab = Vocab::new(vec![
+    let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"c".to_vec()),

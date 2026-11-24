@@ -17,7 +17,7 @@ fn read_vocab(path: &str) -> Vocab {
         (id.parse::<u32>().expect("token id"), bytes)
     }).collect::<Vec<_>>();
     eprintln!("VOCAB entries={}", entries.len());
-    Vocab::new(entries)
+    Vocab::new(entries).unwrap()
 }
 
 fn percentile(values: &mut [f64], q: f64) -> f64 {

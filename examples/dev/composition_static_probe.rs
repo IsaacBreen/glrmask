@@ -24,7 +24,7 @@ fn vocabulary(depth: usize) -> Vocab {
         layer = next;
     }
     words.extend([b"X[a]!".to_vec(), b"X[abc]!".to_vec(), b"abc]!".to_vec()]);
-    Vocab::new(words.into_iter().enumerate().map(|(id, b)| (id as u32, b)).collect())
+    Vocab::new(words.into_iter().enumerate().map(|(id, b)| (id as u32, b)).collect::<Vec<_>>()).unwrap()
 }
 
 fn percentile(times: &mut [f64], q: f64) -> f64 {

@@ -52,7 +52,7 @@ fn disable_test_rescue() {
 const TOKEN_BYTES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()),
         (1, b"b".to_vec()),
         (2, b"c".to_vec()),
@@ -933,7 +933,7 @@ fn fuzz_e86d_seed_4754_publishes_exact_masks_within_budget() {
 const JSON_TOKENS: [&[u8]; 3] = [b"\"", b"a", b"b"];
 
 fn json_vocab() -> Vocab {
-    Vocab::new(
+    Vocab::from_entries_unchecked(
         JSON_TOKENS
             .iter()
             .enumerate()

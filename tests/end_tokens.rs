@@ -3,7 +3,7 @@ use glrmask::{DynamicConstraint, Grammar, Constraint, Vocab};
 
 #[test]
 fn termination_is_caller_policy_after_acceptance() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (64, Vec::new())]);
+    let vocab = Vocab::new::<Vec<u8>>(vec![(0, b"a".to_vec()), (64, Vec::new())]).unwrap();
     let grammar = Grammar::ebnf(r#"start ::= "a""#);
     let static_constraint = Constraint::compile(grammar.clone(), &vocab).unwrap();
     let dynamic_constraint = DynamicConstraint::compile(grammar, &vocab).unwrap();
@@ -24,7 +24,7 @@ fn termination_is_caller_policy_after_acceptance() {
 
 #[test]
 fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle_across_modes() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]).unwrap();
     let grammar = Grammar::ebnf(r#"start ::= "a" "b"?"#);
     let allowed = |mask: &[u32], token: u32| -> bool {
         let word_idx = token as usize / 32;

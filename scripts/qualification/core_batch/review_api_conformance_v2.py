@@ -90,7 +90,7 @@ def walk(c):
         for id in np.flatnonzero(state.mask()).tolist()[:8]:
             child=state.clone();child.commit_token(int(id));todo.append((child,depth+1))
 
-v=g.Vocab.from_id_to_bytes({0:b"a",1:b"b",2:b"ab",3:b"abc",4:b"a",5:b" ",6:b"c",7:b"",8:b"x",32:b"\xc3",33:b"\xa9",34:chr(233).encode(),67:b"a",99:b"",130:b""})
+v=g.Vocab({0:b"a",1:b"b",2:b"ab",3:b"abc",4:b"a",5:b" ",6:b"c",7:b"",8:b"x",32:b"\xc3",33:b"\xa9",34:chr(233).encode(),67:b"a",99:b"",130:b""})
 for source in [
     'start root nt root="ab" "c"?',
     'start root t X=/a|ab/ nt root=X "c"?',

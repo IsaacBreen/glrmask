@@ -7,7 +7,7 @@ holds a grammar, its bindings and any precompiled work, so parts you reuse, such
 ```python
 import glrmask
 
-vocab = glrmask.Vocab.from_id_to_bytes({i: bytes([i]) for i in range(256)})
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
 weather = glrmask.Module(glrmask.Grammar.from_json_schema(
     '{"type": "object", "properties": {"city": {"type": "string"}},'
     ' "required": ["city"], "additionalProperties": false}'))

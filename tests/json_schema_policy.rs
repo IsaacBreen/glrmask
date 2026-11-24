@@ -3,7 +3,7 @@ use glrmask::{Grammar, Vocab};
 use serde_json::{Value, json};
 
 fn check(schema: Value, examples: &[(&str, bool)]) {
-    let vocab = Vocab::new((0..=255).map(|b| (b, vec![b as u8])).collect());
+    let vocab = Vocab::new((0..=255).map(|b| (b, vec![b as u8])).collect::<Vec<_>>()).unwrap();
     let text = schema.to_string();
     for mode in MaskMode::ALL {
         let constraint = Grammar::from_json_schema(&text).unwrap().compile_with_build_options(&vocab, mode.build_options()).unwrap_or_else(|e| panic!("{schema} {mode:?}: {e}"));

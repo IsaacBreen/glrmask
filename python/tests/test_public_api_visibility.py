@@ -32,7 +32,7 @@ def test_parser_backend_is_public_but_constraint_inspection_is_internal():
     assert "parser_backend" not in inspect.signature(glrmask.Grammar.compile).parameters
     assert "merge_equivalent_tokens" not in inspect.signature(glrmask.Grammar.compile).parameters
     assert not hasattr(glrmask.Constraint, "parser_backend")
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
+    vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b"})
     grammar = glrmask.Grammar.from_lark('start: "a" "b"?')
     public = grammar.compile(
         vocab,
@@ -47,7 +47,7 @@ def test_parser_backend_is_public_but_constraint_inspection_is_internal():
 
 @pytest.mark.parametrize("mode", MODES)
 def test_save_flag_preserves_default_and_external_roundtrips(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b", 3: b""})
+    vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b", 3: b""})
     constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, **mode)
     assert not hasattr(constraint, "save_with_external_vocab")
     self_contained = constraint.save()
@@ -68,7 +68,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
                 assert actual.commit_token(3)
                 assert actual.is_accepting() and not actual.mask().any()
                 assert not actual.mask().any()
-    wrong_vocab = glrmask.Vocab.from_id_to_bytes({0: b"b", 1: b"ab", 2: b"a", 3: b""})
+    wrong_vocab = glrmask.Vocab({0: b"b", 1: b"ab", 2: b"a", 3: b""})
     with pytest.raises(ValueError):
         glrmask.Constraint.load(external, wrong_vocab)
     with pytest.raises(TypeError):
@@ -76,7 +76,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_boundary_option_is_eager_and_does_not_change_masks(mode):
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
+    vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b"})
     grammar = glrmask.Grammar.from_lark('start: "a" "b"?')
     plain = grammar.compile(vocab, **mode)
     assert grammar.compile(vocab, **mode,
@@ -96,7 +96,7 @@ def test_boundary_option_is_eager_and_does_not_change_masks(mode):
 
 
 def test_boundary_request_applies_to_compile_after_save_and_bind():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay"})
+    vocab = glrmask.Vocab({0: b"x", 1: b"a", 2: b"y", 3: b"xay"})
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
     child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
@@ -114,7 +114,7 @@ def test_boundary_request_applies_to_compile_after_save_and_bind():
 def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     assert hasattr(glrmask.ConstraintState, "is_terminated")
     assert hasattr(glrmask.ConstraintState, "is_accepting")
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
+    vocab = glrmask.Vocab({0: b"a", 1: b"b"})
     end_token_ids = {130}
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),

@@ -11,7 +11,7 @@ fn syntax_and_source_span() {
 fn caller_errors_are_invalid_input() {
     let mut grammar = Grammar::from_glrm("start s extern token E nt s = E").unwrap();
     assert_eq!(grammar.bind("missing", 0u32).unwrap_err().kind(), ErrorKind::InvalidInput);
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     assert_eq!(grammar.compile(&vocab).unwrap_err().kind(), ErrorKind::InvalidInput);
     grammar.bind("E", 0u32).unwrap();
     assert_eq!(grammar.bind("E", 0u32).unwrap_err().kind(), ErrorKind::InvalidInput);

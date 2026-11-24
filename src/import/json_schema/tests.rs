@@ -752,7 +752,7 @@ fn byte_vocab() -> Vocab {
         .map(|byte| (byte, vec![byte as u8]))
         .collect::<Vec<_>>();
     entries.push((256, b"<|endoftext|>".to_vec()));
-    Vocab::new(entries)
+    Vocab::from_entries_unchecked(entries)
 }
 
 fn schema_mask_allows_token_after_prefix(
@@ -766,7 +766,7 @@ fn schema_mask_allows_token_after_prefix(
         .collect::<Vec<_>>();
     entries.push((256, b"<|endoftext|>".to_vec()));
     entries.push((token_id, token_bytes.to_vec()));
-    let vocab = Vocab::new(entries);
+    let vocab = Vocab::from_entries_unchecked(entries);
     let grammar = schema_to_named_grammar(schema).expect("schema should import");
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
@@ -1607,7 +1607,7 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
     entries.push((json_u_c, b"\\uC".to_vec()));
     entries.push((zero, b"0".to_vec()));
     entries.push((upper_b, b"B".to_vec()));
-    let vocab = Vocab::new(entries);
+    let vocab = Vocab::from_entries_unchecked(entries);
 
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
@@ -1638,7 +1638,7 @@ fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
 
     let space_escaped_quote = 0u32;
     let end_of_text = 1u32;
-    let vocab = Vocab::new(
+    let vocab = Vocab::from_entries_unchecked(
         vec![
             (space_escaped_quote, b" \\\"".to_vec()),
             (end_of_text, b"<|endoftext|>".to_vec()),
@@ -1667,7 +1667,7 @@ fn mask_does_not_enable_json_u_by_runtime_patch() {
     entries.push((256, b"<|endoftext|>".to_vec()));
     entries.push((json_u_token, b"\\u".to_vec()));
     entries.push((json_backslash_token, b"\\\\".to_vec()));
-    let vocab = Vocab::new(entries);
+    let vocab = Vocab::from_entries_unchecked(entries);
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#"""#), "opening quote should be accepted");
@@ -4759,7 +4759,7 @@ fn complex_anchored_pattern_split_matches_monolithic_masks() {
         (302, b"\", \"simple\": \"".to_vec()),
         (303, b"_".repeat(64)),
     ]);
-    let vocab = Vocab::new(entries);
+    let vocab = Vocab::from_entries_unchecked(entries);
 
     let monolithic = {
         let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "0");

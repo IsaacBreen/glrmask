@@ -20,7 +20,7 @@ fn load_vocab(path: &Path) -> Vocab {
             .into_iter()
             .map(|(id, hex)| (id, hex_to_bytes(&hex)))
             .collect(),
-    )
+    ).unwrap()
 }
 
 fn percentile_us(sorted_ns: &[u128], p: f64) -> f64 {

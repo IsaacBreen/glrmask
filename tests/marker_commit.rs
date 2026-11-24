@@ -3,7 +3,7 @@ use glrmask::{Constraint, MarkerEvent, TokenSet, Vocab};
 
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn vocab(parts: &[&[u8]]) -> Vocab {
-    Vocab::new(parts.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect())
+    Vocab::new(parts.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect::<Vec<_>>()).unwrap()
 }
 fn events(state: &glrmask::ConstraintState) -> Vec<(u32,u64)> {
     state.marker_events().iter().map(|e| (e.id,e.byte_offset)).collect()

@@ -14,7 +14,7 @@ def token_extern():
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_vocab_rejects_a_huge_id(token_id):
     with pytest.raises(glrmask.GLRMaskError, match=str(token_id)) as exc:
-        glrmask.Vocab.from_id_to_bytes({0: b"a", token_id: b"b"})
+        glrmask.Vocab({0: b"a", token_id: b"b"})
     assert exc.value.kind == "invalid_input"
 
 
@@ -50,7 +50,7 @@ def test_the_maximum_id_is_accepted():
 
 
 def test_mask_size_is_capped():
-    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
+    vocab = glrmask.Vocab({0: b"a"})
     state = glrmask.Grammar.from_glrm('start s nt s = "a"').compile(vocab).start()
     with pytest.raises(glrmask.GLRMaskError, match="at most") as exc:
         state.mask(size=4 * 10**9)

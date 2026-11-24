@@ -106,7 +106,7 @@ fn main() -> Result<()> {
     let grammar = Grammar::from_ebnf(r#"root ::= "a" | "(" root ")""#)?.prepare_parser_grammar()?;
     let parser = grammar.compile_parser(&TerminalLeading)?;
     let vocab = Vocab::new(vec![(0, b"(".to_vec()), (1, b")".to_vec()), (2, b"a".to_vec()),
-        (3, b"((a))".to_vec()), (4, b"()".to_vec())]);
+        (3, b"((a))".to_vec()), (4, b"()".to_vec())]).unwrap();
     for optimization in [MaskStrategy::FAST_COMPILE, MaskStrategy::ParserDwa] {
         let constraint = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(optimization))?;
         let mut state = constraint.start();
@@ -137,7 +137,7 @@ mod tests {
         let prepared = Grammar::from_ebnf(r#"root ::= "a" "b" | "a" "c""#).unwrap().prepare_parser_grammar().unwrap();
         let parser = prepared.compile_parser(&TerminalLeading).unwrap();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec()),
-            (3, b"ab".to_vec()), (4, b"ac".to_vec()), (5, b"aa".to_vec())]);
+            (3, b"ab".to_vec()), (4, b"ac".to_vec()), (5, b"aa".to_vec())]).unwrap();
         for mode in [MaskStrategy::FAST_COMPILE, MaskStrategy::ParserDwa] {
             let c = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(mode)).unwrap();
             for c in [&c, &Constraint::load(c.save(), &vocab).unwrap()] {

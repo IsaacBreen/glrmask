@@ -3,7 +3,7 @@ use glrmask::test_modes::MaskMode;
 use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, ParserBackend, TokenTrie, Vocab};
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::new::<Vec<u8>>(vec![
         (0, b"(".to_vec()),
         (1, b")".to_vec()),
         (2, b"()".to_vec()),
@@ -21,7 +21,7 @@ fn vocab() -> Vocab {
         (14, b"[".to_vec()),
         (15, b"]".to_vec()),
         (16, Vec::new()),
-    ])
+    ]).unwrap()
 }
 
 fn d_options() -> CompileOptions {

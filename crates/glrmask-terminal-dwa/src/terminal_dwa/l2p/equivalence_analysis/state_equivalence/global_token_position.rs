@@ -1610,7 +1610,7 @@ mod tests {
     }
 
     fn vocab(entries: &[(u32, &[u8])]) -> Vocab {
-        Vocab::new(
+        Vocab::from_entries_unchecked(
             entries
                 .iter()
                 .map(|&(token, bytes)| (token, bytes.to_vec()))

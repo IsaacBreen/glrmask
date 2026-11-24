@@ -3,7 +3,7 @@ use crate::test_modes::MaskMode;
 use super::*;
 
 fn vocab() -> Vocab {
-    Vocab::new(vec![
+    Vocab::from_entries_unchecked(vec![
         (0, b"!".to_vec()),
         (1, b"x".to_vec()),
         (2, b";".to_vec()),

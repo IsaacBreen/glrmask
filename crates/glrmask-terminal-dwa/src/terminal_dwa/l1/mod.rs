@@ -7332,7 +7332,7 @@ mod generic_nfa_tests {
 
     #[test]
     fn locally_derived_subset_order_matches_standalone_order() {
-        let parent = Vocab::new(vec![
+        let parent = Vocab::from_entries_unchecked(vec![
             (9, b"z".to_vec()),
             (2, b" alpha".to_vec()),
             (7, b"".to_vec()),
@@ -7346,10 +7346,10 @@ mod generic_nfa_tests {
             (2, b" alpha".to_vec()),
             (4, b"apple".to_vec()),
         ];
-        let subset = Vocab::new(subset_entries.clone());
+        let subset = Vocab::from_entries_unchecked(subset_entries.clone());
         let parent_order = l1_identity_vocab_order(&parent);
         let derived = derive_l1_identity_vocab_order_from_parent(&parent_order, &subset);
-        let standalone = l1_identity_vocab_order(&Vocab::new(subset_entries));
+        let standalone = l1_identity_vocab_order(&Vocab::from_entries_unchecked(subset_entries));
 
         assert_eq!(derived.token_ids_sorted, standalone.token_ids_sorted);
         assert_eq!(derived.original_to_internal, standalone.original_to_internal);
@@ -7545,7 +7545,7 @@ mod generic_nfa_tests {
     #[test]
     fn generic_epsilon_l1_powerset_trie_matches_scalar_reference() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -7607,7 +7607,7 @@ mod generic_nfa_tests {
     #[test]
     fn generic_epsilon_l1_shared_superset_topology_matches_subset_topology() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let full_vocab = Vocab::new(
+        let full_vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -7618,7 +7618,7 @@ mod generic_nfa_tests {
                 (6, b"bb".to_vec()),
                 (7, b"x".to_vec()),
             ]);
-        let subset_vocab = Vocab::new(
+        let subset_vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -7725,7 +7725,7 @@ mod generic_nfa_tests {
     #[test]
     fn generic_epsilon_l1_exact_composes_a_proved_seed_partition() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"".to_vec()),
             (1, b"a".to_vec()),
             (2, b"aa".to_vec()),
@@ -7827,7 +7827,7 @@ mod generic_nfa_tests {
     #[test]
     fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -7965,7 +7965,7 @@ mod packed_suffix_product_tests {
             "fixture must project an inactive raw self-loop to dead",
         );
 
-        let vocab = Vocab::new(vec![
+        let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
             (2, b"bb".to_vec()),
@@ -8234,7 +8234,7 @@ mod packed_suffix_product_tests {
         );
         assert!(tokenizer.has_deterministic_dispatch());
 
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),
@@ -8342,7 +8342,7 @@ mod packed_suffix_product_tests {
         );
         assert!(tokenizer.has_deterministic_dispatch());
 
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![(0, b"".to_vec()), (1, b"a".to_vec())]);
         let active_terminals = vec![true, false];
         let flat_trans: Arc<[u32]> = build_flat_transition_table(&tokenizer).into();
@@ -8460,7 +8460,7 @@ mod packed_suffix_product_tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let vocab = Vocab::new(
+        let vocab = Vocab::from_entries_unchecked(
             vec![
                 (0, b"".to_vec()),
                 (1, b"a".to_vec()),

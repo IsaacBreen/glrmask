@@ -69,7 +69,7 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
     let (_, mut tokens) = vocabulary();
     tokens.extend([(4000, b"px".to_vec()), (4001, b"yq".to_vec()),
         (4002, b"pxayq".to_vec()), (4003, b"pxyq".to_vec())]);
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     for nullable in [false, true] {
         let mut rules = vec![Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
             Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },
@@ -138,7 +138,7 @@ fn static_composition_with_no_crossing_tokens_needs_no_boundary_shards() {
     }
     let tokens = b"xaypq".iter().enumerate().map(|(id, byte)| (id as u32, vec![*byte]))
         .collect::<Vec<_>>();
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let options = || MaskMode::ParserDwa.build_options()
         .parser_backend(ParserBackend::TemplateDfa);
     let leaf = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_with_build_options(&vocab, options()).unwrap();
@@ -193,7 +193,7 @@ fn strict_static_crossings_preserve_delayed_lexemes_sparse_ids_and_aliases() {
     tokens.extend([(1000, b"xaby".to_vec()), (1001, b"xaby".to_vec()), (1033, b"xabby".to_vec()),
         (2048, b"abby".to_vec()), (2051, b"aay".to_vec()), (2052, b"xaaay".to_vec()),
         (2060, b"aq".to_vec()), (3000, b"ayq".to_vec())]);
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let cases: &[(&str, &[&[u8]])] = &[
         (r#"start root; t A = "a" | "ab"; nt root = A "b"?;"#,
             &[b"xay", b"xaby", b"xabby"]),
@@ -335,7 +335,7 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
         "Xa!", "a!", "X[", "a", "a", "dead-branch"] {
         tokens.push((tokens.len() as u32, bytes.as_bytes().to_vec()));
     }
-    let vocab = Vocab::new(tokens.clone());
+    let vocab = Vocab::new(tokens.clone()).unwrap();
     let words: &[&[u8]] = &[b"X[]!", b"X[a]!"];
     let prefixes = words.iter().flat_map(|word| (0..=word.len()).map(|end| &word[..end]))
         .collect::<BTreeSet<_>>();
@@ -421,7 +421,7 @@ fn scoped_ignores_match_the_independent_lr_composition() {
 fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
     let (_, mut tokens) = vocabulary();
     tokens.extend([(600, b"special".to_vec()), (601, vec![]), (602, b"special".to_vec()), (700, vec![])]);
-    let vocab = Vocab::new(tokens);
+    let vocab = Vocab::new(tokens).unwrap();
     let child = Grammar::from_glrm(r#"extern token SPECIAL extern token EMPTY start root nt root = SPECIAL "a" | EMPTY "b""#).unwrap()
         .bind_snapshot("SPECIAL",TokenSet::new([600])).unwrap()
         .bind_snapshot("EMPTY",TokenSet::new([601])).unwrap()
@@ -490,7 +490,7 @@ fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {
         "xp", "paq", "aqy", "xpaqy", "xpaqpaqy", "xpaqpbqy", "qy", "pq" ].iter().enumerate() {
         tokens.push((256 + index as u32, token.as_bytes().to_vec()));
     }
-    (Vocab::new(tokens.clone()), tokens)
+    (Vocab::new(tokens.clone()).unwrap(), tokens)
 }
 
 #[test]

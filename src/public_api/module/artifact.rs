@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn corrupt_graphs_and_retained_option_claims_are_rejected_before_linking() {
         let mut module = fixture();
-        let v = Vocab::new(vec![(0, b"a".to_vec())]);
+        let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         module.precompile(&v).unwrap();
         let bytes = module.save();
         let mut m = read(&bytes);
@@ -345,7 +345,7 @@ mod tests {
     }
     #[test]
     fn token_set_ranges_are_validated() {
-        let v = Vocab::new(vec![(0, b"a".to_vec())]);
+        let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
         module.bind("mark", TokenSet::from(7)).unwrap();
         let bytes = module.save();
@@ -375,7 +375,7 @@ mod tests {
     }
     #[test]
     fn corrupt_key_2_body_is_rejected() {
-        let v = Vocab::new(vec![(0, b"a".to_vec())]);
+        let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let mut shell = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         shell
             .precompile_with(
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
-        let v = Vocab::new(vec![(0, b"a".to_vec())]);
+        let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         module
             .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
