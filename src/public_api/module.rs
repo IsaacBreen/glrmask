@@ -72,6 +72,7 @@ impl MaskStrategy {
 ///
 /// Converted automatically from a [`Module`], [`Grammar`], [`Expr`], [`TokenSet`]
 /// or token ID.
+#[derive(Debug, Clone)]
 pub struct Binding(pub(crate) BindingKind);
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,34 @@ impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Exp
 impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
 impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingKind::TokenSet(t.clone())) } }
 impl From<u32> for Binding { fn from(id: u32) -> Self { Self(BindingKind::TokenSet(TokenSet::from(id))) } }
+
+/// A value that can be bound to an extern of a `Grammar`: a grammar, expression, token set or token ID.
+///
+/// A module cannot be bound to a grammar:
+///
+/// ```compile_fail
+/// use glrmask::{Grammar, Module};
+/// let mut grammar = Grammar::from_glrm("extern grammar CHILD start s nt s = CHILD").unwrap();
+/// let module = Module::new(&Grammar::from_glrm("start s nt s = \"a\"").unwrap());
+/// grammar.bind("CHILD", module).unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct GrammarBinding(pub(crate) GrammarBindingKind);
+
+#[derive(Debug, Clone)]
+pub(crate) enum GrammarBindingKind {
+    Grammar(Grammar),
+    Expr(Expr),
+    TokenSet(TokenSet),
+}
+
+impl From<Grammar> for GrammarBinding { fn from(g: Grammar) -> Self { Self(GrammarBindingKind::Grammar(g)) } }
+impl From<&Grammar> for GrammarBinding { fn from(g: &Grammar) -> Self { Self(GrammarBindingKind::Grammar(g.clone())) } }
+impl From<Expr> for GrammarBinding { fn from(e: Expr) -> Self { Self(GrammarBindingKind::Expr(e)) } }
+impl From<&Expr> for GrammarBinding { fn from(e: &Expr) -> Self { Self(GrammarBindingKind::Expr(e.clone())) } }
+impl From<TokenSet> for GrammarBinding { fn from(t: TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t)) } }
+impl From<&TokenSet> for GrammarBinding { fn from(t: &TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t.clone())) } }
+impl From<u32> for GrammarBinding { fn from(id: u32) -> Self { Self(GrammarBindingKind::TokenSet(TokenSet::from(id))) } }
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {

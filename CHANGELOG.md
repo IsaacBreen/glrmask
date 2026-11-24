@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rust: `Grammar::bind` takes a `GrammarBinding`, which can't be a `Module`, so binding a module into a grammar is a compile error instead of a runtime error.
+
 - Python: Externs keys, values and items are mapping views. Rust: ExternKind is re-exported from the public grammar crate.
 
 - `commit_tokens` returns the number of tokens committed before the first failure, instead of a Boolean.

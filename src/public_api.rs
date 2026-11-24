@@ -27,7 +27,7 @@ mod artifact_limits;
 pub(crate) mod module;
 mod expr;
 mod stack;
-pub use module::{Module, CompileOptions, Binding};
+pub use module::{Module, CompileOptions, Binding, GrammarBinding};
 pub use expr::Expr;
 pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
@@ -796,18 +796,13 @@ impl Grammar {
     /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
     /// bound, or `value` is the wrong kind. A grammar can't bind a [`Module`]; use
     /// [`Module::bind`] for that.
-    pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
+    pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
         let value = match value.into().0 {
-            module::BindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
-            module::BindingKind::Expr(expr) => {
+            module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
+            module::GrammarBindingKind::Expr(expr) => {
                 GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
             }
-            module::BindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
-            module::BindingKind::Module(_) => {
-                return Err(Error::InvalidInput(format!(
-                    "can't bind {name:?} to a Module in a Grammar; use Module::bind instead"
-                )));
-            }
+            module::GrammarBindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
         };
         let next = self.bind_value(name, value)?;
         *self = next;
@@ -1837,7 +1832,7 @@ pub struct ConstraintSpec<'a> {
     grammar: Grammar,
     vocab: &'a Vocab,
     token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
-    grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
+    grammar_bindings: BTreeMap<String, SpecGrammarBinding<'a>>,
     unbound_grammar_names: Vec<String>,
     // Only explicit module compilation may preserve unbound source token
     // slots. Legacy specification compilation keeps its validation contract.
@@ -1858,7 +1853,7 @@ pub struct ConstraintSpecBuilder<'a> {
     vocab: &'a Vocab,
     declared_externals: BTreeSet<String>,
     token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
-    grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
+    grammar_bindings: BTreeMap<String, SpecGrammarBinding<'a>>,
     boundary_trigger_detail: BoundaryTriggerDetail,
     boundary_summary_policy: BoundarySummaryPolicy,
 }
@@ -1867,7 +1862,7 @@ pub struct ConstraintSpecBuilder<'a> {
 #[doc(hidden)]
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub(crate) enum GrammarBinding<'a> {
+pub(crate) enum SpecGrammarBinding<'a> {
     Source(Grammar),
     Spec(Box<ConstraintSpec<'a>>),
     #[doc(hidden)]
@@ -1884,58 +1879,58 @@ pub(crate) enum GrammarBinding<'a> {
 #[doc(hidden)]
 pub(crate) trait IntoGrammarBinding<'a> {
     #[doc(hidden)]
-    fn into_grammar_binding(self) -> GrammarBinding<'a>;
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a>;
 }
 
 impl<'a> IntoGrammarBinding<'a> for Grammar {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> { GrammarBinding::Source(self) }
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> { SpecGrammarBinding::Source(self) }
 }
 
 impl<'a> IntoGrammarBinding<'a> for ConstraintSpec<'a> {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::Spec(Box::new(self))
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::Spec(Box::new(self))
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for &ConstraintSpec<'a> {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::Spec(Box::new(self.clone()))
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::Spec(Box::new(self.clone()))
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for RuntimeConstraint {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::StaticOwned(Arc::new(self))
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::StaticOwned(Arc::new(self))
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for &'a RuntimeConstraint {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::StaticBorrowed(self)
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::StaticBorrowed(self)
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for Arc<RuntimeConstraint> {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::StaticOwned(self)
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::StaticOwned(self)
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for DynamicConstraint {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::DynamicOwned(Arc::new(self))
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::DynamicOwned(Arc::new(self))
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for &'a DynamicConstraint {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::DynamicBorrowed(self)
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::DynamicBorrowed(self)
     }
 }
 
 impl<'a> IntoGrammarBinding<'a> for Arc<DynamicConstraint> {
-    fn into_grammar_binding(self) -> GrammarBinding<'a> {
-        GrammarBinding::DynamicOwned(self)
+    fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
+        SpecGrammarBinding::DynamicOwned(self)
     }
 }
 
@@ -2192,7 +2187,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
                             "there is no grammar extern named {name:?}",
                         )));
                     }
-                    grammar_bindings.insert(name, GrammarBinding::Source(child.as_ref().clone()));
+                    grammar_bindings.insert(name, SpecGrammarBinding::Source(child.as_ref().clone()));
                 }
             }
         }
@@ -2343,7 +2338,7 @@ fn static_constraint_targets(constraint: &RuntimeConstraint, vocab: &Vocab) -> b
         )
 }
 
-impl GrammarBinding<'_> {
+impl SpecGrammarBinding<'_> {
     fn bind_target(&mut self, vocab: &Vocab, name: &str) -> Result<()> {
         let compatible = match self {
             Self::Source(_) => return Ok(()),

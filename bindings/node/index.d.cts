@@ -143,9 +143,9 @@ export declare class Grammar implements Disposable {
   /** Creates a grammar from an expression. */
   static fromExpr(expr: Expr | Grammar | TokenSet): Grammar;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
-  bind(name: string, value: ExprPart): void;
+  bind(name: string, value: GrammarBindValue): void;
   /** Binds several externs at once; if one fails, none is bound. */
-  bind(bindings: Record<string, ExprPart>): void;
+  bind(bindings: Record<string, GrammarBindValue>): void;
   /** Like `precompileSync`, but returns a promise and doesn't block the event loop. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<Module>;
   /** Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work. */
@@ -164,6 +164,8 @@ export declare class Grammar implements Disposable {
   [Symbol.dispose](): void;
 }
 
+
+export type GrammarBindValue = Grammar | Expr | TokenSet | number;
 
 /** A value that can be part of an `Expr` or bound to an extern. */
 export type ExprPart = Grammar | Module | Expr | TokenSet | number;

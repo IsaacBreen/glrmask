@@ -36,15 +36,6 @@ fn grammar_bind_accepts_every_binding_kind() {
 }
 
 #[test]
-fn grammar_bind_rejects_module_with_guidance() {
-    let mut g=Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD").unwrap();
-    let child=Module::new(&Grammar::from_glrm("start root nt root=\"a\"").unwrap());
-    let err=g.bind("CHILD",child).unwrap_err().to_string();
-    assert_eq!(err,"can't bind \"CHILD\" to a Module in a Grammar; use Module::bind instead");
-    assert_eq!(g.externs().unbound().len(),1);
-}
-
-#[test]
 fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let v=vocab();let text="extern token MARK start root nt root=MARK";
     let parent_text="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT";
