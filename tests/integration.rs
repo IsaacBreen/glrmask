@@ -2499,9 +2499,9 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
     assert!(!state.commit_bytes(b"a"));
     // commit_tokens stops at the first failure and leaves the state dead.
     let mut state = constraint.start();
-    assert!(!state.commit_tokens(&[0, 1, 0]));
+    assert_eq!(state.commit_tokens(&[0, 1, 0]), 1);
     dead(&state);
-    assert!(!state.commit_tokens(&[0]));
+    assert_eq!(state.commit_tokens(&[0]), 0);
 }
 
 #[test]
@@ -2515,7 +2515,7 @@ fn commit_tokens_commits_in_order_and_post_end_commits_error() {
     .compile(&vocab)
     .unwrap();
     let mut state = constraint.start();
-    assert!(state.commit_tokens(&[0, 1, 7]));
+    assert_eq!(state.commit_tokens(&[0, 1, 7]), 3);
     assert!(state.is_accepting());
     // After an end token every commit errors and the state is dead.
     assert!(!state.commit_token(0));
@@ -2552,4 +2552,16 @@ fn module_retained_work_is_checked_against_the_compile_vocabulary() {
     );
     let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]).unwrap();
     assert!(loaded.compile(&wrong).is_err());
+}
+
+#[test]
+fn batch_commit_counts_prefix_and_preserves_original_clone() {
+    let vocab = Vocab::new([(0, b"a".as_slice()), (1, b"b".as_slice())]).unwrap();
+    let constraint = glrmask::Grammar::from_lark("start: \"a\" \"a\" \"a\" \"a\" \"a\"").unwrap().compile(&vocab).unwrap();
+    let original = constraint.start();
+    let mut copy = original.clone();
+    assert_eq!(copy.commit_tokens(&[0, 0, 1, 0, 0]), 2);
+    assert!(copy.is_terminated());
+    assert!(!original.is_terminated());
+    assert!(!original.is_accepting());
 }

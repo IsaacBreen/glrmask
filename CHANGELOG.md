@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `commit_tokens` returns the number of tokens committed before the first failure, instead of a Boolean.
+
 - GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.
 - Committing a token ID never raises or throws. An ID that isn't in the vocabulary, or isn't a valid token ID at all, makes the commit return false.
 - In C, the commit functions return `bool`, and `GLRMASK_REJECTED` is gone.

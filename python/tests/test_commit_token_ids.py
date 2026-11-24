@@ -25,10 +25,10 @@ def test_out_of_range_token_id_fails_closed(bad):
 @pytest.mark.parametrize("bad", _BAD_IDS)
 def test_out_of_range_token_id_in_list_fails_closed(bad):
     state = _constraint().start()
-    assert state.commit_tokens([0, bad]) is False
+    assert state.commit_tokens([0, bad]) == 1
     assert state.is_accepting() is False
     assert state.is_terminated() is True
-    assert state.commit_tokens([0]) is False
+    assert state.commit_tokens([0]) == 0
 
 
 def test_non_integer_token_id_is_a_type_error():
@@ -58,3 +58,11 @@ def test_special_tokens_are_explicit():
     assert state.is_accepting()
     with pytest.raises(ValueError):
         glrmask.Grammar.from_lark("start: <|missing|>").compile(body)
+
+def test_batch_counts_prefix_and_preserves_original_copy():
+    original = glrmask.Grammar.from_lark('start: "a" "a" "a" "a" "a"').compile(_vocab()).start()
+    copy = original.copy()
+    assert copy.commit_tokens([0, 0, 1, 0, 0]) == 2
+    assert copy.is_terminated()
+    assert not original.is_terminated()
+    assert not original.is_accepting()

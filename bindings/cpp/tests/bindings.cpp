@@ -256,7 +256,7 @@ void commit_contract() {
     }
     // The C commits return false for a rejected commit and for a NULL state.
     CHECK(glrmask_state_commit_token(nullptr, 0) == false);
-    CHECK(glrmask_state_commit_tokens(nullptr, nullptr, 0) == false);
+    CHECK(glrmask_state_commit_tokens(nullptr, nullptr, 0) == 0);
     CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0) == false);
     auto c = Module(simple()).compile(v);
     glrmask_state* raw = nullptr;

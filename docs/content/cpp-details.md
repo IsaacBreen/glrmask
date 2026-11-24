@@ -92,7 +92,7 @@ bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of word `id / 32` is set. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token`, `commit_tokens` and `commit_bytes` return whether the input was allowed. A failed commit ends the state,
+`commit_token` and `commit_bytes` return whether the input was allowed. `commit_tokens` returns the number of tokens committed. A failed commit ends the state,
 so copy it first to try a token without committing to it. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 

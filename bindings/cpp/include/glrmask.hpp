@@ -512,10 +512,10 @@ public:
     bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
     /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
-    /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_tokens(const std::uint32_t* ids, std::size_t count) { return glrmask_state_commit_tokens(native_handle(), ids, count); }
-    /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
+    /// Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone.
+    [[nodiscard]] std::size_t commit_tokens(const std::uint32_t* ids, std::size_t count) { return glrmask_state_commit_tokens(native_handle(), ids, count); }
+    /// Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone.
+    [[nodiscard]] std::size_t commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
     /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return glrmask_state_commit_bytes(native_handle(), bytes, size); }
     /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.

@@ -276,8 +276,8 @@ impl NativeState {
         })
     }
     #[napi]
-    pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<bool> {
-        call(|| live(&self.inner)?.commit_tokens(ids.as_ref()))
+    pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<f64> {
+        call(|| Ok(live(&self.inner)?.commit_tokens(ids.as_ref())? as f64))
     }
     #[napi]
     pub fn commit_bytes(&self, env: Env, bytes: Unknown<'_>) -> napi::Result<bool> {

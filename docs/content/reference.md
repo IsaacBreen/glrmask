@@ -37,7 +37,7 @@ print(text.decode())
 writes a packed bitmask into a buffer you reuse: bit `id % 32` of word `id / 32` is set when token `id` is allowed.
 `Constraint.mask_len()` gives the buffer's length in words. In Rust, Node.js, C and C++, masks are always packed.
 
-`commit_token` returns whether the token was allowed. `commit_tokens` commits several in order, and `commit_bytes`
+`commit_token` returns whether the token was allowed. `commit_tokens` commits several in order and returns the number committed. `commit_bytes`
 commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
 token without committing to it, copy the state first.
 

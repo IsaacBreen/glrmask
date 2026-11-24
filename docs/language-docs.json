@@ -85,7 +85,7 @@
     "ConstraintState.mask": "The tokens allowed next, as a NumPy `bool` array indexed by token ID.\n\n`size` sets the array length, for example to match your logits; it must cover every token ID.",
     "ConstraintState.fill_mask": "Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.\n\nToken `id` is allowed when bit `id % 32` of word `id // 32` is set.",
     "ConstraintState.commit_token": "Commits a token. If it isn't allowed, returns `False` and terminates the state.",
-    "ConstraintState.commit_tokens": "Commits each token in order. If one isn't allowed, returns `False` and terminates the state.",
+    "ConstraintState.commit_tokens": "Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.",
     "ConstraintState.commit_bytes": "Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.",
     "ConstraintState.is_accepting": "Whether everything committed so far is a complete match.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
@@ -205,8 +205,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "7fc894b2773951bd8190db76db0edf8d7a3d047fef1b99ac64705bb794125fad",
-    "bindings/node/README.md": "ae6871adddafcb38f0ca80e445985ee441e5deee2527440c5b216dfee14fd1cc",
+    "bindings/cpp/README.md": "7af10ce195fafb438a95114c7824fe687854fd30edaccf6533267594331f3f7e",
+    "bindings/node/README.md": "a20a1a7660662a72a1d3fd30cb55cf8aea0693d6906639792dc09ff4eb7fee9f",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -214,5 +214,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "80fc211984a64230a0d8f2e44c06fdae76b204be3b4484bebd8a6a6de8f42a9e"
+  "content_sha256": "2bf469a903ac4299f95a7ba687f911c0a1c94fa7738b887c11c09f12050efa40"
 }

@@ -431,11 +431,10 @@ class ConstraintState extends Owned {
     const words = [];
     for (const id of iterable(ids, 'token IDs')) {
       if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
-      // An ID outside the u32 token domain can never be allowed. Commit it
-      // through commitToken so the native side rejects the state without
-      // committing the earlier IDs.
       if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
-        return invoke(() => handle(this, ConstraintState).commitToken(id));
+        const count = invoke(() => handle(this, ConstraintState).commitTokens(Uint32Array.from(words)));
+        if (count === words.length) this.commitToken(id);
+        return count;
       }
       words.push(id);
     }

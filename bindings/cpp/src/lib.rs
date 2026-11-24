@@ -232,11 +232,8 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> bool {
     commit(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> bool {
-    commit(|| unsafe {
-        let ids = if n == 0 { &[] } else if ids.is_null() { return Err(Error::invalid("token ID array is null")); } else { std::slice::from_raw_parts(ids, n) };
-        Ok(write(p)?.0.commit_tokens(ids)?)
-    })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> usize {
+    core::guarded(|| unsafe { write(p)?.0.commit_tokens(input(ids, n)?) }).unwrap_or(0)
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> bool {
     commit(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })

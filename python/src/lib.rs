@@ -877,9 +877,9 @@ impl PyDynamicConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
+    /// Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.
     #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
         if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
             return Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)));
         }
@@ -889,8 +889,12 @@ impl PyDynamicConstraintState {
             match resolve_token_id(value)? {
                 Some(id) => ids.push(id),
                 None => {
-                    with_state_mut(&mut self.inner, |state| state.reject());
-                    return Ok(false);
+                    let count = with_state_mut(&mut self.inner, |state| {
+                        let count = state.commit_tokens(&ids);
+                        state.reject();
+                        count
+                    });
+                    return Ok(count);
                 }
             }
         }
@@ -1091,9 +1095,9 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Commits each token in order. If one isn't allowed, returns `False` and terminates the state.
+    /// Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.
     #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
         if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
             return Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)));
         }
@@ -1103,8 +1107,12 @@ impl PyConstraintState {
             match resolve_token_id(value)? {
                 Some(id) => ids.push(id),
                 None => {
-                    with_state_mut(&mut self.inner, |state| state.reject());
-                    return Ok(false);
+                    let count = with_state_mut(&mut self.inner, |state| {
+                        let count = state.commit_tokens(&ids);
+                        state.reject();
+                        count
+                    });
+                    return Ok(count);
                 }
             }
         }

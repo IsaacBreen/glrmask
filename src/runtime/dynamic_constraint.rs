@@ -3788,18 +3788,15 @@ impl DynamicConstraintState {
         self.alternatives.clear();
     }
 
-    /// Commits each token in order. If one isn't allowed, returns `false` and terminates the state.
+    /// Returns the number of tokens committed. If it is less than `token_ids.len()`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns false). To try tokens without changing this state, commit them on a clone.
     #[must_use]
-    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
-        if token_ids.is_empty() {
-            return !(self.is_terminated() && !self.is_accepting());
-        }
-        for &token_id in token_ids {
+    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> usize {
+        for (i, &token_id) in token_ids.iter().enumerate() {
             if !self.commit_token(token_id) {
-                return false;
+                return i;
             }
         }
-        true
+        token_ids.len()
     }
 
     fn commit_token_raw(&mut self, token_id: u32) -> Result<(), String> {

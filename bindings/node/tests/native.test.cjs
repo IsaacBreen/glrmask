@@ -218,7 +218,7 @@ test('out-of-range token IDs fail closed instead of throwing',()=>{
     assert.equal(s.isTerminated(),true);
     assert.equal(s.commitToken(0),false);
     const list=simple().compileSync(v).start();
-    assert.equal(list.commitTokens([0,bad]),false);
+    assert.equal(list.commitTokens([0,bad]),1);
     assert.equal(list.isAccepting(),false);
     assert.equal(list.isTerminated(),true);
     assert.equal(list.commitToken(0),false);

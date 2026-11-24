@@ -348,7 +348,7 @@ fn commit_forced_tokens_semantics_match_commit_tokens_replay() {
     let mut replay = state.clone();
     let returned = state.commit_forced_tokens();
     assert!(!returned.is_empty());
-    assert!(replay.commit_tokens(&returned));
+    assert_eq!(replay.commit_tokens(&returned), returned.len());
     assert_eq!(state.mask(), replay.mask());
     assert_eq!(state.is_accepting(), replay.is_accepting());
     assert_eq!(state.is_terminated(), replay.is_terminated());

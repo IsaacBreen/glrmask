@@ -307,9 +307,10 @@ GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* p,ui
 /// Commits a token. If it isn't allowed, returns `false` and terminates the
 /// state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_token(glrmask_state* p,uint32_t id);
-/// Commits each token in order. If one isn't allowed, returns `false` and
-/// terminates the state. Returns false for a NULL state.
-GLRMASK_API bool glrmask_state_commit_tokens(glrmask_state* p,const uint32_t* ids,size_t n);
+/// Returns the number of tokens committed. If less than n, the token at that index
+/// was not allowed and the state is now terminated. Returns zero for a NULL state.
+/// To try tokens without changing this state, commit them on a clone.
+GLRMASK_API size_t glrmask_state_commit_tokens(glrmask_state* p,const uint32_t* ids,size_t n);
 /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the
 /// state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* p,const uint8_t* bytes,size_t n);

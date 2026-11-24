@@ -413,8 +413,8 @@ class ConstraintState:
     def commit_token(self, token_id: int, /) -> bool:
         """Commits a token. If it isn't allowed, returns `False` and terminates the state."""
         ...
-    def commit_tokens(self, token_ids: Sequence[int], /) -> bool:
-        """Commits each token in order. If one isn't allowed, returns `False` and terminates the state."""
+    def commit_tokens(self, token_ids: Sequence[int], /) -> int:
+        """Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
         """Commits raw bytes. If they aren't allowed, returns `False` and terminates the state."""

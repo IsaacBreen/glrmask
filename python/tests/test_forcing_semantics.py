@@ -139,7 +139,7 @@ def test_commit_forced_tokens_semantics_match_commit_tokens_replay():
     replay = state.copy()
     returned = state.commit_forced_tokens()
     assert len(returned) > 0
-    assert replay.commit_tokens(returned)
+    assert replay.commit_tokens(returned) == len(returned)
     assert np.array_equal(state.mask(), replay.mask())
     assert state.is_accepting() == replay.is_accepting()
     assert state.is_terminated() == replay.is_terminated()

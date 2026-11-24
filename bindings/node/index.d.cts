@@ -271,8 +271,8 @@ export declare class ConstraintState implements Disposable {
   fillMask(output: Uint32Array): void;
   /** Commits a token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;
-  /** Commits each token in order. If one isn't allowed, returns `false` and terminates the state. */
-  commitTokens(ids: Iterable<number> | Uint32Array): boolean;
+  /** Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone. */
+  commitTokens(ids: Iterable<number> | Uint32Array): number;
   /** Commits raw bytes. If they aren't allowed, returns `false` and terminates the state. */
   commitBytes(bytes: Uint8Array): boolean;
   /** Whether everything committed so far is a complete match. */

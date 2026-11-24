@@ -21,7 +21,7 @@ def test_empty_commit_on_failed_state_returns_false():
     assert not fresh.is_terminated()
     assert not fresh.is_accepting()
     assert fresh.commit_bytes(b"")
-    assert fresh.commit_tokens([])
+    assert fresh.commit_tokens([]) == 0
 
     # Finished state: empty commits return true
     finished = grammar.compile(vocab).start()
@@ -29,7 +29,7 @@ def test_empty_commit_on_failed_state_returns_false():
     assert finished.is_accepting()
     assert finished.is_terminated()
     assert finished.commit_bytes(b"")
-    assert finished.commit_tokens([])
+    assert finished.commit_tokens([]) == 0
 
     # Failed state: committing a disallowed token
     failed = grammar.compile(vocab).start()
@@ -39,7 +39,7 @@ def test_empty_commit_on_failed_state_returns_false():
     assert not failed.commit_bytes(b"")
     assert failed.is_terminated()
     assert not failed.is_accepting()
-    assert not failed.commit_tokens([])
+    assert failed.commit_tokens([]) == 0
     assert failed.is_terminated()
     assert not failed.is_accepting()
 

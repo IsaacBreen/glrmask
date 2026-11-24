@@ -144,7 +144,7 @@ const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set.
 `fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-`commitToken`, `commitTokens` and `commitBytes` return whether the input was allowed. A failed commit ends the state, so
+`commitToken` and `commitBytes` return whether the input was allowed. `commitTokens` returns the number of tokens committed. A failed commit ends the state, so
 `clone()` it first to try a token without committing to it. Commit special tokens and token sets with `commitToken`;
 bytes never match them.
 
