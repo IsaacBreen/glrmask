@@ -52,244 +52,28 @@ _internal: ModuleType
 __version__: str
 """The GLRMask version, for example "0.5.0"."""
 __all__: list[str] = [
-    "BoundaryMaskStrategy",
+    "Vocab",
+    "Grammar",
     "Constraint",
     "ConstraintState",
+    "Module",
     "Expr",
     "Extern",
     "Externs",
-    "Grammar",
-    "MaskStrategy",
-    "Module",
-    "ParserBackend",
     "TokenSet",
     "TokenTrie",
-    "Vocab",
+    "MaskStrategy",
+    "BoundaryMaskStrategy",
+    "ParserBackend",
     "GLRMaskError",
     "__version__",
 ]
-
-@final
-class MaskStrategy:
-    """How masks are computed."""
-    AUTO: ClassVar[MaskStrategy]
-    """Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
-    PARSER_DWA: ClassVar[MaskStrategy]
-    """Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks."""
-    TOKEN_TRIE: ClassVar[MaskStrategy]
-    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` instead to change its settings."""
-    FAST_COMPILE: ClassVar[MaskStrategy]
-    """Same as `TOKEN_TRIE`."""
-    FAST_MASKS: ClassVar[MaskStrategy]
-    """Same as `PARSER_DWA`."""
-
-@final
-class BoundaryMaskStrategy:
-    """How masks are computed at grammar boundaries."""
-    AUTO: ClassVar[BoundaryMaskStrategy]
-    """`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
-    PARSER_DWA: ClassVar[BoundaryMaskStrategy]
-    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `GLRMaskError` if it would be too large."""
-    TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
-    """Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks."""
-    FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
-    """Same as `TOKEN_TRIE`."""
-    FAST_MASKS: ClassVar[BoundaryMaskStrategy]
-    """Same as `PARSER_DWA`."""
-
-@final
-class ParserBackend:
-    """How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`."""
-    LR_TABLE: ClassVar[ParserBackend]
-    """An LR table. Faster to compile, with slower masks. The default."""
-    TEMPLATE_DFA: ClassVar[ParserBackend]
-    """Template DFAs. Slower to compile, with faster masks."""
-
-@final
-class TokenTrie:
-    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
-
-    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
-    def __new__(cls, *, parser_backend: Optional[ParserBackend] = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
-    @property
-    def parser_backend(self) -> ParserBackend:
-        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
-        ...
-    @property
-    def merge_equivalent_tokens(self) -> bool:
-        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
-
-        Tokens are not merged in a composition that includes precompiled parts."""
-        ...
-
-@final
-class TokenSet:
-    """A set of token IDs."""
-    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
-        """Creates a set from `ids`."""
-        ...
-    @staticmethod
-    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
-        """Creates a set from `range` objects, which must have step 1."""
-        ...
-    def __repr__(self) -> str:
-        """An expression that rebuilds the set, or a summary for large sets."""
-        ...
-    def __eq__(self, other: object, /) -> bool:
-        """Whether both sets contain the same IDs."""
-        ...
 
 @final
 class Vocab:
     """A model's tokens and their bytes, from an`{id: bytes}`mapping. A token ID it doesn't contain never matches text, but a token set can still allow it."""
     def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
         """Creates a vocabulary from an`{id: bytes}`mapping."""
-        ...
-
-@final
-class Extern:
-    """A named placeholder in a grammar."""
-    @property
-    def name(self) -> str:
-        """The extern's name."""
-        ...
-    @property
-    def kind(self) -> Literal["token", "grammar"]:
-        """What the extern can be bound to: `"token"` or `"grammar"`."""
-        ...
-    def __repr__(self) -> str:
-        """A representation for debugging."""
-        ...
-    def __eq__(self, other: object, /) -> bool:
-        """Whether both have the same name and kind."""
-        ...
-
-@final
-class Externs(Mapping[str, Extern]):
-    """A grammar's or module's externs, in declaration order.
-
-    A read-only mapping from name to `Extern`.
-    """
-    @property
-    def unbound(self) -> Externs:
-        """The externs not yet bound."""
-        ...
-    def __getitem__(self, key: str, /) -> Extern:
-        """The extern named `key`. Raises `KeyError` if there is none."""
-        ...
-    def __iter__(self) -> Iterator[str]:
-        """The extern names, in declaration order."""
-        ...
-    def __len__(self) -> int:
-        """The number of externs."""
-        ...
-    @overload
-    def get(self, key: str, /) -> Optional[Extern]:
-        """The extern named `key`, or `default` if there is none."""
-        ...
-    @overload
-    def get(self, key: str, default: Optional[Union[Extern, _T]], /) -> Union[Extern, _T]: ...
-    def keys(self) -> KeysView[str]:
-        """The extern names, in declaration order."""
-        ...
-    def values(self) -> ValuesView[Extern]:
-        """The externs, in declaration order."""
-        ...
-    def items(self) -> ItemsView[str, Extern]:
-        """`(name, extern)` pairs, in declaration order."""
-        ...
-    def __repr__(self) -> str:
-        """A representation for debugging."""
-        ...
-    def __eq__(self, other: object, /) -> bool:
-        """Whether both list the same externs in the same order."""
-        ...
-
-@final
-class Expr:
-    """A grammar expression."""
-    @staticmethod
-    def choice(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
-        """Matches any one of `parts`.
-
-        Raises `GLRMaskError` if a part has unbound externs.
-        """
-        ...
-    @staticmethod
-    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
-        """Matches `parts` in order.
-
-        Raises `GLRMaskError` if a part has unbound externs.
-        """
-        ...
-    @staticmethod
-    def literal(value: Union[str, bytes], /) -> Expr:
-        """Matches exactly `value`. A `str` is UTF-8 encoded."""
-        ...
-
-@final
-class Module:
-    """A grammar you can compose with others and partly compile before its externs are bound."""
-    def __new__(cls, source: Grammar, /) -> Module:
-        """Creates a module from a grammar."""
-        ...
-    @overload
-    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet, int], /) -> None:
-        """Binds the extern `name` to `value`.
-
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
-        """
-        ...
-    @overload
-    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet, int]) -> None:
-        """Binds the extern `name` to `value`.
-
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
-        """
-        ...
-    def precompile(
-        self,
-        vocab: Vocab,
-        *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
-    ) -> None:
-        """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
-
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
-        """
-        ...
-    def compile(
-        self,
-        vocab: Vocab,
-        *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
-    ) -> Constraint:
-        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
-
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
-        """
-        ...
-    @property
-    def externs(self) -> Externs:
-        """The module's externs."""
-        ...
-    def copy(self) -> Module:
-        """A copy of the module. Binding the copy does not change the original."""
-        ...
-    def __copy__(self) -> Module:
-        """Same as `copy()`."""
-        ...
-    def __deepcopy__(self, memo: dict[int, Any]) -> Module:
-        """Same as `copy()`."""
-        ...
-    def save(self) -> bytes:
-        """Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another."""
-        ...
-    @staticmethod
-    def load(data: bytes, /) -> Module:
-        """Loads a module saved with `save()`."""
         ...
 
 @final
@@ -428,6 +212,222 @@ class ConstraintState:
     def commit_forced_tokens(self) -> list[int]:
         """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
         ...
+
+@final
+class Module:
+    """A grammar you can compose with others and partly compile before its externs are bound."""
+    def __new__(cls, source: Grammar, /) -> Module:
+        """Creates a module from a grammar."""
+        ...
+    @overload
+    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet, int], /) -> None:
+        """Binds the extern `name` to `value`.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        """
+        ...
+    @overload
+    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet, int]) -> None:
+        """Binds the extern `name` to `value`.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        """
+        ...
+    def precompile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
+    ) -> None:
+        """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
+
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        """
+        ...
+    def compile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
+        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
+    ) -> Constraint:
+        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
+
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        """
+        ...
+    @property
+    def externs(self) -> Externs:
+        """The module's externs."""
+        ...
+    def copy(self) -> Module:
+        """A copy of the module. Binding the copy does not change the original."""
+        ...
+    def __copy__(self) -> Module:
+        """Same as `copy()`."""
+        ...
+    def __deepcopy__(self, memo: dict[int, Any]) -> Module:
+        """Same as `copy()`."""
+        ...
+    def save(self) -> bytes:
+        """Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another."""
+        ...
+    @staticmethod
+    def load(data: bytes, /) -> Module:
+        """Loads a module saved with `save()`."""
+        ...
+
+@final
+class Expr:
+    """A grammar expression."""
+    @staticmethod
+    def choice(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
+        """Matches any one of `parts`.
+
+        Raises `GLRMaskError` if a part has unbound externs.
+        """
+        ...
+    @staticmethod
+    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
+        """Matches `parts` in order.
+
+        Raises `GLRMaskError` if a part has unbound externs.
+        """
+        ...
+    @staticmethod
+    def literal(value: Union[str, bytes], /) -> Expr:
+        """Matches exactly `value`. A `str` is UTF-8 encoded."""
+        ...
+
+@final
+class Extern:
+    """A named placeholder in a grammar."""
+    @property
+    def name(self) -> str:
+        """The extern's name."""
+        ...
+    @property
+    def kind(self) -> Literal["token", "grammar"]:
+        """What the extern can be bound to: `"token"` or `"grammar"`."""
+        ...
+    def __repr__(self) -> str:
+        """A representation for debugging."""
+        ...
+    def __eq__(self, other: object, /) -> bool:
+        """Whether both have the same name and kind."""
+        ...
+
+@final
+class Externs(Mapping[str, Extern]):
+    """A grammar's or module's externs, in declaration order.
+
+    A read-only mapping from name to `Extern`.
+    """
+    @property
+    def unbound(self) -> Externs:
+        """The externs not yet bound."""
+        ...
+    def __getitem__(self, key: str, /) -> Extern:
+        """The extern named `key`. Raises `KeyError` if there is none."""
+        ...
+    def __iter__(self) -> Iterator[str]:
+        """The extern names, in declaration order."""
+        ...
+    def __len__(self) -> int:
+        """The number of externs."""
+        ...
+    @overload
+    def get(self, key: str, /) -> Optional[Extern]:
+        """The extern named `key`, or `default` if there is none."""
+        ...
+    @overload
+    def get(self, key: str, default: Optional[Union[Extern, _T]], /) -> Union[Extern, _T]: ...
+    def keys(self) -> KeysView[str]:
+        """The extern names, in declaration order."""
+        ...
+    def values(self) -> ValuesView[Extern]:
+        """The externs, in declaration order."""
+        ...
+    def items(self) -> ItemsView[str, Extern]:
+        """`(name, extern)` pairs, in declaration order."""
+        ...
+    def __repr__(self) -> str:
+        """A representation for debugging."""
+        ...
+    def __eq__(self, other: object, /) -> bool:
+        """Whether both list the same externs in the same order."""
+        ...
+
+@final
+class TokenSet:
+    """A set of token IDs."""
+    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
+        """Creates a set from `ids`."""
+        ...
+    @staticmethod
+    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
+        """Creates a set from `range` objects, which must have step 1."""
+        ...
+    def __repr__(self) -> str:
+        """An expression that rebuilds the set, or a summary for large sets."""
+        ...
+    def __eq__(self, other: object, /) -> bool:
+        """Whether both sets contain the same IDs."""
+        ...
+
+@final
+class TokenTrie:
+    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
+
+    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
+    def __new__(cls, *, parser_backend: Optional[ParserBackend] = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
+    @property
+    def parser_backend(self) -> ParserBackend:
+        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
+        ...
+    @property
+    def merge_equivalent_tokens(self) -> bool:
+        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
+
+        Tokens are not merged in a composition that includes precompiled parts."""
+        ...
+
+@final
+class MaskStrategy:
+    """How masks are computed."""
+    AUTO: ClassVar[MaskStrategy]
+    """Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
+    PARSER_DWA: ClassVar[MaskStrategy]
+    """Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks."""
+    TOKEN_TRIE: ClassVar[MaskStrategy]
+    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` instead to change its settings."""
+    FAST_COMPILE: ClassVar[MaskStrategy]
+    """Same as `TOKEN_TRIE`."""
+    FAST_MASKS: ClassVar[MaskStrategy]
+    """Same as `PARSER_DWA`."""
+
+@final
+class BoundaryMaskStrategy:
+    """How masks are computed at grammar boundaries."""
+    AUTO: ClassVar[BoundaryMaskStrategy]
+    """`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
+    PARSER_DWA: ClassVar[BoundaryMaskStrategy]
+    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `GLRMaskError` if it would be too large."""
+    TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
+    """Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks."""
+    FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
+    """Same as `TOKEN_TRIE`."""
+    FAST_MASKS: ClassVar[BoundaryMaskStrategy]
+    """Same as `PARSER_DWA`."""
+
+@final
+class ParserBackend:
+    """How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`."""
+    LR_TABLE: ClassVar[ParserBackend]
+    """An LR table. Faster to compile, with slower masks. The default."""
+    TEMPLATE_DFA: ClassVar[ParserBackend]
+    """Template DFAs. Slower to compile, with faster masks."""
 
 class GLRMaskError(ValueError):
     """Raised when GLRMask can't do what was asked. Wrong argument types still raise `TypeError`, and a missing `Externs` key raises `KeyError`, as usual in Python."""
