@@ -42,7 +42,7 @@ pub(crate) fn reject_special_token_ids(
     let special = RangeSetBlaze::from_iter(vocab.event_token_ranges())
         - RangeSetBlaze::from_iter(vocab.byte_token_ranges());
     match (selected & &special).first() {
-        Some(id) => Err(crate::Error::Compilation(format!(
+        Some(id) => Err(crate::Error::InvalidInput(format!(
             "token ID {id} is a special token; grammar text can't name special tokens by ID, so declare a token extern and bind the token to it"
         ))),
         None => Ok(()),
@@ -62,7 +62,7 @@ pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate:
     let ranges = comp.inline_token_ranges();
     for &(start, end) in &ranges {
         if !vocab.contains_token_range(start, end) {
-            return Err(crate::Error::Compilation(format!(
+            return Err(crate::Error::InvalidInput(format!(
                 "token range {start}..={end} includes IDs that are not in the vocabulary"
             )));
         }

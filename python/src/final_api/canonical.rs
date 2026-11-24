@@ -1,6 +1,7 @@
 //! Owned Module/Expr facade and Externs mapping view.
 use super::*;
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError};
+use crate::glrmask_error;
 use pyo3::types::PyString;
 
 fn extern_repr(py: Python<'_>, name: &str, kind: &str) -> PyResult<String> {
@@ -192,7 +193,7 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
         let unbound = mod_inner.externs().unbound();
         if !unbound.is_empty() {
             let names: Vec<String> = unbound.iter().map(|e| e.name().to_string()).collect();
-            return Err(PyValueError::new_err(format!(
+            return Err(glrmask_error("invalid_input", format!(
                 "cannot create Expr: part has unbound externs [{}]",
                 names
                     .iter()
@@ -208,7 +209,7 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
         let unbound = m.externs().unbound();
         if !unbound.is_empty() {
             let names: Vec<String> = unbound.iter().map(|e| e.name().to_string()).collect();
-            return Err(PyValueError::new_err(format!(
+            return Err(glrmask_error("invalid_input", format!(
                 "cannot create Expr: part has unbound externs [{}]",
                 names
                     .iter()
@@ -271,7 +272,7 @@ impl PyExpr {
 
     /// Matches any one of `parts`.
     ///
-    /// Raises `ValueError` if a part has unbound externs.
+    /// Raises `GLRMaskError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn choice(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -283,7 +284,7 @@ impl PyExpr {
 
     /// Matches `parts` in order.
     ///
-    /// Raises `ValueError` if a part has unbound externs.
+    /// Raises `GLRMaskError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn sequence(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -329,7 +330,7 @@ fn extract_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
     match value.extract::<u32>() {
         Ok(id) => check_token_id(id).map(Some),
         // An integer outside the u32 token-ID domain is a bad value, not a bad type.
-        Err(_) => Err(PyValueError::new_err(format!(
+        Err(_) => Err(glrmask_error("invalid_input", format!(
             "token ID {value} is out of range; token IDs go from 0 to {}",
             glrmask::MAX_TOKEN_ID
         ))),
@@ -473,7 +474,7 @@ impl PyModule {
 
     /// Binds the extern `name` to `value`.
     ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -535,7 +536,7 @@ impl PyModule {
         Ok(())
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work. Raises `ValueError` if any extern is unbound or the module was precompiled for another vocabulary.
+    /// Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
     ///
     /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]

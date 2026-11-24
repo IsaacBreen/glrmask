@@ -343,8 +343,8 @@ precompiled parts use `TemplateDfa`.
 
 Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
 Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
-Python raises `ValueError`, Node.js throws a `GlrMaskError`, C returns a status and sets `glrmask_error_message()`, and
-C++ throws `glrmask::Error`. In Rust, `Error::kind()` gives the kind of error and `source_span()` its place in the source.
+In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization` or `Internal`. `source_span()` gives its place in the source.
+Python raises `GLRMaskError` (a `ValueError`) with a `kind` string. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`. New kinds may be added in a minor release.
 
 ## Grammar formats
 

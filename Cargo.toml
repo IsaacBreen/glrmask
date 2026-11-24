@@ -576,6 +576,10 @@ name = "owned_constraint_state"
 path = "tests/owned_constraint_state.rs"
 
 [[test]]
+name = "error_kinds"
+path = "tests/error_kinds.rs"
+
+[[test]]
 name = "token_id_limit"
 path = "tests/token_id_limit.rs"
 

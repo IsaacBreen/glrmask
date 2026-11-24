@@ -129,7 +129,7 @@ impl RetainedPreparation for PreparedGrammar {
             return Ok(Arc::new(self.clone()));
         };
         if self.retained_vocab_fingerprint != Some(crate::compiler::compile::vocab_fingerprint(vocab)) {
-            return Err(error("the module was precompiled for a different vocabulary"));
+            return Err(invalid("the module was precompiled for a different vocabulary"));
         }
         prepared_artifact::load(wire.as_ref(), Some(vocab))
             .map(|prepared| Arc::new(prepared) as Arc<dyn RetainedPreparation>)
@@ -154,7 +154,7 @@ pub(crate) struct Certificate {
 impl Certificate {
     fn target(&mut self, vocab: &Vocab) -> Result<()> {
         if self.target.as_ref().is_some_and(|v| !v.same_model_vocab(vocab)) {
-            return Err(error("the bound modules were precompiled for different vocabularies"));
+            return Err(invalid("the bound modules were precompiled for different vocabularies"));
         }
         if self.target.is_none() {
             // The first supplied vocabulary must validate every pending token
@@ -184,6 +184,8 @@ impl Certificate {
 }
 
 fn error(message: impl Into<String>) -> Error { Error::Compilation(message.into()) }
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidInput(message.into()) }
+fn resource_limit(message: impl Into<String>) -> Error { Error::ResourceLimit(message.into()) }
 
 fn own_local(grammar: &Grammar) -> Grammar {
     Grammar {
@@ -371,21 +373,21 @@ impl Module {
         let unbound = child.externs().unbound();
         if !unbound.is_empty() {
             let names: Vec<String> = unbound.iter().map(|e| e.name().to_string()).collect();
-            return Err(error(format!("cannot bind {name:?} to a value with unbound externs: {}", names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
+            return Err(invalid(format!("cannot bind {name:?} to a value with unbound externs: {}", names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
         }
         Ok(BoundValue::Module(child))
     }
 
     fn bound(&self, name: &str, binding: Binding) -> Result<Self> {
         if name.contains("::") {
-            return Err(error(format!("there is no extern named {name:?}")));
+            return Err(invalid(format!("there is no extern named {name:?}")));
         }
         let declared = self.node.source.declarations()?;
         let Some(&kind) = declared.kinds.get(name) else {
-            return Err(error(format!("there is no extern named {name:?}")));
+            return Err(invalid(format!("there is no extern named {name:?}")));
         };
         if self.node.bindings.contains_key(name) {
-            return Err(error(format!("extern \"{name}\" is already bound")));
+            return Err(invalid(format!("extern \"{name}\" is already bound")));
         }
         let value = match binding.0 {
             BindingKind::Grammar(grammar) => {
@@ -397,7 +399,7 @@ impl Module {
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
                 let unbound = check_expr_unbound(&expr);
                 if !unbound.is_empty() {
-                    return Err(error(format!("cannot bind {name:?} to a value with unbound externs: {}", unbound.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
+                    return Err(invalid(format!("cannot bind {name:?} to a value with unbound externs: {}", unbound.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
                 }
                 let child = Module::from_expr(&expr)?;
                 BoundValue::Module(child)
@@ -465,25 +467,25 @@ impl Module {
                     c.ports = c.ports.saturating_add(child.ports);
                 }
             }
-            if c.height > graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
+            if c.height > graph::MAX_DEPTH { return Err(resource_limit("grammars are nested more than 64 levels deep")); }
             Ok(Arc::new(c))
         }).clone()
     }
 
     fn check_limits(&self) -> Result<()> {
         let c = self.certificate()?;
-        if c.height > graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
+        if c.height > graph::MAX_DEPTH { return Err(resource_limit("grammars are nested more than 64 levels deep")); }
         if c.instances > graph::MAX_NODES as u128 || c.ports > 1_048_576 { self.index()?; }
         Ok(())
     }
 
     pub(crate) fn index(&self) -> Result<Vec<Module>> {
         fn visit(module: &Module, active: &mut BTreeSet<usize>, done: &mut BTreeSet<usize>, out: &mut Vec<Module>, depth: usize) -> Result<()> {
-            if depth > graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
+            if depth > graph::MAX_DEPTH { return Err(resource_limit("grammars are nested more than 64 levels deep")); }
             #[cfg(test)]
             BIND_WORK.with(|c| c.set(c.get() + 1));
             let id = Arc::as_ptr(&module.node) as usize;
-            if active.contains(&id) { return Err(error("a module is bound inside itself")); }
+            if active.contains(&id) { return Err(invalid("a module is bound inside itself")); }
             if done.contains(&id) { return Ok(()); }
             active.insert(id);
             for value in module.node.bindings.values() {
@@ -492,7 +494,7 @@ impl Module {
             active.remove(&id);
             done.insert(id);
             out.push(module.clone());
-            if out.len() > graph::MAX_NODES { return Err(error("the composition has too many parts")); }
+            if out.len() > graph::MAX_NODES { return Err(resource_limit("the composition has too many parts")); }
             Ok(())
         }
         let mut out = Vec::new();
@@ -503,7 +505,7 @@ impl Module {
             let mut height = 0;
             let mut expanded = 1usize;
             ports = ports.saturating_add(module.node.bindings.len());
-            if ports > 1_048_576 { return Err(error("the composition has too many externs")); }
+            if ports > 1_048_576 { return Err(resource_limit("the composition has too many externs")); }
             for value in module.node.bindings.values() {
                 if let BoundValue::Module(child) = value {
                     let (h, e) = summaries[&(Arc::as_ptr(&child.node) as usize)];
@@ -511,7 +513,7 @@ impl Module {
                     expanded = expanded.saturating_add(e);
                 }
             }
-            if height > graph::MAX_DEPTH { return Err(error("grammars are nested more than 64 levels deep")); }
+            if height > graph::MAX_DEPTH { return Err(resource_limit("grammars are nested more than 64 levels deep")); }
             summaries.insert(Arc::as_ptr(&module.node) as usize, (height, expanded));
         }
         Ok(out)
@@ -534,7 +536,7 @@ impl Module {
                     .retained_vocab_fingerprint
                     .unwrap_or_else(|| prepared.inner.vocab_fingerprint());
                 if recorded != expected {
-                    return Err(error(
+                    return Err(invalid(
                         "the module was precompiled for a different vocabulary",
                     ));
                 }
@@ -910,7 +912,7 @@ impl Module {
     fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions, end_tokens: &[u32]) -> Result<RuntimeConstraint> {
         crate::error::check_vocab_token_ids(vocab)?;
         if let Some(slot) = self.externs().unbound().iter().next() {
-            return Err(error(format!("extern {:?} is unbound; bind it before compiling, or precompile to leave it open", slot.name())));
+            return Err(invalid(format!("extern {:?} is unbound; bind it before compiling, or precompile to leave it open", slot.name())));
         }
         if end_tokens.is_empty()
             && let Some((body, ids)) = self.end_token_root()?
@@ -935,7 +937,7 @@ impl Module {
             expanded.insert(Arc::as_ptr(&module.node) as usize, count);
         }
         if expanded[&(Arc::as_ptr(&self.node) as usize)] > graph::MAX_NODES {
-            return Err(error("the composition expands to too many parts"));
+            return Err(resource_limit("the composition expands to too many parts"));
         }
         // TOKEN_TRIE without retained static work compiles the whole
         // composition as one ordinary Dynamic grammar, inlined at source level.

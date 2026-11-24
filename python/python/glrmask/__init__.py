@@ -53,6 +53,7 @@ from ._glrmask import (
     Module,
     TokenTrie,
     Vocab,
+    GLRMaskError,
     __version__,
     _internal,
 )
@@ -73,5 +74,6 @@ __all__ = [
     "Module",
     "TokenTrie",
     "Vocab",
+    "GLRMaskError",
     "__version__",
 ]

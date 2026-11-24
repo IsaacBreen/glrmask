@@ -172,3 +172,24 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
     };
     assert!(unsafe { root_options((&too_short as *const OldOptions).cast()) }.is_err());
 }
+
+#[test]
+fn status_codes_distinguish_error_kinds() {
+    assert_eq!(glrmask_abi_version(), 4);
+    assert_eq!(status(core::ErrorKind::InvalidInput), 1);
+    assert_eq!(status(core::ErrorKind::Compilation), 2);
+    assert_eq!(status(core::ErrorKind::Panic), 3);
+    assert_eq!(status(core::ErrorKind::BufferTooSmall), 4);
+    assert_eq!(status(core::ErrorKind::Closed), 5);
+    assert_eq!(status(core::ErrorKind::Syntax), 6);
+    assert_eq!(status(core::ErrorKind::ResourceLimit), 7);
+    assert_eq!(status(core::ErrorKind::StrategyUnsupported), 8);
+    assert_eq!(status(core::ErrorKind::Serialization), 9);
+    assert_eq!(status(core::ErrorKind::Internal), 10);
+    let source = "start: (";
+    unsafe {
+        let mut grammar = ptr::null_mut();
+        assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 6);
+        assert!(grammar.is_null());
+    }
+}

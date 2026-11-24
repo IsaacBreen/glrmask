@@ -13,27 +13,32 @@ def token_extern():
 
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_vocab_rejects_a_huge_id(token_id):
-    with pytest.raises(ValueError, match=str(token_id)):
+    with pytest.raises(glrmask.GLRMaskError, match=str(token_id)) as exc:
         glrmask.Vocab.from_id_to_bytes({0: b"a", token_id: b"b"})
+    assert exc.value.kind == "invalid_input"
 
 
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_binding_a_huge_id_is_an_error(token_id):
     grammar = token_extern()
-    with pytest.raises(ValueError, match="maximum token ID"):
+    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
         grammar.bind("E", token_id)
+    assert exc.value.kind == "invalid_input"
     module = glrmask.Module(token_extern())
-    with pytest.raises(ValueError, match="maximum token ID"):
+    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
         module.bind("E", token_id)
+    assert exc.value.kind == "invalid_input"
     assert "E" in module.externs.unbound
 
 
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_token_sets_reject_a_huge_id(token_id):
-    with pytest.raises(ValueError, match="maximum token ID"):
+    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
         glrmask.TokenSet([1, token_id])
-    with pytest.raises(ValueError, match="maximum token ID"):
+    assert exc.value.kind == "invalid_input"
+    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
         glrmask.TokenSet.from_ranges([range(token_id, token_id + 1)])
+    assert exc.value.kind == "invalid_input"
 
 
 def test_the_maximum_id_is_accepted():
@@ -47,6 +52,7 @@ def test_the_maximum_id_is_accepted():
 def test_mask_size_is_capped():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
     state = glrmask.Grammar.from_glrm('start s nt s = "a"').compile(vocab).start()
-    with pytest.raises(ValueError, match="at most"):
+    with pytest.raises(glrmask.GLRMaskError, match="at most") as exc:
         state.mask(size=4 * 10**9)
+    assert exc.value.kind == "invalid_input"
     assert state.mask(size=MAX_TOKEN_ID + 1).shape == (MAX_TOKEN_ID + 1,)

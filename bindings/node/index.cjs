@@ -4,12 +4,12 @@ const native = require('./loader.cjs');
 const key = Symbol('GLRMask owning native handle');
 const handles = new WeakMap();
 
-class GlrMaskError extends Error {
-  constructor(code, message, options) { super(message, options); this.name = 'GlrMaskError'; this.code = code; }
+class GLRMaskError extends Error {
+  constructor(code, message, options) { super(message, options); this.name = 'GLRMaskError'; this.code = code; }
 }
 function normalize(error) {
   const match = error instanceof Error && /^(GLRMASK_[A-Z_]+): ([\s\S]*)$/.exec(error.message);
-  return match ? new GlrMaskError(match[1], match[2], {cause: error}) : error;
+  return match ? new GLRMaskError(match[1], match[2], {cause: error}) : error;
 }
 function invoke(fn) { try { return fn(); } catch (error) { throw normalize(error); } }
 async function invokeAsync(fn) {
@@ -324,14 +324,14 @@ class Module extends Owned {
 
   _bindSingle(name, value) {
     string(name, 'binding name');
-    if (name.includes('::')) throw new GlrMaskError('GLRMASK_ENGINE_ERROR', `there is no extern named ${JSON.stringify(name)}`);
+    if (name.includes('::')) throw new GLRMaskError('GLRMASK_INVALID_INPUT', `there is no extern named ${JSON.stringify(name)}`);
     invoke(() => {
       const target = handle(this, Module);
       if (value instanceof Grammar) target.bindGrammar(name, handle(value, Grammar));
       else if (value instanceof Module) {
         if (value.externs.unbound.size > 0) {
           const names = Array.from(value.externs.unbound.keys()).map(n => `"${n}"`).join(', ');
-          throw new GlrMaskError('GLRMASK_ENGINE_ERROR', `cannot bind "${name}": the value has unbound externs [${names}]`);
+          throw new GLRMaskError('GLRMASK_INVALID_INPUT', `cannot bind "${name}": the value has unbound externs [${names}]`);
         }
         target.bindModule(name, handle(value, Module));
       }
@@ -446,5 +446,5 @@ class ConstraintState extends Owned {
 
 module.exports = Object.freeze({
   Vocab, TokenSet, Grammar, Module, Expr, Constraint, ConstraintState,
-  MaskStrategy, BoundaryMaskStrategy, ParserBackend, GlrMaskError, version: native.version(),
+  MaskStrategy, BoundaryMaskStrategy, ParserBackend, GLRMaskError, version: native.version(),
 });

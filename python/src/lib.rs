@@ -44,7 +44,7 @@ fn configure_mimalloc_runtime_default() {
 }
 
 use numpy::{PyArray1, PyArrayMethods, PyReadwriteArray1};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,10 +68,35 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // Helpers
 // ---------------------------------------------------------------------------
 
+pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyValueError,
+    "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python.");
+
+pub(crate) fn glrmask_error(kind: &str, message: impl Into<String>) -> PyErr {
+    let error = GLRMaskError::new_err(message.into());
+    Python::attach(|py| {
+        // The exception is a normal Python subclass with an instance dictionary.
+        error.value(py).setattr("kind", kind).expect("GLRMaskError kind");
+    });
+    error
+}
+
+fn kind_name(kind: glrmask::ErrorKind) -> &'static str {
+    match kind {
+        glrmask::ErrorKind::InvalidInput => "invalid_input",
+        glrmask::ErrorKind::Compilation => "compilation",
+        glrmask::ErrorKind::Syntax => "syntax",
+        glrmask::ErrorKind::ResourceLimit => "resource_limit",
+        glrmask::ErrorKind::StrategyUnsupported => "strategy_unsupported",
+        glrmask::ErrorKind::Serialization => "serialization",
+        glrmask::ErrorKind::Internal => "internal",
+        _ => "internal",
+    }
+}
+
 /// Rejects a token ID above `glrmask::MAX_TOKEN_ID`, as the Rust API does.
 pub(crate) fn check_token_id(id: u32) -> PyResult<u32> {
     if id > glrmask::MAX_TOKEN_ID {
-        return Err(PyValueError::new_err(format!(
+        return Err(glrmask_error("invalid_input", format!(
             "token ID {id} is larger than the maximum token ID, {}",
             glrmask::MAX_TOKEN_ID
         )));
@@ -84,7 +109,7 @@ fn checked_vocab(entries: Vec<(u32, Vec<u8>)>) -> PyResult<glrmask::Vocab> {
     for (id, _) in &entries {
         check_token_id(*id)?;
         if !ids.insert(*id) {
-            return Err(PyValueError::new_err(format!("duplicate vocabulary ID {id}")));
+            return Err(glrmask_error("invalid_input", format!("duplicate vocabulary ID {id}")));
         }
     }
     Ok(glrmask::Vocab::new(entries))
@@ -95,7 +120,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     for (key, value) in token_to_id.iter() {
         let token_bytes = key
             .cast::<PyBytes>()
-            .map_err(|_| PyValueError::new_err("vocab keys must be Python bytes"))?
+            .map_err(|_| PyTypeError::new_err("vocab keys must be Python bytes"))?
             .as_bytes()
             .to_vec();
         let token_id: u32 = value.extract()?;
@@ -110,7 +135,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
         let token_id: u32 = key.extract()?;
         let token_bytes = value
             .cast::<PyBytes>()
-            .map_err(|_| PyValueError::new_err("vocab values must be Python bytes"))?
+            .map_err(|_| PyTypeError::new_err("vocab values must be Python bytes"))?
             .as_bytes()
             .to_vec();
         entries.push((token_id, token_bytes));
@@ -275,14 +300,14 @@ fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usiz
     let minimum = max_token as usize + 1;
     let size = requested.unwrap_or(minimum);
     if size < minimum {
-        return Err(PyValueError::new_err(format!(
+        return Err(glrmask_error("invalid_input", format!(
             "size must be at least {minimum}"
         )));
     }
     // A mask has one entry per token ID, so it never needs more than this.
     let maximum = glrmask::MAX_TOKEN_ID as usize + 1;
     if size > maximum {
-        return Err(PyValueError::new_err(format!(
+        return Err(glrmask_error("invalid_input", format!(
             "size must be at most {maximum}, one more than the maximum token ID"
         )));
     }
@@ -294,7 +319,7 @@ fn bitmask_u32_view<'a, 'py>(
 ) -> PyResult<&'a mut [u32]> {
     let slice = bitmask
         .as_slice_mut()
-        .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
+        .map_err(|_| glrmask_error("invalid_input", "the mask array must be contiguous"))?;
     // Safety: i32 and u32 have identical size, alignment, and bit representation.
     Ok(unsafe {
         std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -508,9 +533,6 @@ fn mask_profile_to_dict<'py>(
     )?;
     dict.set_item("other_ns", profile.other_ns)?;
     Ok(dict)
-}
-fn string_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
-    result.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 fn advance_trace_to_dict<'py>(
@@ -809,14 +831,14 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for.
+    /// Loads a constraint saved with `save()`. Raises `GLRMaskError` if `vocab` isn't the one it was compiled for.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.inner.clone();
         let loaded = py.detach(move || glrmask::Constraint::load(data, &vocab));
-        let inner = constraint_result(loaded)?;
+        let inner = loaded.map_err(final_api::api_error)?;
         let max_token = inner.max_original_token_id().unwrap_or(0);
         Ok(Self { inner: Arc::new(inner), max_token })
     }
@@ -1084,7 +1106,7 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
@@ -1186,14 +1208,14 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask
             .as_slice_mut()
-            .map_err(|_| PyValueError::new_err("the mask array must be contiguous"))?;
+            .map_err(|_| glrmask_error("invalid_input", "the mask array must be contiguous"))?;
         // Safety: i32 and u32 have identical size, alignment, and bit representation.
         // fill_mask writes valid u32 bitmask values where the high bit is meaningful.
         let buf: &mut [u32] = unsafe {
@@ -1201,7 +1223,7 @@ impl PyConstraintState {
         };
         let required = self.mask_len;
         if buf.len() < required {
-            return Err(PyValueError::new_err(format!("the mask array needs at least {required} words")));
+            return Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")));
         }
         with_state(&self.inner, |state| state.fill_mask(buf));
         Ok(())
@@ -2064,6 +2086,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
     final_api::register(m)?;
+    m.add("GLRMaskError", m.py().get_type::<GLRMaskError>())?;
     m.add_class::<PyVocab>()?;
     m.add_class::<PyVocabPartition>()?;
     m.add_class::<PyConstraint>()?;
@@ -2087,6 +2110,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "Vocab",
             "Constraint",
             "ConstraintState",
+            "GLRMaskError",
         ],
     )?;
     Ok(())

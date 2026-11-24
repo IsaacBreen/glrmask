@@ -32,11 +32,16 @@ pub struct glrmask_externs(Vec<glrmask_extern_item>);
 
 fn status(kind: core::ErrorKind) -> i32 {
     match kind {
-        core::ErrorKind::InvalidArgument => 1,
-        core::ErrorKind::Engine => 2,
+        core::ErrorKind::InvalidInput => 1,
+        core::ErrorKind::Compilation => 2,
         core::ErrorKind::Panic => 3,
         core::ErrorKind::BufferTooSmall => 4,
         core::ErrorKind::Closed => 5,
+        core::ErrorKind::Syntax => 6,
+        core::ErrorKind::ResourceLimit => 7,
+        core::ErrorKind::StrategyUnsupported => 8,
+        core::ErrorKind::Serialization => 9,
+        core::ErrorKind::Internal => 10,
     }
 }
 
@@ -82,7 +87,7 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 3 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 4 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
 

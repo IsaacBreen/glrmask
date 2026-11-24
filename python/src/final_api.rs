@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
 use std::sync::Arc;
 
-pub(super) fn api_error(error: impl std::fmt::Display) -> PyErr {
-    PyValueError::new_err(error.to_string())
+pub(super) fn api_error(error: glrmask::Error) -> PyErr {
+    super::glrmask_error(super::kind_name(error.kind()), error.to_string())
 }
 
 pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
@@ -224,7 +224,7 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
     }
     let step: i128 = value.getattr("step")?.extract()?;
     if step != 1 {
-        return Err(PyValueError::new_err("TokenSet.from_ranges requires ranges with step 1"));
+        return Err(super::glrmask_error("invalid_input", "TokenSet.from_ranges requires ranges with step 1"));
     }
     let start: i128 = value.getattr("start")?.extract()?;
     let stop: i128 = value.getattr("stop")?.extract()?;
@@ -233,7 +233,7 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
     }
     let convert = |id: i128| match u32::try_from(id) {
         Ok(id) => check_token_id(id),
-        Err(_) => Err(PyValueError::new_err(format!(
+        Err(_) => Err(super::glrmask_error("invalid_input", format!(
             "token ID {id} is out of range; token IDs go from 0 to {}",
             glrmask::MAX_TOKEN_ID
         ))),
@@ -383,7 +383,7 @@ impl PyGrammar {
 
     /// Binds the extern `name` to `value`.
     ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -429,7 +429,7 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
-    /// Compiles the grammar for `vocab`. Raises `ValueError` if any extern is unbound.
+    /// Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
     ///
     /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]

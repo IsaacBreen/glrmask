@@ -13,6 +13,8 @@
 - Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
 - Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`. Python's `mask(size=...)` is capped at 16,777,216.
 
+- Errors: `ErrorKind` has no payloads and new kinds (`Syntax`, `InvalidInput`, `Internal` replace `GrammarParse`, `InternalInvariant`; caller mistakes moved from `Compilation` to `InvalidInput`); `kind()` returns it by value; the public `From` impls for internal error types are gone. Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. C has one status code per kind.
+
 ## 0.5.0
 
 - `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.

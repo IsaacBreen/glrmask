@@ -6,8 +6,8 @@
 int main(void) {
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==3);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
-    CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_ARGUMENT);CHECK(vocab==NULL);
+    CHECK(glrmask_abi_version()==4);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
+    CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_INPUT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,&vocab)==GLRMASK_OK);
     const char source[]="start: \"a\"";
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&grammar)==GLRMASK_OK);
@@ -18,7 +18,7 @@ int main(void) {
     {
         glrmask_compile_options wrong=glrmask_default_compile_options();
         wrong.token_trie.merge_equivalent_tokens=1;
-        CHECK(glrmask_grammar_compile(grammar,vocab,&wrong,&constraint)==GLRMASK_INVALID_ARGUMENT);
+        CHECK(glrmask_grammar_compile(grammar,vocab,&wrong,&constraint)==GLRMASK_INVALID_INPUT);
         CHECK(strcmp(glrmask_error_message(),"token_trie settings apply only to the TokenTrie mask strategy")==0);
     }
     {
@@ -30,7 +30,7 @@ int main(void) {
         glrmask_constraint_free(merged_lr_constraint);
     }
     options.struct_size=0;
-    CHECK(glrmask_grammar_compile(grammar,vocab,&options,&constraint)==GLRMASK_INVALID_ARGUMENT);CHECK(constraint==NULL);
+    CHECK(glrmask_grammar_compile(grammar,vocab,&options,&constraint)==GLRMASK_INVALID_INPUT);CHECK(constraint==NULL);
     CHECK(glrmask_grammar_compile(grammar,vocab,NULL,&constraint)==GLRMASK_OK);
     /* Canonical Module/Expr handles own snapshots across source destruction. */
     glrmask_module *module=NULL,*loaded=NULL;glrmask_expr* expr=NULL;glrmask_bytes* saved=NULL;
@@ -45,7 +45,7 @@ int main(void) {
     CHECK(glrmask_grammar_precompile(grammar,vocab,&module_options,&from_grammar)==GLRMASK_OK);
     CHECK(glrmask_module_compile(from_grammar,vocab,NULL,&precompiled_constraint)==GLRMASK_OK);
     glrmask_constraint_free(precompiled_constraint);glrmask_module_free(from_grammar);
-    CHECK(glrmask_grammar_precompile(grammar,vocab,NULL,NULL)==GLRMASK_INVALID_ARGUMENT);
+    CHECK(glrmask_grammar_precompile(grammar,vocab,NULL,NULL)==GLRMASK_INVALID_INPUT);
     CHECK(glrmask_module_bind_token(module,"missing",7,0)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);
@@ -60,8 +60,8 @@ int main(void) {
     glrmask_constraint_free(constraint);glrmask_grammar_free(grammar);glrmask_vocab_free(vocab);
     uint32_t words[3]={123,123,123};
     CHECK(glrmask_state_fill_mask(state,words,0)==GLRMASK_BUFFER_TOO_SMALL);CHECK(words[0]==123);
-    CHECK(glrmask_state_fill_mask(state,(uint32_t*)((uint8_t*)words+1),1)==GLRMASK_INVALID_ARGUMENT);
-    CHECK(glrmask_state_fill_mask(state,NULL,1)==GLRMASK_INVALID_ARGUMENT);
+    CHECK(glrmask_state_fill_mask(state,(uint32_t*)((uint8_t*)words+1),1)==GLRMASK_INVALID_INPUT);
+    CHECK(glrmask_state_fill_mask(state,NULL,1)==GLRMASK_INVALID_INPUT);
     CHECK(glrmask_state_fill_mask(state,words,3)==GLRMASK_OK);
     CHECK(words[0]==(UINT32_C(1)|UINT32_C(0x80000000)) && words[1]==0 && words[2]==0);
     uint32_t terminated=0;
@@ -74,7 +74,7 @@ int main(void) {
     CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
-    CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_ARGUMENT);CHECK(grammar==NULL);
-    CHECK(glrmask_constraint_load(NULL,1,NULL,&constraint)==GLRMASK_INVALID_ARGUMENT);CHECK(constraint==NULL);
+    CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_INPUT);CHECK(grammar==NULL);
+    CHECK(glrmask_constraint_load(NULL,1,NULL,&constraint)==GLRMASK_INVALID_INPUT);CHECK(constraint==NULL);
     puts("C ABI regression checks passed");return 0;
 }

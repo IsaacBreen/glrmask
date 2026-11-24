@@ -65,6 +65,7 @@ __all__: list[str] = [
     "TokenSet",
     "TokenTrie",
     "Vocab",
+    "GLRMaskError",
     "__version__",
 ]
 
@@ -88,7 +89,7 @@ class BoundaryMaskStrategy:
     AUTO: ClassVar[BoundaryMaskStrategy]
     """`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
     PARSER_DWA: ClassVar[BoundaryMaskStrategy]
-    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `ValueError` if it would be too large."""
+    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `GLRMaskError` if it would be too large."""
     TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
     """Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks."""
     FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
@@ -145,18 +146,18 @@ class Vocab:
     def from_dict(token_to_id: dict[Union[str, bytes], int], /) -> Vocab:
         """Creates a vocabulary from a `{token: id}` dict.
 
-        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `ValueError` if an ID appears more than once.
+        `str` tokens are UTF-8 encoded; `bytes` tokens are used as is. Raises `GLRMaskError` if an ID appears more than once.
         """
         ...
     @staticmethod
     def from_id_to_bytes(id_to_bytes: dict[int, bytes], /) -> Vocab:
-        """Creates a vocabulary from an `{id: bytes}` dict. Raises `ValueError` if an ID appears more than once."""
+        """Creates a vocabulary from an `{id: bytes}` dict. Raises `GLRMaskError` if an ID appears more than once."""
         ...
     @staticmethod
     def from_llama_cpp(llm: Any, /) -> Vocab:
         """Creates a vocabulary from a llama-cpp-python `Llama` model.
 
-        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `ValueError` if an ID appears more than once.
+        Tokens with no text, such as control and end-of-generation tokens, are left out; a token set can still allow them. Raises `GLRMaskError` if an ID appears more than once.
         """
         ...
     @property
@@ -230,14 +231,14 @@ class Expr:
     def choice(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Matches any one of `parts`.
 
-        Raises `ValueError` if a part has unbound externs.
+        Raises `GLRMaskError` if a part has unbound externs.
         """
         ...
     @staticmethod
     def sequence(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Matches `parts` in order.
 
-        Raises `ValueError` if a part has unbound externs.
+        Raises `GLRMaskError` if a part has unbound externs.
         """
         ...
     @staticmethod
@@ -255,14 +256,14 @@ class Module:
     def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet, int], /) -> None:
         """Binds the extern `name` to `value`.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
     def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet, int]) -> None:
         """Binds the extern `name` to `value`.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     def precompile(
@@ -284,7 +285,7 @@ class Module:
         mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
         boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
-        """Compiles the module for `vocab`, reusing any precompiled work. Raises `ValueError` if any extern is unbound or the module was precompiled for another vocabulary.
+        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
 
         The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
@@ -348,7 +349,7 @@ class Grammar:
         mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
         boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
     ) -> Constraint:
-        """Compiles the grammar for `vocab`. Raises `ValueError` if any extern is unbound.
+        """Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
 
         The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
@@ -361,14 +362,14 @@ class Grammar:
     def bind(self, name: str, value: Union[Grammar, Expr, TokenSet, int], /) -> None:
         """Binds the extern `name` to `value`.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
     def bind(self, **bindings: Union[Grammar, Expr, TokenSet, int]) -> None:
         """Binds the extern `name` to `value`.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     def copy(self) -> Grammar:
@@ -398,7 +399,7 @@ class Constraint:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """Loads a constraint saved with `save()`. Raises `ValueError` if `vocab` isn't the one it was compiled for."""
+        """Loads a constraint saved with `save()`. Raises `GLRMaskError` if `vocab` isn't the one it was compiled for."""
         ...
 
 @final
@@ -423,7 +424,7 @@ class ConstraintState:
         """
         ...
     def fill_mask(self, bitmask: NDArray[np.int32], /) -> None:
-        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `ValueError` if it's too short or not contiguous.
+        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """
@@ -446,3 +447,8 @@ class ConstraintState:
     def commit_forced_tokens(self) -> list[int]:
         """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
         ...
+
+class GLRMaskError(ValueError):
+    """Raised when GLRMask can't do what was asked. Wrong argument types still raise `TypeError`, and a missing `Externs` key raises `KeyError`, as usual in Python."""
+    kind: str
+    """What went wrong: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. New kinds may be added in a minor release."""

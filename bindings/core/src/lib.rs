@@ -12,7 +12,7 @@ pub use glrmask;
 // C status codes are fixed by glrmask.h; a new kind needs a new status value there.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorKind { InvalidArgument = 1, Engine = 2, Panic = 3, BufferTooSmall = 4, Closed = 5 }
+pub enum ErrorKind { InvalidInput = 1, Compilation = 2, Panic = 3, BufferTooSmall = 4, Closed = 5, Syntax = 6, ResourceLimit = 7, StrategyUnsupported = 8, Serialization = 9, Internal = 10 }
 
 #[derive(Debug)]
 pub struct Error { pub kind: ErrorKind, pub message: String }
@@ -20,13 +20,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self { Self { kind, message: message.into() } }
-    pub fn invalid(message: impl Into<String>) -> Self { Self::new(ErrorKind::InvalidArgument, message) }
+    pub fn invalid(message: impl Into<String>) -> Self { Self::new(ErrorKind::InvalidInput, message) }
     pub fn closed() -> Self { Self::new(ErrorKind::Closed, "object has been disposed") }
-    pub fn engine(error: impl fmt::Display) -> Self { Self::new(ErrorKind::Engine, error.to_string()) }
 }
 impl fmt::Display for Error { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.message) } }
 impl std::error::Error for Error {}
-impl From<glrmask::Error> for Error { fn from(error: glrmask::Error) -> Self { Self::engine(error) } }
+impl From<glrmask::Error> for Error {
+    fn from(error: glrmask::Error) -> Self {
+        let kind = match error.kind() {
+            glrmask::ErrorKind::InvalidInput => ErrorKind::InvalidInput,
+            glrmask::ErrorKind::Compilation => ErrorKind::Compilation,
+            glrmask::ErrorKind::Syntax => ErrorKind::Syntax,
+            glrmask::ErrorKind::ResourceLimit => ErrorKind::ResourceLimit,
+            glrmask::ErrorKind::StrategyUnsupported => ErrorKind::StrategyUnsupported,
+            glrmask::ErrorKind::Serialization => ErrorKind::Serialization,
+            glrmask::ErrorKind::Internal => ErrorKind::Internal,
+            _ => ErrorKind::Compilation,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
 
 /// Contain unwinding Rust panics at a foreign-language boundary. This cannot
 /// recover process aborts (including allocation failure), or invalid C pointers.
@@ -215,8 +228,8 @@ mod tests {
     fn duplicate_ids_and_panics_are_errors() {
         assert!(vocab(vec![(1,vec![]),(1,vec![1])]).is_err());
         for id in [u32::MAX, 4_000_000_000, glrmask::MAX_TOKEN_ID + 1] {
-            assert_eq!(vocab(vec![(id, b"a".to_vec())]).unwrap_err().kind, ErrorKind::InvalidArgument);
-            assert_eq!(token_id(id).unwrap_err().kind, ErrorKind::InvalidArgument);
+            assert_eq!(vocab(vec![(id, b"a".to_vec())]).unwrap_err().kind, ErrorKind::InvalidInput);
+            assert_eq!(token_id(id).unwrap_err().kind, ErrorKind::InvalidInput);
         }
         assert_eq!(token_id(glrmask::MAX_TOKEN_ID).unwrap(), glrmask::MAX_TOKEN_ID);
         assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Panic);

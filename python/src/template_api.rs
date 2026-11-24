@@ -1,7 +1,8 @@
 //! Data-only parser programs. Python objects are converted to owned Rust data
 //! before validation/compilation; no Python callback is retained at runtime.
 use super::{PyConstraint, PyVocab};
-use super::final_api::{api_error, constraint, resolve_mask_strategy};
+use super::final_api::{constraint, resolve_mask_strategy};
+fn api_error(error: impl std::fmt::Display) -> PyErr { PyValueError::new_err(error.to_string()) }
 use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, TemplateBuildOptions, TerminalPattern,
 };

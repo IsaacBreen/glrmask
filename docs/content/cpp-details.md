@@ -124,8 +124,13 @@ Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()
 
 | Status | |
 | --- | --- |
-| `GLRMASK_ENGINE_ERROR` | A grammar, binding, compile or load failed. The message says why. |
-| `GLRMASK_INVALID_ARGUMENT` | An argument is invalid. The message says which. |
+| `GLRMASK_INVALID_INPUT` | A handle or argument is invalid. |
+| `GLRMASK_COMPILATION` | Compilation failed. |
+| `GLRMASK_SYNTAX` | Invalid grammar syntax. |
+| `GLRMASK_RESOURCE_LIMIT` | A resource limit was exceeded. |
+| `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
+| `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
+| `GLRMASK_INTERNAL` | An internal error; please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `mask_len()`. |
 | `GLRMASK_CLOSED` | The object was moved from or disposed. |
 | `GLRMASK_PANIC` | An internal error. Discard the object; please report it. |

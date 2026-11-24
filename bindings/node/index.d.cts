@@ -22,7 +22,7 @@ export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy] | Toke
 export declare const BoundaryMaskStrategy: Readonly<{
   /** `ParserDwa`, or `TokenTrie` when that would be too large. The default. */
   Auto: 'auto';
-  /** Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws `GlrMaskError` if it would be too large. */
+  /** Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws `GLRMaskError` if it would be too large. */
   ParserDwa: 'parser-dwa';
   /** Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks. */
   TokenTrie: 'token-trie';
@@ -54,10 +54,10 @@ export interface TokenTrie {
   readonly mergeEquivalentTokens?: boolean;
 }
 
-/** The kinds of `GlrMaskError`. */
-export type ErrorCode = 'GLRMASK_INVALID_ARGUMENT' | 'GLRMASK_ENGINE_ERROR' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
+/** The kinds of `GLRMaskError`. */
+export type ErrorCode = 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED' | 'GLRMASK_SYNTAX' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL';
 /** A GLRMask error. */
-export declare class GlrMaskError extends Error {
+export declare class GLRMaskError extends Error {
   /** What kind of error this is. */
   readonly code: ErrorCode;
   /** Creates an error. GLRMask throws these; you don't need to create them. */
@@ -267,7 +267,7 @@ export declare class ConstraintState implements Disposable {
   clone(): ConstraintState;
   /** The tokens allowed next, as a bitmask. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
   mask(): Uint32Array;
-  /** Writes the mask into `output`, zeroing any extra elements. Throws `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `maskLength` elements. */
+  /** Writes the mask into `output`, zeroing any extra elements. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `maskLength` elements. */
   fillMask(output: Uint32Array): void;
   /** Commits a token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;

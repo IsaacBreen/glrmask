@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GlrMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GLRMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[
   {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
@@ -16,7 +16,7 @@ const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
 const simple=()=>Grammar.fromLark('start: "a" "b"');
 const allowed=(m,id)=>(m[Math.floor(id/32)] & (1<<(id%32)))!==0;
-const closed=fn=>assert.throws(fn,e=>e instanceof GlrMaskError && e.code==='GLRMASK_CLOSED');
+const closed=fn=>assert.throws(fn,e=>e instanceof GLRMaskError && e.code==='GLRMASK_CLOSED');
 
 for(const {label:maskStrategy,options} of strategies) {
   test(`${maskStrategy}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,()=>{
@@ -113,7 +113,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   }
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
-  assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GlrMaskError);
+  assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GLRMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) assert.throws(()=>new TokenSet([bad]),RangeError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296]) {
     assert.equal((await Grammar.fromLark('start: "a" "b"').compile(v)).start().commitToken(bad),false);
@@ -140,7 +140,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
-  assert.throws(()=>Grammar.fromLark('this is not a grammar'),GlrMaskError);
+  assert.throws(()=>Grammar.fromLark('this is not a grammar'),GLRMaskError);
 });
 
 test('raw native arguments reject truncation and unsafe typed-array backing',()=>{
@@ -149,7 +149,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   const initial=s.mask();
   const c=g.compileSync(v,0,0);
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
-    const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_ARGUMENT/.test(String(e));
+    const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_INPUT/.test(String(e));
     assert.equal(c.start().commitToken(bad),false);
     assert.throws(()=>new TokenSet([bad]),badArg);
     assert.throws(()=>g.compileSync(v,bad,0),badArg);

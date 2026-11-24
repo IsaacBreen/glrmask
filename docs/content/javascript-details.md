@@ -124,12 +124,17 @@ load saved bytes from untrusted sources.
 ## Errors
 
 Arguments of the wrong type throw `TypeError`, and token IDs out of range throw `RangeError`. Everything else throws a
-`GlrMaskError`, whose `code` is one of:
+`GLRMaskError`, whose `code` is one of:
 
 | Code | |
 | --- | --- |
-| `GLRMASK_ENGINE_ERROR` | A grammar, binding, compile or load failed. The message says why. |
-| `GLRMASK_INVALID_ARGUMENT` | An argument is invalid. The message says which. |
+| `GLRMASK_INVALID_INPUT` | A handle or argument is invalid. |
+| `GLRMASK_COMPILATION` | Compilation failed. |
+| `GLRMASK_SYNTAX` | Invalid grammar syntax. |
+| `GLRMASK_RESOURCE_LIMIT` | A resource limit was exceeded. |
+| `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
+| `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
+| `GLRMASK_INTERNAL` | An internal error; please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `maskLength`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
 | `GLRMASK_PANIC` | An internal error. Discard the object; please report it. |

@@ -84,12 +84,12 @@ void exact_and_unicode() {
     }
     auto merged = TokenSet::from_ranges({{31,33}});
     auto duplicate = TokenSet({31,31,32});
-    throws([]{ TokenSet::from_ranges({{2,0}}); }, GLRMASK_INVALID_ARGUMENT);
+    throws([]{ TokenSet::from_ranges({{2,0}}); }, GLRMASK_INVALID_INPUT);
     auto empty = TokenSet::from_ranges({{5,5}});
     Vocab maximum({});
     auto high = TokenSet::from_ranges({{0xffffff, 0xffffff}});
-    throws([]{ TokenSet({0xffffffff}); }, GLRMASK_INVALID_ARGUMENT);
-    throws([]{ TokenSet({4000000000u}); }, GLRMASK_INVALID_ARGUMENT);
+    throws([]{ TokenSet({0xffffffff}); }, GLRMASK_INVALID_INPUT);
+    throws([]{ TokenSet({4000000000u}); }, GLRMASK_INVALID_INPUT);
     auto none = TokenSet(std::vector<TokenId>{});
     (void)merged; (void)duplicate; (void)high; (void)none; (void)empty;
 }
@@ -188,16 +188,16 @@ void threads_and_errors() {
     auto v = vocabulary(); auto c = simple().compile(v); std::atomic<bool> okay{true}; std::vector<std::thread> threads;
     for (int i=0; i<4; ++i) threads.emplace_back([&]{ try { for (int j=0; j<8; ++j) { auto s = c.start(); CHECK(s.commit_token(31)); if (!s.is_accepting()) okay=false; } } catch(...) { okay=false; } });
     for (auto& thread : threads) thread.join(); CHECK(okay);
-    std::size_t ignored = 0; CHECK(glrmask_constraint_mask_len(nullptr, &ignored)==GLRMASK_INVALID_ARGUMENT);
+    std::size_t ignored = 0; CHECK(glrmask_constraint_mask_len(nullptr, &ignored)==GLRMASK_INVALID_INPUT);
     const std::string main_error = glrmask_error_message();
     std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
     CHECK(main_error==glrmask_error_message());
-    throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_ARGUMENT);
+    throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_INPUT);
     throws([]{ Grammar::from_lark("start: ("); });
     throws([]{ Grammar::from_json_schema("{"); });
     throws([]{ Grammar::from_glrm("invalid source"); });
     glrmask_grammar* invalid_source = nullptr;
-    CHECK(glrmask_grammar_from_source(GLRMASK_LARK, "start: (", 9, &invalid_source) == GLRMASK_ENGINE_ERROR);
+    CHECK(glrmask_grammar_from_source(GLRMASK_LARK, "start: (", 9, &invalid_source) == GLRMASK_SYNTAX);
     CHECK(invalid_source == nullptr);
 }
 
@@ -426,7 +426,7 @@ void canonical_modules() {
     try { Grammar::from_lark("start: \"a\"").compile(v, wrong); }
     catch (const Error& error) {
         rejected = true;
-        CHECK(error.status() == GLRMASK_INVALID_ARGUMENT);
+        CHECK(error.status() == GLRMASK_INVALID_INPUT);
         CHECK(std::string(error.what()) == "token_trie settings apply only to the TokenTrie mask strategy");
     }
     CHECK(rejected);

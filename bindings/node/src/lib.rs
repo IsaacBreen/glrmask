@@ -10,11 +10,16 @@ use std::{ops::{Deref, DerefMut}, sync::{Arc, Mutex, MutexGuard}};
 
 fn error(e: core::Error) -> napi::Error {
     let code = match e.kind {
-        core::ErrorKind::InvalidArgument => "GLRMASK_INVALID_ARGUMENT",
-        core::ErrorKind::Engine => "GLRMASK_ENGINE_ERROR",
+        core::ErrorKind::InvalidInput => "GLRMASK_INVALID_INPUT",
+        core::ErrorKind::Compilation => "GLRMASK_COMPILATION",
         core::ErrorKind::Panic => "GLRMASK_PANIC",
         core::ErrorKind::BufferTooSmall => "GLRMASK_BUFFER_TOO_SMALL",
         core::ErrorKind::Closed => "GLRMASK_CLOSED",
+        core::ErrorKind::Syntax => "GLRMASK_SYNTAX",
+        core::ErrorKind::ResourceLimit => "GLRMASK_RESOURCE_LIMIT",
+        core::ErrorKind::StrategyUnsupported => "GLRMASK_STRATEGY_UNSUPPORTED",
+        core::ErrorKind::Serialization => "GLRMASK_SERIALIZATION",
+        core::ErrorKind::Internal => "GLRMASK_INTERNAL",
     };
     napi::Error::new(napi::Status::GenericFailure, format!("{code}: {}", e.message))
 }

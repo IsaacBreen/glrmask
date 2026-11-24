@@ -46,13 +46,19 @@ extern "C" {
 /// are set to NULL and `glrmask_error_message()` describes the failure.
 typedef int32_t glrmask_status;
 /// Status values. On failure an output handle is NULL.
+/// New codes may be added in a minor release; treat an unknown non-zero code as a failure.
 enum {
-    GLRMASK_OK=0,                 ///< Success.
-    GLRMASK_INVALID_ARGUMENT=1,   ///< A handle or argument is invalid.
-    GLRMASK_ENGINE_ERROR=2,       ///< Parsing, compiling or loading failed.
-    GLRMASK_PANIC=3,              ///< An internal error was caught. Discard the handle involved.
-    GLRMASK_BUFFER_TOO_SMALL=4,   ///< The buffer is too small; nothing was written.
-    GLRMASK_CLOSED=5              ///< The handle was already freed.
+    GLRMASK_OK=0, ///< Success.
+    GLRMASK_INVALID_INPUT=1, ///< A handle or argument is invalid.
+    GLRMASK_COMPILATION=2, ///< Compilation failed.
+    GLRMASK_PANIC=3, ///< An internal error was caught. Discard the handle involved.
+    GLRMASK_BUFFER_TOO_SMALL=4, ///< The buffer is too small; nothing was written.
+    GLRMASK_CLOSED=5, ///< The handle was already freed.
+    GLRMASK_SYNTAX=6, ///< Invalid grammar syntax.
+    GLRMASK_RESOURCE_LIMIT=7, ///< A resource limit was exceeded.
+    GLRMASK_STRATEGY_UNSUPPORTED=8, ///< The chosen strategy does not support the grammar.
+    GLRMASK_SERIALIZATION=9, ///< Saved bytes could not be loaded.
+    GLRMASK_INTERNAL=10 ///< An internal error; please report it.
 };
 /// How masks are computed.
 enum {
@@ -67,7 +73,7 @@ enum {
 /// How masks are computed at grammar boundaries.
 enum {
     GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,        ///< GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA, or GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA across each boundary. Slower to compile, with faster masks. Fails with GLRMASK_ENGINE_ERROR if it would be too large.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA across each boundary. Slower to compile, with faster masks. Fails with GLRMASK_RESOURCE_LIMIT if it would be too large.
     GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE=2   ///< Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
 };
 /// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE.

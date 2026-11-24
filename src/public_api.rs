@@ -517,7 +517,7 @@ fn attached_path<'n,T:Clone>(name:&'n str, bindings:&OrdMap<String,T>) -> Option
 }
 fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     if matches!((kind,grammar),(ExternKind::Token,true)) {
-        return Err(Error::Compilation(format!("extern {name:?} is a token extern; bind it to a token ID or token set")));
+        return Err(Error::InvalidInput(format!("extern {name:?} is a token extern; bind it to a token ID or token set")));
     }
     Ok(())
 }
@@ -690,7 +690,7 @@ impl Grammar {
                 LarkTokenSet::Any=>domain.clone(),
                 LarkTokenSet::Ranges{ranges,negate}=>{
                     for &(start,end) in ranges {
-                        if !vocab.contains_token_range(start,end){return Err(Error::Compilation(format!("token range {start}..={end} includes IDs that are not in the vocabulary")));}
+                        if !vocab.contains_token_range(start,end){return Err(Error::InvalidInput(format!("token range {start}..={end} includes IDs that are not in the vocabulary")));}
                     }
                     let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
                     if *negate {
@@ -746,7 +746,7 @@ impl Grammar {
             let ranges = comp.inline_token_ranges();
             for &(start, end) in &ranges {
                 if !vocab.contains_token_range(start, end) {
-                    return Err(Error::Compilation(format!(
+                    return Err(Error::InvalidInput(format!(
                         "token range {start}..={end} includes IDs that are not in the vocabulary"
                     )));
                 }
@@ -804,7 +804,7 @@ impl Grammar {
             }
             module::BindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
             module::BindingKind::Module(_) => {
-                return Err(Error::Compilation(format!(
+                return Err(Error::InvalidInput(format!(
                     "can't bind {name:?} to a Module in a Grammar; use Module::bind instead"
                 )));
             }
@@ -831,7 +831,7 @@ impl Grammar {
         if !declared.kinds.contains_key(name) {
             if let Some((head,tail))=attached_path(name,&self.bindings) {
                 let Some(GrammarValue::Source(child))=self.bindings.get(head) else {
-                    return Err(Error::Compilation(format!("{head:?} is not a source component")));
+                    return Err(Error::InvalidInput(format!("{head:?} is not a source component")));
                 };
                 let child=child.bind_value(tail,value)?;
                 let summary=graph::source_summary(&child)?;
@@ -842,10 +842,10 @@ impl Grammar {
                 graph::check_source_limits(&next)?;
                 return Ok(next);
             }
-            return Err(Error::Compilation(format!("there is no extern named {name:?}")));
+            return Err(Error::InvalidInput(format!("there is no extern named {name:?}")));
         }
         if self.bindings.contains_key(name) {
-            return Err(Error::Compilation(format!("extern {name:?} is already bound")));
+            return Err(Error::InvalidInput(format!("extern {name:?} is already bound")));
         }
         check_binding_kind(name,declared.kinds[name],matches!(value,GrammarValue::Source(_)))
             .map_err(|e|e.with_source_span(declared.spans.get(name).copied()))?;
@@ -924,7 +924,7 @@ impl Grammar {
         self.validate_exact_target(vocab)?;
         self.validate_ebnf(vocab)?;
         if let Some(name) = self.unresolved_external_names()?.first() {
-            return Err(Error::Compilation(format!(
+            return Err(Error::InvalidInput(format!(
                 "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
             )));
         }
@@ -996,7 +996,7 @@ impl Grammar {
                     let mut spec = ConstraintSpec::builder(attempt_grammar.clone(), vocab)?.build()?;
                     spec.automatic_boundary_selection = true;
                     if let Some(name) = spec.unbound_grammar_names.first() {
-                        return Err(Error::Compilation(format!(
+                        return Err(Error::InvalidInput(format!(
                             "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                         )));
                     }
@@ -1166,11 +1166,11 @@ impl Grammar {
 
     fn prepare_cached(&self,vocab:&Vocab,options:BuildOptions,cache:&mut SourcePreparation,depth:usize)
         -> Result<Arc<PreparedGrammar>> {
-        if depth>graph::MAX_DEPTH {return Err(Error::Compilation("grammars are nested more than 64 levels deep".into()));}
+        if depth>graph::MAX_DEPTH {return Err(Error::ResourceLimit("grammars are nested more than 64 levels deep".into()));}
         let identity=graph::source_identity(self);
         if let Some(module)=cache.prepared.get(&identity){return Ok(module.clone());}
         cache.visited+=1;
-        if cache.visited>graph::MAX_NODES {return Err(Error::Compilation("the composition has too many parts".into()));}
+        if cache.visited>graph::MAX_NODES {return Err(Error::ResourceLimit("the composition has too many parts".into()));}
 
         if matches!(self.source,GrammarSource::Lark(_)) {
             let resolved=Arc::new(self.resolve_lark(vocab)?);
@@ -2238,7 +2238,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         self.require_declared(name)?;
         check_binding_kind(name,self.grammar.declarations()?.kinds[name],false)?;
         if self.token_bindings.contains_key(name) || self.grammar_bindings.contains_key(name) {
-            return Err(Error::Compilation(format!(
+            return Err(Error::InvalidInput(format!(
                 "extern {name:?} is already bound",
             )));
         }
@@ -2265,7 +2265,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         self.require_declared(name)?;
         check_binding_kind(name,self.grammar.declarations()?.kinds[name],true)?;
         if self.grammar_bindings.contains_key(name) || self.token_bindings.contains_key(name) {
-            return Err(Error::Compilation(format!(
+            return Err(Error::InvalidInput(format!(
                 "extern {name:?} is already bound",
             )));
         }
@@ -2305,7 +2305,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         if self.declared_externals.contains(name) {
             return Ok(());
         }
-        Err(Error::Compilation(format!("there is no extern named {name:?}")))
+        Err(Error::InvalidInput(format!("there is no extern named {name:?}")))
     }
 }
 
@@ -2356,7 +2356,7 @@ impl GrammarBinding<'_> {
         if compatible {
             Ok(())
         } else {
-            Err(Error::Compilation(format!(
+            Err(Error::InvalidInput(format!(
                 "the module bound to extern {name:?} was precompiled for a different vocabulary",
             )))
         }
@@ -2373,7 +2373,7 @@ impl GrammarBinding<'_> {
                 ChildCompileMode::Static => {
                     if !allow_open_source_tokens
                         && let Some(name) = grammar.unresolved_external_names()?.first() {
-                            return Err(Error::Compilation(format!(
+                            return Err(Error::InvalidInput(format!(
                                 "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                             )));
                         }
@@ -2415,7 +2415,7 @@ impl GrammarBinding<'_> {
             Self::Source(grammar) => match mode {
                 ChildCompileMode::Static => {
                     if let Some(name) = grammar.unresolved_external_names()?.first() {
-                        return Err(Error::Compilation(format!(
+                        return Err(Error::InvalidInput(format!(
                             "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
                         )));
                     }
@@ -2877,7 +2877,7 @@ fn apply_final_boundary_trigger(constraint: &mut RuntimeConstraint, detail: Boun
 
 fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
     if let Some(slot) = constraint.late_grammar_slots.first() {
-        return Err(Error::Compilation(format!(
+        return Err(Error::InvalidInput(format!(
             "extern {:?} is unbound; bind it before compiling, or precompile to leave it open",
             slot.name,
         )));
@@ -3037,8 +3037,8 @@ impl PreparedGrammar {
     }
 
     fn require_direct_slot(&self,name:&str)->Result<()> {
-        if !self.slot_kinds.contains_key(name){return Err(Error::Compilation(format!("there is no unbound extern named {name:?}")));}
-        if self.bindings.contains_key(name){return Err(Error::Compilation(format!("extern {name:?} is already bound")));}
+        if !self.slot_kinds.contains_key(name){return Err(Error::InvalidInput(format!("there is no unbound extern named {name:?}")));}
+        if self.bindings.contains_key(name){return Err(Error::InvalidInput(format!("extern {name:?} is already bound")));}
         Ok(())
     }
 
@@ -3056,11 +3056,11 @@ impl PreparedGrammar {
         self.validate_slot_manifest()?;
         let mut pending=vec![(self,Vec::<String>::new())];let mut out=Vec::new();let mut visits=0;
         while let Some((module,prefix))=pending.pop() {
-            visits+=1;if visits>131_072 {return Err(Error::Compilation("the composition expands to too many parts".into()));}
+            visits+=1;if visits>131_072 {return Err(Error::ResourceLimit("the composition expands to too many parts".into()));}
             for (name,&kind) in module.slot_kinds.iter() {
                 let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));
                 out.push(Requirement {path,kind,source_span:module.slot_spans.get(name).copied()});
-                if out.len()>65_536 {return Err(Error::Compilation("the composition expands to too many parts".into()));}
+                if out.len()>65_536 {return Err(Error::ResourceLimit("the composition expands to too many parts".into()));}
             }
             for (name,binding) in &module.bindings {if let ModuleBinding::Module(child)=binding {
                 let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));pending.push((child,path));
@@ -3089,7 +3089,7 @@ impl PreparedGrammar {
         let vocab = constraint_vocab(self.inner.as_ref());
         let binding = match value {
             UnlinkedValue::Prepared(child) => {
-                if !child.targets_vocab(&vocab){return Err(Error::Compilation("the bound modules were precompiled for different vocabularies".into()));}
+                if !child.targets_vocab(&vocab){return Err(Error::InvalidInput("the bound modules were precompiled for different vocabularies".into()));}
                 let _=graph::prepared_first(&child)?;
                 ModuleBinding::Module(child)
             }
@@ -3100,7 +3100,7 @@ impl PreparedGrammar {
             UnlinkedValue::StaticBorrowed(child) => {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child, &vocab) {
-                    return Err(Error::Compilation(format!(
+                    return Err(Error::InvalidInput(format!(
                         "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }
@@ -3109,7 +3109,7 @@ impl PreparedGrammar {
             UnlinkedValue::StaticOwned(child) => {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child.as_ref(), &vocab) {
-                    return Err(Error::Compilation(format!(
+                    return Err(Error::InvalidInput(format!(
                         "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }
@@ -3259,7 +3259,7 @@ impl PreparedGrammar {
     pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
         graph::prepared_preflight(self)?;
         if let Some(name) = self.first_open_slot()? {
-            return Err(Error::Compilation(format!(
+            return Err(Error::InvalidInput(format!(
                 "extern {name:?} is unbound; bind it before compiling, or precompile to leave it open",
             )));
         }
