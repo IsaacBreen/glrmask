@@ -21,7 +21,7 @@ fn main() {
     let vocab = Vocab::new(
         raw.into_iter()
             .map(|(id, bytes)| (id.parse().unwrap(), decode_hex(&bytes)))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap();
     vocab.prepare_for_compile();
     let started = Instant::now();

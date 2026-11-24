@@ -21,7 +21,7 @@ fn vocab() -> Vocab {
             .into_iter()
             .enumerate()
             .map(|(i, s)| (i as u32, s.as_bytes().to_vec()))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap()
 }
 fn program(a: StackTemplate, b: StackTemplate, completion: StackTemplate) -> ParserProgram {
@@ -356,7 +356,7 @@ fn overlapping_terminal_lexer_and_ignored_whitespace_match_byte_language() {
             .iter()
             .enumerate()
             .map(|(i, p)| (i as u32, p.as_bytes().to_vec()))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap();
     let definition = ParserDefinition {
         stack_symbol_count: 4,

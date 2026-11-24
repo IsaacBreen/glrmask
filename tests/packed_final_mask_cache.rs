@@ -30,7 +30,7 @@ fn vocabulary() -> Vocab {
             .into_iter()
             .enumerate()
             .map(|(i, w)| (i as u32, w))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap()
 }
 

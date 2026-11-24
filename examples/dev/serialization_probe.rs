@@ -25,7 +25,7 @@ fn load_vocab(path: &Path) -> Vocab {
         entries
             .into_iter()
             .map(|(id, hex)| (id, hex_to_bytes(&hex)))
-            .collect(),
+            .collect::<Vec<_>>(),
     ).unwrap()
 }
 
@@ -61,7 +61,7 @@ fn main() {
                 entries
                     .into_iter()
                     .map(|(id, hex)| (id, hex_to_bytes(&hex)))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             ).unwrap();
             let construct_ms = started.elapsed().as_secs_f64() * 1000.0;
             let started = Instant::now();
