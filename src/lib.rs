@@ -90,7 +90,7 @@ pub use public_api::{
 #[doc(hidden)]
 pub use runtime::BoundaryTriggerDetail;
 pub use glrmask_vocab::SourceSpan;
-pub use glrmask_grammar::__private::grammar::glrm::ExternKind;
+pub use glrmask_grammar::ExternKind;
 
 /// Unstable compatibility surface for repository tooling and benchmark
 /// harnesses. It is deliberately absent from normal dependency builds.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python: Externs keys, values and items are mapping views. Rust: ExternKind is re-exported from the public grammar crate.
+
 - `commit_tokens` returns the number of tokens committed before the first failure, instead of a Boolean.
 
 - GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.

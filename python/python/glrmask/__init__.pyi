@@ -39,7 +39,7 @@ assert state.is_accepting()
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://glrmask.com/api/python/)
 """
 from __future__ import annotations
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, KeysView, ValuesView, ItemsView
 from types import ModuleType
 from typing import Any, ClassVar, Iterable, Literal, Optional, Sequence, TypeVar, Union, final, overload
 import numpy as np
@@ -189,13 +189,13 @@ class Externs(Mapping[str, Extern]):
         ...
     @overload
     def get(self, key: str, default: Optional[Union[Extern, _T]], /) -> Union[Extern, _T]: ...
-    def keys(self) -> list[str]:  # type: ignore[override]
+    def keys(self) -> KeysView[str]:
         """The extern names, in declaration order."""
         ...
-    def values(self) -> list[Extern]:  # type: ignore[override]
+    def values(self) -> ValuesView[Extern]:
         """The externs, in declaration order."""
         ...
-    def items(self) -> list[tuple[str, Extern]]:  # type: ignore[override]
+    def items(self) -> ItemsView[str, Extern]:
         """`(name, extern)` pairs, in declaration order."""
         ...
     def __repr__(self) -> str:

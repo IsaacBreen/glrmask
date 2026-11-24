@@ -78,7 +78,15 @@ def test_externs_mapping_semantics():
 
     # Declaration order preserved
     assert list(externs) == ["A", "B"]
-    assert externs.keys() == ["A", "B"]
+    from collections.abc import KeysView, ValuesView, ItemsView
+    assert isinstance(externs.keys(), KeysView)
+    assert isinstance(externs.values(), ValuesView)
+    assert isinstance(externs.items(), ItemsView)
+    assert list(externs.keys()) == ["A", "B"]
+    assert externs.keys() == {"A", "B"}
+    assert "A" in externs.keys()
+    assert list(externs.values()) == [externs["A"], externs["B"]]
+    assert list(externs.items()) == [("A", externs["A"]), ("B", externs["B"])]
 
     # Item access
     a = externs["A"]

@@ -127,21 +127,18 @@ impl PyExterns {
     }
 
     /// The extern names, in declaration order.
-    fn keys(&self) -> Vec<String> {
-        self.entries.iter().map(|e| e.name.clone()).collect()
+    fn keys(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf.py().import("collections.abc")?.getattr("KeysView")?.call1((slf,))?.unbind())
     }
 
     /// The externs, in declaration order.
-    fn values(&self) -> Vec<PyExtern> {
-        self.entries.clone()
+    fn values(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf.py().import("collections.abc")?.getattr("ValuesView")?.call1((slf,))?.unbind())
     }
 
     /// `(name, extern)` pairs, in declaration order.
-    fn items(&self) -> Vec<(String, PyExtern)> {
-        self.entries
-            .iter()
-            .map(|e| (e.name.clone(), e.clone()))
-            .collect()
+    fn items(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf.py().import("collections.abc")?.getattr("ItemsView")?.call1((slf,))?.unbind())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {

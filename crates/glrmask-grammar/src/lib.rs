@@ -61,6 +61,7 @@ pub(crate) mod import {
 }
 
 pub use grammar::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
+pub use grammar::glrm::ExternKind;
 pub use grammar::ast::parser_grammar::{ParserAutomaton, ParserAutomatonState,
     ParserExpr, ParserGrammar, ParserRule, CfgRecursion, FlatParserGrammar,
     ParserAnalysis, ParserProduction, ParserSymbol};
