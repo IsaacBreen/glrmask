@@ -29,10 +29,10 @@ assert state.commit_bytes(b"weather")
 | Rust | `TokenSet::new([1, 2, 3])` | `TokenSet::from_ranges([0..10])` or `[0..=9]` |
 | Python | `TokenSet([1, 2, 3])` | `TokenSet.from_ranges([range(0, 10)])` |
 | Node.js | `new TokenSet([1, 2, 3])` | `TokenSet.fromRanges([{start: 0, end: 10}])` |
-| C | `glrmask_token_set_new` | `glrmask_token_set_from_ranges`, with `{first, last}` |
-| C++ | `TokenSet({1, 2, 3})` | `TokenSet::from_ranges({{0, 9}})` |
+| C | `glrmask_token_set_new` | `glrmask_token_set_from_ranges`, with `{start, end}` |
+| C++ | `TokenSet({1, 2, 3})` | `TokenSet::from_ranges({{0, 10}})` |
 
-Python and Node.js ranges exclude their end; C and C++ ranges include it. Ranges may overlap or touch, and a range that
+C and C++ use `{start, end}` with `end` excluded, as in every language. Ranges may overlap or touch, and a range that
 is empty or reversed adds nothing. Repeated IDs count once.
 
 For large sets, use ranges. A set of all but one of 131,072 tokens is two ranges, and costs the same to compile and run

@@ -703,7 +703,7 @@ pub struct GlrmWithExternalSubgrammars {
 
 /// What an extern can be bound to.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExternKind {
     /// A token set or token ID.
     Token,

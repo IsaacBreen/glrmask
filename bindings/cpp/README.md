@@ -157,7 +157,7 @@ so copy it first to try a token without committing to it. Commit special tokens 
 bytes never match them.
 
 `is_accepting()` says whether the input so far is a complete match, and `is_terminated()` whether nothing more can be
-committed. `forced_tokens()` returns the tokens that must come next.
+committed. `commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing.
 
 [examples/generate.cpp](https://github.com/IsaacBreen/glrmask/blob/main/bindings/cpp/examples/generate.cpp) is a
 complete generation loop.

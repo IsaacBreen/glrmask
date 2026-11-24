@@ -109,7 +109,7 @@ class ParserBackend:
 class TokenTrie:
     """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
 
-    `TokenTrie()` is the same as `MaskStrategy.TOKEN_TRIE`."""
+    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
     def __new__(cls, *, parser_backend: Optional[ParserBackend] = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
     @property
     def parser_backend(self) -> ParserBackend:
@@ -209,14 +209,14 @@ class Externs(Mapping[str, Extern]):
 class Expr:
     """A grammar expression."""
     @staticmethod
-    def choice(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
+    def choice(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
         """Matches any one of `parts`.
 
         Raises `GLRMaskError` if a part has unbound externs.
         """
         ...
     @staticmethod
-    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
+    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
         """Matches `parts` in order.
 
         Raises `GLRMaskError` if a part has unbound externs.
@@ -404,8 +404,8 @@ class ConstraintState:
         `size` sets the array length, for example to match your logits; it must cover every token ID.
         """
         ...
-    def fill_mask(self, bitmask: NDArray[np.int32], /) -> None:
-        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
+    def fill_mask(self, bitmask: Union[NDArray[np.int32], NDArray[np.uint32]], /) -> None:
+        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """

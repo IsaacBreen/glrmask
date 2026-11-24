@@ -345,3 +345,32 @@ def test_equality_with_other_types_is_false_not_an_error():
 def test_internal_module_stays_importable_but_is_not_public():
     assert "_internal" not in glrmask.__all__
     assert hasattr(glrmask._internal, "compiler_cache_stats")
+
+def test_fill_mask_dtype_and_layout():
+    state = glrmask.Grammar.from_lark('start: "a"').compile(vocab()).start()
+    words = np.zeros(4, dtype=np.uint32)
+    state.fill_mask(words)
+    signed = np.zeros(4, dtype=np.int32)
+    state.fill_mask(signed)
+    assert np.array_equal(words, signed.view(np.uint32))
+    readonly = signed.copy()
+    readonly.flags.writeable = False
+    for array in (np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.int32), signed[::2], readonly):
+        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D int32 NumPy array"):
+            state.fill_mask(array)
+
+
+def test_hashable_public_values_and_integer_expr_parts():
+    for value in (glrmask.MaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.AUTO, glrmask.ParserBackend.LR_TABLE):
+        assert {value: 1}[value] == 1
+        assert hash(value) == hash(int(value))
+    assert hash(glrmask.TokenSet([1])) == hash(glrmask.TokenSet([1]))
+    grammar = glrmask.Grammar.from_glrm('extern token A; start s; nt s = A;')
+    assert len(set(grammar.externs.values())) == 1
+    assert hash(grammar.externs["A"]) == hash(grammar.externs["A"])
+    state = glrmask.Grammar.from_expr(glrmask.Expr.sequence(5, 6)).compile(glrmask.Vocab({})).start()
+    assert state.commit_tokens([5, 6]) == 2
+    assert state.is_accepting()
+    choice = glrmask.Grammar.from_expr(glrmask.Expr.choice(5, 6)).compile(glrmask.Vocab({})).start()
+    assert choice.commit_token(6)
+    assert choice.is_accepting()

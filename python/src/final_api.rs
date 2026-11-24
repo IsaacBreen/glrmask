@@ -18,12 +18,17 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 
 /// How masks are computed.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, from_py_object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyMaskStrategy {
     AUTO,
     PARSER_DWA,
     TOKEN_TRIE,
+}
+
+#[pymethods]
+impl PyMaskStrategy {
+    fn __hash__(&self) -> isize { *self as isize }
 }
 
 impl From<PyMaskStrategy> for glrmask::MaskStrategy {
@@ -49,12 +54,17 @@ impl From<glrmask::MaskStrategy> for PyMaskStrategy {
 
 /// How masks are computed at grammar boundaries.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, from_py_object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyBoundaryMaskStrategy {
     AUTO,
     PARSER_DWA,
     TOKEN_TRIE,
+}
+
+#[pymethods]
+impl PyBoundaryMaskStrategy {
+    fn __hash__(&self) -> isize { *self as isize }
 }
 
 impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
@@ -80,13 +90,18 @@ impl From<glrmask::BoundaryMaskStrategy> for PyBoundaryMaskStrategy {
 
 /// How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask", eq, eq_int, from_py_object)]
+#[pyclass(name = "ParserBackend", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyParserBackend {
     /// An LR table. Faster to compile, with slower masks. The default.
     LR_TABLE,
     /// Template DFAs. Slower to compile, with faster masks.
     TEMPLATE_DFA,
+}
+
+#[pymethods]
+impl PyParserBackend {
+    fn __hash__(&self) -> isize { *self as isize }
 }
 
 impl From<PyParserBackend> for glrmask::ParserBackend {
@@ -112,7 +127,7 @@ impl TryFrom<glrmask::ParserBackend> for PyParserBackend {
 
 /// Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
 ///
-/// `TokenTrie()` is the same as `MaskStrategy.TOKEN_TRIE`.
+/// `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`.
 #[pyclass(name = "TokenTrie", module = "glrmask", frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct PyTokenTrie {
@@ -286,6 +301,13 @@ impl PyTokenSet {
                 .collect();
             format!("TokenSet.from_ranges([{}])", listed.join(", "))
         }
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

@@ -12,7 +12,7 @@ fn extern_repr(py: Python<'_>, name: &str, kind: &str) -> PyResult<String> {
 
 /// A named placeholder in a grammar.
 #[pyclass(name = "Extern", module = "glrmask", frozen, from_py_object)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PyExtern {
     pub(super) name: String,
     pub(super) kind: String,
@@ -36,6 +36,13 @@ impl PyExtern {
     /// A representation for debugging.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         extern_repr(py, &self.name, &self.kind)
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Whether both have the same name and kind.
@@ -223,8 +230,11 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
     if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Expr::from(et.inner.clone()));
     }
+    if let Some(id) = extract_token_id(value)? {
+        return Ok(glrmask::Expr::from(id));
+    }
     Err(PyTypeError::new_err(
-        "Expr parts must be Grammar, Module, Expr, or TokenSet",
+        "Expr parts must be Grammar, Module, Expr, TokenSet, or a token ID",
     ))
 }
 

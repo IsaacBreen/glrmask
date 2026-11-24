@@ -97,7 +97,7 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
 
-[Native AWS benchmark details](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.
+[Native AWS benchmark details](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published packages.
 
 ## Installation
 
@@ -217,8 +217,7 @@ once the grammar is complete, and nothing is allowed after it. The token doesn't
 
 ### Forced tokens
 
-`forced_tokens()` returns the tokens that must come next, without committing them, so you can commit them without
-running the model. When the forced text could be tokenized in several ways, it takes the longest token at each step.
+`commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing. When the forced text could be tokenized in several ways, it takes the longest token at each step, at most 1,000 tokens per call.
 See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing.md).
 
 ## Composing grammars
@@ -297,8 +296,7 @@ expression can be bound to a grammar extern directly.
 ## Token sets
 
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
-`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges exclude their end in Python and
-Node.js, and include it in C and C++; Rust takes `0..10` or `0..=9`. An ID doesn't need to be in the vocabulary.
+`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. An ID doesn't need to be in the vocabulary.
 
 Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
 is an error.

@@ -92,7 +92,7 @@ A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of ele
 bytes never match them.
 
 `isAccepting()` says whether the input so far is a complete match, and `isTerminated()` whether nothing more can be
-committed. `forcedTokens()` returns the tokens that must come next.
+committed. `commitForcedTokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing.
 
 [examples/generate.mjs](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/examples/generate.mjs) is a
 complete generation loop.

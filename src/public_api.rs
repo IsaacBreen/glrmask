@@ -170,7 +170,7 @@ impl Engine {
 }
 
 /// A named placeholder in a grammar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Extern {
     pub(crate) name: String,
     pub(crate) kind: ExternKind,

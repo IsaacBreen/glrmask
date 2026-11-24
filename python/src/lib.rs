@@ -203,6 +203,36 @@ fn bitmask_u32_view<'a, 'py>(
     })
 }
 
+fn with_mask_buffer(
+    bitmask: &Bound<'_, PyAny>,
+    required: usize,
+    fill: impl FnOnce(&mut [u32]),
+) -> PyResult<()> {
+    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D int32 NumPy array");
+    let checked = |len| {
+        if len < required {
+            Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")))
+        } else {
+            Ok(())
+        }
+    };
+    if let Ok(array) = bitmask.cast::<PyArray1<i32>>() {
+        let mut array = array.try_readwrite().map_err(|_| invalid())?;
+        let slice = array.as_slice_mut().map_err(|_| invalid())?;
+        checked(slice.len())?;
+        // i32 and u32 have the same size, alignment, and bit representation.
+        fill(unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast::<u32>(), slice.len()) });
+    } else if let Ok(array) = bitmask.cast::<PyArray1<u32>>() {
+        let mut array = array.try_readwrite().map_err(|_| invalid())?;
+        let slice = array.as_slice_mut().map_err(|_| invalid())?;
+        checked(slice.len())?;
+        fill(slice);
+    } else {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn set_gss_summary_fields(
     dict: &Bound<'_, PyDict>,
     prefix: &str,
@@ -962,14 +992,14 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
-    fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
-        let buf = bitmask_u32_view(&mut bitmask)?;
-        with_state(&self.inner, |state| state.fill_mask(buf));
-        Ok(())
+    fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
+        with_mask_buffer(bitmask, (self.max_token as usize + 1).div_ceil(32), |buf| {
+            with_state(&self.inner, |state| state.fill_mask(buf));
+        })
     }
 
     #[doc(hidden)]
@@ -1064,25 +1094,14 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` array of at least `Constraint.mask_len()` words. Raises `TypeError` if it isn't `int32`, or `GLRMaskError` if it's too short or not contiguous.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
-    fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
-        let slice = bitmask
-            .as_slice_mut()
-            .map_err(|_| glrmask_error("invalid_input", "the mask array must be contiguous"))?;
-        // Safety: i32 and u32 have identical size, alignment, and bit representation.
-        // fill_mask writes valid u32 bitmask values where the high bit is meaningful.
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        let required = self.mask_len;
-        if buf.len() < required {
-            return Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")));
-        }
-        with_state(&self.inner, |state| state.fill_mask(buf));
-        Ok(())
+    fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
+        with_mask_buffer(bitmask, self.mask_len, |buf| {
+            with_state(&self.inner, |state| state.fill_mask(buf));
+        })
     }
 
     /// Commits a token. If it isn't allowed, returns `False` and terminates the state.

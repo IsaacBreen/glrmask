@@ -1,16 +1,20 @@
 # Forced tokens
 
 Sometimes the grammar allows only one continuation, such as the rest of a tool call's opening tag once its first
-letters are chosen. `forced_tokens()` returns tokens for that text, so you can commit them without running the model for
-each one.
+letters are chosen. `commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing.
 
 ```python
-for token in state.forced_tokens():
-    state.commit_token(token)
+import glrmask
+
+vocab = glrmask.Vocab({0: b"a", 1: b"b"})
+state = glrmask.Grammar.from_lark('start: "ab"').compile(vocab).start()
+assert state.copy().commit_forced_tokens() == [0, 1]
+tokens = state.commit_forced_tokens()
+assert tokens == [0, 1]
+assert state.is_accepting()
 ```
 
-`forced_tokens()` doesn't change the state; commit the tokens yourself. Your model also has to see them, so add them to
-its input as you would tokens it generated.
+Your model also has to see the returned tokens, so add them to its input as you would tokens it generated.
 
 ## Which tokens
 
@@ -26,7 +30,7 @@ The result stops:
 - before a token that would cross a point where a special token or token extern could come instead. In `"ab" | "a" T "b"`,
   where `T` is a token extern, `ab` would skip the point after `a` where `T` could go, and `a` alone isn't the longest
   token, so the result is empty;
-- after 10,000 tokens or bytes.
+- after at most 1,000 tokens per call.
 
 An empty result says only that nothing is forced. It doesn't mean the text is complete or that the state has ended.
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable, and `Expr.choice` and `Expr.sequence` accept token IDs.
+
 - GLRM reserves `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. Extra semicolons are allowed.
 
 - Rust: `Grammar::bind` takes a `GrammarBinding`, which can't be a `Module`, so binding a module into a grammar is a compile error instead of a runtime error.
