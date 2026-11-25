@@ -1,7 +1,7 @@
 //! An independent finite-language compiler consumes only public parser data.
 //! It knows nothing about GLR tables, lexer expressions, or masking internals.
 use std::{cell::Cell, collections::{BTreeMap, BTreeSet}, sync::Arc};
-use glrmask::{Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+use glrmask::{CompileOptions, Constraint, Grammar, MaskStrategy, Module, ParserBackend, TokenSet, Vocab};
 use glrmask::template_parser::{CfgRecursion, FlatParserGrammar, ParserDefinition, ParserExpr,
     ParserGrammar, ParserSymbol, PreparedParserGrammar, StackDfa, StackLabel,
     StackState, StackTemplate, StackTransition, TemplateBuildOptions};
@@ -227,9 +227,53 @@ fn exact_token_binding_is_not_its_vocabulary_byte_spelling() {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
             let mut state = c.start(); let mask = state.mask(); assert!(bit(&mask, 70)); assert!(!bit(&mask, 0));
+            // A second mask reads the cache; it must include exact-token admissions too.
+            assert_eq!(state.mask(), mask);
+            for id in [0, 1, 70] {
+                let mut candidate = state.clone();
+                assert_eq!(candidate.commit_token(id), bit(&mask, id), "initial token {id}");
+            }
             assert!(state.commit_token(70)); assert!(!state.is_accepting()); assert!(bit(&state.mask(), 1));
+            let mask = state.mask();
+            assert_eq!(state.mask(), mask);
+            for id in [0, 1, 70] {
+                let mut candidate = state.clone();
+                assert_eq!(candidate.commit_token(id), bit(&mask, id), "after exact token {id}");
+            }
             assert!(state.commit_token(1)); assert!(state.is_accepting());
             let mut wrong = c.start(); assert!(!wrong.commit_token(0));
+        }
+    }
+}
+
+#[test]
+fn exact_token_extern_mask_cache_agrees_with_commit_and_forcing() {
+    let v = Vocab::new([(0, b"a".to_vec()), (1, b"b".to_vec()), (70, b"a".to_vec()), (71, vec![])]).unwrap();
+    let g = Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark \"b\";").unwrap();
+    for strategy in [MaskStrategy::ParserDwa, MaskStrategy::FAST_COMPILE] {
+        let options = CompileOptions::default().mask_strategy(strategy);
+        let mut bound = g.clone();
+        bound.bind("mark", TokenSet::new([70])).unwrap();
+        let direct = bound.compile_with(&v, options.clone()).unwrap();
+        let mut m = Module::new(&g);
+        m.precompile_with(&v, options.clone()).unwrap();
+        m.bind("mark", TokenSet::new([70])).unwrap();
+        let loaded = Module::load(m.save()).unwrap().compile_with(&v, options).unwrap();
+        for c in [&direct, &loaded, &Constraint::load(direct.save(), &v).unwrap()] {
+            let mut state = c.start();
+            for wanted in [70, 1] {
+                let mask = state.mask();
+                assert_eq!(state.mask(), mask);
+                for id in [0, 1, 70, 71] {
+                    assert_eq!(bit(&mask, id), id == wanted, "expected {wanted}, candidate {id}");
+                    assert_eq!(state.clone().commit_token(id), bit(&mask, id));
+                }
+                assert!(state.commit_token(wanted));
+            }
+            assert!(state.is_accepting());
+            let mut forced = c.start();
+            assert_eq!(forced.commit_forced_tokens(), [70, 1]);
+            assert!(forced.is_accepting());
         }
     }
 }

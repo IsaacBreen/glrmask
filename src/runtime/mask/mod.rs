@@ -9001,8 +9001,11 @@ impl ConstraintState {
                 }
             }
             self.update_control_special_token_mask(mask);
+            // Template exact-token admissions are overlaid on the byte DWA.
+            // Replace any pre-overlay cached mask before it can be reused.
             if self.constraint.parser_has_controls()
                 || self.constraint.uses_compact_segmented_parser_runtime()
+                || (self.constraint.has_template_parser() && !self.constraint.special_token_terminals.is_empty())
             {
                 self.store_mask_cache_reuse_dense(mask);
             }
@@ -9081,6 +9084,7 @@ impl ConstraintState {
         self.clear_late_grammar_placeholder_mask(buf);
         if self.constraint.parser_has_controls()
             || self.constraint.uses_compact_segmented_parser_runtime()
+            || (self.constraint.has_template_parser() && !self.constraint.special_token_terminals.is_empty())
         {
             self.store_mask_cache_reuse_dense(buf);
         }
