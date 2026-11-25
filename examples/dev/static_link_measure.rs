@@ -520,6 +520,7 @@ fn cmd_dynamic_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: 
         let mut dispatch = Constraint::load(&dispatch_bytes, vocab).unwrap();
         core.prepare_for_dynamic_composition(vocab).unwrap();
         dispatch.prepare_for_dynamic_composition(vocab).unwrap();
+        #[allow(clippy::arc_with_non_send_sync)] // Required by the shared-composition API; this probe runs on one thread.
         let dispatch = Arc::new(dispatch);
         let started = Instant::now();
         let composed = if std::env::var_os("STATIC_LINK_MEASURE_DYNAMIC_BORROWED").is_some() {
@@ -643,6 +644,7 @@ fn validate_dynamic_link_artifact(
     // reconstructing its retired flattened compiler views.
     let nested_core = Constraint::load(core_bytes, vocab)
         .expect("load nested core with vocab");
+    #[allow(clippy::arc_with_non_send_sync)] // Required by the shared-composition API; this probe runs on one thread.
     let fast_child = Arc::new(fast.clone());
     let nested = nested_core
         .compose_compiled_subgrammars_dynamic_shared(
@@ -714,6 +716,7 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
                 core.compose_compiled_subgrammars(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], vocab)
                     .unwrap()
             } else {
+                #[allow(clippy::arc_with_non_send_sync)] // Required by the shared-composition API; this probe runs on one thread.
                 let dispatch = Arc::new(dispatch);
                 core.compose_compiled_subgrammars_dynamic_shared(
                     &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&dispatch))],
