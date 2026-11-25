@@ -99,7 +99,7 @@ fn canonical_alias_selection_excludes_reserved_root_end_ids() {
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; nt root = \"x\";").unwrap()
             .compile_with_build_options(&vocab,mode.build_options().end_tokens([0])).unwrap();
-        assert_eq!(checked_force(&c),[1],"{mode:?}");
+        assert_eq!(checked_force(&c),[1,0],"{mode:?}");
     }
 }
 
@@ -383,4 +383,115 @@ fn code_bound_token_set_with_unregistered_id_is_allowed_after_literal() {
     assert!(allows(&state.mask(), 99));
     assert!(state.commit_token(99));
     assert!(state.is_accepting());
+}
+
+#[test]
+fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
+    let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(9,Vec::new()),(10,Vec::new())]).unwrap();
+    let optional = Grammar::from_glrm(r#"start root nt root = "a" "b"?"#).unwrap();
+    let finite = Grammar::from_glrm(r#"start root nt root = "a""#).unwrap();
+    for mode in MODES {
+        let options = mode.build_options();
+        let plain = optional.compile_with_build_options(&vocab, options.clone()).unwrap();
+        let mut s = plain.start();
+        assert_eq!(s.commit_forced_tokens(), [0], "{mode:?}");
+        assert!(s.is_accepting() && !s.is_terminated());
+        assert_eq!(s.mask()[0], 1 << 1);
+        assert!(s.commit_forced_tokens().is_empty());
+        assert!(s.forced_token_ids_reference().is_empty());
+
+        for (body, ends, expected) in [
+            (&finite, vec![9], vec![0,9]),
+            (&optional, vec![9], vec![0]),
+            (&finite, vec![9,10], vec![0]),
+        ] {
+            let mut root = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap();
+            root.bind("BODY", body.clone()).unwrap();
+            root.bind("END", TokenSet::new(ends.clone())).unwrap();
+            let c = root.compile_with_build_options(&vocab, options.clone()).unwrap();
+            for c in [c.clone(), Constraint::load(c.save(), &vocab).unwrap()] {
+                let forced = checked_force(&c);
+                assert!(expected.starts_with(&forced), "{mode:?}, ends={ends:?}, forced={forced:?}");
+                let mut s = c.start();
+                assert!(!s.is_accepting());
+                assert!(s.commit_token(0));
+                assert!(!s.is_accepting() && !s.is_terminated());
+                assert!(allows(&s.mask(), 9));
+                if expected.len() == 2 {
+                    assert_eq!(s.forced_token_ids_reference(), [9]);
+                    assert_eq!(s.commit_forced_tokens(), [9]);
+                } else {
+                    assert!(s.commit_forced_tokens().is_empty());
+                    assert!(s.commit_token(9));
+                }
+                assert!(s.is_accepting() && s.is_terminated());
+                assert!(s.mask().iter().all(|&x| x == 0));
+                assert!(s.commit_forced_tokens().is_empty());
+            }
+        }
+    }
+}
+
+fn with_end(body: &Grammar, ends: &[u32]) -> Grammar {
+    let mut root = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap();
+    root.bind("BODY", body.clone()).unwrap();
+    root.bind("END", TokenSet::new(ends.iter().copied())).unwrap();
+    root
+}
+
+#[test]
+fn caller_eos_equivalence_at_sampled_prefixes() {
+    use glrmask::{CompileOptions, MaskStrategy};
+    let mut entries = (0..128).map(|i| (i, vec![i as u8])).collect::<Vec<_>>();
+    entries.push((130,Vec::new()));
+    let vocab = Vocab::new(entries).unwrap();
+    let grammars = [
+        ("finite", Grammar::from_glrm(r#"start root nt root = "a" | "ab" | "b""#).unwrap()),
+        ("nullable", Grammar::from_glrm(r#"start root nt root = "a"*"#).unwrap()),
+        ("regex", Grammar::from_glrm(r#"start root t WORD=/[ab]+/ nt root=WORD"#).unwrap()),
+        ("recursive", Grammar::from_glrm(r#"start root nt root = "a" root "b" | eps"#).unwrap()),
+        ("json", Grammar::from_json_schema(r#"{"type":"array","items":{"type":"integer"},"maxItems":3}"#).unwrap()),
+    ];
+    let mut checked = 0;
+    let mut stops = 0;
+    let mut seed = 813u64;
+    for (label, body) in grammars {
+        for strategy in [MaskStrategy::ParserDwa, MaskStrategy::FAST_COMPILE] {
+            let options=CompileOptions::default().mask_strategy(strategy);
+            let b=body.compile_with(&vocab,options.clone()).unwrap();
+            for ends in [&[130][..], &[130,160][..]] {
+                let a=with_end(&body,ends).compile_with(&vocab,options.clone()).unwrap();
+                let words=a.mask_len().max(b.mask_len()).max(6);
+                for (a,b) in [(a.clone(),b.clone()),(Constraint::load(a.save(),&vocab).unwrap(),Constraint::load(b.save(),&vocab).unwrap())] {
+                    for _ in 0..4 {
+                        let mut x=a.start();let mut y=b.start();
+                        for step in 0..64 {
+                            let mut am=vec![u32::MAX;words];let mut bm=vec![u32::MAX;words];
+                            x.fill_mask(&mut am);y.fill_mask(&mut bm);
+                            let accepted=y.is_accepting();
+                            assert!(!x.is_accepting(),"{label} {strategy:?} {step}");
+                            if accepted { for &id in ends {bm[id as usize/32]|=1<<(id%32);} }
+                            assert_eq!(am,bm,"{label} {strategy:?} {ends:?} step={step}");
+                            checked+=1;
+                            if accepted {
+                                assert!(!x.is_terminated(),"{label} {strategy:?} END is available");
+                                for &id in ends {
+                                    let mut ended=x.clone();assert!(ended.commit_token(id));
+                                    assert!(ended.is_accepting() && ended.is_terminated());
+                                    assert!(ended.mask().iter().all(|&w|w==0));
+                                    stops+=1;
+                                }
+                            }
+                            let ordinary=(0..128).filter(|&id|allows(&bm,id)).collect::<Vec<_>>();
+                            if ordinary.is_empty(){break;}
+                            seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            let id=ordinary[((seed>>32) as usize)%ordinary.len()];
+                            assert!(x.commit_token(id) && y.commit_token(id),"{label} {strategy:?} {id}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("EOS equivalence: {checked} full mask comparisons, {stops} explicit END commits");
 }

@@ -255,7 +255,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState], dynamic: Option<bool>)
         states.retain(|state| !state.state.is_empty());
         let mut output = Vec::new();
         while !states.is_empty() && output.len() < MAX_FORCED_TOKENS {
-            if states.iter().any(ConstraintState::frontier_complete) { break; }
+            if states.iter().any(ConstraintState::is_accepting) { break; }
             let (individual, union) = masks(&states, dynamic);
             let Some(id) = singleton(&union) else { break; };
             if !commit_selected(&mut states, &individual, id, dynamic) { break; }
@@ -266,15 +266,25 @@ pub(crate) fn force_token_ids(states: &[ConstraintState], dynamic: Option<bool>)
 }
 
 fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<u32> {
-    if states.is_empty() || states.iter().any(ConstraintState::frontier_complete) || !same_spelling_policy(states) {
+    if states.is_empty() || !same_spelling_policy(states) {
         return Vec::new();
     }
     states.retain(|state| !state.state.is_empty());
     let mut budget = Budget(MAX_PROBES);
     let mut output = Vec::new();
     while !states.is_empty() && output.len() < MAX_FORCED_TOKENS {
-        if states.iter().any(ConstraintState::frontier_complete) { break; }
+        if states.iter().any(ConstraintState::is_accepting) { break; }
         let (individual, mask) = masks(states, dynamic);
+        // Legacy internal root-end controls are not included in event_possible.
+        // A complete body is not accepting until an end ID is committed. Treat
+        // admitted ends as exact events: force a unique ID, never choose between
+        // an end and another ID (including a different end).
+        if states[0].constraint.end_tokens.iter().any(|&id| bit(&mask, id)) {
+            let Some(id) = singleton(&mask) else { break; };
+            if !commit_selected(states, &individual, id, dynamic) { break; }
+            output.push(id);
+            continue;
+        }
         let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
         let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
         for (&c, s) in constraints.iter().zip(&mut frontiers) { expand_runtime_product_states(c, s); }
@@ -294,7 +304,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
         let mut current_masks = individual;
         let mut current_mask = mask;
         while offset < prefix.len() {
-            if states.iter().any(ConstraintState::is_accepting) || output.len() >= MAX_FORCED_TOKENS { return output; }
+            if (offset != 0 && states.iter().any(ConstraintState::is_accepting)) || output.len() >= MAX_FORCED_TOKENS { return output; }
             let Some((id, width)) = canonical_token(&states[0].constraint, &current_mask, &prefix[offset..]) else { return output; };
             if !commit_selected(states, &current_masks, id, dynamic) { return output; }
             output.push(id);
