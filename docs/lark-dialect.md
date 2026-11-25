@@ -41,16 +41,14 @@ split text differently in Lark.
 |---|---|
 | `@name` | A grammar extern |
 | `<\|name\|>` | A token extern |
-| `<[5]>`, `<[1,3-8]>` | Token 5; tokens 1 and 3 to 8 |
-| `<[^1,3-8]>`, `<[*]>` | Any token except 1 and 3 to 8; any token |
 | `%json { ... }` | A JSON Schema, inline |
 | `name[lazy]: ...` | A terminal that ends as soon as it can |
 
 ### Externs
 
 ```python
-call = glrmask.Grammar.from_lark('start: <|begin_call|> "<" @payload ">"')
-call.bind("begin_call", begin_call_id)  # your tokenizer's ID for <|begin_call|>
+call = glrmask.Module(glrmask.Grammar.from_lark('start: <|begin_call|> "<" @payload ">"'))
+call.bind("begin_call", glrmask.TokenSet([begin_call_id]))  # your tokenizer's ID for <|begin_call|>
 call.bind("payload", glrmask.Grammar.from_json_schema({"type": "null"}))
 ```
 
@@ -60,10 +58,7 @@ grammar; see [Composing grammars](../GUIDE.md#composing-grammars). GLRMask never
 
 ### Token IDs
 
-`<[...]>` matches one token by ID. Ranges include both ends and are ranges of IDs, not of characters. `^` and `*` are
-relative to the vocabulary's tokens with bytes: they never match a special token. Every ID must be a token with bytes
-in the vocabulary, so none can be a special token; to allow one, declare it with `<|name|>` and bind it.
-Token IDs can't appear inside a terminal or a `[lazy]` body. See [token sets](token-sets.md).
+Grammar source cannot introduce token-level matches: only code binding a TokenSet on a Module can. Numeric token atoms, ranges, complements, wildcard and `@token(...)` are syntax errors. Declare a token slot with `<|name|>` instead. See [token sets](token-sets.md).
 
 ### Inline JSON Schema
 

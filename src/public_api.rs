@@ -674,39 +674,12 @@ impl Grammar {
             .as_ref().map_err(Clone::clone)
     }
 
-    fn resolve_lark(&self,vocab:&Vocab)->Result<Self> {
-        use range_set_blaze::RangeSetBlaze;
+    fn resolve_lark(&self,_vocab:&Vocab)->Result<Self> {
         let GrammarSource::Lark(source)=&self.source else{return Err(Error::Compilation("not a Lark description".into()));};
         let document=self.lark_document()?;
-        let domain=RangeSetBlaze::from_iter(vocab.byte_token_ranges());
         let mut values=std::collections::HashMap::new();
-        for (name,set) in &document.events {
-            // A named atom is a token extern; its binding supplies the IDs.
-            if let LarkTokenSet::Named(external)=set {
-                values.insert(name.clone(),glrmask_grammar::GrammarExpr::Ref(external.clone()));
-                continue;
-            }
-            let ranges=(|| -> Result<RangeSetBlaze<u32>> { Ok(match set {
-                LarkTokenSet::Any=>domain.clone(),
-                LarkTokenSet::Ranges{ranges,negate}=>{
-                    for &(start,end) in ranges {
-                        if !vocab.contains_token_range(start,end){return Err(Error::InvalidInput(format!("token range {start}..={end} includes IDs that are not in the vocabulary")));}
-                    }
-                    let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
-                    if *negate {
-                        &domain-&selected
-                    } else {
-                        crate::import::reject_special_token_ids(&selected, vocab)?;
-                        selected
-                    }
-                }
-                LarkTokenSet::Named(_)=>unreachable!("handled above"),
-            }) })().map_err(|e|e.with_source_span(document.source_spans.get(name).copied()))?;
-            let mut atoms=ranges.ranges().map(|range|if range.start()==range.end(){
-                glrmask_grammar::GrammarExpr::SpecialToken(*range.start())
-            }else{glrmask_grammar::GrammarExpr::SpecialTokenRange(*range.start(),*range.end())}).collect::<Vec<_>>();
-            let expression=if atoms.len()==1{atoms.pop().unwrap()}else{glrmask_grammar::GrammarExpr::Choice(atoms)};
-            values.insert(name.clone(),expression);
+        for (name,LarkTokenSet::Named(external)) in &document.events {
+            values.insert(name.clone(),glrmask_grammar::GrammarExpr::Ref(external.clone()));
         }
         let named=document.resolve_events(&values);
         let externs=lark_declarations(document)

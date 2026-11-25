@@ -40,12 +40,9 @@ def test_non_integer_token_id_is_a_type_error():
 
 
 def test_special_tokens_are_explicit():
-    vocab = glrmask.Vocab({0: b"a", 1: b"a", 3: b""})
-    wildcard = glrmask.Grammar.from_lark("start: <[*]>").compile(vocab)
-    mask = wildcard.start().mask()
-    assert mask[0] and mask[1] and not mask[3]
-    with pytest.raises(ValueError):
-        glrmask.Grammar.from_lark("start: <[3]>").compile(vocab)
+    for atom in ("<[1]>", "<[1,3-8]>", "<[]>", "<[^0]>", "<[*]>", "@token(7)"):
+        with pytest.raises(ValueError, match="token IDs can't appear in grammar source"):
+            glrmask.Grammar.from_lark("start: " + atom)
 
     body = glrmask.Vocab({0: b"a", 1: b"a"})
     module = glrmask.Module(glrmask.Grammar.from_lark("start: <|begin|> <|body|>"))

@@ -979,22 +979,23 @@ fn terminal_ended_first_json_schema_matches_the_exact_oracle() {
 }
 
 #[test]
-fn terminal_ended_first_lark_event_matches_the_exact_oracle() {
+fn terminal_ended_first_lark_matches_the_exact_oracle() {
     let _serial = serial();
-    // `<[1]>` is a Lark event, so this only lowers through Grammar::resolve_lark.
-    // Token 1 is `b`, so the language is exactly "ab".
+    // Portable Lark source lowers through Grammar::resolve_lark.
+    // The language is exactly "ab"; named token slots require binding and
+    // are outside the plain-single-grammar rescue scope.
     let case = case(0, 2, &[(0, &[-1, -2])]);
     reset_test_rescue_entries();
     let constraint = compile_with_te_first(
-        Grammar::from_lark("start: \"a\" <[1]>").unwrap(),
+        Grammar::from_lark("start: \"a\" \"b\"").unwrap(),
         &vocab(),
         MaskMode::ParserDwa,
     )
-    .unwrap_or_else(|error| panic!("TE-first Lark event compile failed: {error}"));
+    .unwrap_or_else(|error| panic!("TE-first Lark compile failed: {error}"));
     assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
     assert!(
         test_rescue_entries() > 0,
-        "the Lark event compile did not enter the rescue"
+        "the Lark compile did not enter the rescue"
     );
     check_exact_oracle(&constraint, &case);
 }
@@ -1014,8 +1015,8 @@ fn rescue_lowering_equals_the_normal_static_route() {
             &v,
         ),
         (
-            "lark-event",
-            Grammar::from_lark("start: \"a\" <[1]>").unwrap(),
+            "lark",
+            Grammar::from_lark("start: \"a\" \"b\"").unwrap(),
             &v,
         ),
         (

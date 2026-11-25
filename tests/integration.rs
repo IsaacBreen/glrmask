@@ -1495,7 +1495,7 @@ fn glrm_special_token_is_exact_token_id_not_byte_language() {
 }
 
 #[test]
-fn ebnf_and_lark_accept_special_token_atoms() {
+fn internal_ebnf_and_bound_lark_accept_special_tokens() {
     let vocab = special_token_vocab();
     let ebnf = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::ebnf(r#"start ::= "a" @token(7) "b""#), &vocab).unwrap()
@@ -1503,7 +1503,10 @@ fn ebnf_and_lark_accept_special_token_atoms() {
     assert_special_token_sequence(&ebnf);
 
     let lark = with_stable_ti_env(|| {
-        Constraint::compile(glrmask::Grammar::lark(r#"start: "a" @token(7) "b""#), &vocab).unwrap()
+        let g = glrmask::Grammar::from_lark(r#"start: "a" <|event|> "b""#).unwrap();
+        let mut module = glrmask::Module::new(&g);
+        module.bind("event", TokenSet::new([7])).unwrap();
+        module.compile(&vocab).unwrap()
     });
     assert_special_token_sequence(&lark);
 }

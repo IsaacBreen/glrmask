@@ -23,7 +23,6 @@ enum Token {
     Ident(String),
     Terminal(String),
     Literal(String),
-    Special(u32),
     EventSet(LarkTokenSet),
     External(String),
     JsonSchema(std::ops::Range<usize>),
@@ -209,35 +208,6 @@ impl<'a> Lexer<'a> {
         Ok(n)
     }
 
-    fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
-        let prefix: &[u8] = b"token(";
-        if !self.input[self.pos..].starts_with(prefix) {
-            return Err(GlrMaskError::GrammarParse(
-                "expected @token(<token-id>)".into(),
-            ));
-        }
-        self.pos += prefix.len();
-        let mut token_id = 0u32;
-        let mut digits = 0usize;
-        while let Some(byte @ b'0'..=b'9') = self.peek() {
-            token_id = token_id
-                .checked_mul(10)
-                .and_then(|value| value.checked_add((byte - b'0') as u32))
-                .ok_or_else(|| {
-                    GlrMaskError::GrammarParse("token ID doesn't fit in 32 bits".into())
-                })?;
-            digits += 1;
-            self.pos += 1;
-        }
-        if digits == 0 || self.peek() != Some(b')') {
-            return Err(GlrMaskError::GrammarParse(
-                "expected @token(<token-id>)".into(),
-            ));
-        }
-        self.pos += 1;
-        Ok(Token::Special(token_id))
-    }
-
     fn lex_event_set(&mut self) -> Result<Token,GlrMaskError> {
         self.pos+=1; // '<'
         if self.peek()==Some(b'|') {
@@ -247,33 +217,7 @@ impl<'a> Lexer<'a> {
             let name=std::str::from_utf8(&self.input[start..self.pos]).map_err(|_|GlrMaskError::GrammarParse("invalid token name".into()))?.to_owned();
             self.pos+=2;return Ok(Token::EventSet(LarkTokenSet::Named(name)));
         }
-        if self.advance()!=Some(b'['){return Err(GlrMaskError::GrammarParse("expected <[...]> or <|name|>".into()));}
-        self.skip_whitespace_inline();
-        let negate=if self.peek()==Some(b'^'){self.pos+=1;true}else{false};
-        self.skip_whitespace_inline();
-        if self.peek()==Some(b'*') {
-            self.pos+=1;self.skip_whitespace_inline();
-            if negate || self.advance()!=Some(b']') || self.advance()!=Some(b'>'){
-                return Err(GlrMaskError::GrammarParse("wildcard syntax is <[*]>; a negated wildcard is not supported".into()));
-            }
-            return Ok(Token::EventSet(LarkTokenSet::Any));
-        }
-        let mut ranges=Vec::new();
-        while self.peek()!=Some(b']') {
-            let number=|lexer:&mut Self|->Result<u32,GlrMaskError>{
-                let first=lexer.advance().filter(u8::is_ascii_digit).ok_or_else(||GlrMaskError::GrammarParse("expected numeric token ID".into()))?;
-                let id=lexer.lex_number(first)?;
-                u32::try_from(id).map_err(|_|GlrMaskError::GrammarParse("token ID doesn't fit in 32 bits".into()))
-            };
-            let start=number(self)?;self.skip_whitespace_inline();
-            let end=if self.peek()==Some(b'-'){self.pos+=1;self.skip_whitespace_inline();number(self)?}else{start};
-            if start>end{return Err(GlrMaskError::GrammarParse("token range endpoints are reversed".into()));}
-            ranges.push((start,end));self.skip_whitespace_inline();
-            if self.peek()!=Some(b','){break;}self.pos+=1;self.skip_whitespace_inline();
-            if self.peek()==Some(b']'){return Err(GlrMaskError::GrammarParse("missing token ID after comma".into()));}
-        }
-        if self.advance()!=Some(b']') || self.advance()!=Some(b'>'){return Err(GlrMaskError::GrammarParse("unterminated <[...]> token atom".into()));}
-        Ok(Token::EventSet(LarkTokenSet::Ranges{ranges,negate}))
+        Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token slot with <|name|> and bind a TokenSet on a Module".into()))
     }
 
     fn lex_json_schema(&mut self)->Result<Token,GlrMaskError> {
@@ -297,7 +241,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_at_reference(&mut self)->Result<Token,GlrMaskError> {
-        if self.input[self.pos..].starts_with(b"token("){return self.lex_special_token();}
+        if self.input[self.pos..].starts_with(b"token("){return Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token slot with <|name|> and bind a TokenSet on a Module".into()));}
         let first=self.advance().filter(|b|b.is_ascii_alphabetic()||*b==b'_')
             .ok_or_else(||GlrMaskError::GrammarParse("expected external grammar name after @".into()))?;
         let mut name=self.lex_ident(first);
@@ -1291,7 +1235,6 @@ impl Parser {
             Some(Token::Ident(_))
                 | Some(Token::Terminal(_))
                 | Some(Token::Literal(_))
-                | Some(Token::Special(_))
                 | Some(Token::EventSet(_))
                 | Some(Token::External(_))
                 | Some(Token::JsonSchema(_))
@@ -1343,14 +1286,8 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
-            Some(Token::Special(token_id)) => {
-                let name=format!("$lark_event_{}",self.events.len());
-                self.remember_source_span(&name,position);
-                self.events.push((name.clone(),LarkTokenSet::Ranges{ranges:vec![(token_id,token_id)],negate:false}));
-                Ok(GrammarExpr::Ref(name))
-            }
             Some(Token::EventSet(set))=>{
-                if let LarkTokenSet::Named(name)=&set {self.remember_extern(name,LarkExternKind::Token);}
+                let LarkTokenSet::Named(name)=&set;self.remember_extern(name,LarkExternKind::Token);
                 let name=format!("$lark_event_{}",self.events.len());self.remember_source_span(&name,position);self.events.push((name.clone(),set));Ok(GrammarExpr::Ref(name))
             }
             Some(Token::External(name))=>{self.remember_source_span(&name,position);self.remember_extern(&name,LarkExternKind::Grammar);self.imports.insert(name.clone());Ok(GrammarExpr::Ref(format!("@{name}")))}
@@ -1769,7 +1706,7 @@ mod lazy_prefix_minimal_regressions {
         for source in [
             "start: word\nword[lazy]: other\nother: \"a\"",
             "start: word\nword[lazy]: @child",
-            "start: word\nword[lazy]: <[1]>",
+            "start: word\nword[lazy]: <|event|>",
             "start: word\nword[lazy]: %json {}",
             "start: word\nword[lazy]: word \"a\" | \"b\"",
             "start: WORD\nWORD[lazy]: /a+?/",

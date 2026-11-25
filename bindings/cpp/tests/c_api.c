@@ -9,6 +9,14 @@ int main(void) {
     CHECK(glrmask_abi_version()==4);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_INPUT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,&vocab)==GLRMASK_OK);
+    {
+        const char* rejected[]={"start: <[1]>","start: <[1,3-8]>","start: <[]>","start: <[^0]>","start: <[*]>","start: @token(7)"};
+        for (size_t i=0;i<sizeof(rejected)/sizeof(rejected[0]);i++){
+            CHECK(glrmask_grammar_from_source(GLRMASK_LARK,rejected[i],strlen(rejected[i]),&grammar)==GLRMASK_SYNTAX);
+            CHECK(grammar==NULL);
+            CHECK(strstr(glrmask_error_message(),"token IDs can't appear in grammar source")!=NULL);
+        }
+    }
     const char source[]="start: \"a\"";
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&grammar)==GLRMASK_OK);
     glrmask_compile_options options; CHECK(glrmask_compile_options_init(&options,sizeof(options))==GLRMASK_OK);

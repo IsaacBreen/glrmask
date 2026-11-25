@@ -6,36 +6,37 @@ fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {
 fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect::<Vec<_>>()).unwrap()}
 fn lark(source:&str)->Grammar{Grammar::from_lark(source).unwrap()}
 #[test]
-fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
+fn source_token_id_atoms_are_rejected() {
+    for source in ["start: <[1]>", "start: <[1,3-8]>", "start: <[]>", "start: <[^0]>", "start: <[*]>", "start: @token(7)"] {
+        let err=Grammar::from_lark(source).unwrap_err().to_string();
+        assert!(err.contains("token IDs can't appear in grammar source"),"{source}: {err}");
+    }
+}
+#[test]
+fn explicit_module_sets_use_actual_id_domain() {
     let v=Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).unwrap();
-    for (source,expected) in [("start: <[1]>",vec![1]),("start: <[^0]>",vec![1]),("start: <[*]>",vec![0,1]),("start: <[^0,3]>",vec![1])]{
-        for mode in MODES{
-            let c=lark(source).compile_with_build_options(&v,mode.build_options().end_tokens([10])).unwrap();
-            assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
-            for &id in &expected{assert!(accepts(&c,&[id,10]));}
-            let loaded=Constraint::load(c.save(), &v).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
+    for expected in [vec![1],vec![0,1],vec![3],vec![7],vec![]] {
+        for mode in MODES {
+            let mut m=Module::new(&lark("start: <|event|>"));
+            m.bind("event",TokenSet::new(expected.clone())).unwrap();
+            let c=m.compile_with(&v,mode.compile_options()).unwrap();
+            assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{mode:?}");
+            for &id in &expected {assert!(accepts(&c,&[id]));}
+            let loaded=Constraint::load(c.save(),&v).unwrap();
+            assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
-    let source = "start: <[3]>";
-    let err = lark(source).compile(&v).unwrap_err().to_string();
-    assert!(err.contains("is a special token"), "{source}: {err}");
-    assert!(lark("start: <[0-5]>").compile(&v).is_err());
-    let mut m=Module::new(&lark("start: <|eos|>"));
-    m.bind("eos",TokenSet::new([7])).unwrap();
-    let c=m.compile(&v).unwrap();
-    assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
-    let g=module_expr(TokenSet::new([7])).unwrap();
-    let c=g.compile(&v).unwrap();
+    let c=module_expr(TokenSet::new([7])).unwrap().compile(&v).unwrap();
     assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
 }
 #[test]
 fn empty_event_set_is_not_epsilon() {
     let v=words(&["x","xx"]);
     for mode in MODES {
-        let c=lark("start: <[]> | \"x\"").compile_with_build_options(&v,mode.build_options()).unwrap();
+        let mut m=Module::new(&lark("start: <|event|> | \"x\""));
+        m.bind("event",TokenSet::new([])).unwrap();
+        let c=m.compile_with(&v,mode.compile_options()).unwrap();
         assert!(!c.start().is_accepting());assert!(accepts(&c,&[0]));assert!(!accepts(&c,&[1]));
-        let c=lark("start: <[^0-1]> | \"x\"").compile_with_build_options(&v,mode.build_options()).unwrap();
-        assert!(!c.start().is_accepting());assert!(accepts(&c,&[0]));
     }
 }
 #[test]

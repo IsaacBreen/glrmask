@@ -42,8 +42,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 - Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_len()` for the mask's length.
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
 - The minimum supported Rust version is now 1.89.
-- Grammar text can no longer allow a special token. In Lark, `<[*]>` and `<[^...]>` match only tokens with bytes, and
-  naming a special token by ID, with `<[...]>` or `@token(...)`, is a compile error.
+- Lark grammar source rejects numeric token atoms, lists/ranges, complements, wildcard and @token(...); use named token slots and bind TokenSets on a Module.
   Declare a token extern instead (`<|name|>` in Lark) and bind the token to it.
 - Committing empty input to a failed state now returns `false`.
 

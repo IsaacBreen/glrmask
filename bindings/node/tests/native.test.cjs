@@ -207,6 +207,9 @@ test('named Lark special tokens use explicit mappings, not byte aliases',async()
 
 test('source constructors reject invalid source',()=>{
   assert.throws(()=>Grammar.fromLark('start: ('));
+  for (const atom of ['<[1]>', '<[1,3-8]>', '<[]>', '<[^0]>', '<[*]>', '@token(7)']) {
+    assert.throws(()=>Grammar.fromLark('start: '+atom), /token IDs can't appear in grammar source/);
+  }
   assert.throws(()=>Grammar.fromJsonSchema('{'));
   assert.throws(()=>Grammar.fromGlrm('invalid source'));
 });

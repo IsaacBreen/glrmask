@@ -2,9 +2,7 @@
 
 A `TokenSet` is a set of token IDs. In a grammar it matches exactly one token from the set. It matches the token itself,
 not its bytes: two tokens with the same bytes are different tokens, and committing text with `commit_bytes` never matches
-a token set. Token sets are the only way to let a grammar use a special token, such as a tool-call
-token: bind one to a token extern, or put one in an expression. Grammar text can't name a special token by ID, and
-Lark's `<[*]>` and `<[^...]>` never match one.
+a token set. Grammar source cannot introduce token-level matches: only code binding a TokenSet on a Module can.
 
 ```python
 import glrmask
@@ -46,11 +44,6 @@ as any other two ranges; built from IDs, it means reading 131,071 IDs first.
   `grammar`.
 - Use a one-element TokenSet for a single token ID. Token sets cannot be bound on a Grammar or included in Grammar.from_expr, even indirectly.
 
-In Lark, `<[5]>` matches token 5, `<[1,3-8]>` a list or inclusive range of IDs, `<[^1,3-8]>` any token except those, and
-`<[*]>` any token. These IDs are written into the grammar, so they are specific to one vocabulary; an extern keeps the
-grammar independent of it.
-
 ## Checks
 
-When you compile, every ID in a set must be in the vocabulary, and a range can't run across IDs the vocabulary lacks. An
-empty set is allowed and matches nothing.
+IDs may be absent from the vocabulary or have no byte spelling. An empty set is allowed and matches nothing.

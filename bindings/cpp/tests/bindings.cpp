@@ -219,6 +219,9 @@ void threads_and_errors() {
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_INPUT);
     throws([]{ Grammar::from_lark("start: ("); });
+    for (const auto* source : {"start: <[1]>","start: <[1,3-8]>","start: <[]>","start: <[^0]>","start: <[*]>","start: @token(7)"}) {
+        throws([&]{ Grammar::from_lark(source); }, GLRMASK_SYNTAX);
+    }
     throws([]{ Grammar::from_json_schema("{"); });
     throws([]{ Grammar::from_glrm("invalid source"); });
     glrmask_grammar* invalid_source = nullptr;

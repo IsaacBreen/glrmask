@@ -25,8 +25,6 @@ pub enum LarkExternKind {
 
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum LarkTokenSet {
-    Ranges {ranges:Vec<(u32,u32)>,negate:bool},
-    Any,
     Named(String),
 }
 #[derive(Debug,Clone)]
@@ -58,21 +56,12 @@ pub fn parse_lark_document(input:&str)->Result<LarkDocument,GlrMaskError> {
 }
 
 impl LarkDocument {
-    /// Legacy lower-level import supports explicit positive IDs without needing
-    /// a vocabulary. Domain-dependent atoms and child composition need the host.
+    /// Named token slots and child composition require the host frontend.
     pub fn into_plain_grammar(self)->Result<NamedGrammar,GlrMaskError> {
-        if !self.imports.is_empty() || !self.schemas.is_empty(){
+        if !self.imports.is_empty() || !self.schemas.is_empty() || !self.events.is_empty(){
             return Err(GlrMaskError::GrammarParse("this Lark document requires the component-aware Grammar frontend".into()));
         }
-        let mut grammar=self.grammar;
-        let mut substitutions=HashMap::new();
-        for (name,set) in self.events {
-            let LarkTokenSet::Ranges{ranges,negate:false}=set else {
-                return Err(GlrMaskError::GrammarParse("named/complement/wildcard tokens require a vocabulary-aware Grammar frontend".into()));
-            };
-            substitutions.insert(name,event_expression(&ranges));
-        }
-        for rule in &mut grammar.rules {rewrite(&mut rule.expr,&mut |name|substitutions.get(name).cloned());}
+        let grammar=self.grammar;
         if !self.additional_ignores.is_empty(){
             return crate::grammar::glrm::ParsedComponent::from_named_with_ignores(grammar,&[],&self.additional_ignores)?.lower_closed();
         }
@@ -109,11 +98,6 @@ impl LarkDocument {
     }
 }
 
-pub fn event_expression(ranges:&[(u32,u32)])->GrammarExpr {
-    let mut atoms=ranges.iter().map(|&(a,b)|if a==b{GrammarExpr::SpecialToken(a)}else{GrammarExpr::SpecialTokenRange(a,b)}).collect::<Vec<_>>();
-    if atoms.len()==1{atoms.pop().unwrap()}else{GrammarExpr::Choice(atoms)}
-}
-
 fn rewrite(expr:&mut GrammarExpr,reference:&mut impl FnMut(&str)->Option<GrammarExpr>) {
     match expr {
         GrammarExpr::Ref(name)=>{if let Some(value)=reference(name){*expr=value;}},
@@ -131,17 +115,17 @@ mod tests {
     use super::*;
     #[test]
     fn opaque_atoms_are_explicit() {
-        let source=r#"start: <[1,3-8]> <[^2]> <[*]> <|finish|> @payload %json {"type":"string","description":"}"}"#;
+        let source=r#"start: <|finish|> @payload %json {"type":"string","description":"}"}"#;
         let doc=parse_lark_document(source).unwrap();
-        assert_eq!(doc.events.len(),4);assert_eq!(doc.schemas.len(),1);
+        assert_eq!(doc.events.len(),1);assert_eq!(doc.schemas.len(),1);
         assert!(doc.imports.contains("payload"));
         assert_eq!(&source[doc.schemas[0].1.clone()],r#"{"type":"string","description":"}"}"#);
     }
     #[test]
     fn invalid_event_atoms_and_contexts_fail_closed() {
-        for s in ["start: <[8-3]>","start: <[1,]>","start: <[^*]>","start: <[4294967296]>",
-                  "start: A\nA: <[1]>","start: A\nA: @child","start: A\nA: %json {}",
-                  "start: item\nitem[lazy]: @child","start: <[1]>\n%ignore <[1]>"] {
+        for s in ["start: <[1]>", "start: <[1,3-8]>", "start: <[]>", "start: <[^2]>", "start: <[*]>", "start: @token(7)", "start: <[8-3]>","start: <[1,]>","start: <[^*]>","start: <[4294967296]>",
+                  "start: A\nA: <|event|>","start: A\nA: @child","start: A\nA: %json {}",
+                  "start: item\nitem[lazy]: @child","start: <|event|>\n%ignore <|event|>"] {
             assert!(parse_lark_document(s).is_err(),"{s}");
         }
     }

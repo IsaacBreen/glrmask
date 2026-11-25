@@ -370,7 +370,7 @@ These are the design principles that constrain GLRMask's API.
 
 Special tokens are privileged. They switch roles, call tools and end turns, and the software running a model acts on them. A grammar, though, may come from an untrusted source, such as an API user, a tool definition or a shared library. If grammar source could allow special tokens, an untrusted grammar could make the model fake a role switch or a tool call, requiring every untrusted grammar to be validated before use.
 
-In GLRMask, grammar source has no way to allow a special token. Allowing one is an explicit step in code, either a `bind` to an extern or an `Expr` that contains the token. A name such as `<|im_end|>` in grammar source is an extern, which allows nothing until it's bound. Wildcards such as `<[*]>` match only ordinary tokens, and a special token's ID in grammar source is an error.
+In GLRMask, grammar source cannot introduce token-level matches. A name such as `<|finish|>` in grammar source declares a token slot, which allows nothing until code binds a TokenSet on a Module.
 
 ### Working without masks
 
