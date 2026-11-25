@@ -604,7 +604,7 @@ fn preprocess(
     let (mut rules, mut start_dense) = compact_rules(rules, start_dense);
 
     // 7. Collapse unit SCCs proactively, retaining unit exits.
-    let (collapsed, collapsed_start) = collapse_unit_sccs(rules, start_dense)?;
+    let (collapsed, collapsed_start) = collapse_unit_sccs(rules, start_dense, limits, budget)?;
     rules = collapsed;
     start_dense = collapsed_start;
     rules = dedup_rules(rules);
@@ -791,7 +791,12 @@ fn compact_rules(rules: Vec<Rule>, start: NtIx) -> (Vec<Rule>, NtIx) {
 /// component's non-unit and outgoing unit productions. Full transitive unit
 /// elimination is unnecessary: the closure construction below handles the
 /// remaining unit DAG.
-fn collapse_unit_sccs(rules: Vec<Rule>, start: NtIx) -> Result<(Vec<Rule>, NtIx), CompileDecline> {
+fn collapse_unit_sccs(
+    rules: Vec<Rule>,
+    start: NtIx,
+    limits: &CompileLimits,
+    budget: &mut CompileBudget,
+) -> Result<(Vec<Rule>, NtIx), CompileDecline> {
     let num_nts = rules
         .iter()
         .flat_map(|rule| {
@@ -805,22 +810,74 @@ fn collapse_unit_sccs(rules: Vec<Rule>, start: NtIx) -> Result<(Vec<Rule>, NtIx)
         .unwrap_or(0)
         .max(start as usize + 1);
 
-    let mut unit_adj = vec![BitSet::new(num_nts); num_nts];
+    // Kosaraju's two passes visit each vertex and edge a constant number of
+    // times. Charge before allocating either adjacency list or DFS stacks.
+    let unit_edges = rules.iter().filter(|r| matches!(r.rhs.as_slice(), [Symbol::Nonterminal(_)])).count() as u64;
+    budget.charge_candidate_work(
+        Stage::Preprocess,
+        limits,
+        (num_nts as u64).saturating_mul(3)
+            .saturating_add(unit_edges.saturating_mul(4))
+            .saturating_add(rules.len() as u64),
+    )?;
+    let mut forward = vec![Vec::<usize>::new(); num_nts];
+    let mut reverse = vec![Vec::<usize>::new(); num_nts];
     for rule in &rules {
         if let [Symbol::Nonterminal(right)] = rule.rhs.as_slice() {
-            unit_adj[rule.lhs as usize].set(*right as usize);
+            let left = rule.lhs as usize;
+            let right = *right as usize;
+            forward[left].push(right);
+            reverse[right].push(left);
         }
     }
-    let unit_closure = transitive_closure(&unit_adj, num_nts);
 
-    let mut representative: Vec<NtIx> = (0..num_nts as NtIx).collect();
-    for i in 0..num_nts {
-        for j in (i + 1)..num_nts {
-            if unit_closure[i].contains(j) && unit_closure[j].contains(i) {
-                let minimum = i as NtIx;
-                representative[i] = representative[i].min(minimum);
-                representative[j] = representative[j].min(minimum);
+    // Iterative postorder: a long unit chain must not consume the call stack.
+    let mut seen = vec![false; num_nts];
+    let mut finished = Vec::with_capacity(num_nts);
+    let mut dfs = Vec::<(usize, usize)>::new();
+    for root in 0..num_nts {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        dfs.push((root, 0));
+        while let Some((node, next)) = dfs.last_mut() {
+            if let Some(&child) = forward[*node].get(*next) {
+                *next += 1;
+                if !seen[child] {
+                    seen[child] = true;
+                    dfs.push((child, 0));
+                }
+            } else {
+                finished.push(*node);
+                dfs.pop();
             }
+        }
+    }
+
+    seen.fill(false);
+    let mut representative = vec![0; num_nts];
+    let mut pending = Vec::new();
+    let mut members = Vec::new();
+    for root in finished.into_iter().rev() {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        pending.push(root);
+        let mut minimum = root;
+        while let Some(node) = pending.pop() {
+            minimum = minimum.min(node);
+            members.push(node);
+            for &child in &reverse[node] {
+                if !seen[child] {
+                    seen[child] = true;
+                    pending.push(child);
+                }
+            }
+        }
+        for member in members.drain(..) {
+            representative[member] = minimum as NtIx;
         }
     }
 

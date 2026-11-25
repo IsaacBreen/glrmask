@@ -663,3 +663,19 @@ fn goto_target_certificate_holds_for_the_discriminator() {
             .unwrap_or_else(|error| panic!("{construction:?}: {error}"));
     }
 }
+
+#[test]
+fn unit_scc_linear_preprocessing_collapses_long_cycle_and_charges_budget() {
+    let n = 20_000;
+    let mut rules = (0..n).map(|i| rule(i, vec![nt((i + 1) % n)])).collect::<Vec<_>>();
+    rules.push(rule(n - 1, vec![t(0)]));
+    let mut budget = CompileBudget::new();
+    let (collapsed, start) = collapse_unit_sccs(rules.clone(), n - 1, &CompileLimits::default(), &mut budget).unwrap();
+    assert_eq!(start, 0);
+    assert_eq!(dedup_rules(collapsed), dedup_rules(vec![rule(0, vec![nt(0)]), rule(0, vec![t(0)])]));
+    assert!(budget.candidate_work >= n as u64);
+    let mut budget = CompileBudget::new();
+    let limits = CompileLimits { max_candidate_work: 1, ..Default::default() };
+    assert!(matches!(collapse_unit_sccs(rules, 0, &limits, &mut budget),
+        Err(CompileDecline::ResourceLimit { stage: Stage::Preprocess, .. })));
+}
