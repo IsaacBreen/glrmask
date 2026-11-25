@@ -1,5 +1,5 @@
 //! Downstream auto-trait regression: intentionally no recursion_limit override.
-use glrmask::{Expr, Grammar, Module, Vocab};
+use glrmask::{Constraint, ConstraintState, Expr, Grammar, Module, TokenSet, Vocab};
 
 fn require_send_sync<T: Send + Sync>() {}
 
@@ -8,6 +8,10 @@ fn source_module_and_expression_are_send_sync_at_the_default_budget() {
     require_send_sync::<Grammar>();
     require_send_sync::<Module>();
     require_send_sync::<Expr>();
+    require_send_sync::<Constraint>();
+    require_send_sync::<ConstraintState>();
+    require_send_sync::<Vocab>();
+    require_send_sync::<TokenSet>();
 }
 
 #[test]
