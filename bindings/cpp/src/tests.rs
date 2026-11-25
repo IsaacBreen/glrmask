@@ -181,15 +181,15 @@ fn status_codes_distinguish_error_kinds() {
     assert_eq!(status(core::ErrorKind::Panic), 3);
     assert_eq!(status(core::ErrorKind::BufferTooSmall), 4);
     assert_eq!(status(core::ErrorKind::Closed), 5);
-    assert_eq!(status(core::ErrorKind::Syntax), 6);
-    assert_eq!(status(core::ErrorKind::ResourceLimit), 7);
-    assert_eq!(status(core::ErrorKind::StrategyUnsupported), 8);
-    assert_eq!(status(core::ErrorKind::Serialization), 9);
-    assert_eq!(status(core::ErrorKind::Internal), 10);
+    assert_eq!(status(core::ErrorKind::Syntax), 7);
+    assert_eq!(status(core::ErrorKind::ResourceLimit), 8);
+    assert_eq!(status(core::ErrorKind::StrategyUnsupported), 9);
+    assert_eq!(status(core::ErrorKind::Serialization), 10);
+    assert_eq!(status(core::ErrorKind::Internal), 11);
     let source = "start: (";
     unsafe {
         let mut grammar = ptr::null_mut();
-        assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 6);
+        assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 7);
         assert!(grammar.is_null());
     }
 }

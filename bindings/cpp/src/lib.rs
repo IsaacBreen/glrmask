@@ -37,11 +37,11 @@ fn status(kind: core::ErrorKind) -> i32 {
         core::ErrorKind::Panic => 3,
         core::ErrorKind::BufferTooSmall => 4,
         core::ErrorKind::Closed => 5,
-        core::ErrorKind::Syntax => 6,
-        core::ErrorKind::ResourceLimit => 7,
-        core::ErrorKind::StrategyUnsupported => 8,
-        core::ErrorKind::Serialization => 9,
-        core::ErrorKind::Internal => 10,
+        core::ErrorKind::Syntax => 7,
+        core::ErrorKind::ResourceLimit => 8,
+        core::ErrorKind::StrategyUnsupported => 9,
+        core::ErrorKind::Serialization => 10,
+        core::ErrorKind::Internal => 11,
     }
 }
 

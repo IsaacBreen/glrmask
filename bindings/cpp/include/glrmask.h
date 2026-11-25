@@ -54,11 +54,12 @@ enum {
     GLRMASK_PANIC=3, ///< An internal error was caught. Discard the handle involved.
     GLRMASK_BUFFER_TOO_SMALL=4, ///< The buffer is too small; nothing was written.
     GLRMASK_CLOSED=5, ///< The handle was already freed.
-    GLRMASK_SYNTAX=6, ///< Invalid grammar syntax.
-    GLRMASK_RESOURCE_LIMIT=7, ///< A resource limit was exceeded.
-    GLRMASK_STRATEGY_UNSUPPORTED=8, ///< The chosen strategy does not support the grammar.
-    GLRMASK_SERIALIZATION=9, ///< Saved bytes could not be loaded.
-    GLRMASK_INTERNAL=10 ///< An internal error; please report it.
+    /* 6 was GLRMASK_REJECTED before 1.0; it is never reused. */
+    GLRMASK_SYNTAX=7, ///< Invalid grammar syntax.
+    GLRMASK_RESOURCE_LIMIT=8, ///< A resource limit was exceeded.
+    GLRMASK_STRATEGY_UNSUPPORTED=9, ///< The chosen strategy does not support the grammar.
+    GLRMASK_SERIALIZATION=10, ///< Saved bytes could not be loaded.
+    GLRMASK_INTERNAL=11 ///< An internal error; please report it.
 };
 /// How masks are computed.
 enum {

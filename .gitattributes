@@ -1,3 +1,6 @@
 
 # Native package validation and generated declarations use canonical LF text.
 bindings/** text=auto eol=lf
+
+# Golden corpus is compared byte-for-byte with generated LF output.
+crates/glrmask-grammar/tests/data/lark-standard-corpus.golden text eol=lf

@@ -11,7 +11,7 @@ pub use glrmask;
 // C status codes are fixed by glrmask.h; a new kind needs a new status value there.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorKind { InvalidInput = 1, Compilation = 2, Panic = 3, BufferTooSmall = 4, Closed = 5, Syntax = 6, ResourceLimit = 7, StrategyUnsupported = 8, Serialization = 9, Internal = 10 }
+pub enum ErrorKind { InvalidInput = 1, Compilation = 2, Panic = 3, BufferTooSmall = 4, Closed = 5, Syntax = 7, ResourceLimit = 8, StrategyUnsupported = 9, Serialization = 10, Internal = 11 }
 
 #[derive(Debug)]
 pub struct Error { pub kind: ErrorKind, pub message: String }
