@@ -705,9 +705,9 @@ pub struct GlrmWithExternalSubgrammars {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExternKind {
-    /// A token set or token ID.
+    /// A token set.
     Token,
-    /// A grammar, module, expression, token set or token ID.
+    /// A grammar, module, expression or token set.
     Grammar,
 }
 

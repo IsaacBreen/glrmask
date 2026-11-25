@@ -2,7 +2,7 @@
 // commit it, and stop when nothing more can be committed.
 //
 // Random numbers stand in for the model.
-import { Expr, Grammar, Vocab } from '@glrmask/node';
+import { Expr, Grammar, TokenSet, Vocab } from '@glrmask/node';
 
 // One token per character, and an end-of-sequence token with no bytes.
 const chars = '0123456789+*()';
@@ -19,7 +19,7 @@ const arithmetic = Grammar.fromGlrm(`
   nt product = atom | product "*" atom
   nt atom = NUMBER | "(" sum ")"
 `);
-const grammar = Grammar.fromExpr(Expr.sequence(arithmetic, eos));
+const grammar = Grammar.fromExpr(Expr.sequence(arithmetic, new TokenSet([eos])));
 const constraint = await grammar.compile(vocab);
 
 const state = constraint.start();
