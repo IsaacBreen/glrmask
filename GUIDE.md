@@ -290,8 +290,7 @@ and `load` checks that you pass the one it was compiled for. Bytes saved by one 
 
 `Expr.choice(*parts)` matches any one of its parts, `Expr.sequence(*parts)` matches them one after another, and
 `Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, expressions and
-token sets. `Grammar.from_expr` makes a grammar from an expression, and an
-expression can be bound to a grammar extern directly.
+token sets. `Grammar.from_expr` makes a grammar from an expression that contains no modules. Expressions containing modules can be bound to a `Module`.
 
 ## Token sets
 
