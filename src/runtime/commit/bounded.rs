@@ -37,7 +37,7 @@ impl<'a> View<'a> {
         Self {constraint:&state.constraint,state:&state.state,terminated:state.terminated,
             cache:Some(&state.mask_cache),generation:state.generation}
     }
-    fn stopping(self)->bool {frontier_is_accepting(&self.constraint,self.state,self.terminated)}
+    fn stopping(self)->bool {frontier_is_accepting(self.constraint,self.state,self.terminated)}
 }
 
 struct Witnesses {
@@ -505,7 +505,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> 
             }
             if !live{return Ok(output);}
             output.push(id);
-            if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(&s.constraint,&s.state,false)){break;}
+            if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(s.constraint,&s.state,false)){break;}
             let mut witnesses=Witnesses::new(1);
             let mut over_limit=false;
             for cursor in &mut cursors {
