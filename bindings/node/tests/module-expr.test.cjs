@@ -22,8 +22,9 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const options={maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true},boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
-  const root=Grammar.fromExpr(Expr.sequence(configured,new TokenSet([63])));
+  const options={maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa},boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
+  const root=new Module(Grammar.fromGlrm('start s extern grammar item nt s = item'));
+  root.bind('item',Expr.sequence(configured,new TokenSet([63])));
   const state=root.compileSync(v,options).start();
   assert.ok(!allowed(state,63));assert.ok(state.commitToken(4));assert.ok(!state.isAccepting());assert.ok(allowed(state,63));assert.ok(state.commitToken(63));assert.ok(state.isAccepting());assert.ok(state.mask().every(w=>w===0));
   assert.throws(()=>configured.compileSync(v,{bogus:true}),TypeError);
@@ -232,5 +233,21 @@ test('Externs snapshots survive bind and owner disposal',()=>{
     assert.equal(after.unbound.size,0);
     assert.equal(before.get('child').kind,'grammar');
     assert.equal(before._map,undefined);
+  }
+});
+
+test('Grammar rejects direct and nested module expressions; Module.bind still accepts',()=>{
+  const v=vocab(), parent=()=>Grammar.fromGlrm('start s extern grammar item nt s = item');
+  const prepared=source().precompileSync(v);
+  const error=e=>e.code==='GLRMASK_INVALID_INPUT' && e.message==="an expression containing a Module can't become a Grammar; bind it into a Module instead";
+  for(const m of [new Module(source()),prepared]){
+    assert.throws(()=>Grammar.fromExpr(m),error);
+    for(const expr of [Expr.sequence(m),Expr.sequence(Expr.choice(m),Expr.literal(''))]){
+      assert.throws(()=>Grammar.fromExpr(expr),error);
+      const g=parent();
+      assert.throws(()=>g.bind('item',expr),error);
+      assert.equal(g.externs.unbound.size,1);
+      const outer=new Module(parent());outer.bind('item',expr);accept(outer,v,[1]);
+    }
   }
 });

@@ -1511,7 +1511,7 @@ impl Grammar {
     }
 
     pub(crate) fn from_expr_ref(expr: &Expr) -> Result<Grammar> {
-        let module = Module::from_expr(expr)?;
+        let module = Module::from_expr(expr, false)?;
         module.to_source()
     }
 

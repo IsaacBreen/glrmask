@@ -88,12 +88,12 @@ fn compile_options_never_invalidate_retained_work() {
 
     let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;").unwrap());
     parent.bind("VALUE", &leaf).unwrap();
-    let root = Grammar::from_expr(Expr::sequence([
+    let mut root = Module::new(&Grammar::from_glrm("start s extern grammar item nt s = item").unwrap());
+    root.bind("item", Expr::sequence([
         Expr::from(parent),
         Expr::from(TokenSet::new([5])),
-    ]))
-    .unwrap()
-    .compile_with(
+    ])).unwrap();
+    let root = root.compile_with(
         &v,
         CompileOptions::default()
             .mask_strategy(MaskStrategy::ParserDwa)

@@ -379,3 +379,27 @@ def test_hashable_public_values_and_token_set_expr_parts():
     choice = glrmask.Grammar.from_expr(glrmask.Expr.choice(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert choice.commit_token(6)
     assert choice.is_accepting()
+
+def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
+    v = vocab()
+    source = glrmask.Grammar.from_lark('start: "a"')
+    def parent():
+        return glrmask.Grammar.from_glrm('start s extern grammar item nt s = item')
+    for m in (glrmask.Module(source), source.precompile(v)):
+        with pytest.raises(glrmask.GLRMaskError) as exc:
+            glrmask.Grammar.from_expr(m)
+        assert exc.value.kind == "invalid_input"
+        for expr in (glrmask.Expr.sequence(m), glrmask.Expr.sequence(glrmask.Expr.choice(m), glrmask.Expr.literal(""))):
+            with pytest.raises(glrmask.GLRMaskError) as exc:
+                glrmask.Grammar.from_expr(expr)
+            assert exc.value.kind == "invalid_input"
+            assert str(exc.value) == "an expression containing a Module can't become a Grammar; bind it into a Module instead"
+            g = parent()
+            with pytest.raises(glrmask.GLRMaskError) as exc:
+                g.bind("item", expr)
+            assert exc.value.kind == "invalid_input"
+            assert len(g.externs.unbound) == 1
+            outer = glrmask.Module(parent())
+            outer.bind("item", expr)
+            state = outer.compile(v).start()
+            assert state.commit_bytes(b"a") and state.is_accepting()

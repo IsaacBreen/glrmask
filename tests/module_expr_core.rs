@@ -178,9 +178,8 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
 #[test]
 fn final_end_tokens_are_root_only() {
     let v = vocab();
-    let m = Module::new(&a());
     let root = Grammar::from_expr(Expr::sequence([
-        Expr::from(m.clone()),
+        Expr::from(a()),
         Expr::from(TokenSet::new([99])),
     ]))
     .unwrap();

@@ -94,6 +94,24 @@ void exact_and_unicode() {
     (void)merged; (void)duplicate; (void)high; (void)none; (void)empty;
 }
 
+void reject_module_expr_in_grammar() {
+    Vocab v({{0,"a"}});
+    auto source = Grammar::from_lark("start: \"a\"");
+    auto prepared = source.precompile(v);
+    auto host = Grammar::from_glrm("start s extern grammar item nt s = item");
+    for (const auto& m : {Module(source), prepared}) {
+        for (const auto& expr : {Expr::sequence({m}), Expr::sequence({Expr::choice({m}), Expr::literal("")})}) {
+            throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
+            auto g = host;
+            throws([&]{ g.bind("item",expr); }, GLRMASK_INVALID_INPUT);
+            CHECK(g.externs().unbound().size()==1);
+            auto outer = Module(host); outer.bind("item",expr);
+            auto state = outer.compile(v).start();
+            CHECK(state.commit_token(0) && state.is_accepting());
+        }
+    }
+}
+
 void end_tokens() {
     Vocab v({{0,"a"}});
     for (unsigned i=0; i<3; ++i) {
@@ -445,6 +463,7 @@ int main(int argc, char** argv) {
         basic();
         exact_and_unicode();
         end_tokens();
+        reject_module_expr_in_grammar();
         composition_and_persistence();
         frontends();
         threads_and_errors();

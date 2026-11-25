@@ -7,6 +7,7 @@ pub struct Expr(pub(crate) Arc<ExprNode>);
 
 #[derive(Debug, Clone)]
 pub(crate) enum ExprLeaf {
+    Grammar(Grammar),
     Module(Module),
     TokenSet(TokenSet),
 }
@@ -34,12 +35,12 @@ impl From<&Module> for Expr {
 }
 impl From<Grammar> for Expr {
     fn from(g: Grammar) -> Self {
-        Expr::from(Module::new(&g))
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Grammar(g))))
     }
 }
 impl From<&Grammar> for Expr {
     fn from(g: &Grammar) -> Self {
-        Expr::from(Module::new(g))
+        Expr::from(g.clone())
     }
 }
 impl From<TokenSet> for Expr {
@@ -74,13 +75,14 @@ impl Expr {
         Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }
 
-    pub(crate) fn skeleton(&self) -> Result<(Grammar, Vec<(String, Binding)>)> {
+    pub(crate) fn skeleton(&self, allow_modules: bool) -> Result<(Grammar, Vec<(String, Binding)>)> {
         fn walk(
             expr: &Expr,
             leaves: &mut Vec<(String, Binding)>,
             externs: &mut Vec<(String, ExternKind)>,
             depth: usize,
             count: &mut usize,
+            allow_modules: bool,
         ) -> Result<crate::grammar::ast::GrammarExpr> {
             *count += 1;
             if depth > graph::MAX_DEPTH || *count > graph::MAX_NODES {
@@ -90,7 +92,13 @@ impl Expr {
                 ExprNode::Leaf(leaf) => {
                     let name = format!("leaf{}", leaves.len());
                     let (kind, binding) = match leaf {
-                        ExprLeaf::Module(m) => (ExternKind::Grammar, Binding::from(m.clone())),
+                        ExprLeaf::Grammar(g) => (ExternKind::Grammar, Binding::from(g.clone())),
+                        ExprLeaf::Module(m) => {
+                            if !allow_modules {
+                                return Err(Error::InvalidInput("an expression containing a Module can't become a Grammar; bind it into a Module instead".into()));
+                            }
+                            (ExternKind::Grammar, Binding::from(m.clone()))
+                        },
                         ExprLeaf::TokenSet(t) => (ExternKind::Token, Binding::from(t.clone())),
                     };
                     externs.push((name.clone(), kind));
@@ -104,9 +112,9 @@ impl Expr {
                     if parts.is_empty() {
                         crate::grammar::ast::GrammarExpr::Choice(Vec::new())
                     } else if parts.len() == 1 {
-                        walk(&parts[0], leaves, externs, depth + 1, count)?
+                        walk(&parts[0], leaves, externs, depth + 1, count, allow_modules)?
                     } else {
-                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count)).collect::<Result<Vec<_>>>()?;
+                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count, allow_modules)).collect::<Result<Vec<_>>>()?;
                         crate::grammar::ast::GrammarExpr::Choice(walked)
                     }
                 }
@@ -114,9 +122,9 @@ impl Expr {
                     if parts.is_empty() {
                         crate::grammar::ast::GrammarExpr::Epsilon
                     } else if parts.len() == 1 {
-                        walk(&parts[0], leaves, externs, depth + 1, count)?
+                        walk(&parts[0], leaves, externs, depth + 1, count, allow_modules)?
                     } else {
-                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count)).collect::<Result<Vec<_>>>()?;
+                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count, allow_modules)).collect::<Result<Vec<_>>>()?;
                         crate::grammar::ast::GrammarExpr::Sequence(walked)
                     }
                 }
@@ -124,7 +132,7 @@ impl Expr {
         }
         let mut leaves = Vec::new();
         let mut externs = Vec::new();
-        let body = walk(self, &mut leaves, &mut externs, 0, &mut 0)?;
+        let body = walk(self, &mut leaves, &mut externs, 0, &mut 0, allow_modules)?;
         let named = crate::grammar::ast::NamedGrammar {
             start: "expr_root".into(),
             rules: vec![crate::grammar::ast::NamedRule {
@@ -149,6 +157,11 @@ pub(crate) fn check_expr_unbound(expr: &Expr) -> Vec<String> {
     let mut unbound = Vec::new();
     fn walk(e: &Expr, out: &mut Vec<String>) {
         match e.0.as_ref() {
+            ExprNode::Leaf(ExprLeaf::Grammar(g)) => {
+                for u in g.externs().unbound().iter() {
+                    out.push(u.name().to_string());
+                }
+            }
             ExprNode::Leaf(ExprLeaf::Module(m)) => {
                 for u in m.externs().unbound().iter() {
                     out.push(u.name().to_string());

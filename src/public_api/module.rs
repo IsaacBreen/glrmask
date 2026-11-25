@@ -427,7 +427,7 @@ impl Module {
                 if !unbound.is_empty() {
                     return Err(invalid(format!("cannot bind {name:?} to a value with unbound externs: {}", unbound.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
                 }
-                let child = Module::from_expr(&expr)?;
+                let child = Module::from_expr(&expr, true)?;
                 BoundValue::Module(child)
             }
             BindingKind::TokenSet(tokens) => {
@@ -462,8 +462,8 @@ impl Module {
         Ok(next)
     }
 
-    pub(crate) fn from_expr(expr: &Expr) -> Result<Self> {
-        let (grammar, leaves) = expr.skeleton()?;
+    pub(crate) fn from_expr(expr: &Expr, allow_modules: bool) -> Result<Self> {
+        let (grammar, leaves) = expr.skeleton(allow_modules)?;
         let mut module = Module::new(&grammar);
         for (name, leaf) in leaves {
             module.bind(&name, leaf)?;
@@ -1250,7 +1250,7 @@ impl Module {
 
     pub(super) fn to_source(&self) -> Result<Grammar> {
         if !self.node.prepared.is_empty() {
-            return Err(error("an expression that contains a module can't become a Grammar; bind it to a Module instead"));
+            return Err(error("an expression containing a Module can't become a Grammar; bind it into a Module instead"));
         }
         self.flatten_source()
     }

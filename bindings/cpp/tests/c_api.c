@@ -82,6 +82,24 @@ int main(void) {
     CHECK(glrmask_module_load(artifact,artifact_len,&loaded)==GLRMASK_OK);
     glrmask_bytes_free(saved);glrmask_module_free(module);
     const glrmask_expr_operand operand={1,loaded};CHECK(glrmask_expr_choice(&operand,1,&expr)==GLRMASK_OK);
+    {
+        const char open[]="start s extern grammar item nt s = item";
+        glrmask_grammar* parent=NULL; glrmask_module* outer=NULL; glrmask_expr* nested=NULL;
+        CHECK(glrmask_grammar_from_source(GLRMASK_GLRM,open,strlen(open),&parent)==GLRMASK_OK);
+        const glrmask_expr_operand inner={GLRMASK_OPERAND_EXPR,expr};
+        CHECK(glrmask_expr_sequence(&inner,1,&nested)==GLRMASK_OK);
+        glrmask_expr* cases[]={expr,nested};
+        for (size_t i=0;i<2;i++) {
+            glrmask_grammar* bad=(glrmask_grammar*)(uintptr_t)1;
+            CHECK(glrmask_grammar_from_expr(cases[i],&bad)==GLRMASK_INVALID_INPUT && bad==NULL);
+            CHECK(strcmp(glrmask_error_message(),"an expression containing a Module can't become a Grammar; bind it into a Module instead")==0);
+            CHECK(glrmask_grammar_bind_expr(parent,"item",4,cases[i])==GLRMASK_INVALID_INPUT);
+            CHECK(glrmask_module_new(parent,&outer)==GLRMASK_OK);
+            CHECK(glrmask_module_bind_expr(outer,"item",4,cases[i])==GLRMASK_OK);
+            glrmask_module_free(outer);
+        }
+        glrmask_expr_free(nested);glrmask_grammar_free(parent);
+    }
     glrmask_expr_free(expr);
     glrmask_expr* literal=NULL;CHECK(glrmask_expr_literal((const uint8_t*)"x",1,&literal)==GLRMASK_OK);glrmask_expr_free(literal);
     glrmask_constraint* canonical=NULL;CHECK(glrmask_module_compile(loaded,vocab,NULL,&canonical)==GLRMASK_OK);

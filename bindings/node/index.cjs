@@ -214,6 +214,7 @@ class Grammar extends Owned {
   static fromExpr(value) {
     let expr;
     if (value instanceof Expr) expr = handle(value, Expr);
+    else if (value instanceof Module) expr = invoke(() => native.NativeExpr.fromModule(handle(value, Module)));
     else if (value instanceof Grammar) expr = invoke(() => native.NativeExpr.fromGrammar(handle(value, Grammar)));
     else if (value instanceof TokenSet) expr = invoke(() => native.NativeExpr.fromTokenSet(handle(value, TokenSet)));
     else throw new TypeError('Grammar.fromExpr requires an Expr, Grammar or TokenSet');

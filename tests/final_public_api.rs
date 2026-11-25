@@ -178,7 +178,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     let v = vocab();
     let module = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
     let root = Grammar::from_expr(Expr::sequence([
-        Expr::from(module.clone()),
+        Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([130, 255])),
     ])).unwrap();
     let mut constraint = root.compile(&v).unwrap();
@@ -213,7 +213,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     }
     assert_eq!(module.compile(&v).unwrap().mask_len(), 1);
     let root_b = Grammar::from_expr(Expr::sequence([
-        Expr::from(module.clone()),
+        Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([63])),
     ])).unwrap();
     let policy_b = root_b.compile(&v).unwrap();
@@ -586,4 +586,28 @@ fn source_constructors_reject_invalid_source_at_construction() {
     assert!(Grammar::from_lark("start: (").is_err());
     assert!(Grammar::from_json_schema("{").is_err());
     assert!(Grammar::from_glrm("invalid source").is_err());
+}
+
+#[test]
+fn grammar_expressions_reject_modules_at_any_depth_but_module_bind_accepts_them() {
+    let v = vocab();
+    let source = Grammar::from_lark("start: \"a\"").unwrap();
+    let host = Grammar::from_glrm("start s extern grammar item nt s = item").unwrap();
+    let mut prepared = Module::new(&source);
+    prepared.precompile(&v).unwrap();
+    for m in [Module::new(&source), prepared] {
+        for expr in [Expr::from(&m), Expr::sequence([Expr::choice([Expr::from(&m)]), Expr::literal("")])] {
+            let err = Grammar::from_expr(&expr).unwrap_err();
+            assert_eq!(err.kind(), glrmask::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), "an expression containing a Module can't become a Grammar; bind it into a Module instead");
+            let mut grammar = host.clone();
+            assert_eq!(grammar.bind("item", &expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+            assert_eq!(grammar.externs().unbound().len(), 1);
+            let mut module = Module::new(&host);
+            module.bind("item", expr).unwrap();
+            let mut state = module.compile(&v).unwrap().start();
+            assert!(state.commit_token(1));
+            assert!(state.is_accepting());
+        }
+    }
 }
