@@ -6,6 +6,8 @@
 //!
 //! GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
 //!
+//! From 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).
+//!
 //! # Installation
 //!
 //! ```bash

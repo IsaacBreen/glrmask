@@ -1,6 +1,6 @@
 {
   "schema": "glrmask-language-docs-v1",
-  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.",
+  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.\n\nFrom 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).",
   "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.\n- `Constraint`: a grammar compiled for a vocabulary, ready to use.\n- `ConstraintState`: the state of one generated sequence.",
   "installation": {
     "python": "python -m pip install glrmask",
@@ -205,14 +205,14 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "c6427709ca8eb0c022694ee9510230574ce38efc6a824fd7250ff1a8e151fce3",
-    "bindings/node/README.md": "18445e83d876c373451c7668c233301b5cff5bddd8151ec7d19f0e4715da71bb",
-    "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
-    "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
+    "bindings/cpp/README.md": "3dd43c747ac3fd868d1359f5e52cdd5f4fd93a741973b30061e542b12ffb7263",
+    "bindings/node/README.md": "56063f5cf8aaf9dfd2642bfd356a9305dc2b5c1cb73a75c7421d36c7f7996903",
+    "docs/content/releases/0.3/cpp.md": "da36afc9348afa7618360eef893e90a1b1aa538be0f52958844b1b86b5e8cad2",
+    "docs/content/releases/0.3/javascript.md": "912f11593354856b98d85fe8683fe61cc75d5412c7631c1f64bb543a01224c2c"
   },
   "api_reference": {
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "e99f33e3150ac393f89112b7ac7119c720ec12ab1cbc24b7b7c37c9e09cc2e0d"
+  "content_sha256": "800ce61d7449bb969582401e847d1bcca8ca31af0b9c40ea2e988d8c10572d1d"
 }

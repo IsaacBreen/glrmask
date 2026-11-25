@@ -2,6 +2,8 @@
 
 GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
 
+From 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).
+
 ## Installation
 
 ```bash
@@ -50,7 +52,7 @@ _T = TypeVar("_T")
 _internal: ModuleType
 
 __version__: str
-"""The GLRMask version, for example "0.5.0"."""
+"""The GLRMask version, for example "1.0.0"."""
 __all__: list[str] = [
     "Vocab",
     "Grammar",

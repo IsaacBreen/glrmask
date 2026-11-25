@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (unreleased)
+
+From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds and strategies. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.
+
+### Changes
 
 - Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable, and `Expr.choice` and `Expr.sequence` accept token IDs.
 
@@ -14,12 +18,11 @@
 
 - GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.
 - Committing a token ID never raises or throws. An ID that isn't in the vocabulary, or isn't a valid token ID at all, makes the commit return false.
-- In C, the commit functions return `bool`, and `GLRMASK_REJECTED` is gone.
+- In C, single-token and byte commits return `bool`, batch commits return a count, and `GLRMASK_REJECTED` is gone.
 - Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
 - 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
 - Rust: `ConstraintState::mask_len` is new, matching the other bindings.
-- Rust: `Grammar::bind` takes any `Binding`, like `Module::bind`, and its name is a `&str`. Binding a `Module` into a `Grammar` is an error.
-- Vocab: one constructor from`{id: bytes}`. Rust`Vocab::new`takes any`(u32, bytes)`iterator and returns`Result`(duplicate ID or ID above the maximum:`InvalidInput`), instead of panicking. Python:`Vocab({id: bytes})`;`from_dict`,`from_id_to_bytes`,`from_llama_cpp`and`llama_cpp_end_token_ids`are removed.
+- Vocab: one constructor from `{id: bytes}`. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result` (duplicate ID or ID above the maximum: `InvalidInput`), instead of panicking. Python: `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
 - Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
 - Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`. Python's `mask(size=...)` is capped at 16,777,216.
 

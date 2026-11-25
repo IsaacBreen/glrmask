@@ -6,6 +6,8 @@ GLRMask is a grammar-constrained decoding library for high-throughput LLM servin
 
 GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
 
+From 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).
+
 [Website](https://glrmask.com) · [GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
 ## Installation
@@ -13,7 +15,7 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 Each [GitHub release](https://github.com/IsaacBreen/glrmask/releases) includes static and shared libraries for Windows x64 and arm64 (MSVC), macOS x64 and arm64 (macOS 11 or newer), and Linux x64 and arm64 (glibc 2.28 or newer, or musl). Extract the archive for your platform, then:
 
 ```cmake
-find_package(glrmask 0.5 CONFIG REQUIRED)
+find_package(glrmask 1.0 CONFIG REQUIRED)
 target_link_libraries(application PRIVATE glrmask::glrmask)
 ```
 
