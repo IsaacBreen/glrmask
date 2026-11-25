@@ -63,7 +63,7 @@ int main() {
 `Vocab(entries)` takes `{id, bytes}` entries, with each token's exact bytes as `Bytes` or a
 `std::string_view`. Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character
 or contain NUL. IDs need not be contiguous, and two tokens may have the same bytes. An ID can't appear twice. Leave out
-tokens with no bytes, such as end-of-sequence or tool-call tokens; a token set can still allow them.
+tokens with no bytes, such as tool-call tokens; a token set can still allow them.
 
 ```cpp
 glrmask::Vocab vocab({

@@ -26,12 +26,6 @@ assert state.is_accepting()
 
 `Expr.choice`, `Expr.sequence` and `Expr.literal` combine grammars without writing a new one.
 
-### End tokens
-
-GLRMask has no end-token setting. To require an end-of-sequence token, put it after the grammar:
-`Grammar.from_expr(Expr.sequence(grammar, TokenSet([eos_id])))`. `is_accepting()` says whether the text so far is a
-complete match, and `is_terminated()` whether nothing more can be committed.
-
 ### Mask strategies
 
 `MaskStrategy` trades compile time against mask speed. `ParserDwa` is slowest to compile, with the fastest masks;

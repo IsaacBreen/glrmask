@@ -2,7 +2,7 @@
 
 A `TokenSet` is a set of token IDs. In a grammar it matches exactly one token from the set. It matches the token itself,
 not its bytes: two tokens with the same bytes are different tokens, and committing text with `commit_bytes` never matches
-a token set. Token sets are the only way to let a grammar use a special token, such as an end-of-sequence or tool-call
+a token set. Token sets are the only way to let a grammar use a special token, such as a tool-call
 token: bind one to a token extern, or put one in an expression. Grammar text can't name a special token by ID, and
 Lark's `<[*]>` and `<[^...]>` never match one.
 
@@ -41,7 +41,7 @@ as any other two ranges; built from IDs, it means reading 131,071 IDs first.
 ## Using a token set
 
 - Bind it to an `extern token`, or to an `extern grammar`, in which case it matches one token.
-- Put it in an expression: `Expr.sequence(grammar, TokenSet([eos]))` requires the end-of-sequence token after
+- Put it in an expression: `Expr.sequence(TokenSet([begin_call]), grammar)` requires a tool-call marker before
   `grammar`.
 - A single token ID binds the same as a set of one.
 

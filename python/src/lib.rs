@@ -1019,7 +1019,7 @@ impl PyDynamicConstraintState {
         })
     }
 
-    /// Whether everything committed so far is a complete match.
+    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     fn is_accepting(&self) -> bool {
         with_state(&self.inner, |state| state.is_accepting())
     }
@@ -1151,7 +1151,7 @@ impl PyConstraintState {
         })
     }
 
-    /// Whether everything committed so far is a complete match.
+    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     fn is_accepting(&self) -> bool {
         with_state(&self.inner, |state| state.is_accepting())
     }

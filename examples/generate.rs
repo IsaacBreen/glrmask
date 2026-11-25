@@ -1,16 +1,16 @@
 //! A generation loop: mask the model's scores, take the best allowed token,
-//! commit it, and stop when nothing more can be committed.
+//! stop if EOS is chosen, otherwise commit it.
 //!
 //! Random numbers stand in for the model.
-use glrmask::{Expr, Grammar, TokenSet, Vocab};
+use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
-    // One token per character, and an end-of-sequence token with no bytes.
+    // One token per character, plus a caller-managed EOS ID.
     let chars = b"0123456789+*()";
     let eos = chars.len() as u32;
     let vocab = Vocab::new(chars.iter().enumerate().map(|(id, &c)| (id as u32, vec![c])).collect::<Vec<_>>()).unwrap();
 
-    // Arithmetic, then the end token.
+    // Arithmetic grammar.
     let arithmetic = Grammar::from_glrm(r#"
         start sum
         t NUMBER = /[0-9]+/
@@ -18,28 +18,34 @@ fn main() -> glrmask::Result<()> {
         nt product = atom | product "*" atom
         nt atom = NUMBER | "(" sum ")"
     "#)?;
-    let grammar = Grammar::from_expr(Expr::sequence([Expr::from(arithmetic), Expr::from(TokenSet::new([eos]))]))?;
-    let constraint = grammar.compile(&vocab)?;
+    let constraint = arithmetic.compile(&vocab)?;
 
     let mut model = Model { seed: 7 };
     let mut state = constraint.start();
-    let mut mask = vec![0; constraint.mask_len()];
+    let mut mask = vec![0; constraint.mask_len().max(eos as usize / 32 + 1)];
     let mut text = Vec::new();
-    while !state.is_terminated() {
+    loop {
         let mut scores = model.scores(eos as usize + 1);
         // This model grows keener to stop as the text gets longer.
         scores[eos as usize] += 0.1 * text.len() as f32;
 
         state.fill_mask(&mut mask);
+        if state.is_accepting() {
+            mask[eos as usize / 32] |= 1 << (eos % 32);
+        }
         let allowed = |id: usize| (mask[id / 32] >> (id % 32)) & 1 == 1;
         let token = (0..scores.len())
             .filter(|&id| allowed(id))
             .max_by(|&a, &b| scores[a].total_cmp(&scores[b]))
-            .expect("the grammar allows a token until it terminates");
+            .expect("no allowed token");
+        if token == eos as usize {
+            break;
+        }
 
         assert!(state.commit_token(token as u32));
         text.extend_from_slice(vocab.get(token as u32).unwrap_or_default());
     }
+    assert!(state.is_accepting());
     println!("{}", String::from_utf8_lossy(&text));
     Ok(())
 }

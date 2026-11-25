@@ -279,7 +279,7 @@ export declare class ConstraintState implements Disposable {
   commitTokens(ids: Iterable<number> | Uint32Array): number;
   /** Commits raw bytes. If they aren't allowed, returns `false` and terminates the state. */
   commitBytes(bytes: Uint8Array): boolean;
-  /** Whether everything committed so far is a complete match. */
+  /** Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS. */
   isAccepting(): boolean;
   /** Whether nothing more can be committed. */
   isTerminated(): boolean;

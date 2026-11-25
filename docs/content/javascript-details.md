@@ -3,7 +3,7 @@
 `new Vocab(entries)` takes `[id, bytes]` pairs, with each token's exact bytes as a `Uint8Array` or `Buffer`.
 Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character. IDs need not be
 contiguous, and two tokens may have the same bytes. An ID can't appear twice. Leave out tokens with no bytes, such as
-end-of-sequence or tool-call tokens; a token set can still allow them.
+tool-call tokens; a token set can still allow them.
 
 ```js
 const vocab = new Vocab([

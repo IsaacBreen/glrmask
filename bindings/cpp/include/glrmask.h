@@ -278,7 +278,7 @@ GLRMASK_API void glrmask_state_free(glrmask_state* p);
 /// Writes the number of `uint32_t` words in a mask.
 GLRMASK_API glrmask_status glrmask_state_mask_len(const glrmask_state* p,size_t* out);
 /// Whether everything committed so far is a complete match. Writes 1 or 0 to
-/// `out`.
+/// `out`. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uint32_t* out);
 /// Writes the tokens allowed next into `out` as a bitmask, setting extra words to
 /// zero. Token `id` is allowed when bit `id % 32` of word `id / 32` is set. Returns

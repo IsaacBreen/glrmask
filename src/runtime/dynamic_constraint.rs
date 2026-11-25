@@ -3904,7 +3904,7 @@ impl DynamicConstraintState {
         crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
-    /// Whether everything committed so far is a complete match.
+    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }

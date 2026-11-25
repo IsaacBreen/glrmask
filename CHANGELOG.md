@@ -79,14 +79,9 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 - `Vocab` has `new`, `with_special_tokens`, `get`, `iter`, `len` and `is_empty`. `len` counts only tokens with bytes.
 - The Rust `TokenId` alias is removed.
 
-### End tokens
-
-- There are no end-token options. To require an end token, put it after the grammar:
-  `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(TokenSet::new([eos]))]))`. This costs nothing extra
-  to compile or run.
-
 ### Generating
 
+- Forcing stops at accepting states.
 - `commit_token`, `commit_bytes` and the new `commit_tokens` return `bool` instead of `Result`. A failed commit ends the
   state: later commits fail, the mask is empty and `is_terminated()` is true. Copy the state to try a token without
   committing to it. `is_rejected` is removed.

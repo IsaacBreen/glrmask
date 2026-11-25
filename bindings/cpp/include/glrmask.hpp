@@ -489,7 +489,7 @@ public:
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
     /// Writes the mask into `output`, setting extra words to zero.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
-    /// Whether everything committed so far is a complete match.
+    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
     /// The tokens allowed next, as a bitmask.
     ///

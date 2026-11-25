@@ -74,7 +74,7 @@
   "ConstraintState.commit_token": "Commits a token. If it isn't allowed, returns `False` and terminates the state.",
   "ConstraintState.commit_tokens": "Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.",
   "ConstraintState.commit_bytes": "Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.",
-  "ConstraintState.is_accepting": "Whether everything committed so far is a complete match.",
+  "ConstraintState.is_accepting": "Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.",
   "ConstraintState.is_terminated": "Whether nothing more can be committed.",
   "ConstraintState.commit_forced_tokens": "Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.",
   "Grammar.from_expr": "Creates a grammar from an expression.",

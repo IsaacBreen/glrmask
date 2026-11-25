@@ -87,7 +87,7 @@
     "ConstraintState.commit_token": "Commits a token. If it isn't allowed, returns `False` and terminates the state.",
     "ConstraintState.commit_tokens": "Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.",
     "ConstraintState.commit_bytes": "Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.",
-    "ConstraintState.is_accepting": "Whether everything committed so far is a complete match.",
+    "ConstraintState.is_accepting": "Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
     "ConstraintState.commit_forced_tokens": "Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.",
     "Grammar.from_expr": "Creates a grammar from an expression.",
@@ -123,7 +123,7 @@
         "ExactTokens.__len__": "Number of IDs, rather than ranges.",
         "Vocab": "Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.",
         "Vocab.from_dict": "String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.",
-        "Vocab.from_id_to_bytes": "Use the tokenizerâ€™s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.",
+        "Vocab.from_id_to_bytes": "Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.",
         "Vocab.from_llama_cpp": "Extract the byte vocabulary from a llama-cpp-python `Llama`. EOG, control, unused and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.",
         "Vocab.llama_cpp_end_token_ids": "EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.",
         "Vocab.tokens": "Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.",
@@ -165,22 +165,22 @@
         "Constraint.load": "Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping.",
         "ConstraintState": "Mutable state for one generated sequence.",
         "ConstraintState.clone": "Independent snapshot at the current prefix.",
-        "ConstraintState.mask": "New Boolean array indexed by original token ID. `size` must cover the constraintâ€™s entire ID range; extra positions are false. Includes the root end-token policy.",
+        "ConstraintState.mask": "New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.",
         "ConstraintState.fill_mask": "Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.",
         "ConstraintState.commit_token": "Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error.",
         "ConstraintState.commit_bytes": "Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.",
         "ConstraintState.is_accepting": "The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.",
         "ConstraintState.is_rejected": "The prefix cannot be extended to a valid match.",
         "ConstraintState.forced_tokens": "Read-only library-canonical prefix of genuinely forced text. Uses longest admitted nonempty spelling and the lowest original-ID alias; exact events retain their IDs. Stops at root acceptance, unstable tokenization, intermediate exact-event opportunities, or proof limits. May construct full masks; typed resource failures raise errors.",
-        "ConstraintState.marker_events": "Initial or most recent commitâ€™s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.",
-        "auto": "Adaptive JSON Schema policy inspection and persisted tier selection. For ordinary compilation, prefer `Grammar.compile(..., optimization=Optimization.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importerâ€™s partial assertion support.",
+        "ConstraintState.marker_events": "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.",
+        "auto": "Adaptive JSON Schema policy inspection and persisted tier selection. For ordinary compilation, prefer `Grammar.compile(..., optimization=Optimization.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer’s partial assertion support.",
         "auto.AUTO_POLICY_NAME": "Policy identifier stored on `AutoConstraint` instances.",
         "auto.AutoSchemaShape": "Source-shape counts used by the policy, not a schema validation result. `json_bytes` measures normalized JSON serialized with sorted keys and compact separators.",
-        "auto.json_schema_auto_shape": "Extract the policyâ€™s source-shape features from JSON text or a JSON-serializable schema.",
+        "auto.json_schema_auto_shape": "Extract the policy’s source-shape features from JSON text or a JSON-serializable schema.",
         "auto.select_json_schema_auto_tier": "Select `o1`, `o2` or `o3` using fitted source-shape thresholds. The choice predicts a compilation/masking trade-off; it does not guarantee a latency bound.",
         "auto.AutoConstraint": "Constraint wrapper that records the selected tier and policy. Its artifact carries the tier so loading does not rerun selection. JSON Schema assertions unsupported by the importer may remain unenforced.",
         "auto.AutoConstraint.__init__": "Use `from_json_schema` for normal construction; unknown tier names raise `ValueError`.",
-        "auto.AutoConstraint.from_json_schema": "Choose a tier and compile. Accepts schema text or an object; inherits the importerâ€™s partial JSON Schema support.",
+        "auto.AutoConstraint.from_json_schema": "Choose a tier and compile. Accepts schema text or an object; inherits the importer’s partial JSON Schema support.",
         "auto.AutoConstraint.load": "Restore the recorded tier. Rejects missing or unknown artifact tags; the supplied vocabulary must match the original.",
         "auto.AutoConstraint.save": "Includes the tier tag and underlying constraint artifact.",
         "auto.AutoConstraint.start": "Independent decoding state with the same mask/commit interface as `ConstraintState`.",
@@ -205,8 +205,8 @@
     }
   },
   "native_guides": {
-    "bindings\\cpp\\README.md": "1589fb41747d4a67841eaa002c029d43934217938372ae825ead7d1d98095cf3",
-    "bindings\\node\\README.md": "dee2c09ee02c4b0897c2b666db6929550ef9a53740b830496601960635acdc77",
+    "bindings\\cpp\\README.md": "f490b7e6554c2576f40af5f4618b1e62924353fb4bf697fd5620baffeb501705",
+    "bindings\\node\\README.md": "86d6a2d9690d7efab0e2f1065950f8d08dc66ba2e518bf634d57b028a638d783",
     "docs\\content\\releases\\0.3\\cpp.md": "a429dfbbd09455e1a1b999e547778b09f4a896b09d6a11309989410d7ad27371",
     "docs\\content\\releases\\0.3\\javascript.md": "325c01694d45220dcb62bf41ae7d0ca27c37fa9830ca42192214454265821197"
   },
@@ -214,5 +214,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "088eda72f6e94c6640c011cec87988a720ae6b75c5f28c866f9008b6e0032424"
+  "content_sha256": "67325e0fb04f90e15e02f4834ce6c4268facba603b15fd07121fe40426a3a66c"
 }

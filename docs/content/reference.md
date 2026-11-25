@@ -1,7 +1,6 @@
 ## Generating
 
-Each sequence has its own `ConstraintState`. At each step, mask the model's scores, choose a token and commit it. Stop
-when nothing more can be committed:
+Each sequence has its own `ConstraintState`. At each step, mask the model's scores, allow EOS when the state is accepting, and choose a token. Stop if EOS is chosen; otherwise commit the token:
 
 ```python
 import numpy as np
@@ -18,16 +17,20 @@ arithmetic = glrmask.Grammar.from_glrm(r'''
     nt product = atom | product "*" atom
     nt atom = NUMBER | "(" sum ")"
 ''')
-grammar = glrmask.Grammar.from_expr(glrmask.Expr.sequence(arithmetic, glrmask.TokenSet([eos])))
-constraint = grammar.compile(vocab)
+constraint = arithmetic.compile(vocab)
 
 rng = np.random.default_rng(0)
 state = constraint.start()
 text = b""
-while not state.is_terminated():
+while True:
     logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
-    logits[~state.mask(size=len(logits))] = -np.inf
+    allowed = state.mask(size=len(logits))
+    allowed[eos] = state.is_accepting()
+    assert allowed.any()
+    logits[~allowed] = -np.inf
     token = int(logits.argmax())
+    if token == eos:
+        break
     assert state.commit_token(token)
     text += chars[token:token + 1]
 print(text.decode())
@@ -35,19 +38,14 @@ print(text.decode())
 
 `mask()` returns a Boolean array indexed by token ID; `size` makes it as long as your logits. `fill_mask` is faster: it
 writes a packed bitmask into a buffer you reuse: bit `id % 32` of word `id / 32` is set when token `id` is allowed.
-`Constraint.mask_len()` gives the buffer's length in words. In Rust, Node.js, C and C++, masks are always packed.
+`Constraint.mask_len()` gives the buffer's minimum length in words; allocate enough words for the EOS ID too. In Rust, Node.js, C and C++, masks are always packed.
 
 `commit_token` returns whether the token was allowed. `commit_tokens` commits several in order and returns the number committed. `commit_bytes`
 commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
 token without committing to it, copy the state first.
 
-### Ending
-
 `is_accepting()` says whether the text so far is a complete match. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed.
-
-GLRMask has no end-token setting. To require an end-of-sequence token, put it after the grammar, as above. It's allowed
-once the grammar is complete, and nothing is allowed after it. The token doesn't need to be in the vocabulary.
 
 ### Forced tokens
 
@@ -134,7 +132,7 @@ A `TokenSet` is a set of token IDs. In a grammar it matches any one of its token
 Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
 is an error.
 
-Tokens with no bytes, such as end-of-sequence or tool-call tokens, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
+Tokens with no bytes, such as tool-call markers, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Mask strategies
 

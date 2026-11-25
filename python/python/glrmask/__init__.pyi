@@ -302,7 +302,7 @@ class ConstraintState:
         """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
         ...
     def is_accepting(self) -> bool:
-        """Whether everything committed so far is a complete match."""
+        """Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS."""
         ...
     def is_terminated(self) -> bool:
         """Whether nothing more can be committed."""

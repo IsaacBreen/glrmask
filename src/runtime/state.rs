@@ -585,7 +585,7 @@ impl ConstraintState {
         super::commit::forcing_reference::force_single(self, None)
     }
 
-    /// Whether everything committed so far is a complete match.
+    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
