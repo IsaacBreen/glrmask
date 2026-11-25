@@ -220,3 +220,17 @@ test('Grammar.clone and Module.clone return independent copies', () => {
   assert.equal(m1.externs.unbound.size, 1);
   assert.equal(m2.externs.unbound.size, 0);
 });
+
+test('Externs snapshots survive bind and owner disposal',()=>{
+  for(const owner of [host(),new Module(host())]) {
+    const before=owner.externs;
+    assert.equal(before.unbound.size,1);
+    owner.bind('child',source());
+    const after=owner.externs;
+    owner.dispose();
+    assert.equal(before.unbound.size,1);
+    assert.equal(after.unbound.size,0);
+    assert.equal(before.get('child').kind,'grammar');
+    assert.equal(before._map,undefined);
+  }
+});

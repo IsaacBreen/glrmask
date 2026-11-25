@@ -122,26 +122,27 @@ function formatBoundaryMaskStrategy(num) {
 }
 
 class ExternsMap {
-  constructor(items, unboundFn) {
-    this._items = items;
-    this._map = new Map(items.map(item => [item.name, item]));
-    this._unboundFn = unboundFn;
+  #map;
+  #unbound;
+  constructor(items, unbound) {
+    this.#map = new Map(items.map(item => [item.name, item]));
+    this.#unbound = unbound;
     Object.freeze(this);
   }
-  get(name) { return this._map.get(name); }
-  has(name) { return this._map.has(name); }
-  get size() { return this._map.size; }
-  keys() { return this._map.keys(); }
-  values() { return this._map.values(); }
-  entries() { return this._map.entries(); }
-  [Symbol.iterator]() { return this._map.entries(); }
-  forEach(callback, thisArg) { this._map.forEach((v, k) => callback.call(thisArg, v, k, this)); }
-  get unbound() { return this._unboundFn ? this._unboundFn() : this; }
+  get(name) { return this.#map.get(name); }
+  has(name) { return this.#map.has(name); }
+  get size() { return this.#map.size; }
+  keys() { return this.#map.keys(); }
+  values() { return this.#map.values(); }
+  entries() { return this.#map.entries(); }
+  [Symbol.iterator]() { return this.#map.entries(); }
+  forEach(callback, thisArg) { this.#map.forEach((v, k) => callback.call(thisArg, v, k, this)); }
+  get unbound() { return this.#unbound ?? this; }
 }
 
-function formatExterns(raw, unboundSupplier) {
+function formatExterns(raw, rawUnbound) {
   const items = raw.map(e => Object.freeze({name: e.name, kind: e.kind}));
-  return new ExternsMap(items, unboundSupplier);
+  return new ExternsMap(items, rawUnbound === null ? null : formatExterns(rawUnbound, null));
 }
 
 class Owned {
@@ -207,8 +208,7 @@ class Grammar extends Owned {
   get externs() {
     const target = handle(this, Grammar);
     const rawAll = invoke(() => target.externs());
-    const unboundSupplier = () => formatExterns(invoke(() => target.unboundExterns()), null);
-    return formatExterns(rawAll, unboundSupplier);
+    return formatExterns(rawAll, invoke(() => target.unboundExterns()));
   }
   clone() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
   static fromExpr(value) {
@@ -360,11 +360,7 @@ class Module extends Owned {
   get externs() {
     const target = handle(this, Module);
     const rawAll = invoke(() => target.externs());
-    const unboundSupplier = () => {
-      const rawUnbound = invoke(() => target.unboundExterns());
-      return formatExterns(rawUnbound, null);
-    };
-    return formatExterns(rawAll, unboundSupplier);
+    return formatExterns(rawAll, invoke(() => target.unboundExterns()));
   }
 
   precompileSync(vocab, options) {
