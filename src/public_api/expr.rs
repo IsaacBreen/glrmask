@@ -55,6 +55,16 @@ impl From<&TokenSet> for Expr {
 }
 
 impl Expr {
+    /// Matches exactly `bytes`.
+    pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
+        Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
+    }
+
+    /// Matches `parts` in order.
+    pub fn sequence(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
+        Self(Arc::new(ExprNode::Sequence(parts.into_iter().map(Into::into).collect())))
+    }
+
     /// Matches any one of `parts`.
     pub fn choice(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
         let list: Vec<Expr> = parts.into_iter().map(Into::into).collect();
@@ -63,16 +73,6 @@ impl Expr {
         } else {
             Self(Arc::new(ExprNode::Choice(list)))
         }
-    }
-
-    /// Matches `parts` in order.
-    pub fn sequence(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
-        Self(Arc::new(ExprNode::Sequence(parts.into_iter().map(Into::into).collect())))
-    }
-
-    /// Matches exactly `bytes`.
-    pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
-        Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }
 
     pub(crate) fn skeleton(&self, allow_modules: bool) -> Result<(Grammar, Vec<(String, Binding)>)> {

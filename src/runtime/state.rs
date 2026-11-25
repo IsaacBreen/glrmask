@@ -580,30 +580,17 @@ impl ConstraintState {
     }
 
 
+    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
+    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
+        super::commit::forcing_reference::force_single(self, None)
+    }
+
     /// Whether everything committed so far is a complete match.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
         }
         frontier_is_accepting(&self.constraint, &self.state, self.terminated)
-    }
-
-    /// Whether nothing more can be committed.
-    #[must_use]
-    pub fn is_terminated(&self) -> bool {
-        if self.terminated {
-            return true;
-        }
-        if self.state.is_empty() {
-            return true;
-        }
-        // A complete body under an end-token root can still commit its end token.
-        if !self.constraint.end_tokens.is_empty() && self.frontier_complete() {
-            return false;
-        }
-        !self.state.iter().any(|(&tokenizer_state, gss)| {
-            super::commit::entry_can_continue(&self.constraint, tokenizer_state, gss)
-        })
     }
 
     /// Whether the parser frontier is a complete grammar match, ignoring any
@@ -651,9 +638,22 @@ impl ConstraintState {
         grouped.into_iter().collect()
     }
 
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
-        super::commit::forcing_reference::force_single(self, None)
+    /// Whether nothing more can be committed.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        if self.terminated {
+            return true;
+        }
+        if self.state.is_empty() {
+            return true;
+        }
+        // A complete body under an end-token root can still commit its end token.
+        if !self.constraint.end_tokens.is_empty() && self.frontier_complete() {
+            return false;
+        }
+        !self.state.iter().any(|(&tokenizer_state, gss)| {
+            super::commit::entry_can_continue(&self.constraint, tokenizer_state, gss)
+        })
     }
 
     #[cfg(any(test,feature="internal-api"))]

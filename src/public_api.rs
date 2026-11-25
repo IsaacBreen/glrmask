@@ -610,6 +610,14 @@ impl Grammar {
         Ok(grammar)
     }
 
+    /// Creates a grammar from GLRM source.
+    pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
+        grammar.component()?;
+        Ok(grammar)
+    }
+
+
     /// Creates a grammar from Lark source.
     pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
@@ -618,19 +626,11 @@ impl Grammar {
         Ok(grammar)
     }
 
-
     /// Creates a grammar from a JSON Schema, given as JSON text.
     pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
         let source = source.as_ref();
         crate::import::parse_json_schema_to_named(source)?;
         Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))
-    }
-
-    /// Creates a grammar from GLRM source.
-    pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
-        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
-        grammar.component()?;
-        Ok(grammar)
     }
 
     #[cfg(feature = "internal-api")]
@@ -793,20 +793,10 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind. A grammar can't bind a [`Module`]; use
-    /// [`Module::bind`] for that.
-    pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
-        let value = match value.into().0 {
-            module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
-            module::GrammarBindingKind::Expr(expr) => {
-                GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
-            }
-            module::GrammarBindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
-        };
-        let next = self.bind_value(name, value)?;
-        *self = next;
-        Ok(())
+    /// Creates a grammar from an expression.
+    pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
+        let expr = expr.into();
+        Self::from_expr_ref(&expr)
     }
 
     // Keep the large historical differential fixture corpus readable while it
@@ -878,22 +868,25 @@ impl Grammar {
         }
     }
 
+    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
+    /// bound, or `value` is the wrong kind. A grammar can't bind a [`Module`]; use
+    /// [`Module::bind`] for that.
+    pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
+        let value = match value.into().0 {
+            module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
+            module::GrammarBindingKind::Expr(expr) => {
+                GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
+            }
+            module::GrammarBindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
+        };
+        let next = self.bind_value(name, value)?;
+        *self = next;
+        Ok(())
+    }
+
     /// Compiles the grammar for `vocab`. Fails if any extern is unbound.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         Module::new(self).compile(vocab)
-    }
-
-    /// Compiles as much as possible for `vocab` now, even with externs unbound, and
-    /// returns a [`Module`] that keeps the work.
-    pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
-        self.precompile_with(vocab, CompileOptions::default())
-    }
-
-    /// Like [`precompile`](Self::precompile), with `options`.
-    pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module> {
-        let mut module = Module::new(self);
-        module.precompile_with(vocab, options)?;
-        Ok(module)
     }
 
     /// Like [`compile`](Self::compile), with `options`.
@@ -903,6 +896,12 @@ impl Grammar {
         options: CompileOptions,
     ) -> Result<Constraint> {
         Module::new(self).compile_with(vocab, options)
+    }
+
+    /// Compiles as much as possible for `vocab` now, even with externs unbound, and
+    /// returns a [`Module`] that keeps the work.
+    pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
+        self.precompile_with(vocab, CompileOptions::default())
     }
 
     #[cfg(any(test, feature = "internal-api"))]
@@ -1504,10 +1503,11 @@ impl Grammar {
         }
     }
 
-    /// Creates a grammar from an expression.
-    pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
-        let expr = expr.into();
-        Self::from_expr_ref(&expr)
+    /// Like [`precompile`](Self::precompile), with `options`.
+    pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module> {
+        let mut module = Module::new(self);
+        module.precompile_with(vocab, options)?;
+        Ok(module)
     }
 
     pub(crate) fn from_expr_ref(expr: &Expr) -> Result<Grammar> {

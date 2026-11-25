@@ -365,12 +365,12 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// The module's externs.
-    pub fn externs(&self) -> Externs<'_> {
-        Externs {
-            source: ExternsSource::Module(self),
-            only_unbound: false,
-        }
+    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
+    /// bound, or `value` is the wrong kind.
+    pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
+        let next = self.bound(name, value.into())?;
+        *self = next;
+        Ok(())
     }
 
     // Lets bindings surface a parse error where the Rust view must stay infallible.
@@ -380,12 +380,12 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind.
-    pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
-        let next = self.bound(name, value.into())?;
-        *self = next;
-        Ok(())
+    /// The module's externs.
+    pub fn externs(&self) -> Externs<'_> {
+        Externs {
+            source: ExternsSource::Module(self),
+            only_unbound: false,
+        }
     }
 
     fn bound_module(

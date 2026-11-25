@@ -8766,11 +8766,6 @@ impl ConstraintState {
         Some(shadow)
     }
 
-    /// The number of `u32` words in a mask.
-    pub fn mask_len(&self) -> usize {
-        self.constraint.mask_len()
-    }
-
     /// Writes the mask into `buf`, zeroing any extra words.
     ///
     /// # Panics
@@ -8795,6 +8790,11 @@ impl ConstraintState {
                 if accepting { *word |= bit; } else { *word &= !bit; }
             }
         }
+    }
+
+    /// The number of `u32` words in a mask.
+    pub fn mask_len(&self) -> usize {
+        self.constraint.mask_len()
     }
 
     pub(crate) fn fill_body_mask(&self, buf: &mut [u32]) {

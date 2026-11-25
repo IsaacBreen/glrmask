@@ -41,7 +41,7 @@ assert state.is_accepting()
 from __future__ import annotations
 from collections.abc import Iterator, Mapping, KeysView, ValuesView, ItemsView
 from types import ModuleType
-from typing import Any, ClassVar, Iterable, Literal, Optional, Sequence, TypeVar, Union, final, overload
+from typing import Any, ClassVar, Iterable, Literal, Sequence, TypeVar, final, overload
 import numpy as np
 from numpy.typing import NDArray
 
@@ -54,16 +54,16 @@ __version__: str
 __all__: list[str] = [
     "Vocab",
     "Grammar",
+    "Expr",
+    "TokenSet",
+    "Module",
     "Constraint",
     "ConstraintState",
-    "Module",
-    "Expr",
-    "Extern",
     "Externs",
-    "TokenSet",
-    "TokenTrie",
+    "Extern",
     "MaskStrategy",
     "BoundaryMaskStrategy",
+    "TokenTrie",
     "ParserBackend",
     "GLRMaskError",
     "__version__",
@@ -84,57 +84,57 @@ class Grammar:
         """Creates a grammar from GLRM source."""
         ...
     @staticmethod
+    def from_lark(source: str, /) -> Grammar:
+        """Creates a grammar from Lark source."""
+        ...
+    @staticmethod
     def from_json_schema(schema: Any, /) -> Grammar:
         """Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict."""
         ...
     @staticmethod
-    def from_lark(source: str, /) -> Grammar:
-        """Creates a grammar from Lark source."""
+    def from_expr(expr: Expr | Grammar | TokenSet, /) -> Grammar:
+        """Creates a grammar from an expression."""
         ...
     @property
     def externs(self) -> Externs:
         """The grammar's externs."""
         ...
-    def precompile(
-        self,
-        vocab: Vocab,
-        *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
-    ) -> Module:
-        """Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
+    @overload
+    def bind(self, name: str, value: Grammar | Expr | TokenSet, /) -> None:
+        """Binds the extern `name` to `value`.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        """
+        ...
+    @overload
+    def bind(self, **bindings: Grammar | Expr | TokenSet) -> None:
+        """Binds the extern `name` to `value`.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
+        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Constraint:
         """Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
 
         The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
-    @staticmethod
-    def from_expr(expr: Union[Expr, Grammar, TokenSet], /) -> Grammar:
-        """Creates a grammar from an expression."""
-        ...
-    @overload
-    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet], /) -> None:
-        """Binds the extern `name` to `value`.
+    def precompile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        boundary_mask_strategy: BoundaryMaskStrategy | None = None,
+    ) -> Module:
+        """Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
-        """
-        ...
-    @overload
-    def bind(self, **bindings: Union[Grammar, Expr, TokenSet]) -> None:
-        """Binds the extern `name` to `value`.
-
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
         """
         ...
     def copy(self) -> Grammar:
@@ -144,6 +144,110 @@ class Grammar:
         """Same as `copy()`."""
         ...
     def __deepcopy__(self, memo: dict[int, Any]) -> Grammar:
+        """Same as `copy()`."""
+        ...
+
+@final
+class Expr:
+    """A grammar expression."""
+    @staticmethod
+    def literal(value: str | bytes, /) -> Expr:
+        """Matches exactly `value`. A `str` is UTF-8 encoded."""
+        ...
+    @staticmethod
+    def sequence(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+        """Matches `parts` in order.
+
+        Raises `GLRMaskError` if a part has unbound externs.
+        """
+        ...
+    @staticmethod
+    def choice(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+        """Matches any one of `parts`.
+
+        Raises `GLRMaskError` if a part has unbound externs.
+        """
+        ...
+
+@final
+class TokenSet:
+    """A set of token IDs."""
+    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
+        """Creates a set from `ids`."""
+        ...
+    @staticmethod
+    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
+        """Creates a set from `range` objects, which must have step 1."""
+        ...
+    def __repr__(self) -> str:
+        """An expression that rebuilds the set, or a summary for large sets."""
+        ...
+    def __eq__(self, other: object, /) -> bool:
+        """Whether both sets contain the same IDs."""
+        ...
+
+@final
+class Module:
+    """A grammar you can compose with others and partly compile before its externs are bound."""
+    def __new__(cls, source: Grammar, /) -> Module:
+        """Creates a module from a grammar."""
+        ...
+    @overload
+    def bind(self, name: str, value: Grammar | Module | Expr | TokenSet, /) -> None:
+        """Binds the extern `name` to `value`.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        """
+        ...
+    @overload
+    def bind(self, **bindings: Grammar | Module | Expr | TokenSet) -> None:
+        """Binds the extern `name` to `value`.
+
+        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        """
+        ...
+    @property
+    def externs(self) -> Externs:
+        """The module's externs."""
+        ...
+    def precompile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        boundary_mask_strategy: BoundaryMaskStrategy | None = None,
+    ) -> None:
+        """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
+
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        """
+        ...
+    def compile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        boundary_mask_strategy: BoundaryMaskStrategy | None = None,
+    ) -> Constraint:
+        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
+
+        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        """
+        ...
+    def copy(self) -> Module:
+        """A copy of the module. Binding the copy does not change the original."""
+        ...
+    def save(self) -> bytes:
+        """Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another."""
+        ...
+    @staticmethod
+    def load(data: bytes, /) -> Module:
+        """Loads a module saved with `save()`."""
+        ...
+    def __copy__(self) -> Module:
+        """Same as `copy()`."""
+        ...
+    def __deepcopy__(self, memo: dict[int, Any]) -> Module:
         """Same as `copy()`."""
         ...
 
@@ -170,29 +274,20 @@ class Constraint:
 @final
 class ConstraintState:
     """A constraint's state during generation."""
-    def copy(self) -> ConstraintState:
-        """A copy of the state."""
-        ...
-    def __copy__(self) -> ConstraintState:
-        """Same as `copy()`."""
-        ...
-    def __deepcopy__(self, memo: dict[int, Any]) -> ConstraintState:
-        """Same as `copy()`."""
-        ...
-    def mask_len(self) -> int:
-        """The number of `int32` words that `fill_mask` needs."""
-        ...
-    def mask(self, *, size: Optional[int] = None) -> NDArray[np.bool_]:
+    def mask(self, *, size: int | None = None) -> NDArray[np.bool_]:
         """The tokens allowed next, as a NumPy `bool` array indexed by token ID.
 
         `size` sets the array length, for example to match your logits; it must cover every token ID.
         """
         ...
-    def fill_mask(self, bitmask: Union[NDArray[np.int32], NDArray[np.uint32]], /) -> None:
+    def fill_mask(self, bitmask: NDArray[np.int32] | NDArray[np.uint32], /) -> None:
         """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """
+        ...
+    def mask_len(self) -> int:
+        """The number of `int32` words that `fill_mask` needs."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
         """Commits a token. If it isn't allowed, returns `False` and terminates the state."""
@@ -203,119 +298,23 @@ class ConstraintState:
     def commit_bytes(self, data: bytes, /) -> bool:
         """Commits raw bytes. If they aren't allowed, returns `False` and terminates the state."""
         ...
+    def commit_forced_tokens(self) -> list[int]:
+        """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
+        ...
     def is_accepting(self) -> bool:
         """Whether everything committed so far is a complete match."""
         ...
     def is_terminated(self) -> bool:
         """Whether nothing more can be committed."""
         ...
-    def commit_forced_tokens(self) -> list[int]:
-        """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
+    def copy(self) -> ConstraintState:
+        """A copy of the state."""
         ...
-
-@final
-class Module:
-    """A grammar you can compose with others and partly compile before its externs are bound."""
-    def __new__(cls, source: Grammar, /) -> Module:
-        """Creates a module from a grammar."""
-        ...
-    @overload
-    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet], /) -> None:
-        """Binds the extern `name` to `value`.
-
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
-        """
-        ...
-    @overload
-    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet]) -> None:
-        """Binds the extern `name` to `value`.
-
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
-        """
-        ...
-    def precompile(
-        self,
-        vocab: Vocab,
-        *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
-    ) -> None:
-        """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
-
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
-        """
-        ...
-    def compile(
-        self,
-        vocab: Vocab,
-        *,
-        mask_strategy: Optional[Union[MaskStrategy, TokenTrie]] = None,
-        boundary_mask_strategy: Optional[BoundaryMaskStrategy] = None,
-    ) -> Constraint:
-        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
-
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
-        """
-        ...
-    @property
-    def externs(self) -> Externs:
-        """The module's externs."""
-        ...
-    def copy(self) -> Module:
-        """A copy of the module. Binding the copy does not change the original."""
-        ...
-    def __copy__(self) -> Module:
+    def __copy__(self) -> ConstraintState:
         """Same as `copy()`."""
         ...
-    def __deepcopy__(self, memo: dict[int, Any]) -> Module:
+    def __deepcopy__(self, memo: dict[int, Any]) -> ConstraintState:
         """Same as `copy()`."""
-        ...
-    def save(self) -> bytes:
-        """Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another."""
-        ...
-    @staticmethod
-    def load(data: bytes, /) -> Module:
-        """Loads a module saved with `save()`."""
-        ...
-
-@final
-class Expr:
-    """A grammar expression."""
-    @staticmethod
-    def choice(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
-        """Matches any one of `parts`.
-
-        Raises `GLRMaskError` if a part has unbound externs.
-        """
-        ...
-    @staticmethod
-    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
-        """Matches `parts` in order.
-
-        Raises `GLRMaskError` if a part has unbound externs.
-        """
-        ...
-    @staticmethod
-    def literal(value: Union[str, bytes], /) -> Expr:
-        """Matches exactly `value`. A `str` is UTF-8 encoded."""
-        ...
-
-@final
-class Extern:
-    """A named placeholder in a grammar."""
-    @property
-    def name(self) -> str:
-        """The extern's name."""
-        ...
-    @property
-    def kind(self) -> Literal["token", "grammar"]:
-        """What the extern can be bound to: `"token"` or `"grammar"`."""
-        ...
-    def __repr__(self) -> str:
-        """A representation for debugging."""
-        ...
-    def __eq__(self, other: object, /) -> bool:
-        """Whether both have the same name and kind."""
         ...
 
 @final
@@ -338,11 +337,11 @@ class Externs(Mapping[str, Extern]):
         """The number of externs."""
         ...
     @overload
-    def get(self, key: str, /) -> Optional[Extern]:
+    def get(self, key: str, /) -> Extern | None:
         """The extern named `key`, or `default` if there is none."""
         ...
     @overload
-    def get(self, key: str, default: Optional[Union[Extern, _T]], /) -> Union[Extern, _T]: ...
+    def get(self, key: str, default: Extern | _T | None, /) -> Extern | _T: ...
     def keys(self) -> KeysView[str]:
         """The extern names, in declaration order."""
         ...
@@ -360,37 +359,21 @@ class Externs(Mapping[str, Extern]):
         ...
 
 @final
-class TokenSet:
-    """A set of token IDs."""
-    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
-        """Creates a set from `ids`."""
+class Extern:
+    """A named placeholder in a grammar."""
+    @property
+    def name(self) -> str:
+        """The extern's name."""
         ...
-    @staticmethod
-    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
-        """Creates a set from `range` objects, which must have step 1."""
+    @property
+    def kind(self) -> Literal["token", "grammar"]:
+        """What the extern can be bound to: `"token"` or `"grammar"`."""
         ...
     def __repr__(self) -> str:
-        """An expression that rebuilds the set, or a summary for large sets."""
+        """A representation for debugging."""
         ...
     def __eq__(self, other: object, /) -> bool:
-        """Whether both sets contain the same IDs."""
-        ...
-
-@final
-class TokenTrie:
-    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
-
-    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
-    def __new__(cls, *, parser_backend: Optional[ParserBackend] = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
-    @property
-    def parser_backend(self) -> ParserBackend:
-        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
-        ...
-    @property
-    def merge_equivalent_tokens(self) -> bool:
-        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
-
-        Tokens are not merged in a composition that includes precompiled parts."""
+        """Whether both have the same name and kind."""
         ...
 
 @final
@@ -420,6 +403,23 @@ class BoundaryMaskStrategy:
     """Same as `TOKEN_TRIE`."""
     FAST_MASKS: ClassVar[BoundaryMaskStrategy]
     """Same as `PARSER_DWA`."""
+
+@final
+class TokenTrie:
+    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
+
+    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
+    def __new__(cls, *, parser_backend: ParserBackend | None = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
+    @property
+    def parser_backend(self) -> ParserBackend:
+        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
+        ...
+    @property
+    def merge_equivalent_tokens(self) -> bool:
+        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
+
+        Tokens are not merged in a composition that includes precompiled parts."""
+        ...
 
 @final
 class ParserBackend:
