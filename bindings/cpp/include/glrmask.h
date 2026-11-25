@@ -22,7 +22,7 @@
  *
  * Fallible functions return a status and set output handles to NULL on
  * failure. glrmask_error_message() describes the last failure on the current
- * thread. After GLRMASK_PANIC, discard the handle involved. Aborts, including
+ * thread. After GLRMASK_INTERNAL, discard the handle involved. Aborts, including
  * out-of-memory, can't be recovered.
  */
 
@@ -49,17 +49,15 @@ typedef int32_t glrmask_status;
 /// New codes may be added in a minor release; treat an unknown non-zero code as a failure.
 enum {
     GLRMASK_OK=0, ///< Success.
-    GLRMASK_INVALID_INPUT=1, ///< A handle or argument is invalid.
-    GLRMASK_COMPILATION=2, ///< Compilation failed.
-    GLRMASK_PANIC=3, ///< An internal error was caught. Discard the handle involved.
-    GLRMASK_BUFFER_TOO_SMALL=4, ///< The buffer is too small; nothing was written.
-    GLRMASK_CLOSED=5, ///< The handle was already freed.
-    /* 6 was GLRMASK_REJECTED before 1.0; it is never reused. */
-    GLRMASK_SYNTAX=7, ///< Invalid grammar syntax.
-    GLRMASK_RESOURCE_LIMIT=8, ///< A resource limit was exceeded.
-    GLRMASK_STRATEGY_UNSUPPORTED=9, ///< The chosen strategy does not support the grammar.
-    GLRMASK_SERIALIZATION=10, ///< Saved bytes could not be loaded.
-    GLRMASK_INTERNAL=11 ///< An internal error; please report it.
+    GLRMASK_SYNTAX=1, ///< Invalid grammar syntax.
+    GLRMASK_INVALID_INPUT=2, ///< A handle or argument is invalid.
+    GLRMASK_COMPILATION=3, ///< Compilation failed.
+    GLRMASK_RESOURCE_LIMIT=4, ///< A resource limit was exceeded.
+    GLRMASK_STRATEGY_UNSUPPORTED=5, ///< The chosen strategy does not support the grammar.
+    GLRMASK_SERIALIZATION=6, ///< Saved bytes could not be loaded.
+    GLRMASK_INTERNAL=7, ///< An internal error; discard the affected handle and please report it.
+    GLRMASK_BUFFER_TOO_SMALL=8, ///< The buffer is too small; nothing was written.
+    GLRMASK_CLOSED=9 ///< The handle was already freed.
 };
 /// How masks are computed.
 enum {

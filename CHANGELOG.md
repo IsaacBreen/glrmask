@@ -26,7 +26,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 - Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
 - Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`. Python's `mask(size=...)` is capped at 16,777,216.
 
-- Errors: `ErrorKind` has no payloads and new kinds (`Syntax`, `InvalidInput`, `Internal` replace `GrammarParse`, `InternalInvariant`; caller mistakes moved from `Compilation` to `InvalidInput`); `kind()` returns it by value; the public `From` impls for internal error types are gone. Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. C has one status code per kind.
+- Errors: `ErrorKind` has no payloads and new kinds (`Syntax`, `InvalidInput`, `Internal` replace `GrammarParse`, `InternalInvariant`; caller mistakes moved from `Compilation` to `InvalidInput`); `kind()` returns it by value; the public `From` impls for internal error types are gone. Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. C status codes are 0 (OK), 1 (Syntax), 2 (InvalidInput), 3 (Compilation), 4 (ResourceLimit), 5 (StrategyUnsupported), 6 (Serialization), 7 (Internal), 8 (BufferTooSmall), and 9 (Closed). Caught Rust panics are reported as Internal in C and Node.
 
 ## 0.5.0
 

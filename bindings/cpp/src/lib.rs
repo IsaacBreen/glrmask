@@ -32,16 +32,15 @@ pub struct glrmask_externs(Vec<glrmask_extern_item>);
 
 fn status(kind: core::ErrorKind) -> i32 {
     match kind {
-        core::ErrorKind::InvalidInput => 1,
-        core::ErrorKind::Compilation => 2,
-        core::ErrorKind::Panic => 3,
-        core::ErrorKind::BufferTooSmall => 4,
-        core::ErrorKind::Closed => 5,
-        core::ErrorKind::Syntax => 7,
-        core::ErrorKind::ResourceLimit => 8,
-        core::ErrorKind::StrategyUnsupported => 9,
-        core::ErrorKind::Serialization => 10,
-        core::ErrorKind::Internal => 11,
+        core::ErrorKind::Syntax => 1,
+        core::ErrorKind::InvalidInput => 2,
+        core::ErrorKind::Compilation => 3,
+        core::ErrorKind::ResourceLimit => 4,
+        core::ErrorKind::StrategyUnsupported => 5,
+        core::ErrorKind::Serialization => 6,
+        core::ErrorKind::Internal => 7,
+        core::ErrorKind::BufferTooSmall => 8,
+        core::ErrorKind::Closed => 9,
     }
 }
 

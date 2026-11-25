@@ -11,14 +11,14 @@ pub use glrmask;
 // C status codes are fixed by glrmask.h; a new kind needs a new status value there.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorKind { InvalidInput = 1, Compilation = 2, Panic = 3, BufferTooSmall = 4, Closed = 5, Syntax = 7, ResourceLimit = 8, StrategyUnsupported = 9, Serialization = 10, Internal = 11 }
+pub enum ErrorKind { Syntax = 1, InvalidInput = 2, Compilation = 3, ResourceLimit = 4, StrategyUnsupported = 5, Serialization = 6, Internal = 7, BufferTooSmall = 8, Closed = 9 }
 
 #[derive(Debug)]
-pub struct Error { pub kind: ErrorKind, pub message: String }
+pub struct Error { pub kind: ErrorKind, pub message: String, panicked: bool }
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self { Self { kind, message: message.into() } }
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self { Self { kind, message: message.into(), panicked: false } }
     pub fn invalid(message: impl Into<String>) -> Self { Self::new(ErrorKind::InvalidInput, message) }
     pub fn closed() -> Self { Self::new(ErrorKind::Closed, "object has been disposed") }
 }
@@ -48,7 +48,7 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
         Err(payload) => {
             let message = payload.downcast_ref::<String>().map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("unknown Rust panic");
-            Err(Error::new(ErrorKind::Panic, format!("GLRMask internal panic: {message}")))
+            Err(Error { kind: ErrorKind::Internal, message: format!("GLRMask internal panic: {message}"), panicked: true })
         }
     }
 }
@@ -144,19 +144,19 @@ impl State {
     }
     fn check(&self) -> Result<()> {
         if self.poisoned.load(Ordering::Relaxed) {
-            Err(Error::new(ErrorKind::Panic, "state is unusable after an internal panic; discard it"))
+            Err(Error::new(ErrorKind::Internal, "state is unusable after an internal panic; discard it"))
         } else { Ok(()) }
     }
     fn read<T>(&self, f: impl FnOnce(&glrmask::ConstraintState) -> Result<T>) -> Result<T> {
         self.check()?;
         let result = guarded(|| f(&self.state));
-        if result.as_ref().err().is_some_and(|e| e.kind == ErrorKind::Panic) { self.poisoned.store(true, Ordering::Relaxed); }
+        if result.as_ref().err().is_some_and(|e| e.panicked) { self.poisoned.store(true, Ordering::Relaxed); }
         result
     }
     fn write<T>(&mut self, f: impl FnOnce(&mut glrmask::ConstraintState) -> Result<T>) -> Result<T> {
         self.check()?;
         let result = guarded(|| f(&mut self.state));
-        if result.as_ref().err().is_some_and(|e| e.kind == ErrorKind::Panic) { self.poisoned.store(true, Ordering::Relaxed); }
+        if result.as_ref().err().is_some_and(|e| e.panicked) { self.poisoned.store(true, Ordering::Relaxed); }
         result
     }
     pub fn try_clone(&self) -> Result<Self> {
@@ -226,6 +226,6 @@ mod tests {
             assert_eq!(token_id(id).unwrap_err().kind, ErrorKind::InvalidInput);
         }
         assert_eq!(token_id(glrmask::MAX_TOKEN_ID).unwrap(), glrmask::MAX_TOKEN_ID);
-        assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Panic);
+        assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Internal);
     }
 }

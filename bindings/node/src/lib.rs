@@ -12,7 +12,6 @@ fn error(e: core::Error) -> napi::Error {
     let code = match e.kind {
         core::ErrorKind::InvalidInput => "GLRMASK_INVALID_INPUT",
         core::ErrorKind::Compilation => "GLRMASK_COMPILATION",
-        core::ErrorKind::Panic => "GLRMASK_PANIC",
         core::ErrorKind::BufferTooSmall => "GLRMASK_BUFFER_TOO_SMALL",
         core::ErrorKind::Closed => "GLRMASK_CLOSED",
         core::ErrorKind::Syntax => "GLRMASK_SYNTAX",
@@ -36,7 +35,7 @@ impl<T> Handle<T> {
 impl<T> Deref for Live<'_, T> { type Target = T; fn deref(&self) -> &T { self.0.as_ref().expect("checked live handle") } }
 impl<T> DerefMut for Live<'_, T> { fn deref_mut(&mut self) -> &mut T { self.0.as_mut().expect("checked live handle") } }
 fn live<T>(value: &Handle<T>) -> core::Result<Live<'_, T>> {
-    let guard = value.0.lock().map_err(|_| core::Error::new(core::ErrorKind::Panic, "object is unusable after an internal panic; dispose it"))?;
+    let guard = value.0.lock().map_err(|_| core::Error::new(core::ErrorKind::Internal, "object is unusable after an internal panic; dispose it"))?;
     if guard.is_none() { return Err(core::Error::closed()); }
     Ok(Live(guard))
 }

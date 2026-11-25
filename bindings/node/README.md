@@ -187,16 +187,15 @@ Arguments of the wrong type throw `TypeError`, and token IDs out of range throw 
 
 | Code | |
 | --- | --- |
+| `GLRMASK_SYNTAX` | Invalid grammar syntax. |
 | `GLRMASK_INVALID_INPUT` | A handle or argument is invalid. |
 | `GLRMASK_COMPILATION` | Compilation failed. |
-| `GLRMASK_SYNTAX` | Invalid grammar syntax. |
 | `GLRMASK_RESOURCE_LIMIT` | A resource limit was exceeded. |
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
-| `GLRMASK_INTERNAL` | An internal error; please report it. |
+| `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `maskLength`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
-| `GLRMASK_PANIC` | An internal error. Discard the object; please report it. |
 
 Async methods reject with the same errors.
 
