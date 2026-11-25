@@ -318,7 +318,7 @@ class ConstraintState:
         ...
 
 @final
-class Externs(Mapping[str, Extern]):
+class Externs(Mapping[str, "Extern"]):
     """A grammar's or module's externs, in declaration order.
 
     A read-only mapping from name to `Extern`.
