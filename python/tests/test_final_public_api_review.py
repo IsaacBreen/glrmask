@@ -97,7 +97,8 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     empty = glrmask.TokenSet([])
     assert empty == glrmask.TokenSet.from_ranges([])
     for mode in MODES:
-        m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
+        m = glrmask.Grammar.from_glrm(MARK)
+        m.bind("MARK", empty)
         impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
@@ -178,8 +179,9 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
 def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
     mode = getattr(glrmask.MaskStrategy, mode_name)
-    child_mod = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
-    child = glrmask.Grammar.from_expr(glrmask.Expr.sequence(child_mod, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
+    child_source = glrmask.Grammar.from_lark('start: "a"')
+    child_mod = glrmask.Module(child_source)
+    child = glrmask.Grammar.from_expr(glrmask.Expr.sequence(child_source, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
     child = glrmask.Constraint.load(child.save(), v)
     own_state = child.start()
     assert not own_state.mask()[127]
@@ -187,7 +189,9 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     assert not accepting(own_state) and own_state.mask()[127]
     parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
-    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(parent_mod, glrmask.TokenSet([63]))).compile(v, mask_strategy=mode)
+    root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
+    root.bind(BODY=parent_mod, END=glrmask.TokenSet([63]))
+    c = root.compile(v, mask_strategy=mode)
     state = c.start()
     assert state.mask()[4]
     assert state.commit_token(4)

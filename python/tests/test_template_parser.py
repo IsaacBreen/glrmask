@@ -47,7 +47,13 @@ def link_module(module, vocab, **options):
         options["mask_strategy"] = options.pop("optimization")
     end = options.pop("end_tokens", None)
     if end is not None:
-        module = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet(end)))
+        root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
+        root.bind(BODY=module, END=glrmask.TokenSet(end))
+        module = root
+        # Equivalent-token merging is not supported across precompiled boundaries.
+        strategy = options.get("mask_strategy")
+        if isinstance(strategy, glrmask.TokenTrie) and strategy.merge_equivalent_tokens:
+            options["mask_strategy"] = glrmask.TokenTrie(parser_backend=strategy.parser_backend)
     return module.compile(vocab, **options)
 
 def grammar_from_lark(source): return GrammarCalls(glrmask.Grammar.from_lark(source))

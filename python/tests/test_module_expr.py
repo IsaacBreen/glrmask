@@ -58,7 +58,9 @@ def test_local_precompilation_and_root_only_compile():
     assert child.precompile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)) is None
     parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
-    state = g.Grammar.from_expr(g.Expr.sequence(parent, g.TokenSet([63]))).compile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)).start()
+    root = g.Module(g.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
+    root.bind(BODY=parent, END=g.TokenSet([63]))
+    state = root.compile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA)).start()
     assert not state.mask()[63]
     assert state.commit_token(4)
     assert not state.is_accepting() and state.mask()[63]

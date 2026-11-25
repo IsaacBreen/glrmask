@@ -222,7 +222,7 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
                     .join(", ")
             )));
         }
-        return Ok(glrmask::Expr::from(m));
+        return Ok(glrmask::Expr::from(&g.inner));
     }
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
         return Ok(e.inner.clone());
