@@ -82,3 +82,10 @@ fn ordinary_token_bindings_still_compile() {
     assert!(state.commit_token(70_000));
     assert!(state.is_accepting());
 }
+
+#[test]
+fn a_constructed_above_cap_range_is_rejected_on_use() {
+    let tokens = TokenSet::from_ranges(std::iter::once(MAX_TOKEN_ID..=MAX_TOKEN_ID + 1));
+    assert!(is_invalid_input(&token_extern().bind("E", tokens.clone()).unwrap_err()));
+    assert!(is_invalid_input(&Grammar::from_expr(tokens).unwrap_err()));
+}

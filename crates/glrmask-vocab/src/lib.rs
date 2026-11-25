@@ -17,6 +17,8 @@ pub use error::{Error, ErrorKind, SourceSpan};
 pub const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
 /// A set of token IDs.
+///
+/// A `TokenSet` is a set of numbers; IDs above the token-ID limit are rejected when the set is used.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
     ranges: Arc<[(u32, u32)]>,
