@@ -230,11 +230,8 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
     if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Expr::from(et.inner.clone()));
     }
-    if let Some(id) = extract_token_id(value)? {
-        return Ok(glrmask::Expr::from(id));
-    }
     Err(PyTypeError::new_err(
-        "Expr parts must be Grammar, Module, Expr, TokenSet, or a token ID",
+        "Expr parts must be Grammar, Module, Expr or TokenSet",
     ))
 }
 

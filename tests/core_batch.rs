@@ -7,9 +7,9 @@ fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).unwrap(
 fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
     let mut g=Grammar::from_glrm("extern token MARK start root nt root=MARK").unwrap();
     let untouched=g.clone();
-    let result:()=g.bind("MARK",TokenSet::from(17)).unwrap();assert_eq!(result,());
+    let result:()=g.bind("MARK",TokenSet::new([17])).unwrap();assert_eq!(result,());
     assert!(g.requirements().unwrap().is_empty());assert_eq!(untouched.requirements().unwrap().len(),1);
-    assert!(g.bind("MARK",TokenSet::from(29)).is_err());
+    assert!(g.bind("MARK",TokenSet::new([29])).is_err());
     let c=g.compile_with_build_options(&vocab(),options()).unwrap();let mask=c.start().mask();
     assert_ne!(mask[0]&(1<<17),0);assert_eq!(mask[0]&(1<<29),0);
 }
@@ -41,14 +41,14 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let parent_text="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT";
     let mut child=Grammar::from_glrm(text).unwrap();
     let mut parent=Grammar::from_glrm(parent_text).unwrap();parent.bind("LEFT",&child).unwrap();parent.bind("RIGHT",&child).unwrap();
-    child.bind("MARK",TokenSet::from(29)).unwrap();
+    child.bind("MARK",TokenSet::new([29])).unwrap();
     assert_eq!(parent.requirements().unwrap().len(),2);
     let mut open=parent.prepare(&v).unwrap();
-    let old=open.clone();open.bind("LEFT::MARK",TokenSet::from(17)).unwrap();
+    let old=open.clone();open.bind("LEFT::MARK",TokenSet::new([17])).unwrap();
     assert_eq!(open.requirements().unwrap()[0].name(),"RIGHT::MARK");
     assert_eq!(old.requirements().unwrap().len(),2);
     let mut loaded=PreparedGrammar::load(open.save(), &v).unwrap();
-    loaded.bind("RIGHT::MARK",TokenSet::from(29)).unwrap();
+    loaded.bind("RIGHT::MARK",TokenSet::new([29])).unwrap();
     let c=loaded.link_with(options()).unwrap();let mut s=c.start();
     assert_ne!(s.mask()[0]&(1<<17),0);assert!(s.commit_token(17));
     assert_ne!(s.mask()[0]&(1<<29),0);assert!(s.commit_token(29));assert!(s.is_accepting());
@@ -81,7 +81,7 @@ fn independent_concurrent_specializations_do_not_share_mutations() {
     std::thread::scope(|scope| {
         let jobs=(0..8).map(|i| {let p=&p;scope.spawn(move || {
             let mut request=p.clone();let id=if i%2==0{17}else{29};
-            request.bind("MARK",TokenSet::from(id)).unwrap();
+            request.bind("MARK",TokenSet::new([id])).unwrap();
             let c=request.link_with(options()).unwrap();let mut s=c.start();
             assert!(s.commit_token(id));assert!(s.is_accepting());
         })}).collect::<Vec<_>>();

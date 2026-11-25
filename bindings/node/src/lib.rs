@@ -182,7 +182,7 @@ impl NativeGrammar {
     }
     #[napi]
     pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(&name, g::TokenSet::from(id(value)?))?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, g::TokenSet::new([id(value)?]))?; Ok(()) })
     }
     #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {

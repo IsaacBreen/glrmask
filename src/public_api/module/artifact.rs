@@ -347,7 +347,7 @@ mod tests {
     fn token_set_ranges_are_validated() {
         let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
-        module.bind("mark", TokenSet::from(7)).unwrap();
+        module.bind("mark", TokenSet::new([7])).unwrap();
         let bytes = module.save();
         let mut m = read(&bytes);
         if let Value::Exact(e) = &mut m.instances[0].bindings[0].1 { e.ranges = vec![(7, 7), (7, 7)]; }

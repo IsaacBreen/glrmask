@@ -9490,7 +9490,7 @@ mod tests {
     #[test]
     fn unique_actionable_top_matches_isolation_reference_including_empty_paths() {
         fn reference(constraint: &Constraint, gss: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
-            if constraint.parser_has_controls() || template_advance_selected(&constraint) {
+            if constraint.parser_has_controls() || template_advance_selected(constraint) {
                 return None;
             }
             let mut selected = None;
@@ -9502,7 +9502,7 @@ mod tests {
             let (top, action) = selected?;
             let isolated = gss.isolate(Some(top));
             (!isolated.is_empty())
-                .then(|| apply_single_top_action_fast(&constraint, &isolated, top, terminal, action))
+                .then(|| apply_single_top_action_fast(constraint, &isolated, top, terminal, action))
                 .flatten()
         }
         let vocab = Vocab::from_entries_unchecked(["a", "b", "ab", "ba", ",", " ", "(", ")"]
@@ -9537,8 +9537,8 @@ mod tests {
                                     with_empty += 1;
                                 }
                                 for terminal in 0..constraint.parser_terminal_count() {
-                                    let expected = reference(&constraint, &input, terminal);
-                                    let actual = try_advance_unique_actionable_top_fast(&constraint, &input, terminal);
+                                    let expected = reference(constraint, &input, terminal);
+                                    let actual = try_advance_unique_actionable_top_fast(constraint, &input, terminal);
                                     assert_eq!(actual.as_ref().map(canonical_gss), expected.as_ref().map(canonical_gss),
                                         "terminal={terminal} depth={depth} source={source}");
                                     comparisons += 1;
@@ -9614,12 +9614,12 @@ mod tests {
             let mut state = constraint.start();
             assert!(state.commit_bytes(b"ab"));
             let mut reference = state.state.clone();
-            assert!(commit_token_no_fast_path_reference(&constraint, &mut reference, 1).is_ok());
+            assert!(commit_token_no_fast_path_reference(constraint, &mut reference, 1).is_ok());
             let mut actual = state.state.clone();
             let mut scratch = CommitBuffers::default();
-            assert!(commit_token_impl(&constraint, &mut actual, &mut scratch, 1).is_ok(),
+            assert!(commit_token_impl(constraint, &mut actual, &mut scratch, 1).is_ok(),
                 "lexer lanes sharing parser stacks must not share actionable-match answers");
-            assert_commit_fast_path_equivalence(&constraint, state.state.clone(), 1, &actual, true);
+            assert_commit_fast_path_equivalence(constraint, state.state.clone(), 1, &actual, true);
         }
     }
 
@@ -9660,10 +9660,10 @@ mod tests {
                         assert!(token_in_mask(&actual.mask(), token),
                             "ignore prefix absent from mask partitions={partitions} token={token}");
                         let mut reference = before.clone();
-                        assert!(commit_token_no_fast_path_reference(&constraint, &mut reference, token).is_ok(),
+                        assert!(commit_token_no_fast_path_reference(constraint, &mut reference, token).is_ok(),
                             "general queue must retain unfinished ignore token={token}");
                         assert!(actual.commit_token(token));
-                        assert_commit_fast_path_equivalence(&constraint, before, token, &actual.state, true);
+                        assert_commit_fast_path_equivalence(constraint, before, token, &actual.state, true);
                         for byte in fragments[token as usize] { assert!(bytewise.commit_bytes(&[*byte])); }
                         assert_eq!(actual.mask(), bytewise.mask(), "token-vs-byte prefix token={token}");
                     }
@@ -9932,7 +9932,7 @@ mod tests {
 
             let root_reset = constraint.recursive_tokenizer_reset_state(0).unwrap();
             let root_x = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                &constraint,
+                constraint,
                 b"X",
                 root_reset,
             )
@@ -9942,7 +9942,7 @@ mod tests {
                 constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 0
             }));
             let root_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                &constraint,
+                constraint,
                 b"a",
                 root_reset,
             )
@@ -9955,7 +9955,7 @@ mod tests {
 
             let child_reset = constraint.recursive_tokenizer_reset_state(1).unwrap();
             let child_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
-                &constraint,
+                constraint,
                 b"a",
                 child_reset,
             )
@@ -10202,7 +10202,7 @@ mod tests {
             let tsids = constraint.internal_tsids_for_state(tokenizer_state).to_vec();
             eprintln!("WEIGHT_TRANSPORT {name} tokenizer_state={tokenizer_state} tsids={tsids:?} token={token} internal_token={internal_token}");
             for labels in [&[22_u32][..], &[22_u32, 0][..]] {
-                let weight = accepted_weight(&constraint, labels);
+                let weight = accepted_weight(constraint, labels);
                 let memberships = tsids
                     .iter()
                     .map(|&tsid| (tsid, internal_token != u32::MAX && weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len()))
@@ -10275,10 +10275,10 @@ mod tests {
             let start_final = constraint.parser_dwa.states()[constraint.parser_dwa.start_state() as usize]
                 .final_weight.clone().unwrap_or_else(Weight::empty);
             for &token in tokens {
-                let mut first = contains(&constraint, tokenizer_state, token, &start_final).then_some(0usize);
+                let mut first = contains(constraint, tokenizer_state, token, &start_final).then_some(0usize);
                 for depth in 1..=reversed.len() {
-                    let w = accepted_weight(&constraint, &reversed[..depth]);
-                    if contains(&constraint, tokenizer_state, token, &w) {
+                    let w = accepted_weight(constraint, &reversed[..depth]);
+                    if contains(constraint, tokenizer_state, token, &w) {
                         first = Some(depth);
                         break;
                     }
@@ -10723,7 +10723,7 @@ mod tests {
                         terminals_disallowed.iter()
                     {
                         let execution = execute_tokenizer_from_state_small(
-                            &constraint,
+                            constraint,
                             bytes,
                             continuation_tokenizer_state,
                         );
@@ -11072,8 +11072,8 @@ nt start = item item? item?;
         assert_failed(&state);
     }
 
-    fn assert_fast_and_general_queue_match<'a>(
-        constraint: &'a Constraint,
+    fn assert_fast_and_general_queue_match(
+        constraint: &Constraint,
         fast_state: &ConstraintState,
         token_id: u32,
         bytes: &[u8],
@@ -11084,13 +11084,13 @@ nt start = item item? item?;
         let mut general = fast_state.clone();
 
         let fast_result = commit_bytes_impl(
-            &constraint,
+            constraint,
             &mut fast.state,
             bytes,
             &mut fast.buffers,
         );
         let profiled_result = commit_bytes_impl_profiled(
-            &constraint,
+            constraint,
             &mut profiled.state,
             bytes,
             &mut profiled.buffers,
@@ -11098,7 +11098,7 @@ nt start = item item? item?;
             true,
         );
         let general_result = commit_bytes_impl_profiled(
-            &constraint,
+            constraint,
             &mut general.state,
             bytes,
             &mut general.buffers,

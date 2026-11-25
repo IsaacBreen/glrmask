@@ -793,7 +793,7 @@ mod differential_tests {
             (7,b"a X".to_vec()),(8,b"a".to_vec())]);
         let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?").unwrap().prepare(&v).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"").unwrap().prepare(&v).unwrap();
-        parent.bind("CHILD",&child).unwrap();parent.bind("CHILD::MARK",TokenSet::from(9)).unwrap();
+        parent.bind("CHILD",&child).unwrap();parent.bind("CHILD::MARK",TokenSet::new([9])).unwrap();
         for mode in MODES {
             let c=parent.link_with(mode.build_options()).unwrap();
             walk(&c,&format!("composed {mode:?}"),2);

@@ -248,11 +248,11 @@ void commit_contract() {
         CHECK(!s.is_accepting()); CHECK(s.is_terminated());
         CHECK(!s.commit_token(0)); CHECK(!s.commit_bytes("a"));
         auto list = c.start();
-        CHECK(!list.commit_tokens(std::vector<TokenId>{0, 0}));
+        CHECK(list.commit_tokens(std::vector<TokenId>{0, 0}) == 1);
         CHECK(!list.is_accepting()); CHECK(list.is_terminated());
         auto closed = c.start();
         closed.dispose();
-        throws([&]{ closed.commit_token(0); }, GLRMASK_CLOSED);
+        throws([&]{ (void)closed.commit_token(0); }, GLRMASK_CLOSED);
     }
     // The C commits return false for a rejected commit and for a NULL state.
     CHECK(glrmask_state_commit_token(nullptr, 0) == false);

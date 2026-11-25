@@ -155,7 +155,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     assert!(loaded.compile(&missing).is_ok());
 
     let mut wide = Module::new(&Grammar::from_glrm(OPEN).unwrap());
-    wide.bind("item", TokenSet::from(7)).unwrap();
+    wide.bind("item", TokenSet::new([7])).unwrap();
     let c = wide.compile(&v).unwrap();
     assert!(accepts(&c, &[7]));
     assert!(!allowed(&c.start().mask(), 1));
@@ -229,7 +229,7 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert_eq!(parent.save(), original);
 
     let mut child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
-    child.bind("item", TokenSet::from(777)).unwrap();
+    child.bind("item", TokenSet::new([777])).unwrap();
     let mut child_parent = parent.clone();
     assert!(child_parent.bind("child", child).is_ok());
     assert_eq!(parent.save(), original);
@@ -289,7 +289,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
 
     let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
     terminal.precompile_with(&v, trie.clone()).unwrap();
-    terminal.bind("mark", TokenSet::from(99)).unwrap();
+    terminal.bind("mark", TokenSet::new([99])).unwrap();
     let c = Module::load(terminal.save()).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[99]));
 }
@@ -333,7 +333,7 @@ fn compile_succeeds_on_threads_with_small_stacks() {
             let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M").unwrap());
             template.precompile(&vocab).unwrap();
             let mut request = template.clone();
-            request.bind("M", TokenSet::from(17)).unwrap();
+            request.bind("M", TokenSet::new([17])).unwrap();
             request.compile(&vocab).unwrap()
         })
         .unwrap();

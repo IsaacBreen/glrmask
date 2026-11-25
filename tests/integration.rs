@@ -1487,7 +1487,7 @@ fn glrm_special_token_is_exact_token_id_not_byte_language() {
                 nt start = "a" SPECIAL "b";
             "#)
         .unwrap()
-        .bind_snapshot("SPECIAL", TokenSet::from(7))
+        .bind_snapshot("SPECIAL", TokenSet::new([7]))
         .unwrap();
         Constraint::compile(grammar, &special_token_vocab()).unwrap()
     });
@@ -1550,7 +1550,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
         nt start = "a" SPECIAL "b";
     "#)
         .unwrap()
-        .bind_snapshot("SPECIAL", TokenSet::from(7))
+        .bind_snapshot("SPECIAL", TokenSet::new([7]))
         .unwrap()
     };
     let constraint = with_stable_ti_env(|| {
@@ -1590,7 +1590,7 @@ fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
         nt start = "a" END;
     "#)
         .unwrap()
-        .bind_snapshot("END", TokenSet::from(100))
+        .bind_snapshot("END", TokenSet::new([100]))
         .unwrap()
     };
     let constraint = with_stable_ti_env(|| {
@@ -1627,7 +1627,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
         nt start = "a" SPECIAL | "x" "a" "z";
     "#)
     .unwrap()
-    .bind_snapshot("SPECIAL", TokenSet::from(7))
+    .bind_snapshot("SPECIAL", TokenSet::new([7]))
     .unwrap();
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(grammar, &vocab).unwrap()
@@ -1703,9 +1703,9 @@ fn special_token_atoms_compose_in_parser_choices_and_repetition() {
                 nt start = (FIRST | SECOND)+;
             "#)
     .unwrap()
-    .bind_snapshot("FIRST", TokenSet::from(100))
+    .bind_snapshot("FIRST", TokenSet::new([100]))
     .unwrap()
-    .bind_snapshot("SECOND", TokenSet::from(101))
+    .bind_snapshot("SECOND", TokenSet::new([101]))
     .unwrap();
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(grammar, &vocab).unwrap()

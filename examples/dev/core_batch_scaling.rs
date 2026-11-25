@@ -25,11 +25,11 @@ fn source(slots: usize) -> Grammar {
 }
 
 fn bind_source(g: &mut Grammar, name: &str, id: u32) -> glrmask::Result<()> {
-    g.bind(name, TokenSet::from(id))?.apply(g);
+    g.bind(name, TokenSet::new([id]))?.apply(g);
     Ok(())
 }
 fn bind_prepared(g: &mut PreparedGrammar, name: &str, id: u32) -> glrmask::Result<()> {
-    g.bind(name, TokenSet::from(id))?.apply(g);
+    g.bind(name, TokenSet::new([id]))?.apply(g);
     Ok(())
 }
 

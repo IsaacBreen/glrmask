@@ -75,7 +75,7 @@ fn open_child_and_qualified_paths_are_strictly_rejected() {
     assert!(err.contains("unbound externs"), "must reject open child: {err}");
     assert!(err.contains("VALUE"), "must list unbound externs: {err}");
 
-    let err_qual = parent.bind("CHILD::VALUE", TokenSet::from(5)).unwrap_err().to_string();
+    let err_qual = parent.bind("CHILD::VALUE", TokenSet::new([5])).unwrap_err().to_string();
     assert!(err_qual.contains("there is no extern named"), "must reject '::': {err_qual}");
 }
 

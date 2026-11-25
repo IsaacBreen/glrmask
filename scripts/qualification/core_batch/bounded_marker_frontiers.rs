@@ -30,7 +30,7 @@ fn main(){
      }
     }
    }
-   let mut g=glrmask::__private::grammar_from_glrm_with_markers("extern token E start root nt root=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",TokenSet::from(9000)).unwrap();
+   let mut g=glrmask::__private::grammar_from_glrm_with_markers("extern token E start root nt root=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",TokenSet::new([9000])).unwrap();
    let c=g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();let mut state=c.start();assert!(state.commit_token(0));
    let before=state.marker_events().to_vec();let forced=state.forced_tokens();assert_eq!(forced,state.forced_canonical_reference());assert_eq!(before,state.marker_events());
    assert_eq!(forced,vec![9000,1]);for id in forced{assert!(state.commit_token(id));}assert!(state.is_accepting());queries+=1;

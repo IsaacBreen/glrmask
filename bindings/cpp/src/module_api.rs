@@ -86,7 +86,7 @@ bind_handle!(glrmask_module_bind_expr, glrmask_expr, |e| g::Binding::from(e));
 bind_handle!(glrmask_module_bind_tokens, glrmask_token_set, |t| g::Binding::from(t));
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_bind_token(p: *mut glrmask_module, name: *const c_char, n: usize, id: u32) -> i32 {
-    ffi(|| unsafe { let name = text(name, n)?; write(p)?.0.bind(name, g::TokenSet::from(core::token_id(id)?))?; Ok(()) })
+    ffi(|| unsafe { let name = text(name, n)?; write(p)?.0.bind(name, g::TokenSet::new([core::token_id(id)?]))?; Ok(()) })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options) -> i32 {
@@ -142,7 +142,6 @@ unsafe fn parse_expr_operand(item: &glrmask_expr_operand) -> Result<g::Expr> {
             0 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_grammar>())?.0.clone())),
             1 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_module>())?.0.clone())),
             2 => Ok(read(item.handle.cast::<glrmask_expr>())?.0.clone()),
-            3 => Ok(g::Expr::from(core::token_id(u32::try_from(item.handle as usize).map_err(|_| Error::invalid("token operand does not fit in u32"))?)?)),
             4 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_token_set>())?.0.clone())),
             _ => Err(Error::invalid("unknown operand kind; expected a GLRMASK_OPERAND_* value")),
         }

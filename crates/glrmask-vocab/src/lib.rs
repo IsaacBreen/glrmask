@@ -91,11 +91,6 @@ impl TokenSet {
     }
 }
 
-impl From<u32> for TokenSet {
-    fn from(id: u32) -> Self {
-        Self::from_pairs([(id, id)])
-    }
-}
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -474,7 +469,7 @@ mod tests {
     #[test]
     fn token_sets_are_normalized_and_validate_membership() {
         let vocab = Vocab::from_entries_unchecked(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
-        assert_eq!(TokenSet::from(2u32).range_pairs(), &[(2, 2)]);
+        assert_eq!(TokenSet::new([2u32]).range_pairs(), &[(2, 2)]);
         assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
         assert_eq!(TokenSet::new([]).range_pairs(), &[]);
         assert_eq!(TokenSet::from_ranges(std::iter::once(3..=5)).range_pairs(), &[(3, 5)]);

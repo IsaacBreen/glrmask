@@ -17,7 +17,7 @@ fn check_pair(c:&Constraint) {
 fn typed_source_ports_reject_wrong_kind_at_binding() {
     let token=Grammar::from_glrm(LEAF).unwrap();let grammar=Grammar::from_glrm(PAIR).unwrap();
     assert!(token.bind_snapshot("MARK",Grammar::from_glrm("start root nt root=\"x\"").unwrap()).is_err());
-    let widened=grammar.bind_snapshot("LEFT",TokenSet::from(4)).unwrap();
+    let widened=grammar.bind_snapshot("LEFT",TokenSet::new([4])).unwrap();
     assert_eq!(widened.requirements().unwrap().iter().map(|r|r.name()).collect::<Vec<_>>(),["RIGHT"]);
     assert_eq!(grammar.requirements().unwrap().len(),2);
     let requirements=token.requirements().unwrap();assert_eq!(requirements[0].kind,ExternKind::Token);
@@ -29,8 +29,8 @@ fn source_open_attachments_have_independent_qualified_environments() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF).unwrap();
     let pair=Grammar::from_glrm(PAIR).unwrap().bind_snapshot("LEFT",&leaf).unwrap().bind_snapshot("RIGHT",&leaf).unwrap();
     assert_eq!(pair.requirements().unwrap().iter().map(|r|r.name()).collect::<Vec<_>>(),["LEFT::MARK","RIGHT::MARK"]);
-    let complete=pair.bind_snapshot("LEFT::MARK",TokenSet::from(4)).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::from(5)).unwrap();
-    assert!(complete.bind_snapshot("LEFT::MARK",TokenSet::from(5)).is_err());
+    let complete=pair.bind_snapshot("LEFT::MARK",TokenSet::new([4])).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::new([5])).unwrap();
+    assert!(complete.bind_snapshot("LEFT::MARK",TokenSet::new([5])).is_err());
     assert_eq!(leaf.requirements().unwrap().len(),1);
     for mode in MODES {check_pair(&complete.compile_with_build_options(&v,mode.build_options()).unwrap());}
 }
@@ -41,7 +41,7 @@ fn prepared_open_children_survive_serialization_and_independent_binding() {
     assert!(pair.link().is_err());assert_eq!(pair.requirements().unwrap().len(),2);
     let loaded=PreparedGrammar::load(pair.save(),&v).unwrap();
     assert!(loaded.bind_snapshot("LEFT::MARK",Grammar::from_glrm("start x nt x=\"x\"").unwrap().prepare(&v).unwrap()).is_err());
-    let complete=loaded.bind_snapshot("LEFT::MARK",TokenSet::from(4)).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::from(5)).unwrap();
+    let complete=loaded.bind_snapshot("LEFT::MARK",TokenSet::new([4])).unwrap().bind_snapshot("RIGHT::MARK",TokenSet::new([5])).unwrap();
     for mode in MODES {check_pair(&complete.link_with(mode.build_options()).unwrap());}
     assert_eq!(pair.requirements().unwrap().len(),2);assert_eq!(leaf.requirements().unwrap().len(),1);
 }
@@ -60,7 +60,7 @@ fn unused_parameters_still_belong_to_the_interface() {
     let v=vocab();let g=Grammar::from_glrm("extern token UNUSED start root nt root=\"x\"").unwrap();
     assert!(g.compile(&v).is_err());
     let prepared=g.prepare(&v).unwrap();assert!(prepared.link().is_err());
-    let c=prepared.bind_snapshot("UNUSED",TokenSet::from(4)).unwrap().link().unwrap();
+    let c=prepared.bind_snapshot("UNUSED",TokenSet::new([4])).unwrap().link().unwrap();
     let mut s=c.start();assert!(s.commit_token(0));assert!(s.is_accepting());
 }
 #[test]

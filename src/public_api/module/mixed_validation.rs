@@ -270,7 +270,7 @@ fn build_assembly(
         }
         for &(slot, id) in node.tokens {
             module
-                .bind(slot, TokenSet::from(id))
+                .bind(slot, TokenSet::new([id]))
                 .unwrap_or_else(|error| panic!("{}: bind token {slot:?}: {error}", spec.name));
         }
         built[index] = Some(module);

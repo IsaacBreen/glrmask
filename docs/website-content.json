@@ -6,7 +6,7 @@
     "benchmarks",
     "getting_started"
   ],
-  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.\n\nFrom 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).",
+  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.",
   "links": "[GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)",
   "dynamic": "GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).",
   "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.\n- `Constraint`: a grammar compiled for a vocabulary, ready to use.\n- `ConstraintState`: the state of one generated sequence.",
@@ -83,5 +83,5 @@
     "json": "docs/benchmarks/json-schema-2026-10-14.json",
     "javascript": "docs/benchmarks/javascript-2026-10-14.json"
   },
-  "content_sha256": "7f17d6119e7fbe97ce79a075a18fee37d7425d2dd837258e9b2cc4d7cf60b977"
+  "content_sha256": "31df3749b40030952482939a60e9ec6efa701ae9cbd7a229493caa991cbdd284"
 }

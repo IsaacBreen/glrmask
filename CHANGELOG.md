@@ -6,7 +6,9 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 ### Changes
 
-- Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable, and `Expr.choice` and `Expr.sequence` accept token IDs.
+- Expressions take tokens only as a `TokenSet`.
+
+- Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable.
 
 - GLRM reserves `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. Extra semicolons are allowed.
 
@@ -80,7 +82,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 ### End tokens
 
 - There are no end-token options. To require an end token, put it after the grammar:
-  `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(TokenSet::from(eos))]))`. This costs nothing extra
+  `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(TokenSet::new([eos]))]))`. This costs nothing extra
   to compile or run.
 
 ### Generating

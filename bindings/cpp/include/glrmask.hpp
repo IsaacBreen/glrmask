@@ -325,8 +325,7 @@ public:
     Module precompile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
-/// One part of an expression: a grammar, module, expression, token set or token
-/// ID.
+/// One part of an expression: a grammar, module, expression or token set.
 ///
 /// It refers to the object, which must outlive the operand.
 struct ExprOperand {
@@ -337,8 +336,6 @@ struct ExprOperand {
     ExprOperand(const Module&);
     /// From an expression.
     ExprOperand(const Expr&);
-    /// From a token ID.
-    ExprOperand(TokenId);
     /// From a token set.
     ExprOperand(const TokenSet&);
 };
@@ -460,8 +457,6 @@ inline ExprOperand::ExprOperand(const Grammar& value) : value{0, value.native_ha
 inline ExprOperand::ExprOperand(const Module& value) : value{1, value.native_handle()} {}
 /// From an expression.
 inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handle()} {}
-/// From a token ID.
-inline ExprOperand::ExprOperand(TokenId value) : value{3, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value))} {}
 /// From a token set.
 inline ExprOperand::ExprOperand(const TokenSet& value) : value{4, value.native_handle()} {}
 

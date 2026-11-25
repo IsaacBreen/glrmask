@@ -52,11 +52,6 @@ impl From<&TokenSet> for Expr {
         Expr(Arc::new(ExprNode::Leaf(ExprLeaf::TokenSet(t.clone()))))
     }
 }
-impl From<u32> for Expr {
-    fn from(id: u32) -> Self {
-        Expr::from(TokenSet::from(id))
-    }
-}
 
 impl Expr {
     /// Matches any one of `parts`.

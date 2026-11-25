@@ -15,10 +15,6 @@ impl NativeExpr {
         call(|| Ok(Self { inner: Handle::new(g::Expr::from(value.snapshot()?)) }))
     }
     #[napi(factory)]
-    pub fn from_token(value: f64) -> napi::Result<Self> {
-        call(|| Ok(Self { inner: Handle::new(g::Expr::from(id(value)?)) }))
-    }
-    #[napi(factory)]
     pub fn from_token_set(value: &NativeTokenSet) -> napi::Result<Self> {
         call(|| Ok(Self { inner: Handle::new(g::Expr::from(live(&value.inner)?.clone())) }))
     }
@@ -94,7 +90,7 @@ impl NativeModule {
     }
     #[napi]
     pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
-        call(|| self.bind_value(&name, g::TokenSet::from(id(value)?)))
+        call(|| self.bind_value(&name, g::TokenSet::new([id(value)?])))
     }
     #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {

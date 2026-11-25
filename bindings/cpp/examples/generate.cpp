@@ -26,7 +26,7 @@ int main() {
             nt product = atom | product "*" atom
             nt atom = NUMBER | "(" sum ")"
         )glrm");
-        auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({arithmetic, eos}));
+        auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({arithmetic, glrmask::TokenSet({eos})}));
         auto constraint = grammar.compile(vocab);
 
         std::mt19937 rng(7);

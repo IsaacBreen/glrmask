@@ -2,8 +2,6 @@
 
 GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
 
-From 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).
-
 ## Installation
 
 ```bash
@@ -284,14 +282,14 @@ class Module:
 class Expr:
     """A grammar expression."""
     @staticmethod
-    def choice(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
+    def choice(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Matches any one of `parts`.
 
         Raises `GLRMaskError` if a part has unbound externs.
         """
         ...
     @staticmethod
-    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet, int]) -> Expr:
+    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Matches `parts` in order.
 
         Raises `GLRMaskError` if a part has unbound externs.

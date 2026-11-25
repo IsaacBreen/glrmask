@@ -46,7 +46,7 @@ fn main() {
         }
       }
       // Both ordinary byte paths and event alternatives remain live.
-      let mut g=Grammar::from_glrm("extern token E start root nt root=E \"b\" | \"a\" \"c\"");g.bind("E",TokenSet::from(9000)).unwrap();
+      let mut g=Grammar::from_glrm("extern token E start root nt root=E \"b\" | \"a\" \"c\"");g.bind("E",TokenSet::new([9000])).unwrap();
       for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
         let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         for prefix in &prefixes {

@@ -126,7 +126,7 @@ fn range_construction_normalizes() {
     );
     assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(20, 10))).range_pairs(), &[]);
     assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
-    assert_eq!(TokenSet::new([5, 5]), TokenSet::from(5));
+    assert_eq!(TokenSet::new([5, 5]), TokenSet::new([5]));
 
     // A token set is IDs only. IDs the vocabulary does not define are allowed
     // in the set; they simply never match any text.

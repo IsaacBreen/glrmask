@@ -149,12 +149,11 @@ typedef struct {
 } glrmask_extern;
 /// One part of an expression; `kind` is a `GLRMASK_OPERAND_*` value.
 typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
-/// The kinds of expression part: grammar, module, expression, token ID, token set.
+/// The kinds of expression part: grammar, module, expression, token set.
 enum {
     GLRMASK_OPERAND_GRAMMAR=0,  ///< A glrmask_grammar handle.
     GLRMASK_OPERAND_MODULE=1,   ///< A glrmask_module handle.
     GLRMASK_OPERAND_EXPR=2,     ///< A glrmask_expr handle.
-    GLRMASK_OPERAND_TOKEN=3,    ///< A token ID encoded in the handle pointer.
     GLRMASK_OPERAND_TOKEN_SET=4 ///< A glrmask_token_set handle.
 };
 

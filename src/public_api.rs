@@ -1555,7 +1555,7 @@ impl IntoGrammarValue for TokenSet {
 
 impl IntoGrammarValue for u32 {
     fn into_grammar_value(self) -> Result<GrammarValue> {
-        Ok(GrammarValue::TokenSet(TokenSet::from(self)))
+        Ok(GrammarValue::TokenSet(TokenSet::new([self])))
     }
 }
 
@@ -1606,7 +1606,7 @@ impl<'a> IntoUnlinkedValue<'a> for TokenSet {
 
 impl<'a> IntoUnlinkedValue<'a> for u32 {
     fn into_unlinked_value(self) -> UnlinkedValue<'a> {
-        UnlinkedValue::TokenSet(TokenSet::from(self))
+        UnlinkedValue::TokenSet(TokenSet::new([self]))
     }
 }
 
@@ -2534,6 +2534,7 @@ fn collapse_dynamic_alternatives(
 }
 
 #[inline(never)]
+#[allow(clippy::boxed_local)] // Keep the large parent boxed until this separate frame.
 fn compose_boxed_dynamic_parents(
     parents: Box<DynamicConstraint>,
     children: &[(String, Arc<RuntimeConstraint>)],
@@ -2551,6 +2552,7 @@ fn compose_boxed_dynamic_parents(
 // in a separate frame prevents the by-value linker slots from occupying every
 // suspended source-compiler frame in unoptimized builds.
 #[inline(never)]
+#[allow(clippy::boxed_local)] // Keep the large parent boxed until this separate frame.
 fn compose_boxed_parent(
     parent: Box<RuntimeConstraint>,
     children: &[(String, Arc<RuntimeConstraint>)],
@@ -5273,7 +5275,7 @@ mod tests {
         let child = RuntimeConstraint::compile(
             Grammar::from_glrm("start child; extern token CHILD_TOKEN; nt child = CHILD_TOKEN;")
                 .unwrap()
-                .bind_snapshot("CHILD_TOKEN", crate::TokenSet::from(100))
+                .bind_snapshot("CHILD_TOKEN", crate::TokenSet::new([100]))
                 .unwrap(),
             &vocab,
         )

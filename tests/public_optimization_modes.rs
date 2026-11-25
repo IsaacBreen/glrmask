@@ -59,7 +59,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
         assert!(a.commit_token(2)); assert!(a.is_accepting());
     }
     let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;").unwrap()
-        .bind_snapshot("MARK", glrmask::TokenSet::from(15)).unwrap();
+        .bind_snapshot("MARK", glrmask::TokenSet::new([15])).unwrap();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, mode.build_options()).unwrap();
         let mut a = c.start(); assert!(allowed(&a.mask(),15)); assert!(!allowed(&a.mask(),0));

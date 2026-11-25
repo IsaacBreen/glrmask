@@ -18,7 +18,7 @@ fn main() -> glrmask::Result<()> {
         nt product = atom | product "*" atom
         nt atom = NUMBER | "(" sum ")"
     "#)?;
-    let grammar = Grammar::from_expr(Expr::sequence([Expr::from(arithmetic), Expr::from(TokenSet::from(eos))]))?;
+    let grammar = Grammar::from_expr(Expr::sequence([Expr::from(arithmetic), Expr::from(TokenSet::new([eos]))]))?;
     let constraint = grammar.compile(&vocab)?;
 
     let mut model = Model { seed: 7 };

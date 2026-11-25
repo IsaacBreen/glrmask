@@ -58,7 +58,7 @@ fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
     let v=words(&["x","y","xy"]);
     let g=lark("start: payload @payload\npayload: \"x\"");
     assert_eq!(g.requirements().unwrap()[0].name(),"payload");
-    let widened=g.bind_snapshot("payload",TokenSet::from(0)).unwrap();
+    let widened=g.bind_snapshot("payload",TokenSet::new([0])).unwrap();
     for mode in MODES {
         let c=widened.compile_with_build_options(&v,mode.build_options()).unwrap();
         assert!(accepts(&c,&[0,0]));assert!(!accepts(&c,&[2]));

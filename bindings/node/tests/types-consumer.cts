@@ -33,4 +33,6 @@ const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.Mas
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');
+// @ts-expect-error Token IDs must be wrapped in TokenSet.
+api.Expr.choice(5);
 void [entry, result, expr];

@@ -42,7 +42,7 @@ fn main(){
                 }
             }
         }
-        let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",TokenSet::from(9000)).unwrap();
+        let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",TokenSet::new([9000])).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar C start r nt r=\"A\" C \"B\"");parent.bind("C",&child).unwrap();
         let c=parent.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
         for c in [&c,&Constraint::load(c.save(), &vocab).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());assert!(s.commit_token(id));n+=1;}assert!(s.is_accepting());}

@@ -360,7 +360,7 @@ def test_fill_mask_dtype_and_layout():
             state.fill_mask(array)
 
 
-def test_hashable_public_values_and_integer_expr_parts():
+def test_hashable_public_values_and_token_set_expr_parts():
     for value in (glrmask.MaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.AUTO, glrmask.ParserBackend.LR_TABLE):
         assert {value: 1}[value] == 1
         assert hash(value) == hash(int(value))
@@ -368,9 +368,13 @@ def test_hashable_public_values_and_integer_expr_parts():
     grammar = glrmask.Grammar.from_glrm('extern token A; start s; nt s = A;')
     assert len(set(grammar.externs.values())) == 1
     assert hash(grammar.externs["A"]) == hash(grammar.externs["A"])
-    state = glrmask.Grammar.from_expr(glrmask.Expr.sequence(5, 6)).compile(glrmask.Vocab({})).start()
+    with pytest.raises(TypeError):
+        glrmask.Expr.sequence(5, 6)
+    with pytest.raises(TypeError):
+        glrmask.Expr.choice(5, 6)
+    state = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert state.commit_tokens([5, 6]) == 2
     assert state.is_accepting()
-    choice = glrmask.Grammar.from_expr(glrmask.Expr.choice(5, 6)).compile(glrmask.Vocab({})).start()
+    choice = glrmask.Grammar.from_expr(glrmask.Expr.choice(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert choice.commit_token(6)
     assert choice.is_accepting()

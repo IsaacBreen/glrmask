@@ -91,7 +91,7 @@ impl From<Expr> for Binding { fn from(e: Expr) -> Self { Self(BindingKind::Expr(
 impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Expr(e.clone())) } }
 impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
 impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingKind::TokenSet(t.clone())) } }
-impl From<u32> for Binding { fn from(id: u32) -> Self { Self(BindingKind::TokenSet(TokenSet::from(id))) } }
+impl From<u32> for Binding { fn from(id: u32) -> Self { Self(BindingKind::TokenSet(TokenSet::new([id]))) } }
 
 /// A value that can be bound to an extern of a `Grammar`: a grammar, expression, token set or token ID.
 ///
@@ -119,7 +119,7 @@ impl From<Expr> for GrammarBinding { fn from(e: Expr) -> Self { Self(GrammarBind
 impl From<&Expr> for GrammarBinding { fn from(e: &Expr) -> Self { Self(GrammarBindingKind::Expr(e.clone())) } }
 impl From<TokenSet> for GrammarBinding { fn from(t: TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t)) } }
 impl From<&TokenSet> for GrammarBinding { fn from(t: &TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t.clone())) } }
-impl From<u32> for GrammarBinding { fn from(id: u32) -> Self { Self(GrammarBindingKind::TokenSet(TokenSet::from(id))) } }
+impl From<u32> for GrammarBinding { fn from(id: u32) -> Self { Self(GrammarBindingKind::TokenSet(TokenSet::new([id]))) } }
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {

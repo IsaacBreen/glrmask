@@ -4,8 +4,6 @@ GLRMask is a grammar-constrained decoding library for high-throughput LLM servin
 
 GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
 
-From 1.0, GLRMask follows semantic versioning; see the [stability policy](https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md).
-
 [Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
 ## Benchmarks
@@ -292,7 +290,7 @@ and `load` checks that you pass the one it was compiled for. Bytes saved by one 
 
 `Expr.choice(*parts)` matches any one of its parts, `Expr.sequence(*parts)` matches them one after another, and
 `Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, expressions and
-token sets; in Rust and Node.js, token IDs too. `Grammar.from_expr` makes a grammar from an expression, and an
+token sets. `Grammar.from_expr` makes a grammar from an expression, and an
 expression can be bound to a grammar extern directly.
 
 ## Token sets

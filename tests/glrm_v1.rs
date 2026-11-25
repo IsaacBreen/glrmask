@@ -166,8 +166,8 @@ nt start = CONTROL payload;
         .build().unwrap();
     assert!(narrow.compile().unwrap_err().to_string().contains("is a grammar extern"));
     let mut widened = Grammar::from_glrm(source).unwrap();
-    widened.bind("CONTROL", glrmask::TokenSet::from(7)).unwrap();
-    widened.bind("payload", glrmask::TokenSet::from(7)).unwrap();
+    widened.bind("CONTROL", glrmask::TokenSet::new([7])).unwrap();
+    widened.bind("payload", glrmask::TokenSet::new([7])).unwrap();
     for mode in MaskMode::ALL {
         let constraint = widened.compile_with_build_options(
             &vocab, mode.build_options()).unwrap();
@@ -680,7 +680,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .build()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
-    let constraint = parent.bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()
+    let constraint = parent.bind_snapshot("MARK", glrmask::TokenSet::new([7])).unwrap()
         .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()).unwrap();
     let mut state = constraint.start();
     assert!(state.commit_token(7));

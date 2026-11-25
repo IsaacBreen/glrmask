@@ -290,9 +290,8 @@ class Expr extends Owned {
           if (value instanceof Grammar) return native.NativeExpr.fromGrammar(handle(value, Grammar));
           if (value instanceof Module) return native.NativeExpr.fromModule(handle(value, Module));
           if (value instanceof Expr) return handle(value, Expr).clone();
-          if (typeof value === 'number') return native.NativeExpr.fromToken(tokenId(value));
           if (value instanceof TokenSet) return native.NativeExpr.fromTokenSet(handle(value, TokenSet));
-          throw new TypeError('Expr operands must be a Grammar, Module, Expr, TokenSet or token ID');
+          throw new TypeError('Expr operands must be a Grammar, Module, Expr or TokenSet');
         }));
       }
       return wrap(Expr, invoke(() => native.NativeExpr[operator](parts)));

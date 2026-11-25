@@ -56,10 +56,10 @@ fn binding_a_huge_token_id_is_an_error() {
 #[test]
 fn a_huge_token_id_in_an_expression_is_an_error() {
     for id in HUGE_IDS {
-        let error = Grammar::from_expr(Expr::sequence([Expr::literal("a"), Expr::from(id)])).unwrap_err();
+        let error = Grammar::from_expr(Expr::sequence([Expr::literal("a"), Expr::from(TokenSet::new([id]))])).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
         let mut grammar = Grammar::from_glrm("start s extern grammar G nt s = G").unwrap();
-        let error = grammar.bind("G", Expr::from(id)).unwrap_err();
+        let error = grammar.bind("G", Expr::from(TokenSet::new([id]))).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
     }
 }

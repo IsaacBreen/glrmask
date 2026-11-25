@@ -181,6 +181,8 @@ test('Module: raw source attachment, failure survival and target identity',()=>{
 test('Expr: choice, sequence, literal and plain string errors',()=>{
   const v=vocab();
   // Plain string error pointing to Expr.literal
+  assert.throws(()=>Expr.choice(5), TypeError);
+  assert.throws(()=>Expr.sequence(5), TypeError);
   assert.throws(()=>Expr.choice('plain string'),/Plain strings are not supported/);
   assert.throws(()=>Expr.sequence('plain string'),/Plain strings are not supported/);
 
