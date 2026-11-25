@@ -479,7 +479,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, MaskStrategy};
+    use crate::{BuildOptions, Grammar, InternalMaskStrategy};
 
     #[test]
     fn prepared_root_call_proof_matches_recomputation_and_static_runtime_after_reload() {
@@ -507,7 +507,7 @@ mod tests {
             let mut candidate=dynamic;install(&mut candidate,&vocab).unwrap();
             let reference=Grammar::from_ebnf(if nullable {r#"start ::= "x" ("a" | "") "y""#}
                 else {r#"start ::= "x" "a" "y""#}).unwrap()
-                .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
+                .compile_with_build_options(&vocab,BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();
             let loaded=Constraint::load(candidate.save(), &vocab).unwrap();
             let mut words=vec![Vec::new()];
             for depth in 0..=4 {
@@ -537,9 +537,9 @@ mod tests {
             (11,b"a".to_vec()),(15,b"!".to_vec()),(19,b"?".to_vec()),(23,b"b".to_vec()),
             (27,b"aa!".to_vec()),(31,b"xa".to_vec()),(37,vec![0]),(41,b" ".to_vec()),(43,b"abab".to_vec())]);
         let left=Grammar::from_glrm(r#"glrm 1; start root; t WORD = /[a-z]+/; nt root = WORD "!";"#).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
+            .compile_with_build_options(&vocab,BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();
         let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT = /a[ab]*/; nt root = TEXT "?";"#).unwrap()
-            .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
+            .compile_with_build_options(&vocab,BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();
         let loaded_left=Constraint::load(left.save(), &vocab).unwrap();let loaded_right=Constraint::load(right.save(), &vocab).unwrap();
         for leaves in [vec![&left,&right],vec![&loaded_left,&loaded_right],vec![&left,&loaded_right]] {
             let terminals=vec![0,leaves[0].tokenizer.num_terminals()];
@@ -586,7 +586,7 @@ mod tests {
             (r#"start root; extern grammar child; nt root = "x" child;"#, r#"start ::= "x" "a""#, false),
             (r#"start root; extern grammar child; nt root = "x" child child;"#, r#"start ::= "x" "a" "a""#, true),
         ] {
-            let options = BuildOptions::default().optimization(MaskStrategy::ParserDwa);
+            let options = BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa);
             let unlinked = Grammar::from_glrm(source).unwrap().prepare(&vocab).unwrap();
             let mut candidate = unlinked.bind_snapshot("child", &child).unwrap().link().unwrap();
             assert_eq!(retain_same_owner_paths(&candidate, 1, true).unwrap(), retain);
@@ -615,7 +615,7 @@ mod tests {
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
-            .link_with(BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
+            .link_with(BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();
         c.install_template_parser().unwrap();
         let bodies = c.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components.iter()
             .map(|component| Arc::clone(&component.constraint)).collect::<Vec<_>>();

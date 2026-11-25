@@ -381,14 +381,14 @@ mod tests {
             .precompile_with(
                 &v,
                 CompileOptions::default()
-                    .mask_strategy(MaskStrategy::TokenTrie(
+                    .internal_mask_strategy(InternalMaskStrategy::TokenTrie(
                         TokenTrie::new().parser_backend(ParserBackend::TemplateDfa),
                     )),
             )
             .unwrap();
         let mut static_part = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         static_part
-            .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+            .precompile_with(&v, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa))
             .unwrap();
         let static_bytes = read(&static_part.save()).prepared[0].bytes.clone();
         let mut manifest = read(&shell.save());
@@ -406,7 +406,7 @@ mod tests {
         let v = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         module
-            .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+            .precompile_with(&v, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa))
             .unwrap();
         let mut m = read(&module.save());
         let inner = crate::import::compile_dynamic_named_single_with_backend(

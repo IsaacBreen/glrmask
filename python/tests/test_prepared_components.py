@@ -134,20 +134,19 @@ def test_compile_options_and_save_load_roundtrip():
     m = glrmask.Module(g)
     m.precompile(
         v,
-        mask_strategy=glrmask.MaskStrategy.PARSER_DWA,
+        mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_MASKS,
     )
 
-    # Aliases
-    assert glrmask.MaskStrategy.FAST_COMPILE is glrmask.MaskStrategy.TOKEN_TRIE
-    assert glrmask.MaskStrategy.FAST_MASKS is glrmask.MaskStrategy.PARSER_DWA
+    # Preferences have distinct identities.
+    assert glrmask.MaskStrategy.FAST_COMPILE != glrmask.MaskStrategy.FAST_MASKS
 
     # Save / load round-trip preserves retained work; options are supplied per compile.
     saved = m.save()
     loaded = glrmask.Module.load(saved)
     assert loaded.compile(
         v,
-        mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,
+        mask_strategy=glrmask.MaskStrategy.FAST_COMPILE,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_MASKS,
     ).start().mask().tolist() == m.compile(v).start().mask().tolist()
 
@@ -180,12 +179,12 @@ def test_grammar_compile_sugar():
     g = glrmask.Grammar.from_lark('start: "a"')
     sugar_constraint = g.compile(
         v,
-        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
+        mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     module_constraint = glrmask.Module(g).compile(
         v,
-        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
+        mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())

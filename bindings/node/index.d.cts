@@ -2,57 +2,27 @@
 /** The GLRMask version, for example "1.0.0". */
 export declare const version: string;
 
-/** How masks are computed. */
+/** Cost preferences, not engine selections or performance guarantees. */
 export declare const MaskStrategy: Readonly<{
-  /** Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. The default. */
+  /** Let the library choose. The default. */
   Auto: 'auto';
-  /** Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks. */
-  ParserDwa: 'parser-dwa';
-  /** Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` object instead to change its settings. */
-  TokenTrie: 'token-trie';
-  /** Same as `TokenTrie`. */
-  FastCompile: 'token-trie';
-  /** Same as `ParserDwa`. */
-  FastMasks: 'parser-dwa';
+  /** Prefer lower preparation cost, even if masks cost more. */
+  FastCompile: 'fast-compile';
+  /** Prefer lower mask cost, even if preparation costs more. */
+  FastMasks: 'fast-masks';
 }>;
-/** A `MaskStrategy` value, or `TokenTrie` settings. */
-export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy] | TokenTrie;
+export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
 
-/** How masks are computed at grammar boundaries. */
+/** Cost preferences for masks at grammar boundaries. */
 export declare const BoundaryMaskStrategy: Readonly<{
-  /** `ParserDwa`, or `TokenTrie` when that would be too large. The default. */
+  /** Let the library choose. The default. */
   Auto: 'auto';
-  /** Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws `GLRMaskError` if it would be too large. */
-  ParserDwa: 'parser-dwa';
-  /** Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks. */
-  TokenTrie: 'token-trie';
-  /** Same as `TokenTrie`. */
-  FastCompile: 'token-trie';
-  /** Same as `ParserDwa`. */
-  FastMasks: 'parser-dwa';
+  /** Prefer lower boundary preparation cost. */
+  FastCompile: 'fast-compile';
+  /** Prefer lower boundary mask cost. */
+  FastMasks: 'fast-masks';
 }>;
-/** A `BoundaryMaskStrategy` value. */
 export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
-
-/** How the parser is represented and run when masks are computed with `MaskStrategy.TokenTrie`. */
-export declare const ParserBackend: Readonly<{
-  /** An LR table. Faster to compile, with slower masks. The default. */
-  LrTable: 'lr-table';
-  /** Template DFAs. Slower to compile, with faster masks. */
-  TemplateDfa: 'template-dfa';
-}>;
-/** A `ParserBackend` value. */
-export type ParserBackend = typeof ParserBackend[keyof typeof ParserBackend];
-
-/** Settings for `MaskStrategy.TokenTrie`. Pass one as `maskStrategy`. */
-export interface TokenTrie {
-  /** Always `'token-trie'`. */
-  readonly kind: 'token-trie';
-  /** How the parser is represented. Defaults to `ParserBackend.LrTable`. */
-  readonly parserBackend?: ParserBackend;
-  /** Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `false`. Tokens are not merged in a composition that includes precompiled parts. */
-  readonly mergeEquivalentTokens?: boolean;
-}
 
 /** The kinds of `GLRMaskError`. */
 export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';

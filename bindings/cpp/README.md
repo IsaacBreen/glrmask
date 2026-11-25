@@ -121,23 +121,21 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 
 ## Mask strategies
 
-`compile` and `precompile` take a `CompileOptions` with `mask_strategy`, `boundary_mask_strategy` and `token_trie`.
+`compile` and `precompile` take a `CompileOptions` with `mask_strategy` and `boundary_mask_strategy`.
 
-| `MaskStrategy` | |
+| `MaskStrategy` | Preference |
 | --- | --- |
-| `Auto` | The default. Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. |
-| `ParserDwa` | Slowest to compile, with the fastest masks. |
-| `TokenTrie` | Fastest to compile, with slower masks. |
+| `Auto` | Let the library choose (default). |
+| `FastCompile` | Prefer lower preparation cost. |
+| `FastMasks` | Prefer lower mask cost. |
 
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. `token_trie` holds `TokenTrie`'s settings,
-`parser_backend` and `merge_equivalent_tokens`; leave it at its defaults with any other strategy. `BoundaryMaskStrategy`
-has the same three values, for the boundaries where a grammar meets a bound extern. See [mask
-strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
+`BoundaryMaskStrategy` makes the same independent choice at grammar boundaries. These preferences do not
+guarantee a specific implementation or speed; another supported plan may be selected on a deterministic decline.
+See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
 ```cpp
 glrmask::CompileOptions options;
-options.mask_strategy = glrmask::MaskStrategy::TokenTrie;
-options.token_trie.parser_backend = glrmask::ParserBackend::TemplateDfa;
+options.mask_strategy = glrmask::MaskStrategy::FastMasks;
 auto constraint = grammar.compile(vocab, options);
 ```
 

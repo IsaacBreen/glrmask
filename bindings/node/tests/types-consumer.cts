@@ -3,7 +3,7 @@ const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]]);
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromLark('start: "a"');
-const trie: api.TokenTrie = {kind: 'token-trie', parserBackend: api.ParserBackend.LrTable, mergeEquivalentTokens: true};
+const trie: api.MaskStrategy = api.MaskStrategy.FastCompile;
 const endModule = new api.Module(api.Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE'));
 endModule.bind('VALUE',api.Expr.sequence(g, new api.TokenSet([99])));
 const c = endModule.compileSync(v, {maskStrategy: trie});
@@ -22,16 +22,16 @@ new api.ConstraintState();
 s[Symbol.dispose](); c.dispose();
 void [range, accepted];
 
-const precompiled: api.Module = g.precompileSync(v, {maskStrategy: api.MaskStrategy.ParserDwa});
+const precompiled: api.Module = g.precompileSync(v, {maskStrategy: api.MaskStrategy.FastMasks});
 const precompiledAsync: Promise<api.Module> = g.precompile(v);
 void [precompiled, precompiledAsync];
 
 const module = new api.Module(g);
 const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');
-module.precompileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie});
+module.precompileSync(v, {maskStrategy: api.MaskStrategy.FastCompile});
 const independent: api.Module = module.clone();
-const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa});
+const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.FastCompile, boundaryMaskStrategy: api.BoundaryMaskStrategy.FastMasks});
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');
@@ -43,3 +43,8 @@ void [entry, result, expr];
 g.bind("slot", 1);
 // @ts-expect-error Plain token IDs are not valid bind values.
 module.bind("slot", 1);
+
+// @ts-expect-error Removed hard algorithm selector.
+g.compileSync(v, {maskStrategy: 'parser-dwa'});
+// @ts-expect-error No tuning object in stable API.
+g.compileSync(v, {maskStrategy: {kind:'token-trie'}});

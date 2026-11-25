@@ -1985,7 +1985,6 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "TokenSet",
             "MaskStrategy",
             "BoundaryMaskStrategy",
-            "ParserBackend",
             "Vocab",
             "Constraint",
             "ConstraintState",

@@ -495,7 +495,7 @@ impl PyModule {
 
     /// Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
     ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,
@@ -520,7 +520,7 @@ impl PyModule {
 
     /// Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
     ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,

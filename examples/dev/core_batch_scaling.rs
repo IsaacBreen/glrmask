@@ -3,7 +3,7 @@
 //! The small Apply implementations let the *same source* measure both the old
 //! return-new bind contract and the mutable contract. They compile to assignment
 //! for the old API and to a no-op for the new API; no runtime version detection.
-use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{BuildOptions, Grammar, InternalMaskStrategy, PreparedGrammar, TokenSet, Vocab};
 use rayon::prelude::*;
 use serde_json::json;
 use std::{error::Error, hint::black_box, time::Instant};
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let jobs: usize = args.next().unwrap_or_else(|| "64".into()).parse()?;
     assert!(largest > 0 && jobs > 0);
     let v = Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,Vec::new())]).unwrap();
-    let options = BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE);
+    let options = BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE);
     let workers = [1,2,4,8,16,32,64,128].into_iter().filter(|n| *n<=largest).collect::<Vec<_>>();
     let mut rows = Vec::new();
     for slots in [1,32,128,512] {

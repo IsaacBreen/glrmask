@@ -27,8 +27,6 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
         "TokenSet",
         "MaskStrategy",
         "BoundaryMaskStrategy",
-        "ParserBackend",
-        "TokenTrie",
         "Vocab",
         "Constraint",
         "ConstraintState",
@@ -186,41 +184,21 @@ def test_source_constructors_reject_invalid_source_at_construction():
             factory(source)
 
 
-def test_token_trie_settings_value_semantics_and_validation():
-    default = glrmask.TokenTrie()
-    assert default.parser_backend is glrmask.ParserBackend.LR_TABLE
-    assert default.merge_equivalent_tokens is False
-    assert default == glrmask.TokenTrie()
-    assert hash(default) == hash(glrmask.TokenTrie())
-    assert repr(default) == (
-        "TokenTrie(parser_backend=ParserBackend.LR_TABLE, "
-        "merge_equivalent_tokens=False)"
-    )
-    native = glrmask.TokenTrie(
-        parser_backend=glrmask.ParserBackend.TEMPLATE_DFA,
-        merge_equivalent_tokens=True,
-    )
-    assert native.parser_backend is glrmask.ParserBackend.TEMPLATE_DFA
-    assert native.merge_equivalent_tokens is True
-    assert native != default
-    assert hash(native) != hash(default)
-    assert repr(native) == (
-        "TokenTrie(parser_backend=ParserBackend.TEMPLATE_DFA, "
-        "merge_equivalent_tokens=True)"
-    )
-    assert len({default, glrmask.TokenTrie(), native}) == 2
-
-    v = vocab()
+def test_strategy_presets_are_distinct_and_legacy_tuning_is_not_public():
+    for strategy in (glrmask.MaskStrategy, glrmask.BoundaryMaskStrategy):
+        assert len({strategy.AUTO, strategy.FAST_COMPILE, strategy.FAST_MASKS}) == 3
+        assert not hasattr(strategy, "PARSER_DWA")
+        assert not hasattr(strategy, "TOKEN_TRIE")
+    assert not hasattr(glrmask, "TokenTrie")
+    assert not hasattr(glrmask, "ParserBackend")
     grammar = glrmask.Grammar.from_lark('start: "a"')
-    compiled = grammar.compile(v, mask_strategy=native)
-    assert compiled.start().mask()[0]
-    for bad in ["token-trie", 2, object()]:
+    for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS):
+        for boundary in (glrmask.BoundaryMaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS):
+            c = grammar.compile(vocab(), mask_strategy=mode, boundary_mask_strategy=boundary)
+            assert c.start().mask()[0]
+    for bad in ["token-trie", "parser-dwa", 2, object(), {"kind": "token-trie"}]:
         with pytest.raises(TypeError):
-            grammar.compile(v, mask_strategy=bad)
-    with pytest.raises(TypeError):
-        glrmask.TokenTrie(parser_backend="lr-table")
-    with pytest.raises(TypeError):
-        glrmask.TokenTrie(merge_equivalent_tokens=1)
+            grammar.compile(vocab(), mask_strategy=bad)
 
 
 def test_version_metadata_and_module_attributes_agree():
@@ -361,7 +339,8 @@ def test_fill_mask_dtype_and_layout():
 
 
 def test_hashable_public_values_and_token_set_expr_parts():
-    for value in (glrmask.MaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.AUTO, glrmask.ParserBackend.LR_TABLE):
+    for value in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS,
+                  glrmask.BoundaryMaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS):
         assert {value: 1}[value] == 1
         assert hash(value) == hash(int(value))
     assert hash(glrmask.TokenSet([1])) == hash(glrmask.TokenSet([1]))

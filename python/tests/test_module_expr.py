@@ -33,18 +33,18 @@ def test_compile_options_and_helpers():
     assert not hasattr(g, "ModuleOptions")
     assert not hasattr(g, "CompileOptions")
     assert not hasattr(source(), "mask_strategy")
-    assert g.MaskStrategy.FAST_COMPILE == g.MaskStrategy.TOKEN_TRIE
-    assert g.BoundaryMaskStrategy.FAST_MASKS == g.BoundaryMaskStrategy.PARSER_DWA
+    assert g.MaskStrategy.FAST_COMPILE != g.MaskStrategy.FAST_MASKS
+    assert g.BoundaryMaskStrategy.FAST_MASKS != g.BoundaryMaskStrategy.FAST_COMPILE
 
     assert module.precompile(
         v,
-        mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
-        boundary_mask_strategy=g.BoundaryMaskStrategy.PARSER_DWA,
+        mask_strategy=g.MaskStrategy.FAST_MASKS,
+        boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_MASKS,
     ) is None
     state = module.compile(
         v,
-        mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True),
-        boundary_mask_strategy=g.BoundaryMaskStrategy.TOKEN_TRIE,
+        mask_strategy=g.MaskStrategy.FAST_MASKS,
+        boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_COMPILE,
     ).start()
     assert state.mask()[1]
     assert state.commit_token(1)
@@ -55,12 +55,12 @@ def test_compile_options_and_helpers():
 def test_local_precompilation_and_root_only_compile():
     v = vocab()
     child = g.Module(source())
-    assert child.precompile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)) is None
+    assert child.precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS) is None
     parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
     root = g.Module(g.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
     root.bind(BODY=parent, END=g.TokenSet([63]))
-    state = root.compile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA)).start()
+    state = root.compile(v, mask_strategy=g.MaskStrategy.FAST_MASKS).start()
     assert not state.mask()[63]
     assert state.commit_token(4)
     assert not state.is_accepting() and state.mask()[63]
@@ -87,7 +87,7 @@ def test_independent_mutable_copies(copy_fn):
 def test_precompilation_persists_across_save_and_retained_work_preserved():
     v = vocab()
     module = g.Module(source())
-    module.precompile(v, mask_strategy=g.TokenTrie(parser_backend=g.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
+    module.precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
     saved = module.save()
     loaded = g.Module.load(saved)
     accepts(loaded, v, [1])
@@ -134,7 +134,7 @@ def test_grammar_precompile_returns_a_module():
     # externs are still open.
     open_grammar = g.Grammar.from_glrm(HOST)
     module = open_grammar.precompile(v)
-    module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA))
+    module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS))
     state = module.compile(v).start()
     assert state.mask()[4]
     assert state.commit_token(4)
@@ -149,11 +149,11 @@ def test_grammar_precompile_returns_a_module():
 
     # The returned Module retains work: its artifact carries the static
     # preparation, survives a round-trip, and a TokenTrie compile keeps it.
-    retained = source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA)
+    retained = source().precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
     assert len(retained.save()) > len(g.Module(source()).save())
     restored = g.Module.load(retained.save())
     expected = list(g.Module(source()).compile(v).start().mask())
-    assert list(restored.compile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE).start().mask()) == expected
+    assert list(restored.compile(v, mask_strategy=g.MaskStrategy.FAST_COMPILE).start().mask()) == expected
 
 
 def test_cross_vocab_precompile_load_and_exact_events_preserve_state():

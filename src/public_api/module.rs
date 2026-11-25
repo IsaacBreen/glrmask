@@ -15,44 +15,87 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
-    pub(crate) mask_strategy: MaskStrategy,
-    pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
+    mask_strategy: MaskStrategy,
+    boundary_mask_strategy: BoundaryMaskStrategy,
+    internal_mask: Option<InternalMaskStrategy>,
+    retry_mask: Option<InternalMaskStrategy>,
+    internal_boundary: Option<InternalBoundaryMaskStrategy>,
 }
 
 impl CompileOptions {
-    /// Sets how masks are computed. Defaults to [`MaskStrategy::Auto`].
+    /// Sets the mask cost preference. Defaults to Auto.
     pub fn mask_strategy(mut self, strategy: impl Into<MaskStrategy>) -> Self {
         self.mask_strategy = strategy.into();
+        self.internal_mask = None;
+        self.retry_mask = None;
         self
     }
 
-    /// Sets how masks are computed at grammar boundaries. Defaults to
-    /// [`BoundaryMaskStrategy::Auto`].
+    /// Sets the boundary mask cost preference. Defaults to Auto.
     pub fn boundary_mask_strategy(mut self, strategy: BoundaryMaskStrategy) -> Self {
         self.boundary_mask_strategy = strategy;
+        self.internal_boundary = None;
         self
     }
 
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn internal_mask_strategy(mut self, strategy: impl Into<InternalMaskStrategy>) -> Self {
+        self.internal_mask = Some(strategy.into());
+        self.retry_mask = None;
+        self
+    }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn internal_boundary_mask_strategy(mut self, strategy: InternalBoundaryMaskStrategy) -> Self {
+        self.internal_boundary = Some(strategy);
+        self
+    }
+
+    fn selected_strategy(&self) -> InternalMaskStrategy {
+        self.internal_mask.or(self.retry_mask).unwrap_or_else(|| self.mask_strategy.into())
+    }
+
+    fn selected_boundary(&self) -> InternalBoundaryMaskStrategy {
+        self.internal_boundary.unwrap_or(match self.boundary_mask_strategy {
+            BoundaryMaskStrategy::Auto | BoundaryMaskStrategy::FastMasks => InternalBoundaryMaskStrategy::Auto,
+            BoundaryMaskStrategy::FastCompile => InternalBoundaryMaskStrategy::TokenTrie,
+        })
+    }
+
+    fn can_fallback(&self, error: &Error) -> bool {
+        if self.soft() { crate::error::is_soft_strategy_decline(error) }
+        else { error.is_strategy_decline() }
+    }
+    fn soft(&self) -> bool { self.internal_mask.is_none() }
+    fn prefers_fast_masks(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FastMasks }
+    fn prefers_fast_compile(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FastCompile }
+    fn retry_with(&self, engine: InternalMaskStrategy) -> Self {
+        let mut retry = self.clone();
+        retry.retry_mask = Some(engine);
+        retry
+    }
     /// The internal engine for these options.
     pub(crate) fn engine(&self) -> Result<Engine> {
-        Ok(engine_for(self.mask_strategy))
+        Ok(engine_for(self.selected_strategy()))
     }
 
     pub(crate) fn parser_backend(&self) -> ParserBackend {
-        self.mask_strategy.token_trie_backend()
+        self.selected_strategy().token_trie_backend()
     }
 
     pub(crate) fn merge_equivalent_tokens(&self) -> bool {
-        self.mask_strategy.merges_tokens()
+        self.selected_strategy().merges_tokens()
     }
 
     /// The TokenTrie parser backend for these options.
     fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
-        token_trie_backend(self.mask_strategy.token_trie_backend())
+        token_trie_backend(self.selected_strategy().token_trie_backend())
     }
 }
 
-impl MaskStrategy {
+impl InternalMaskStrategy {
     pub(crate) fn token_trie_backend(self) -> ParserBackend {
         match self {
             Self::TokenTrie(settings) => settings.backend(),
@@ -306,7 +349,7 @@ fn retains_nothing(plan: NodePlan) -> bool {
 }
 
 pub(crate) fn target_boundary() -> BoundaryTriggerDetail {
-    // The public boundary trigger is always the LLM token set. BoundaryMaskStrategy
+    // The public boundary trigger is always the LLM token set. InternalBoundaryMaskStrategy
     // selects the boundary-parser wiring only.
     BoundaryTriggerDetail::TokenSet
 }
@@ -580,7 +623,31 @@ impl Module {
 
     /// Like [`precompile`](Self::precompile), with `options`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, &options, true))
+        with_deep_stack(|| {
+            let run = |opts: &CompileOptions| -> Result<Module> {
+                let mut candidate = self.clone();
+                // Preserve the existing internal benchmark path. Public
+                // preparation has the same bounded attempt as final compile.
+                if opts.soft() && !opts.prefers_fast_compile() {
+                    let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+                    budget.install(|| crate::error::catch_template_attempt(|| {
+                        candidate.precompile_on_stack(vocab, opts, true)
+                    }))?;
+                } else {
+                    candidate.precompile_on_stack(vocab, opts, true)?;
+                }
+                Ok(candidate)
+            };
+            let result = match run(&options) {
+                Err(error) if options.can_fallback(&error) && (options.prefers_fast_masks() || (options.soft() && options.mask_strategy == MaskStrategy::Auto)) =>
+                    run(&options.clone().mask_strategy(MaskStrategy::FastCompile)),
+                Err(error) if options.can_fallback(&error) && options.prefers_fast_compile() =>
+                    run(&options.clone().mask_strategy(MaskStrategy::FastMasks)),
+                other => other,
+            }?;
+            *self = result;
+            Ok(())
+        })
     }
 
     /// Rehydrates vocabulary-free retained work loaded from a Module artifact.
@@ -672,10 +739,10 @@ impl Module {
             let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
             let built = match m.prepare_local_for(vocab, plan.engine, target_b, build_boundary, backend_of(plan)) {
                 Ok(p) => (plan.engine, p),
-                Err(error) if requested == Engine::Auto
+                Err(error) if (requested == Engine::Auto || options.prefers_fast_masks())
                     && plan.engine == Engine::ParserDwa
                     && any_retained
-                    && error.is_strategy_decline() =>
+                    && options.can_fallback(&error) =>
                 {
                     // Auto may fall back per part, but only when the graph keeps
                     // retained work that a whole-composition retry would discard.
@@ -980,15 +1047,16 @@ impl Module {
         // EXPERIMENT: one route report per top-level Module compile.
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         if whole {
-            let result = self
-                .flatten_source()?
-                .compile_requested_token_trie(
-                    vocab,
-                    BoundaryTriggerDetail::TokenSet,
-                    options.parser_backend(),
-                    options.merge_equivalent_tokens(),
-                )?
-                .with_end_tokens(end_tokens)?;
+            let result = self.flatten_source()?.compile_requested_token_trie(
+                    vocab, BoundaryTriggerDetail::TokenSet,
+                    options.parser_backend(), options.merge_equivalent_tokens(),
+                ).and_then(|c| c.with_end_tokens(end_tokens));
+            let result = match result {
+                Err(error) if options.prefers_fast_compile() && options.can_fallback(&error) => {
+                    return self.compile_with_on_stack(vocab, options.retry_with(InternalMaskStrategy::ParserDwa), end_tokens);
+                }
+                other => other?,
+            };
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
                 crate::compiler::terminal_ended_rescue::Route::Normal,
@@ -1041,7 +1109,7 @@ impl Module {
                         let constraint = prepared.materialize(
                             vocab,
                             &mut HashMap::new(),
-                            compile_options.boundary_mask_strategy,
+                            compile_options.selected_boundary(),
                         )?;
                         ensure_runnable_constraint(&constraint)?;
                         constraint.with_end_tokens(&end_tokens)
@@ -1051,7 +1119,7 @@ impl Module {
             let attempt = build();
             match attempt {
                 Ok(constraint) => Ok(constraint),
-                Err(error) if error.is_strategy_decline() => {
+                Err(error) if options.can_fallback(&error) => {
                     // Opt-in experiment: one terminal-ended rescue attempt from
                     // the original flattened source, restricted to plain single
                     // modules. Without the switch, the typed decline is returned
@@ -1092,12 +1160,12 @@ impl Module {
                             error.decline_stage(),
                         );
                     }
-                    // Only Auto may pick a different exact strategy; an explicit
-                    // strategy request is never silently replaced. With retained
+                    // Public Auto/FastMasks may fall back; strict internal
+                    // selectors retain their original behavior. With retained
                     // work the per-part fallback above already kept it; the
                     // whole-composition retry is only allowed when nothing is
                     // retained.
-                    if requested == Engine::Auto && !any_retained {
+                    if (requested == Engine::Auto || options.prefers_fast_masks()) && !any_retained && options.can_fallback(&error) {
                         // The fallback is exactly an explicit TokenTrie request
                         // with the same switches.
                         if let Ok(grammar) = self.flatten_source() {
@@ -1113,6 +1181,18 @@ impl Module {
                                 crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
                             return Ok(constraint);
                         }
+                    }
+                    // Budget unwinds during parallel preparation can reach this outer
+                    // handler instead of the per-node fallback. Retry with a fresh
+                    // budget and a trie preference without discarding retained work.
+                    if options.soft() && any_retained
+                        && (requested == Engine::Auto || options.prefers_fast_masks()) {
+                        return self.compile_with_on_stack(
+                            vocab, options.retry_with(InternalMaskStrategy::FAST_COMPILE), end_tokens);
+                    }
+                    if options.prefers_fast_compile() {
+                        return self.compile_with_on_stack(
+                            vocab, options.retry_with(InternalMaskStrategy::ParserDwa), end_tokens);
                     }
                     Err(error)
                 }
@@ -1133,7 +1213,7 @@ impl Module {
         &self,
         vocab: &Vocab,
         cache: &mut HashMap<usize, RuntimeConstraint>,
-        boundary_strategy: BoundaryMaskStrategy,
+        boundary_strategy: InternalBoundaryMaskStrategy,
     ) -> Result<RuntimeConstraint> {
         let id = Arc::as_ptr(&self.node) as usize;
         if let Some(c) = cache.get(&id) { return Ok(c.clone()); }
@@ -1189,11 +1269,11 @@ impl Module {
             parent = compose(parent)?;
             // All-template compositions may still install the static boundary
             // parser; retained parts keep their own machinery.
-            if boundary_strategy != BoundaryMaskStrategy::TokenTrie
+            if boundary_strategy != InternalBoundaryMaskStrategy::TokenTrie
                 && all_static
                 && matches!(engine, Engine::ParserDwa | Engine::Auto)
             {
-                // `Auto` mirrors `MaskStrategy::Auto`: prefer the static
+                // `Auto` mirrors `InternalMaskStrategy::Auto`: prefer the static
                 // boundary parser, and fall back to the token-trie boundary
                 // when it declines on budget instead of failing the build.
                 let declined = {
@@ -1214,7 +1294,7 @@ impl Module {
                         }
                     }
                 };
-                if declined && boundary_strategy == BoundaryMaskStrategy::ParserDwa {
+                if declined && boundary_strategy == InternalBoundaryMaskStrategy::ParserDwa {
                     return Err(Error::ResourceLimit(
                         crate::error::BOUNDARY_DWA_DECLINE.into(),
                     ));
@@ -1464,7 +1544,7 @@ mod precompile_boundary_tests {
         module
             .precompile_with(
                 &vocab,
-                CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+                CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa),
             )
             .expect("precompile with ParserDwa");
         let prepared_trigger = module
@@ -1477,7 +1557,7 @@ mod precompile_boundary_tests {
         let compiled = module
             .compile_with(
                 &vocab,
-                CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE),
+                CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE),
             )
             .expect("TokenTrie compile after ParserDwa precompile");
         assert!(
@@ -1534,7 +1614,7 @@ mod precompile_boundary_tests {
 
     fn assembly(precompile_parent: bool, precompile_child: bool) -> (Module, Module, Module) {
         let vocab = vocab();
-        let static_options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
+        let static_options = CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa);
         let mut child = Module::new(&Grammar::from_ebnf(CHILD).unwrap());
         if precompile_child {
             child.precompile_with(&vocab, static_options.clone()).expect("precompile child");
@@ -1562,7 +1642,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1577,7 +1657,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1656,7 +1736,7 @@ mod grammar_precompile_tests {
     #[test]
     fn grammar_precompile_returns_a_module_that_retains_its_work() {
         let vocab = vocab();
-        let options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
+        let options = CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
 
         let module = child.precompile_with(&vocab, options).expect("grammar precompile");
@@ -1664,7 +1744,7 @@ mod grammar_precompile_tests {
         assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
 
         let compiled = module
-            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("TokenTrie compile after a ParserDwa grammar precompile");
         assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
         assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");
@@ -1809,7 +1889,7 @@ mod boundary_gate_tests {
         let ignored = Grammar::from_lark("start: \"x\" \"y\"\n%ignore WS\nWS: /[ \\t]+/").unwrap()
             .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             )
             .expect("ignore grammar");
         assert_gate_agrees(&ignored, "ignore/whitespace");
@@ -1844,12 +1924,12 @@ mod boundary_strategy_tests {
             parent
                 .compile_with(
                     &vocab,
-                    CompileOptions::default().boundary_mask_strategy(strategy),
+                    CompileOptions::default().internal_boundary_mask_strategy(strategy),
                 )
                 .unwrap()
         };
-        let static_boundary = compile(BoundaryMaskStrategy::ParserDwa);
-        let token_trie = compile(BoundaryMaskStrategy::TokenTrie);
+        let static_boundary = compile(InternalBoundaryMaskStrategy::ParserDwa);
+        let token_trie = compile(InternalBoundaryMaskStrategy::TokenTrie);
         for prefix in [&[0u32][..0], &[0][..], &[0, 1][..]] {
             let mut a = static_boundary.start();
             let mut b = token_trie.start();
@@ -1884,18 +1964,18 @@ mod boundary_error_tests {
             parent.force_boundary_dwa_decline();
             parent.compile_with(
                 &vocab,
-                CompileOptions::default().boundary_mask_strategy(strategy),
+                CompileOptions::default().internal_boundary_mask_strategy(strategy),
             )
         };
-        let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
+        let error = compile(InternalBoundaryMaskStrategy::ParserDwa).unwrap_err();
         match (error.kind(), error.message()) {
             (crate::ErrorKind::ResourceLimit, message) => {
                 assert_eq!(message, crate::error::BOUNDARY_DWA_DECLINE);
-                assert!(message.contains("TokenTrie"));
+                assert!(message.contains("FastCompile"));
             }
             other => panic!("expected ResourceLimit, got {other:?}"),
         }
-        compile(BoundaryMaskStrategy::TokenTrie).expect("TokenTrie must bypass the static boundary parser");
+        compile(InternalBoundaryMaskStrategy::TokenTrie).expect("TokenTrie must bypass the static boundary parser");
     }
 
     #[test]
@@ -1915,17 +1995,36 @@ mod boundary_error_tests {
             parent.force_boundary_dwa_decline();
             parent.compile_with(
                 &vocab,
-                CompileOptions::default().boundary_mask_strategy(strategy),
+                CompileOptions::default().internal_boundary_mask_strategy(strategy),
             )
         };
-        compile(BoundaryMaskStrategy::ParserDwa).expect_err("explicit ParserDwa must report the budget decline");
-        let auto = compile(BoundaryMaskStrategy::Auto).expect("Auto must fall back to the token-trie boundary");
-        let token_trie = compile(BoundaryMaskStrategy::TokenTrie).expect("TokenTrie must build without the static boundary");
+        compile(InternalBoundaryMaskStrategy::ParserDwa).expect_err("explicit ParserDwa must report the budget decline");
+        let auto = compile(InternalBoundaryMaskStrategy::Auto).expect("Auto must fall back to the token-trie boundary");
+        let token_trie = compile(InternalBoundaryMaskStrategy::TokenTrie).expect("TokenTrie must build without the static boundary");
         let mut auto_state = auto.start();
         let mut trie_state = token_trie.start();
         assert_eq!(auto_state.mask(), trie_state.mask());
         assert!(auto_state.commit_token(0));
         assert!(trie_state.commit_token(0));
         assert_eq!(auto_state.mask(), trie_state.mask());
+    }
+}
+
+#[cfg(test)]
+mod public_preference_tests {
+    use super::*;
+
+    #[test]
+    fn public_fast_masks_falls_back_on_deterministic_parser_decline() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]).unwrap();
+        let source = Grammar::from_lark("start: \"a\"").unwrap();
+        let mut module = Module::new(&source);
+        module.force_parser_dwa_decline();
+        let preferred = CompileOptions::default().mask_strategy(MaskStrategy::FastMasks);
+        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FastCompile);
+        let expected = module.compile_with(&vocab, fast).unwrap().start().mask();
+        assert_eq!(module.compile_with(&vocab, preferred.clone()).unwrap().start().mask(), expected);
+        module.precompile_with(&vocab, preferred.clone()).unwrap();
+        assert_eq!(module.compile_with(&vocab, preferred).unwrap().start().mask(), expected);
     }
 }

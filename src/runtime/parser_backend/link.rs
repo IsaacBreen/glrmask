@@ -297,7 +297,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
 #[cfg(test)]
 mod candidate_tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend};
+    use crate::{BuildOptions, Grammar, InternalMaskStrategy, ParserBackend};
 
     #[test]
     fn direct_table_free_link_carries_persisted_candidate_sets_through_reload() {
@@ -335,7 +335,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(MaskStrategy::FAST_COMPILE).engine_backend(ParserBackend::TemplateDfa).merge_equivalent_tokens(true)
+                    .optimization(InternalMaskStrategy::FAST_COMPILE).engine_backend(ParserBackend::TemplateDfa).merge_equivalent_tokens(true)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();

@@ -33,10 +33,53 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// How masks are computed.
+/// How to trade compilation cost against the cost of computing masks.
+/// These are preferences, not engine selections or performance guarantees.
+/// A preferred plan may decline; another supported plan can be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
+    /// Let the library choose. The default.
+    #[default]
+    Auto,
+    /// Prefer lower preparation cost, even if later masks cost more.
+    FastCompile,
+    /// Prefer lower mask cost, even if preparation costs more.
+    FastMasks,
+}
+impl MaskStrategy {
+    /// Prefer lower preparation cost.
+    pub const FAST_COMPILE: Self = Self::FastCompile;
+    /// Prefer lower mask cost.
+    pub const FAST_MASKS: Self = Self::FastMasks;
+}
+
+/// How to trade preparation cost against mask cost at grammar boundaries.
+/// These preferences apply only where boundary work is needed; they do not
+/// guarantee a particular engine or performance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum BoundaryMaskStrategy {
+    /// Let the library choose. The default.
+    #[default]
+    Auto,
+    /// Prefer lower boundary preparation cost.
+    FastCompile,
+    /// Prefer lower cost of masks at boundaries.
+    FastMasks,
+}
+impl BoundaryMaskStrategy {
+    /// Prefer lower boundary preparation cost.
+    pub const FAST_COMPILE: Self = Self::FastCompile;
+    /// Prefer lower boundary mask cost.
+    pub const FAST_MASKS: Self = Self::FastMasks;
+}
+
+/// How masks are computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+#[doc(hidden)]
+pub enum InternalMaskStrategy {
     /// Reuses any precompiled work; otherwise [`ParserDwa`](Self::ParserDwa), or
     /// [`TokenTrie`](Self::TokenTrie) when that would be too large. The default.
     #[default]
@@ -49,30 +92,29 @@ pub enum MaskStrategy {
     TokenTrie(TokenTrie),
 }
 
-impl MaskStrategy {
+impl InternalMaskStrategy {
     /// Same as [`TokenTrie`](Self::TokenTrie) with the default settings.
     pub const FAST_COMPILE: Self = Self::TokenTrie(TokenTrie::new());
     /// Same as [`ParserDwa`](Self::ParserDwa).
     pub const FAST_MASKS: Self = Self::ParserDwa;
 }
 
-impl From<TokenTrie> for MaskStrategy {
+impl From<MaskStrategy> for InternalMaskStrategy {
+    fn from(value: MaskStrategy) -> Self { match value {
+        MaskStrategy::Auto => Self::Auto,
+        MaskStrategy::FastCompile => Self::FAST_COMPILE,
+        MaskStrategy::FastMasks => Self::ParserDwa,
+    } }
+}
+
+impl From<TokenTrie> for InternalMaskStrategy {
     fn from(settings: TokenTrie) -> Self {
         Self::TokenTrie(settings)
     }
 }
 
-/// Settings for [`MaskStrategy::TokenTrie`].
-///
-/// ```
-/// # use glrmask::{CompileOptions, ParserBackend, TokenTrie};
-/// let options = CompileOptions::default().mask_strategy(
-///     TokenTrie::new()
-///         .parser_backend(ParserBackend::TemplateDfa)
-///         .merge_equivalent_tokens(true),
-/// );
-/// # let _ = options;
-/// ```
+/// Internal token-trie settings, not part of the stable API.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TokenTrie {
     parser_backend: ParserBackend,
@@ -115,7 +157,8 @@ impl TokenTrie {
 /// How masks are computed at grammar boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
-pub enum BoundaryMaskStrategy {
+#[doc(hidden)]
+pub enum InternalBoundaryMaskStrategy {
     /// [`ParserDwa`](Self::ParserDwa), or [`TokenTrie`](Self::TokenTrie) when that
     /// would be too large. The default.
     #[default]
@@ -129,7 +172,7 @@ pub enum BoundaryMaskStrategy {
     TokenTrie,
 }
 
-impl BoundaryMaskStrategy {
+impl InternalBoundaryMaskStrategy {
     /// Same as [`TokenTrie`](Self::TokenTrie).
     pub const FAST_COMPILE: Self = Self::TokenTrie;
     /// Same as [`ParserDwa`](Self::ParserDwa).
@@ -290,9 +333,10 @@ impl<'a> IntoIterator for &'a Externs<'a> {
 }
 
 /// How the parser is represented and run when masks are computed with
-/// [`MaskStrategy::TokenTrie`].
+/// [`InternalMaskStrategy::TokenTrie`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
+#[doc(hidden)]
 pub enum ParserBackend {
     /// An LR table. Faster to compile, with slower masks. The default.
     #[default]
@@ -305,7 +349,7 @@ pub enum ParserBackend {
 #[derive(Debug, Clone)]
 pub struct BuildOptions {
     end_tokens: Vec<u32>,
-    optimization: MaskStrategy,
+    optimization: InternalMaskStrategy,
     engine_backend: ParserBackend,
     merge_equivalent_tokens: bool,
     parser_backend: ParserBackend,
@@ -316,7 +360,7 @@ impl Default for BuildOptions {
     fn default() -> Self {
         Self {
             end_tokens: Vec::new(),
-            optimization: MaskStrategy::default(),
+            optimization: InternalMaskStrategy::default(),
             engine_backend: ParserBackend::LrTable,
             merge_equivalent_tokens: false,
             parser_backend: ParserBackend::TemplateDfa,
@@ -332,8 +376,8 @@ impl BuildOptions {
         self
     }
 
-    /// Defaults to [`MaskStrategy::Auto`].
-    pub fn optimization(mut self, optimization: MaskStrategy) -> Self {
+    /// Defaults to [`InternalMaskStrategy::Auto`].
+    pub fn optimization(mut self, optimization: InternalMaskStrategy) -> Self {
         self.optimization = optimization;
         self
     }
@@ -383,12 +427,12 @@ impl BuildOptions {
 }
 
 /// Derive the internal engine from the public strategy.
-pub(crate) fn engine_for(strategy: MaskStrategy) -> Engine {
+pub(crate) fn engine_for(strategy: InternalMaskStrategy) -> Engine {
     match strategy {
-        MaskStrategy::Auto => Engine::Auto,
-        MaskStrategy::ParserDwa => Engine::ParserDwa,
-        MaskStrategy::TokenTrie(settings) if settings.merges() => Engine::MergedTokenTrie,
-        MaskStrategy::TokenTrie(_) => Engine::TokenTrie,
+        InternalMaskStrategy::Auto => Engine::Auto,
+        InternalMaskStrategy::ParserDwa => Engine::ParserDwa,
+        InternalMaskStrategy::TokenTrie(settings) if settings.merges() => Engine::MergedTokenTrie,
+        InternalMaskStrategy::TokenTrie(_) => Engine::TokenTrie,
     }
 }
 
@@ -407,11 +451,11 @@ impl Engine {
     /// Link options that reproduce this engine for an already prepared body.
     pub(crate) fn build_options(self) -> BuildOptions {
         let (optimization, engine_backend, merge_equivalent_tokens) = match self {
-            Self::Auto => (MaskStrategy::Auto, ParserBackend::LrTable, false),
-            Self::ParserDwa => (MaskStrategy::ParserDwa, ParserBackend::LrTable, false),
-            Self::TokenTrie => (MaskStrategy::FAST_COMPILE, ParserBackend::LrTable, false),
+            Self::Auto => (InternalMaskStrategy::Auto, ParserBackend::LrTable, false),
+            Self::ParserDwa => (InternalMaskStrategy::ParserDwa, ParserBackend::LrTable, false),
+            Self::TokenTrie => (InternalMaskStrategy::FAST_COMPILE, ParserBackend::LrTable, false),
             Self::MergedTokenTrie => (
-                MaskStrategy::TokenTrie(
+                InternalMaskStrategy::TokenTrie(
                     TokenTrie::new()
                         .parser_backend(ParserBackend::TemplateDfa)
                         .merge_equivalent_tokens(true),
@@ -1152,7 +1196,7 @@ impl Grammar {
         let slot_spans=Arc::new(declarations.spans.clone());
         // Compile this component locally. Grammar-child attachments remain
         // compiled values in the unlinked graph and are linked only by link_with,
-        // where the caller's MaskStrategy choice is finally known.
+        // where the caller's InternalMaskStrategy choice is finally known.
         let (local_grammar, source_bindings) = self.clone().into_source_only_and_bindings();
         let mut builder = ConstraintSpec::builder(local_grammar, vocab)?;
         let event_adapters=Arc::new(event_cache::ExactAdapterCache::default());
@@ -6589,7 +6633,7 @@ mod final_unlinked_optimization_tests {
             MaskMode::C.build_options(),
         ).unwrap();
         let fast_runtime = bound.link_with(
-            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
         ).unwrap();
         assert_dynamic_boundary(&fast_build);
         assert_static_boundary(&fast_runtime);
@@ -6601,7 +6645,7 @@ mod final_unlinked_optimization_tests {
             MaskMode::C.build_options(),
         ).unwrap());
         assert_static_boundary(&loaded.link_with(
-            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
         ).unwrap());
     }
 }
@@ -6790,7 +6834,7 @@ mod cached_parent_main_tests {
         let fast_runtime = grammar
             .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             )
             .unwrap();
         assert!(fast_build.uses_dynamic_runtime());
@@ -6915,7 +6959,7 @@ mod final_ordinary_dynamic_selection_tests {
     fn fast_build_uses_the_actual_dynamic_compiler_and_preserves_loaded_representation() {
         let v=Vocab::from_entries_unchecked(vec![(0,b"(".to_vec()),(1,b")".to_vec()),(2,b"()".to_vec()),(3,b"x".to_vec())]);
         let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#).unwrap();
-        let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
+        let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)).unwrap();
         let oracle=DynamicConstraint::compile(g.clone(),&v).unwrap().into_constraint();
         assert!(actual.uses_dynamic_runtime());
         assert!(!actual.has_template_parser()); assert!(actual.table.is_present());
@@ -7312,7 +7356,7 @@ mod module_build_overhead_tests {
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default()
-                    .optimization(MaskStrategy::ParserDwa)
+                    .optimization(InternalMaskStrategy::ParserDwa)
                     .end_tokens([0u32]),
             )
             .expect("direct build");
@@ -7342,7 +7386,7 @@ mod module_build_overhead_tests {
                 .compile_with_build_options(
                     &vocab,
                     BuildOptions::default()
-                        .optimization(MaskStrategy::ParserDwa)
+                        .optimization(InternalMaskStrategy::ParserDwa)
                         .end_tokens([0u32]),
                 )
                 .expect("warmup direct build");
@@ -7365,7 +7409,7 @@ mod module_build_overhead_tests {
                 .compile_with_build_options(
                     &vocab,
                     BuildOptions::default()
-                        .optimization(MaskStrategy::ParserDwa)
+                        .optimization(InternalMaskStrategy::ParserDwa)
                         .end_tokens([0u32]),
                 )
                 .expect("direct build");

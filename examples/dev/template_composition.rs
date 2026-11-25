@@ -1,7 +1,7 @@
 //! Public precompiled template composition; see docs/design/template-parser-composition.md.
 use glrmask::test_modes::MaskMode;
 fn main() -> glrmask::Result<()> {
-    use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+    use glrmask::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
     
     let vocab = Vocab::new(vec![
         (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()),
@@ -10,7 +10,7 @@ fn main() -> glrmask::Result<()> {
     let child = Grammar::from_ebnf(r#"start ::= "a"?"#)?.compile_with_build_options(
         &vocab,
         BuildOptions::default()
-            .optimization(MaskStrategy::ParserDwa)
+            .optimization(InternalMaskStrategy::ParserDwa)
             .parser_backend(ParserBackend::TemplateDfa),
     )?;
     let parent = Grammar::from_glrm(

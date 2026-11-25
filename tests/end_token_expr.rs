@@ -37,7 +37,7 @@ fn allowed(mask: &[u32], id: u32) -> bool {
 
 #[test]
 fn end_token_expression_fast_path_is_exact() {
-    for strategy in [MaskStrategy::ParserDwa, MaskStrategy::FAST_COMPILE] {
+    for strategy in [MaskStrategy::FastMasks, MaskStrategy::FastCompile] {
         let v = vocab();
         let c = root(body(), [99])
             .compile_with(&v, strategy.compile_options())

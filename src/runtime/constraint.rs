@@ -15145,7 +15145,7 @@ mod dense_internal_token_mask_tests {
 mod boundary_token_trie_tests {
     use super::*;
     use crate::__private::VocabExt as _;
-    use crate::{BuildOptions, Grammar, MaskStrategy, Vocab};
+    use crate::{BuildOptions, Grammar, InternalMaskStrategy, Vocab};
 
     fn vocab() -> Vocab {
         let entries = [
@@ -15195,7 +15195,7 @@ mod boundary_token_trie_tests {
             let started = std::time::Instant::now();
             let mut constraint = match Grammar::from_json_schema(&source).unwrap().compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             ) {
                 Ok(constraint) => constraint,
                 Err(error) => {
@@ -15228,7 +15228,7 @@ mod boundary_token_trie_tests {
         let mut plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap()
             .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             )
             .expect("plain");
         assert_matches_reference(&mut plain, "plain");
@@ -15241,7 +15241,7 @@ WS: /[ \t]+/
         ).unwrap()
         .compile_with_build_options(
             &vocab,
-            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
         )
         .expect("ignore");
         assert_matches_reference(&mut ignored, "ignore");
@@ -15251,7 +15251,7 @@ WS: /[ \t]+/
         ).unwrap()
         .compile_with_build_options(
             &vocab,
-            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
         )
         .expect("schema");
         assert_matches_reference(&mut schema, "schema");

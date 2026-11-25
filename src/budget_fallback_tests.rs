@@ -18,7 +18,7 @@ use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::build_budget::{TestBudgetLimit, DEFAULT_LIMIT};
-use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -411,7 +411,7 @@ fn concurrent_compiles_keep_separate_budgets() {
             let _limit = TestBudgetLimit::set(1_000);
             let result = Grammar::from_json_schema(SCHEMA).unwrap().compile_with_build_options(
                 &real_vocab(),
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             );
             let _ = expect_strategy_decline(result, "concurrent tiny-budget compile");
         });
@@ -419,7 +419,7 @@ fn concurrent_compiles_keep_separate_budgets() {
             Grammar::from_json_schema(SCHEMA).unwrap()
                 .compile_with_build_options(
                     &real_vocab(),
-                    BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                    BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
                 )
                 .expect("default-budget compile")
                 .parser_backend()

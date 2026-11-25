@@ -66,16 +66,15 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 
 `compile` and `precompile` take `{maskStrategy, boundaryMaskStrategy}`.
 
-| `MaskStrategy` | Value | |
+| `MaskStrategy` | Value | Preference |
 | --- | --- | --- |
-| `Auto` | `'auto'` | The default. Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be too large. |
-| `ParserDwa` | `'parser-dwa'` | Slowest to compile, with the fastest masks. |
-| `TokenTrie` | `'token-trie'` | Fastest to compile, with slower masks. |
+| `Auto` | `'auto'` | Let the library choose (default). |
+| `FastCompile` | `'fast-compile'` | Prefer lower preparation cost. |
+| `FastMasks` | `'fast-masks'` | Prefer lower mask cost. |
 
-`FastMasks` and `FastCompile` are aliases for `ParserDwa` and `TokenTrie`. To change `TokenTrie`'s settings, pass
-`{kind: 'token-trie', parserBackend: ParserBackend.TemplateDfa, mergeEquivalentTokens: true}` as `maskStrategy`.
-`BoundaryMaskStrategy` has the same three values, for the boundaries where a grammar meets a bound extern. See [mask
-strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
+`BoundaryMaskStrategy` makes the same independent choice at grammar boundaries. These preferences do not
+guarantee a specific implementation or speed; another supported plan may be selected on a deterministic decline.
+See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
 ## Generating
 

@@ -197,19 +197,19 @@ impl LexerDefinition {
 #[derive(Debug, Clone)]
 pub struct TemplateBuildOptions {
     end_tokens: Vec<u32>,
-    optimization: crate::MaskStrategy,
+    optimization: crate::InternalMaskStrategy,
 }
 
 impl Default for TemplateBuildOptions {
     fn default() -> Self {
-        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::FAST_COMPILE }
+        Self { end_tokens: Vec::new(), optimization: crate::InternalMaskStrategy::FAST_COMPILE }
     }
 }
 
 impl TemplateBuildOptions {
     /// Select eager static masking with ParserDwa, or the shared dynamic
     /// mask engine with TokenTrie/Auto. Default is TokenTrie.
-    pub fn optimization(mut self, optimization: crate::MaskStrategy) -> Self {
+    pub fn optimization(mut self, optimization: crate::InternalMaskStrategy) -> Self {
         self.optimization = optimization;
         self
     }
@@ -337,7 +337,7 @@ impl ParserProgram {
         names: Vec<String>, ignore: Option<u32>, specials: Vec<crate::runtime::SpecialTokenTerminal>,
         vocab: &Vocab, options: TemplateBuildOptions) -> Result<Constraint> {
         let mut constraint = match options.optimization {
-            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenTrie(_) => {
+            crate::InternalMaskStrategy::Auto | crate::InternalMaskStrategy::TokenTrie(_) => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
                     tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,
@@ -346,7 +346,7 @@ impl ParserProgram {
                 inner.rebuild_dynamic_runtime_caches();
                 inner
             }
-            crate::MaskStrategy::ParserDwa => {
+            crate::InternalMaskStrategy::ParserDwa => {
                 crate::error::catch_internal_invariant(|| {
                     static_compile::compile(self, tokenizer, ignore, vocab, &specials)
                 })??

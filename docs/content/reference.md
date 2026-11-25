@@ -136,37 +136,24 @@ Tokens with no bytes, such as tool-call markers, are special tokens. They never 
 
 ## Mask strategies
 
-`MaskStrategy` chooses how masks are computed:
+`MaskStrategy` expresses a cost preference:
 
-- `ParserDwa` builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
-- `TokenTrie` computes each mask by walking the vocabulary. Fastest to compile, with slower masks. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).
-- `Auto`, the default, reuses any precompiled work; otherwise it uses `ParserDwa`, or `TokenTrie` when that would be too large.
+- `Auto`: let the library choose. The default.
+- `FastCompile`: prefer lower compilation cost, even if later masks cost more.
+- `FastMasks`: prefer lower mask cost, even if compilation costs more.
 
-`FAST_MASKS` and `FAST_COMPILE` are aliases for `ParserDwa` and `TokenTrie`.
+These are distinct preferences, not concrete engine selections or speed guarantees. If a preferred plan declines
+on applicability or deterministic size grounds, another supported plan may be used. Invalid input, corrupt
+artifacts and operational resource failures are not hidden by fallback. All supported plans preserve mask semantics.
+Retained compatible work may be reused in any mode.
 
-`TokenTrie` has two settings:
-
-- `parser_backend` chooses how the parser is represented: `LrTable`, the default, or `TemplateDfa`, which is slower to compile, with faster masks.
-- `merge_equivalent_tokens` merges tokens that the grammar treats the same, so masks walk fewer tokens. It is off by default. Tokens are not merged in a composition that includes precompiled parts.
+`BoundaryMaskStrategy` expresses the same three preferences for applicable grammar boundary work, independently
+of overall strategy. Pass the preferences to `compile` and `precompile` on either Grammar or Module.
 
 ```python
-constraint = grammar.compile(vocab, mask_strategy=glrmask.TokenTrie(
-    parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
+constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
+                             boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE)
 ```
-
-`BoundaryMaskStrategy` chooses how masks are computed at grammar boundaries, where a grammar meets a bound extern:
-
-- `ParserDwa` builds a parser DWA across each boundary. Slower to compile, with faster masks.
-- `TokenTrie` walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
-- `Auto`, the default, uses `ParserDwa`, or `TokenTrie` when that would be too large.
-
-Every strategy produces the same masks; they differ only in speed. A strategy you choose explicitly reports an error if
-it can't be used, for example because its automaton would be too large. Only `Auto` falls back.
-
-Pass strategies to `compile` and `precompile` (in Python, as keyword arguments). They apply to the whole compile,
-including bound grammars. Precompiled work is never thrown away. Each precompiled part keeps its masks unless you
-request a faster strategy for it, and only the other parts are compiled now. Parts compiled now that link with
-precompiled parts use `TemplateDfa`.
 
 ## Errors
 

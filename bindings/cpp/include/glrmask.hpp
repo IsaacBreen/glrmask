@@ -21,43 +21,18 @@ using TokenRange = glrmask_token_range;
 /// A byte buffer.
 using Bytes = std::vector<std::uint8_t>;
 
-/// How masks are computed.
+/// Cost preferences, not engine selections or performance guarantees.
 enum class MaskStrategy : std::uint32_t {
-    /// Reuses any precompiled work; otherwise `ParserDwa`, or `TokenTrie` when that would be
-    /// too large. The default.
-    Auto = 0,
-    /// Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
-    ParserDwa = 1,
-    /// Computes each mask by walking the vocabulary. Fastest to compile, with slower masks.
-    /// Its settings are in `CompileOptions::token_trie`.
-    TokenTrie = 2,
-    /// Same as `TokenTrie`.
-    FastCompile = TokenTrie,
-    /// Same as `ParserDwa`.
-    FastMasks = ParserDwa
+    Auto = GLRMASK_MASK_STRATEGY_AUTO,
+    FastCompile = GLRMASK_MASK_STRATEGY_FAST_COMPILE,
+    FastMasks = GLRMASK_MASK_STRATEGY_FAST_MASKS
 };
 
-/// How masks are computed at grammar boundaries.
+/// Cost preferences for masks at grammar boundaries.
 enum class BoundaryMaskStrategy : std::uint32_t {
-    /// `ParserDwa`, or `TokenTrie` when that would be too large. The default.
-    Auto = 0,
-    /// Builds a parser DWA across each boundary. Slower to compile, with faster masks. Throws
-    /// `Error` if it would be too large.
-    ParserDwa = 1,
-    /// Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
-    TokenTrie = 2,
-    /// Same as `TokenTrie`.
-    FastCompile = TokenTrie,
-    /// Same as `ParserDwa`.
-    FastMasks = ParserDwa
-};
-
-/// How the parser is represented and run when masks are computed with `MaskStrategy::TokenTrie`.
-enum class ParserBackend : std::uint32_t {
-    /// An LR table. Faster to compile, with slower masks. The default.
-    LrTable = 0,
-    /// Template DFAs. Slower to compile, with faster masks.
-    TemplateDfa = 1
+    Auto = GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO,
+    FastCompile = GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE,
+    FastMasks = GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS
 };
 
 /// What an extern can be bound to.
@@ -139,32 +114,18 @@ public:
     }
 };
 
-/// Settings for `MaskStrategy::TokenTrie`.
-struct TokenTrie {
-    /// How the parser is represented. Defaults to `ParserBackend::LrTable`.
-    ParserBackend parser_backend = ParserBackend::LrTable;
-    /// Whether tokens that the grammar treats the same are merged, so masks walk fewer
-    /// tokens. Off by default. Tokens are not merged in a composition that includes
-    /// precompiled parts.
-    bool merge_equivalent_tokens = false;
-};
-
 /// Options for compiling a grammar or module.
 struct CompileOptions {
     /// How masks are computed. Defaults to `MaskStrategy::Auto`.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
     /// How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy::Auto`.
     BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
-    /// Settings for `MaskStrategy::TokenTrie`. Leave at the defaults for any other strategy.
-    TokenTrie token_trie{};
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         glrmask_compile_options options{};
         (void)glrmask_compile_options_init(&options, sizeof(options));
         options.mask_strategy = static_cast<std::uint32_t>(mask_strategy);
         options.boundary_mask_strategy = static_cast<std::uint32_t>(boundary_mask_strategy);
-        options.token_trie.parser_backend = static_cast<std::uint32_t>(token_trie.parser_backend);
-        options.token_trie.merge_equivalent_tokens = static_cast<std::uint32_t>(token_trie.merge_equivalent_tokens);
         return options;
     }
 };

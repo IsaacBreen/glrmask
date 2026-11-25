@@ -2,15 +2,12 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GLRMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GLRMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[
   {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
-  {label:'parser-dwa',options:{maskStrategy:MaskStrategy.ParserDwa}},
-  {label:'token-trie',options:{maskStrategy:MaskStrategy.TokenTrie}},
-  {label:'token-trie+template-dfas',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa}}},
-  {label:'token-trie+template-dfas+merge',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}}},
-  {label:'token-trie+lr+merge',options:{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.LrTable,mergeEquivalentTokens:true}}},
+  {label:'fast-compile',options:{maskStrategy:MaskStrategy.FastCompile}},
+  {label:'fast-masks',options:{maskStrategy:MaskStrategy.FastMasks}},
 ];
 const b=s=>Buffer.from(s);
 const vocab=()=>new Vocab([[0,b('a')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
@@ -104,7 +101,7 @@ test('an active JS timer continues during native compilation',{timeout:60000},as
   const g=Grammar.fromLark('start: '+values.join(' | '));
   const v=new Vocab(Array.from({length:128},(_,i)=>[i,Buffer.from([i])]));
   let beats=0;const interval=setInterval(()=>beats++,1);
-  try {await g.compile(v,{maskStrategy:MaskStrategy.ParserDwa});} finally {clearInterval(interval);}
+  try {await g.compile(v,{maskStrategy:MaskStrategy.FastMasks});} finally {clearInterval(interval);}
   assert.ok(beats>0,'native compilation blocked the JavaScript event loop');
 });
 
@@ -134,11 +131,18 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'lr-table'}}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',bogus:true}}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{parserBackend:ParserBackend.LrTable}),TypeError);
+  assert.throws(()=>simple().compileSync(v,{parserBackend:'lr-table'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:true}),TypeError);
-  // An LR merged request is accepted.
-  const merged=simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:true}});
-  assert.ok(allowed(merged.start().mask(),0));
+  for(const obsolete of ['parser-dwa','token-trie',1,2,{kind:'token-trie',mergeEquivalentTokens:true}])
+    assert.throws(()=>simple().compileSync(v,{maskStrategy:obsolete}),TypeError);
+  assert.equal(Object.keys(MaskStrategy).length,3);
+  assert.equal(new Set(Object.values(MaskStrategy)).size,3);
+  assert.equal(Object.keys(BoundaryMaskStrategy).length,3);
+  assert.equal(require('../index.cjs').ParserBackend,undefined);
+  for(const maskStrategy of Object.values(MaskStrategy)) for(const boundaryMaskStrategy of Object.values(BoundaryMaskStrategy)){
+    const c=simple().compileSync(v,{maskStrategy,boundaryMaskStrategy}), state=c.start();
+    assert.ok(allowed(state.mask(),0));
+  }
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);

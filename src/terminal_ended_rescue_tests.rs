@@ -22,7 +22,7 @@ use crate::compiler::terminal_ended_rescue::{
 };
 use crate::compiler::grammar::transforms::set_test_epsfree_prepass;
 use crate::import::static_route_recorded;
-use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 // One single-byte token per terminal used by the witnesses. Keeping the
 // vocabulary small keeps the exact oracle and the TokenTrie comparison focused
@@ -1040,7 +1040,7 @@ fn rescue_lowering_equals_the_normal_static_route() {
         grammar
             .compile_with_build_options(
                 target,
-                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
             )
             .unwrap_or_else(|error| panic!("{label} normal compile failed: {error}"));
         assert!(

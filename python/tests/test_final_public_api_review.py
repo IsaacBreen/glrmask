@@ -10,10 +10,8 @@ import glrmask
 
 MODES = [
     {},
-    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_COMPILE},
 ]
 
 
@@ -41,14 +39,10 @@ def _bound_snapshot(source, name, value):
 def test_public_types_exist_without_exposing_backend_selection():
     for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "TokenSet", "MaskStrategy", "BoundaryMaskStrategy"]:
         assert hasattr(glrmask, name), name
-    for name in ["AUTO", "FAST_COMPILE", "FAST_MASKS", "PARSER_DWA", "TOKEN_TRIE"]:
-        assert hasattr(glrmask.MaskStrategy, name), name
-    assert glrmask.MaskStrategy.FAST_COMPILE is glrmask.MaskStrategy.TOKEN_TRIE
-    assert glrmask.MaskStrategy.FAST_MASKS is glrmask.MaskStrategy.PARSER_DWA
-    for name in ["AUTO", "FAST_COMPILE", "FAST_MASKS", "PARSER_DWA", "TOKEN_TRIE"]:
-        assert hasattr(glrmask.BoundaryMaskStrategy, name), name
-    assert glrmask.BoundaryMaskStrategy.FAST_COMPILE is glrmask.BoundaryMaskStrategy.TOKEN_TRIE
-    assert glrmask.BoundaryMaskStrategy.FAST_MASKS is glrmask.BoundaryMaskStrategy.PARSER_DWA
+    for strategy in (glrmask.MaskStrategy, glrmask.BoundaryMaskStrategy):
+        assert len({strategy.AUTO, strategy.FAST_COMPILE, strategy.FAST_MASKS}) == 3
+        assert not hasattr(strategy, "PARSER_DWA")
+        assert not hasattr(strategy, "TOKEN_TRIE")
 
 
 def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():

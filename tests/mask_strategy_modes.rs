@@ -1,6 +1,6 @@
 //! The public mask-strategy surface: the A/B/C/D TokenTrie configurations.
 use glrmask::test_modes::MaskMode;
-use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, ParserBackend, TokenTrie, Vocab};
+use glrmask::{CompileOptions, Grammar, InternalMaskStrategy, Module, ParserBackend, TokenTrie, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new::<Vec<u8>>(vec![
@@ -25,7 +25,7 @@ fn vocab() -> Vocab {
 }
 
 fn d_options() -> CompileOptions {
-    CompileOptions::default().mask_strategy(
+    CompileOptions::default().internal_mask_strategy(
         TokenTrie::new()
             .parser_backend(ParserBackend::LrTable)
             .merge_equivalent_tokens(true),
@@ -33,7 +33,7 @@ fn d_options() -> CompileOptions {
 }
 
 fn a_options() -> CompileOptions {
-    CompileOptions::default().mask_strategy(TokenTrie::new())
+    CompileOptions::default().internal_mask_strategy(TokenTrie::new())
 }
 
 fn assert_same_masks(a: &glrmask::Constraint, b: &glrmask::Constraint) {
@@ -199,9 +199,9 @@ fn mask_strategy_accepts_token_trie_settings_directly() {
     let grammar = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
     let d = TokenTrie::new().merge_equivalent_tokens(true);
     let compiled = grammar
-        .compile_with(&vocab, CompileOptions::default().mask_strategy(d))
+        .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(d))
         .unwrap();
     assert_eq!(compiled.parser_backend(), ParserBackend::LrTable);
     assert!(compiled.runtime_is_grammar_quotiented());
-    assert_eq!(MaskStrategy::FAST_COMPILE, MaskStrategy::TokenTrie(TokenTrie::new()));
+    assert_eq!(InternalMaskStrategy::FAST_COMPILE, InternalMaskStrategy::TokenTrie(TokenTrie::new()));
 }

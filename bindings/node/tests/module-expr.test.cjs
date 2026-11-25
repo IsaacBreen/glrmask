@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,ParserBackend,GLRMaskError}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,GLRMaskError}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]]);
 const source=(text='a')=>Grammar.fromLark(`start: "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
@@ -14,7 +14,7 @@ test('Module: copy and root-only final options',()=>{
 
   const configured=original.clone();
   const child=new Module(source());
-  assert.equal(child.precompileSync(v,{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true},boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie}),undefined);
+  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks,boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile}),undefined);
   accept(child,v,[1]);
 
   assert.equal(configured.bind('child',child),undefined);
@@ -22,7 +22,7 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const options={maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa},boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
+  const options={maskStrategy:MaskStrategy.FastMasks,boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile};
   const root=new Module(Grammar.fromGlrm('start s extern grammar item nt s = item'));
   root.bind('item',Expr.sequence(configured,new TokenSet([63])));
   const state=root.compileSync(v,options).start();
@@ -33,9 +33,9 @@ test('Module: copy and root-only final options',()=>{
 test('Grammar: precompile returns a bindable Module with retained work',async()=>{
   const v=vocab();
   const child=source();
-  const parent=host().precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa});
+  const parent=host().precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
   assert.ok(parent instanceof Module);
-  parent.bind('child',child.precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa}));
+  parent.bind('child',child.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks}));
   const state=parent.compileSync(v).start();
   assert.ok(allowed(state,4));assert.ok(state.commitToken(4));assert.ok(state.isAccepting());
 
@@ -44,25 +44,25 @@ test('Grammar: precompile returns a bindable Module with retained work',async()=
   assert.equal(parent.compileSync(v).start().isAccepting(),reference.compileSync(v).start().isAccepting());
 
   // The asynchronous spelling returns the same bindable Module.
-  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
+  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile});
   assert.ok(asyncParent instanceof Module);
   asyncParent.bind('child',await child.precompile(v));
   accept(asyncParent,v,[4]);
 
   // Retained work is serialized, survives a round-trip, and a TokenTrie
   // compile keeps it instead of rebuilding dynamically.
-  const retained=source().precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa});
+  const retained=source().precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
   const bytes=retained.saveSync();
   assert.ok(bytes.length>new Module(source()).saveSync().length);
   const restored=Module.loadSync(bytes,v);
-  assert.deepEqual(Array.from(restored.compileSync(v,{maskStrategy:MaskStrategy.TokenTrie}).start().mask()),
+  assert.deepEqual(Array.from(restored.compileSync(v,{maskStrategy:MaskStrategy.FastCompile}).start().mask()),
     Array.from(new Module(source()).compileSync(v).start().mask()));
 });
 
 test('Module: retained work round-trips without stored settings',()=>{
   const v=vocab();
   const m=new Module(source());
-  m.precompileSync(v,{maskStrategy:MaskStrategy.TokenTrie,boundaryMaskStrategy:BoundaryMaskStrategy.ParserDwa});
+  m.precompileSync(v,{maskStrategy:MaskStrategy.FastCompile,boundaryMaskStrategy:BoundaryMaskStrategy.FastMasks});
   const bytes=m.saveSync();
   const loaded=Module.loadSync(bytes,v);
   accept(loaded,v,[1]);
@@ -158,7 +158,7 @@ for(const parentPrepared of [false,true])for(const childPrepared of [false,true]
   test(`Module: saved mixed graph parent=${parentPrepared}, child=${childPrepared}`,async()=>{
     const v=vocab(),parent=new Module(host()),child=new Module(mark());
     if(parentPrepared)assert.equal(await parent.precompile(v),undefined);
-    if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:{kind:'token-trie',parserBackend:ParserBackend.TemplateDfa,mergeEquivalentTokens:true}}),undefined);
+    if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.FastMasks}),undefined);
     child.bind('MARK',new TokenSet([8]));
     parent.bind('child',child);const bytes=await parent.save();
     const loaded=await Module.load(bytes);

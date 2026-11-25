@@ -505,7 +505,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 #[cfg(test)]
 mod reset_projection_tests {
     use super::*;
-    use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
+    use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, Vocab};
 
     #[test]
     fn medium_and_large_reset_projections_match_generic_lexer_execution() {
@@ -560,7 +560,7 @@ mod reset_projection_tests {
         let vocab = Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
         for cached in [false,true] {
             let mut constraint = Grammar::from_glrm("start root; t A=/ab*/; nt root=A;").unwrap()
-                .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
+                .compile_with_build_options(&vocab,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)).unwrap();
             // The public analysis union retains distinct states but shares
             // terminal IDs, exactly the overlapping-lane case under test.
             let tokenizer = Tokenizer::disjoint_union_for_analysis(

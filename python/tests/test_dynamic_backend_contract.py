@@ -52,10 +52,8 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(partition):
 
 MODES = [
     {},
-    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_COMPILE},
 ]
 
 

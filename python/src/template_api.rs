@@ -86,7 +86,7 @@ impl PyParserProgram {
         let mut options = TemplateBuildOptions::default().end_tokens(end_tokens.unwrap_or_default());
         let strategy = resolve_mask_strategy(mask_strategy.or(optimization))?;
         if mask_strategy.is_some() || optimization.is_some() {
-            options = options.optimization(strategy);
+            options = options.optimization(strategy.into());
         }
         let vocab = vocab.inner.clone();
         py.detach(|| self.inner.compile_with(&lexer, &vocab, options))

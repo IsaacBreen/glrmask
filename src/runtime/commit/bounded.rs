@@ -543,7 +543,7 @@ pub(crate) fn mask_for_states_at_most(states:&[ConstraintState],max_allowed:usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions,Grammar,MaskStrategy,TokenSet,Vocab};
+    use crate::{BuildOptions,Grammar,InternalMaskStrategy,TokenSet,Vocab};
 
     const MODES:[MaskMode;6]=MaskMode::ALL;
     fn ids(mask:&[u32])->Vec<u32> {
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn ambiguous_query_stops_after_two_final_witnesses_without_filling_cache() {
         let v=Vocab::from_entries_unchecked((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
-        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)).unwrap();
+        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)).unwrap();
         let s=c.start();let before=s.mask_cache.lock().unwrap().is_some();
         BYTE_PROOFS.with(|n|n.set(0));assert_eq!(s.probe_one_token().unwrap(),AtMostOne::MoreThanOne);
         let examined=BYTE_PROOFS.with(|n|n.get());assert!(examined<40,"performed {examined} byte proofs for a two-witness query");

@@ -1,7 +1,23 @@
 /// The one typed decline that is a boundary request, not a mask strategy
-/// decline: `BoundaryMaskStrategy::ParserDwa` refused the boundary parser DWA.
+/// decline: `InternalBoundaryMaskStrategy::ParserDwa` refused the boundary parser DWA.
 pub(crate) const BOUNDARY_DWA_DECLINE: &str =
-    "the parser DWA for a grammar boundary would be too large; use the Auto or TokenTrie boundary mask strategy";
+    "the parser DWA for a grammar boundary would be too large; use the Auto or FastCompile boundary mask strategy";
+
+// Only deterministic plan-specific refusals qualify for the public soft
+// preferences. A general ResourceLimit (allocation failure, graph size,
+// parser control closure, etc.) is not a reason to conceal a real failure.
+pub(crate) fn is_soft_strategy_decline(error: &Error) -> bool {
+    match error.kind() {
+        ErrorKind::StrategyUnsupported => true,
+        ErrorKind::ResourceLimit => {
+            let m = error.message();
+            m.ends_with(" build budget exhausted")
+                || m == "the grammar is too large to normalize"
+                || (m.starts_with("projected L1 partition ") && m.contains("exceeding GLRMASK_L1_SINGLE_MAX_STATES="))
+        }
+        _ => false,
+    }
+}
 
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
@@ -250,4 +266,12 @@ mod resource_limit_tests {
         assert_eq!(error.to_string(), "resource limit exceeded: projected L1 state budget");
         assert_eq!(catch_internal_invariant(|| 42).unwrap(), 42);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn soft_preference_fallback_distinguishes_resource_failures() {
+    assert!(is_soft_strategy_decline(&Error::ResourceLimit("the grammar is too large to normalize".into())));
+    assert!(!is_soft_strategy_decline(&Error::ResourceLimit("not enough memory for a table of 128 token IDs".into())));
+    assert!(!is_soft_strategy_decline(&Error::InvalidInput("bad input".into())));
 }

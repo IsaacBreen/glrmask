@@ -5,7 +5,7 @@ import pytest
 
 VOCAB = {0: b'x', 1: b'y', 2: b'z', 17: b'm', 18: b'm', 19: b'', 20: b''}
 LIFECYCLES = ['prebound', 'open', 'open-loaded']
-STRATEGIES = [g.MaskStrategy.PARSER_DWA, g.MaskStrategy.FAST_COMPILE]
+STRATEGIES = [g.MaskStrategy.FAST_MASKS, g.MaskStrategy.FAST_COMPILE]
 
 
 def prepared(source, vocab, lifecycle, strategy):

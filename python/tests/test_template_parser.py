@@ -33,12 +33,8 @@ def compile_grammar(grammar, vocab, **options):
     if isinstance(grammar, GrammarCalls): grammar = grammar.grammar
     if "optimization" in options:
         options["mask_strategy"] = options.pop("optimization")
-    if "parser_backend" in options:
-        backend = options.pop("parser_backend")
-        merge = options.pop("merge_equivalent_tokens", False)
-        options["mask_strategy"] = glrmask.TokenTrie(
-            parser_backend=backend, merge_equivalent_tokens=merge)
-        return glrmask._internal.compile_with_backend(grammar, vocab, **options)
+    if "parser_backend" in options or "merge_equivalent_tokens" in options:
+        raise TypeError("Python does not expose engine tuning")
     return grammar.compile(vocab, **options)
 
 def link_module(module, vocab, **options):
@@ -50,10 +46,6 @@ def link_module(module, vocab, **options):
         root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
         root.bind(BODY=module, END=glrmask.TokenSet(end))
         module = root
-        # Equivalent-token merging is not supported across precompiled boundaries.
-        strategy = options.get("mask_strategy")
-        if isinstance(strategy, glrmask.TokenTrie) and strategy.merge_equivalent_tokens:
-            options["mask_strategy"] = glrmask.TokenTrie(parser_backend=strategy.parser_backend)
     return module.compile(vocab, **options)
 
 def grammar_from_lark(source): return GrammarCalls(glrmask.Grammar.from_lark(source))
@@ -125,9 +117,9 @@ def depth_after(word, depth=0, ignore_whitespace=True):
 
 
 MODES = [
-    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
-    {"mask_strategy": glrmask.TokenTrie(
-        parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
+    {},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_COMPILE},
 ]
 
 
@@ -147,12 +139,12 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
     candidate = compile_grammar(
         grammar,
         vocab,
-        **{**mode, "parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA},
+        **mode,
     )
-    assert glrmask._internal.parser_backend(reference) == glrmask._internal.ParserBackend.TEMPLATE_DFA
+    reference_backend = glrmask._internal.parser_backend(reference)
     reference_bytes = reference.save()
     for compiled in representations(reference, vocab) + representations(candidate, vocab):
-        assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
+        assert glrmask._internal.parser_backend(compiled) == reference_backend
         for prefix in [b"", b"(", b"()", b"(()", b"((()))", b"()("]:
             left, right = reference.start(), compiled.start()
             assert left.commit_bytes(prefix)
@@ -183,7 +175,7 @@ def test_python_data_only_program_matches_literal_language(mode, as_json):
     # The implementation owns the validated program, not the mutable mapping.
     definition["terminals"].clear()
     words, vocab = words_and_vocab()
-    compiled = program.compile(vocab, [b"(", b")", "[ ]+"], ignore_terminal=2, mask_strategy=mode["mask_strategy"], end_tokens=[64])
+    compiled = program.compile(vocab, [b"(", b")", "[ ]+"], ignore_terminal=2, mask_strategy=mode.get("mask_strategy", glrmask.MaskStrategy.AUTO), end_tokens=[64])
     del program, definition
     gc.collect()
     for compiled in representations(compiled, vocab):
@@ -237,22 +229,8 @@ def test_python_prepared_composition_uses_native_defaults(mode):
     body = grammar_from_lark('start: "a"')
     # Standalone representations and composed representations are both native;
     # executable roots are not implicitly converted into reusable components.
-    strategy = mode.get("mask_strategy")
-    standalone_backend = (
-        glrmask._internal.ParserBackend.LR_TABLE
-        if isinstance(strategy, glrmask.TokenTrie)
-        and strategy.merge_equivalent_tokens
-        and strategy.parser_backend is glrmask.ParserBackend.LR_TABLE
-        else glrmask._internal.ParserBackend.TEMPLATE_DFA
-    )
-    for root, expected in [
-        (body.compile(vocab, **mode), standalone_backend),
-        (body.compile(vocab, mask_strategy=glrmask.TokenTrie(
-            parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)),
-         glrmask._internal.ParserBackend.TEMPLATE_DFA),
-    ]:
+    for root in [body.compile(vocab, **mode), body.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS)]:
         for restored in representations(root, vocab):
-            assert glrmask._internal.parser_backend(restored) == expected
             assert restored.start().mask().tolist() == [True, False, False]
     prepared = body.prepare(vocab)
     parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
@@ -308,15 +286,11 @@ def test_python_backend_selection_does_not_accept_untyped_flags():
             compile_grammar(grammar, vocab, parser_backend=value)
 
 
-def test_python_explicit_lr_merged_request_is_supported():
+def test_python_explicit_lr_merged_request_is_not_exposed():
     vocab = glrmask.Vocab({0: b"a"})
-    grammar = grammar_from_lark('start: "a"')
-    compiled = compile_grammar(
-        grammar, vocab,
-        parser_backend=glrmask._internal.ParserBackend.LR_TABLE,
-        merge_equivalent_tokens=True,
-    )
-    assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.LR_TABLE
+    grammar = glrmask.Grammar.from_lark('start: "a"')
+    with pytest.raises(TypeError):
+        grammar.compile(vocab, parser_backend="lr-table", merge_equivalent_tokens=True)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -353,13 +327,11 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
             assert not state.is_accepting()
         state = compiled.start()
         assert not state.commit_bytes(b'p"x:' + b"a" * 4999)
-@pytest.mark.parametrize("backend", [None, glrmask._internal.ParserBackend.TEMPLATE_DFA])
 @pytest.mark.parametrize("mode", MODES)
-def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, mode):
+def test_python_nullable_lexical_body_survives_compiled_child_binding(mode):
     tokens = {0: b"x", 1: b"a", 2: b"y", 3: b"xay", 4: b"xy",
               5: b"ay", 6: b"aa", 7: b"yx", 8: b""}
     vocab = glrmask.Vocab(tokens)
-    selection = {} if backend is None else {"parser_backend": backend}
     prepared = grammar_from_glrm(
         'start root t A = /a?/ nt root = A').prepare(vocab)
     parent = grammar_from_glrm(
@@ -383,7 +355,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                     if token_id == 8:
                         continue
                     expected = any(complete.startswith(prefix + word) for complete in language)
-                    assert bool(mask[token_id]) == expected, (backend, mode, prefix, word)
+                    assert bool(mask[token_id]) == expected, (mode, prefix, word)
                     if expected:
                         branch = compiled.start()
                         assert branch.commit_bytes(prefix)

@@ -2,7 +2,7 @@
 //! Usage: template_schema_reparse_oracle SCHEMA_JSON REPARSED_GLRM VOCAB_DUMP OUTPUT_JSON
 use std::{fs, io::Write, path::Path, time::Instant};
 
-use glrmask::{BuildOptions, Constraint, MaskStrategy, ParserBackend, Vocab};
+use glrmask::{BuildOptions, Constraint, InternalMaskStrategy, ParserBackend, Vocab};
 use glrmask::Grammar;
 use glrmask::__private::parser_backend_report;
 use serde_json::json;
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
     let source = fs::read_to_string(&args[2])?;
     let (vocab, vocab_count) = read_vocab(Path::new(&args[3]))?;
     let options = BuildOptions::default()
-        .optimization(MaskStrategy::ParserDwa)
+        .optimization(InternalMaskStrategy::ParserDwa)
         .parser_backend(ParserBackend::TemplateDfa);
     let started = Instant::now();
     let original = Grammar::from_json_schema(&schema)?.compile_with_build_options(&vocab, options.clone())?;

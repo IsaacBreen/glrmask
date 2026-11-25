@@ -49,76 +49,16 @@ function checkedOptions(value, allowed) {
 }
 
 const MaskStrategy = Object.freeze({
-  Auto: 'auto',
-  ParserDwa: 'parser-dwa',
-  TokenTrie: 'token-trie',
-  FastCompile: 'token-trie',
-  FastMasks: 'parser-dwa',
+  Auto: 'auto', FastCompile: 'fast-compile', FastMasks: 'fast-masks',
 });
-
 const BoundaryMaskStrategy = Object.freeze({
-  Auto: 'auto',
-  ParserDwa: 'parser-dwa',
-  TokenTrie: 'token-trie',
-  FastCompile: 'token-trie',
-  FastMasks: 'parser-dwa',
+  Auto: 'auto', FastCompile: 'fast-compile', FastMasks: 'fast-masks',
 });
-
-const ParserBackend = Object.freeze({
-  LrTable: 'lr-table',
-  TemplateDfa: 'template-dfa',
-});
-
-function parseMaskStrategy(value) {
-  if (value === undefined) return {strategy: 0, parserBackend: 0, mergeEquivalentTokens: false};
-  if (typeof value === 'string') {
-    if (value === 'auto') return {strategy: 0, parserBackend: 0, mergeEquivalentTokens: false};
-    if (value === 'parser-dwa') return {strategy: 1, parserBackend: 0, mergeEquivalentTokens: false};
-    if (value === 'token-trie') return {strategy: 2, parserBackend: 0, mergeEquivalentTokens: false};
-    throw new TypeError("maskStrategy must be 'auto', 'parser-dwa' or 'token-trie'");
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new TypeError('maskStrategy must be a string or a TokenTrie object');
-  }
-  const o = checkedOptions(value, ['kind', 'parserBackend', 'mergeEquivalentTokens']);
-  if (o.kind !== 'token-trie') {
-    throw new TypeError("maskStrategy.kind must be 'token-trie'");
-  }
-  if (o.parserBackend !== undefined && o.parserBackend !== 'lr-table' && o.parserBackend !== 'template-dfa') {
-    throw new TypeError("maskStrategy.parserBackend must be 'lr-table' or 'template-dfa'");
-  }
-  if (o.mergeEquivalentTokens !== undefined && typeof o.mergeEquivalentTokens !== 'boolean') {
-    throw new TypeError('maskStrategy.mergeEquivalentTokens must be a boolean');
-  }
-  return {
-    strategy: 2,
-    parserBackend: o.parserBackend === 'template-dfa' ? 1 : 0,
-    mergeEquivalentTokens: o.mergeEquivalentTokens ?? false,
-  };
-}
-function formatMaskStrategy(num) {
-  switch (num) {
-    case 0: return 'auto';
-    case 1: return 'parser-dwa';
-    case 2: return 'token-trie';
-    default: return 'auto';
-  }
-}
-
-function parseBoundaryMaskStrategy(value) {
-  if (value === undefined) return 0;
-  if (value === 'auto') return 0;
-  if (value === 'parser-dwa') return 1;
-  if (value === 'token-trie') return 2;
-  throw new TypeError("boundaryMaskStrategy must be 'auto', 'parser-dwa' or 'token-trie'");
-}
-function formatBoundaryMaskStrategy(num) {
-  switch (num) {
-    case 0: return 'auto';
-    case 1: return 'parser-dwa';
-    case 2: return 'token-trie';
-    default: return 'auto';
-  }
+function parseStrategy(value, field) {
+  if (value === undefined || value === 'auto') return 0;
+  if (value === 'fast-compile') return 3;
+  if (value === 'fast-masks') return 4;
+  throw new TypeError(field + " must be 'auto', 'fast-compile' or 'fast-masks'");
 }
 
 class ExternsMap {
@@ -241,17 +181,17 @@ class Grammar extends Owned {
   }
   precompileSync(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Module, invoke(() => handle(this, Grammar).precompileSync(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+    return wrap(Module, invoke(() => handle(this, Grammar).precompileSync(handle(vocab, Vocab), s.mode, s.boundary)));
   }
   async precompile(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Module, await invokeAsync(() => handle(this, Grammar).precompile(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+    return wrap(Module, await invokeAsync(() => handle(this, Grammar).precompile(handle(vocab, Vocab), s.mode, s.boundary)));
   }
   compileSync(vocab, options) {
     const s = compileSettings(options);
     const mod = new Module(this);
     try {
-      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary)));
     } finally {
       mod.dispose();
     }
@@ -260,7 +200,7 @@ class Grammar extends Owned {
     const s = compileSettings(options);
     const mod = new Module(this);
     try {
-      return wrap(Constraint, await invokeAsync(() => handle(mod, Module).compile(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+      return wrap(Constraint, await invokeAsync(() => handle(mod, Module).compile(handle(vocab, Vocab), s.mode, s.boundary)));
     } finally {
       mod.dispose();
     }
@@ -269,12 +209,9 @@ class Grammar extends Owned {
 
 function compileSettings(options) {
   const o = checkedOptions(options, ['maskStrategy', 'boundaryMaskStrategy']);
-  const strategy = parseMaskStrategy(o.maskStrategy);
   return {
-    mode: strategy.strategy,
-    boundary: parseBoundaryMaskStrategy(o.boundaryMaskStrategy),
-    parserBackend: strategy.parserBackend,
-    mergeEquivalentTokens: strategy.mergeEquivalentTokens,
+    mode: parseStrategy(o.maskStrategy, 'maskStrategy'),
+    boundary: parseStrategy(o.boundaryMaskStrategy, 'boundaryMaskStrategy'),
   };
 }
 
@@ -366,20 +303,20 @@ class Module extends Owned {
 
   precompileSync(vocab, options) {
     const s = compileSettings(options);
-    invoke(() => handle(this, Module).precompileSync(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens));
+    invoke(() => handle(this, Module).precompileSync(handle(vocab, Vocab), s.mode, s.boundary));
   }
   async precompile(vocab, options) {
     const s = compileSettings(options);
-    await invokeAsync(() => handle(this, Module).precompile(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens));
+    await invokeAsync(() => handle(this, Module).precompile(handle(vocab, Vocab), s.mode, s.boundary));
   }
 
   compileSync(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary)));
   }
   async compile(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.mode, s.boundary, s.parserBackend, s.mergeEquivalentTokens)));
+    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.mode, s.boundary)));
   }
 
   saveSync() { return invoke(() => handle(this, Module).saveSync()); }
@@ -444,5 +381,5 @@ class ConstraintState extends Owned {
 
 module.exports = Object.freeze({
   Vocab, TokenSet, Grammar, Module, Expr, Constraint, ConstraintState,
-  MaskStrategy, BoundaryMaskStrategy, ParserBackend, GLRMaskError, version: native.version(),
+  MaskStrategy, BoundaryMaskStrategy, GLRMaskError, version: native.version(),
 });

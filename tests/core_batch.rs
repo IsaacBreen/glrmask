@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Expr, Grammar, MaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
-fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::FAST_COMPILE)}
+use glrmask::{BuildOptions, Expr, Grammar, InternalMaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
+fn options()->BuildOptions {BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)}
 fn vocab()->Vocab {Vocab::new(vec![(0,b"x".to_vec()),(1,b"y".to_vec())]).unwrap()}
 
 #[test]
@@ -10,7 +10,7 @@ fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
     let result:()=g.bind("MARK",TokenSet::new([17])).unwrap();assert_eq!(result,());
     assert!(g.externs().unbound().is_empty());assert_eq!(untouched.externs().unbound().len(),1);
     assert!(g.bind("MARK",TokenSet::new([29])).is_err());
-    let c=g.compile_with(&vocab(),glrmask::CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE)).unwrap();let mask=c.start().mask();
+    let c=g.compile_with(&vocab(),glrmask::CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE)).unwrap();let mask=c.start().mask();
     assert_ne!(mask[0]&(1<<17),0);assert_eq!(mask[0]&(1<<29),0);
 }
 #[test]
@@ -31,7 +31,7 @@ fn module_bind_accepts_every_binding_kind() {
     g.bind("SET",&borrowed_tokens).unwrap();
     g.bind("ID",glrmask::TokenSet::new([9u32])).unwrap();
     assert!(g.externs().unbound().is_empty());
-    let c=g.compile_with(&v,glrmask::CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE)).unwrap();let mut s=c.start();
+    let c=g.compile_with(&v,glrmask::CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE)).unwrap();let mut s=c.start();
     for id in [0,1,0,7,8,9] {assert!(s.commit_token(id));}
     assert!(s.is_accepting());
 }

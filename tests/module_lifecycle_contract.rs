@@ -96,8 +96,8 @@ fn compile_options_never_invalidate_retained_work() {
     let root = root.compile_with(
         &v,
         CompileOptions::default()
-            .mask_strategy(MaskStrategy::ParserDwa)
-            .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+            .mask_strategy(MaskStrategy::FastMasks)
+            .boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
     )
     .unwrap();
     let mut state = root.start();

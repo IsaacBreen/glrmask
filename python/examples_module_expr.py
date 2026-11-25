@@ -1,10 +1,9 @@
 """Small canonical assembly example; run against the installed glrmask wheel."""
-from glrmask import Expr, Grammar, Module, ParserBackend, TokenTrie, Vocab
+from glrmask import Expr, Grammar, Module, MaskStrategy, Vocab
 
 vocab = Vocab({0: b'xay', 1: b'xby'})
 child = Module(Grammar.from_lark('start: "a"'))
-child.precompile(vocab, mask_strategy=TokenTrie(
-    parser_backend=ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True))
+child.precompile(vocab, mask_strategy=MaskStrategy.FAST_MASKS)
 parent = Module(Grammar.from_glrm(
     'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
 ))

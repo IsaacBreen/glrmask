@@ -71,56 +71,25 @@ pub fn vocab(entries: Vec<(u32, Vec<u8>)>) -> Result<glrmask::Vocab> {
 pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
     match val {
         0 => Ok(glrmask::MaskStrategy::Auto),
-        1 => Ok(glrmask::MaskStrategy::ParserDwa),
-        2 => Ok(glrmask::MaskStrategy::TokenTrie(glrmask::TokenTrie::new())),
-        _ => Err(Error::invalid("unknown mask strategy; expected 0, 1 or 2")),
-    }
-}
-
-pub fn mask_strategy_value(strategy: glrmask::MaskStrategy) -> u32 {
-    match strategy {
-        glrmask::MaskStrategy::Auto => 0,
-        glrmask::MaskStrategy::ParserDwa => 1,
-        glrmask::MaskStrategy::TokenTrie(_) => 2,
-        _ => 0,
+        3 => Ok(glrmask::MaskStrategy::FastCompile),
+        4 => Ok(glrmask::MaskStrategy::FastMasks),
+        _ => Err(Error::invalid("unknown mask strategy; expected Auto (0), FastCompile (3) or FastMasks (4)")),
     }
 }
 
 pub fn boundary_mask_strategy(val: u32) -> Result<glrmask::BoundaryMaskStrategy> {
     match val {
         0 => Ok(glrmask::BoundaryMaskStrategy::Auto),
-        1 => Ok(glrmask::BoundaryMaskStrategy::ParserDwa),
-        2 => Ok(glrmask::BoundaryMaskStrategy::TokenTrie),
-        _ => Err(Error::invalid("unknown boundary mask strategy; expected 0, 1 or 2")),
-    }
-}
-
-pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> u32 {
-    match strategy {
-        glrmask::BoundaryMaskStrategy::Auto => 0,
-        glrmask::BoundaryMaskStrategy::ParserDwa => 1,
-        glrmask::BoundaryMaskStrategy::TokenTrie => 2,
-        _ => 0,
-    }
-}
-
-pub fn parser_backend(value: u32) -> Result<glrmask::ParserBackend> {
-    match value {
-        0 => Ok(glrmask::ParserBackend::LrTable),
-        1 => Ok(glrmask::ParserBackend::TemplateDfa),
-        _ => Err(Error::invalid("unknown parser backend; expected 0 or 1")),
+        3 => Ok(glrmask::BoundaryMaskStrategy::FastCompile),
+        4 => Ok(glrmask::BoundaryMaskStrategy::FastMasks),
+        _ => Err(Error::invalid("unknown boundary mask strategy; expected Auto (0), FastCompile (3) or FastMasks (4)")),
     }
 }
 
 pub fn compile_options(
     mask_strategy: glrmask::MaskStrategy,
     boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
-    token_trie: glrmask::TokenTrie,
 ) -> glrmask::CompileOptions {
-    let mask_strategy = match mask_strategy {
-        glrmask::MaskStrategy::TokenTrie(_) => glrmask::MaskStrategy::TokenTrie(token_trie),
-        other => other,
-    };
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy)
         .boundary_mask_strategy(boundary_mask_strategy)
@@ -195,13 +164,12 @@ mod tests {
     #[test]
     fn state_retains_owner_and_clones_independently() {
         let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())]).unwrap();
-        for mode in 0..3 {
+        for mode in [0,3,4] {
             let grammar = glrmask::Grammar::from_lark("start: \"a\" \"b\"").unwrap();
             let module = glrmask::Module::new(&grammar);
             let options = compile_options(
                 mask_strategy(mode).unwrap(),
                 glrmask::BoundaryMaskStrategy::Auto,
-                glrmask::TokenTrie::new(),
             );
             let c = Arc::new(module.compile_with(&vocab, options).unwrap());
             let expected = c.start().mask();

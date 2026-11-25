@@ -10,7 +10,7 @@ use crate::test_modes::MaskMode;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
+use crate::{CompileOptions, Grammar, InternalMaskStrategy, Module, Vocab};
 
 const NULLABLE_AMBIGUOUS: &str = "start: n0\nn0: \"a\" | n0 n0 |\n";
 
@@ -21,7 +21,7 @@ fn vocab() -> Vocab {
 fn token_trie() -> crate::runtime::Constraint {
     let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
-        .compile_with(&vocab(), CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+        .compile_with(&vocab(), CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
         .unwrap()
 }
 

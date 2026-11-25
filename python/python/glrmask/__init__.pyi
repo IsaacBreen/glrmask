@@ -117,24 +117,24 @@ class Grammar:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Constraint:
         """Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def precompile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Module:
         """Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def copy(self) -> Grammar:
@@ -214,24 +214,24 @@ class Module:
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> None:
         """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | TokenTrie | None = None,
+        mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Constraint:
         """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
         """
         ...
     def copy(self) -> Module:
@@ -378,56 +378,23 @@ class Extern:
 
 @final
 class MaskStrategy:
-    """How masks are computed."""
+    """Cost preferences, not engine selections or performance guarantees."""
     AUTO: ClassVar[MaskStrategy]
-    """Reuses any precompiled work; otherwise `PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
-    PARSER_DWA: ClassVar[MaskStrategy]
-    """Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks."""
-    TOKEN_TRIE: ClassVar[MaskStrategy]
-    """Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Pass a `TokenTrie` instead to change its settings."""
+    """Let the library choose. The default."""
     FAST_COMPILE: ClassVar[MaskStrategy]
-    """Same as `TOKEN_TRIE`."""
+    """Prefer lower preparation cost, even if masks cost more."""
     FAST_MASKS: ClassVar[MaskStrategy]
-    """Same as `PARSER_DWA`."""
+    """Prefer lower mask cost, even if preparation costs more."""
 
 @final
 class BoundaryMaskStrategy:
-    """How masks are computed at grammar boundaries."""
+    """Cost preferences for masks at grammar boundaries."""
     AUTO: ClassVar[BoundaryMaskStrategy]
-    """`PARSER_DWA`, or `TOKEN_TRIE` when that would be too large. The default."""
-    PARSER_DWA: ClassVar[BoundaryMaskStrategy]
-    """Builds a parser DWA across each boundary. Slower to compile, with faster masks. Raises `GLRMaskError` if it would be too large."""
-    TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
-    """Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks."""
+    """Let the library choose. The default."""
     FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
-    """Same as `TOKEN_TRIE`."""
+    """Prefer lower boundary preparation cost."""
     FAST_MASKS: ClassVar[BoundaryMaskStrategy]
-    """Same as `PARSER_DWA`."""
-
-@final
-class TokenTrie:
-    """Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
-
-    `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`."""
-    def __new__(cls, *, parser_backend: ParserBackend | None = None, merge_equivalent_tokens: bool = False) -> TokenTrie: ...
-    @property
-    def parser_backend(self) -> ParserBackend:
-        """How the parser is represented. Defaults to `ParserBackend.LR_TABLE`."""
-        ...
-    @property
-    def merge_equivalent_tokens(self) -> bool:
-        """Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
-
-        Tokens are not merged in a composition that includes precompiled parts."""
-        ...
-
-@final
-class ParserBackend:
-    """How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`."""
-    LR_TABLE: ClassVar[ParserBackend]
-    """An LR table. Faster to compile, with slower masks. The default."""
-    TEMPLATE_DFA: ClassVar[ParserBackend]
-    """Template DFAs. Slower to compile, with faster masks."""
+    """Prefer lower boundary mask cost."""
 
 class GLRMaskError(ValueError):
     """Raised when GLRMask can't do what was asked. Wrong argument types still raise `TypeError`, and a missing `Externs` key raises `KeyError`, as usual in Python."""

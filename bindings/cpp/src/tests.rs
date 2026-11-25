@@ -11,13 +11,12 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
         let (mut vocab, mut grammar) = (ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), &mut vocab), 0);
         assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 0);
-        for strategy in 0..3 {
+        for strategy in [0,3,4] {
             let rust_g = g::Grammar::from_lark(source).unwrap();
             let rust_m = g::Module::new(&rust_g);
             let rust_options = core::compile_options(
                 core::mask_strategy(strategy).unwrap(),
                 g::BoundaryMaskStrategy::Auto,
-                g::TokenTrie::new(),
             );
             let rust = rust_m.compile_with(&rust_vocab, rust_options).unwrap();
             let mut reference = rust.start();
@@ -27,10 +26,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 struct_size: size_of::<glrmask_compile_options>(),
                 mask_strategy: strategy,
                 boundary_mask_strategy: 0,
-                token_trie: glrmask_token_trie_settings {
-                    parser_backend: 0,
-                    merge_equivalent_tokens: 0,
-                },
+                reserved: [0,0],
             };
             let (mut constraint, mut state) = (ptr::null_mut(), ptr::null_mut());
             assert_eq!(glrmask_module_compile(module, vocab, &options, &mut constraint), 0);
@@ -92,12 +88,9 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         assert_eq!(glrmask_module_new(child, &mut prepared), 0);
         let parse_options = glrmask_compile_options {
             struct_size: size_of::<glrmask_compile_options>(),
-            mask_strategy: 1,
+            mask_strategy: 4,
             boundary_mask_strategy: 0,
-            token_trie: glrmask_token_trie_settings {
-                parser_backend: 0,
-                merge_equivalent_tokens: 0,
-            },
+            reserved: [0,0],
         };
         assert_eq!(glrmask_module_precompile(prepared, vocab, &parse_options), 0);
 
@@ -153,14 +146,13 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
     }
     let old = OldOptions {
         struct_size: size_of::<OldOptions>(),
-        mask_strategy: 2,
-        boundary_mask_strategy: 1,
+        mask_strategy: 3,
+        boundary_mask_strategy: 4,
     };
     let options = unsafe { root_options((&old as *const OldOptions).cast()) }.unwrap();
     let reference = core::compile_options(
-        g::MaskStrategy::TokenTrie(g::TokenTrie::new()),
-        g::BoundaryMaskStrategy::ParserDwa,
-        g::TokenTrie::new(),
+        g::MaskStrategy::FastCompile,
+        g::BoundaryMaskStrategy::FastMasks,
     );
     assert_eq!(options, reference);
 
@@ -175,7 +167,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
 
 #[test]
 fn status_codes_distinguish_error_kinds() {
-    assert_eq!(glrmask_abi_version(), 4);
+    assert_eq!(glrmask_abi_version(), 5);
     assert_eq!(status(core::ErrorKind::Syntax), 1);
     assert_eq!(status(core::ErrorKind::InvalidInput), 2);
     assert_eq!(status(core::ErrorKind::Compilation), 3);

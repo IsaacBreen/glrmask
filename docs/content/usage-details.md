@@ -28,9 +28,9 @@ assert state.is_accepting()
 
 ### Mask strategies
 
-`MaskStrategy` trades compile time against mask speed. `ParserDwa` is slowest to compile, with the fastest masks;
-`TokenTrie` is fastest to compile, with slower masks; `Auto`, the default, reuses precompiled work and otherwise uses
-`ParserDwa`, or `TokenTrie` when that would be too large. `BoundaryMaskStrategy` makes the same choice where a grammar
-meets a bound extern. Every strategy produces the same masks.
+`MaskStrategy` expresses a cost preference: `Auto` (the default), `FastCompile` (prefer less preparation),
+or `FastMasks` (prefer lower cost per mask). `BoundaryMaskStrategy` makes the same independent choice for
+grammar boundaries. The library can select another supported plan on a deterministic strategy decline; these
+preferences do not guarantee a particular engine or speed, and preserve mask semantics.
 
 The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.

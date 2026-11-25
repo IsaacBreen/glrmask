@@ -16,81 +16,61 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
     PyConstraint { inner: Arc::new(inner), max_token }
 }
 
-/// How masks are computed.
+/// Cost preferences, not engine selections or performance guarantees.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyMaskStrategy {
-    AUTO,
-    PARSER_DWA,
-    TOKEN_TRIE,
+    /// Let the library choose. The default.
+    AUTO = 0,
+    /// Prefer lower preparation cost.
+    FAST_COMPILE = 3,
+    /// Prefer lower cost per mask.
+    FAST_MASKS = 4,
 }
-
 #[pymethods]
 impl PyMaskStrategy {
     fn __hash__(&self) -> isize { *self as isize }
 }
-
 impl From<PyMaskStrategy> for glrmask::MaskStrategy {
     fn from(value: PyMaskStrategy) -> Self {
         match value {
             PyMaskStrategy::AUTO => Self::Auto,
-            PyMaskStrategy::PARSER_DWA => Self::ParserDwa,
-            PyMaskStrategy::TOKEN_TRIE => Self::TokenTrie(glrmask::TokenTrie::new()),
+            PyMaskStrategy::FAST_COMPILE => Self::FastCompile,
+            PyMaskStrategy::FAST_MASKS => Self::FastMasks,
         }
     }
 }
 
-impl From<glrmask::MaskStrategy> for PyMaskStrategy {
-    fn from(value: glrmask::MaskStrategy) -> Self {
-        match value {
-            glrmask::MaskStrategy::Auto => Self::AUTO,
-            glrmask::MaskStrategy::ParserDwa => Self::PARSER_DWA,
-            glrmask::MaskStrategy::TokenTrie(_) => Self::TOKEN_TRIE,
-            _ => Self::AUTO,
-        }
-    }
-}
-
-/// How masks are computed at grammar boundaries.
+/// Cost preferences for masks at grammar boundaries.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyBoundaryMaskStrategy {
-    AUTO,
-    PARSER_DWA,
-    TOKEN_TRIE,
+    /// Let the library choose. The default.
+    AUTO = 0,
+    /// Prefer lower boundary preparation cost.
+    FAST_COMPILE = 3,
+    /// Prefer lower boundary mask cost.
+    FAST_MASKS = 4,
 }
-
 #[pymethods]
 impl PyBoundaryMaskStrategy {
     fn __hash__(&self) -> isize { *self as isize }
 }
-
 impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
     fn from(value: PyBoundaryMaskStrategy) -> Self {
         match value {
             PyBoundaryMaskStrategy::AUTO => Self::Auto,
-            PyBoundaryMaskStrategy::PARSER_DWA => Self::ParserDwa,
-            PyBoundaryMaskStrategy::TOKEN_TRIE => Self::TokenTrie,
+            PyBoundaryMaskStrategy::FAST_COMPILE => Self::FastCompile,
+            PyBoundaryMaskStrategy::FAST_MASKS => Self::FastMasks,
         }
     }
 }
 
-impl From<glrmask::BoundaryMaskStrategy> for PyBoundaryMaskStrategy {
-    fn from(value: glrmask::BoundaryMaskStrategy) -> Self {
-        match value {
-            glrmask::BoundaryMaskStrategy::Auto => Self::AUTO,
-            glrmask::BoundaryMaskStrategy::ParserDwa => Self::PARSER_DWA,
-            glrmask::BoundaryMaskStrategy::TokenTrie => Self::TOKEN_TRIE,
-            _ => Self::AUTO,
-        }
-    }
-}
-
-/// How the parser is represented and run when masks are computed with `MaskStrategy.TOKEN_TRIE`.
+/// Internal diagnostic value for the actual parser representation.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask", eq, eq_int, frozen, from_py_object)]
+#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyParserBackend {
     /// An LR table. Faster to compile, with slower masks. The default.
@@ -102,15 +82,6 @@ pub(super) enum PyParserBackend {
 #[pymethods]
 impl PyParserBackend {
     fn __hash__(&self) -> isize { *self as isize }
-}
-
-impl From<PyParserBackend> for glrmask::ParserBackend {
-    fn from(value: PyParserBackend) -> Self {
-        match value {
-            PyParserBackend::LR_TABLE => Self::LrTable,
-            PyParserBackend::TEMPLATE_DFA => Self::TemplateDfa,
-        }
-    }
 }
 
 impl TryFrom<glrmask::ParserBackend> for PyParserBackend {
@@ -125,104 +96,12 @@ impl TryFrom<glrmask::ParserBackend> for PyParserBackend {
     }
 }
 
-/// Settings for `MaskStrategy.TOKEN_TRIE`. Pass one as `mask_strategy`.
-///
-/// `TokenTrie()` has the same effect as `MaskStrategy.TOKEN_TRIE`.
-#[pyclass(name = "TokenTrie", module = "glrmask", frozen, from_py_object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct PyTokenTrie {
-    inner: glrmask::TokenTrie,
-    parser_backend: PyParserBackend,
-    merge_equivalent_tokens: bool,
-}
-
-#[pymethods]
-impl PyTokenTrie {
-    #[new]
-    #[pyo3(signature = (*, parser_backend = None, merge_equivalent_tokens = false))]
-    fn new(
-        parser_backend: Option<PyRef<'_, PyParserBackend>>,
-        merge_equivalent_tokens: bool,
-    ) -> Self {
-        let backend = parser_backend
-            .as_deref()
-            .copied()
-            .unwrap_or(PyParserBackend::LR_TABLE);
-        Self {
-            inner: glrmask::TokenTrie::new()
-                .parser_backend(backend.into())
-                .merge_equivalent_tokens(merge_equivalent_tokens),
-            parser_backend: backend,
-            merge_equivalent_tokens,
-        }
-    }
-
-    /// How the parser is represented. Defaults to `ParserBackend.LR_TABLE`.
-    #[getter]
-    fn parser_backend(&self) -> PyParserBackend {
-        self.parser_backend
-    }
-
-    /// Whether tokens that the grammar treats the same are merged, so masks walk fewer tokens. Defaults to `False`.
-    ///
-    /// Tokens are not merged in a composition that includes precompiled parts.
-    #[getter]
-    fn merge_equivalent_tokens(&self) -> bool {
-        self.merge_equivalent_tokens
-    }
-
-    /// Whether both sets contain the same IDs.
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let py = other.py();
-        match other.extract::<PyRef<'_, Self>>() {
-            Ok(other) => Ok(pyo3::types::PyBool::new(py, other.inner == self.inner)
-                .to_owned()
-                .into_any()
-                .unbind()),
-            Err(_) => Ok(py.NotImplemented()),
-        }
-    }
-
-    fn __hash__(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "TokenTrie(parser_backend=ParserBackend.{:?}, merge_equivalent_tokens={})",
-            self.parser_backend,
-            if self.merge_equivalent_tokens { "True" } else { "False" }
-        )
-    }
-}
-
-/// Resolve the Python-facing `mask_strategy` union.
 pub(super) fn resolve_mask_strategy(value: Option<&Bound<'_, PyAny>>) -> PyResult<glrmask::MaskStrategy> {
-    resolve_mask_strategy_settings(value).map(|(strategy, _, _)| strategy)
-}
-
-pub(super) fn resolve_mask_strategy_settings(
-    value: Option<&Bound<'_, PyAny>>,
-) -> PyResult<(glrmask::MaskStrategy, PyParserBackend, bool)> {
-    let Some(value) = value else {
-        return Ok((glrmask::MaskStrategy::Auto, PyParserBackend::LR_TABLE, false));
-    };
+    let Some(value) = value else { return Ok(glrmask::MaskStrategy::Auto); };
     if let Ok(strategy) = value.extract::<PyRef<'_, PyMaskStrategy>>() {
-        return Ok(((*strategy).into(), PyParserBackend::LR_TABLE, false));
+        return Ok((*strategy).into());
     }
-    if let Ok(settings) = value.extract::<PyRef<'_, PyTokenTrie>>() {
-        return Ok((
-            glrmask::MaskStrategy::TokenTrie(settings.inner),
-            settings.parser_backend,
-            settings.merge_equivalent_tokens,
-        ));
-    }
-    Err(PyTypeError::new_err(
-        "mask_strategy must be a MaskStrategy or TokenTrie",
-    ))
+    Err(PyTypeError::new_err("mask_strategy must be a MaskStrategy"))
 }
 
 /// A set of token IDs.
@@ -453,7 +332,7 @@ impl PyGrammar {
 
     /// Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
     ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
@@ -475,7 +354,7 @@ impl PyGrammar {
 
     /// Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
     ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy`, `TokenTrie` and `BoundaryMaskStrategy`.
+    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
     #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,
@@ -523,17 +402,6 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTokenSet>()?;
     module.add_class::<PyMaskStrategy>()?;
     module.add_class::<PyBoundaryMaskStrategy>()?;
-    module.add_class::<PyParserBackend>()?;
-    module.add_class::<PyTokenTrie>()?;
-
-    let mask_strat = module.getattr("MaskStrategy")?;
-    mask_strat.setattr("FAST_COMPILE", mask_strat.getattr("TOKEN_TRIE")?)?;
-    mask_strat.setattr("FAST_MASKS", mask_strat.getattr("PARSER_DWA")?)?;
-
-    let boundary_strat = module.getattr("BoundaryMaskStrategy")?;
-    boundary_strat.setattr("FAST_COMPILE", boundary_strat.getattr("TOKEN_TRIE")?)?;
-    boundary_strat.setattr("FAST_MASKS", boundary_strat.getattr("PARSER_DWA")?)?;
-
     Ok(())
 }
 
@@ -552,14 +420,11 @@ fn compile_with_backend(
     end_tokens: Option<Vec<u32>>,
     mask_strategy: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyConstraint> {
-    let (strategy, backend, merge_equivalent_tokens) =
-        resolve_mask_strategy_settings(mask_strategy)?;
+    let strategy: glrmask::InternalMaskStrategy = resolve_mask_strategy(mask_strategy)?.into();
     let options = glrmask::BuildOptions::default()
         .end_tokens(end_tokens.unwrap_or_default())
         .optimization(strategy)
-        .parser_backend(glrmask::ParserBackend::TemplateDfa)
-        .engine_backend(backend.into())
-        .merge_equivalent_tokens(merge_equivalent_tokens);
+        .parser_backend(glrmask::ParserBackend::TemplateDfa);
     let grammar = grammar.as_rust().map_err(api_error)?;
     py.detach(|| grammar.compile_with_build_options(&vocab.inner, options))
         .map(constraint)

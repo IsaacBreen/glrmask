@@ -59,30 +59,17 @@ enum {
     GLRMASK_BUFFER_TOO_SMALL=8, ///< The buffer is too small; nothing was written.
     GLRMASK_CLOSED=9 ///< The handle was already freed.
 };
-/// How masks are computed.
+/// Cost preferences, not engine selections or performance guarantees.
 enum {
-    GLRMASK_MASK_STRATEGY_AUTO=0,        ///< Reuses any precompiled work; otherwise GLRMASK_MASK_STRATEGY_PARSER_DWA, or GLRMASK_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
-    GLRMASK_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA for the grammar. Slowest to compile, with the fastest masks.
-    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2   ///< Computes each mask by walking the vocabulary. Fastest to compile, with slower masks. Its settings are in `glrmask_compile_options.token_trie`.
+    GLRMASK_MASK_STRATEGY_AUTO=0,         ///< Let the library choose. The default.
+    GLRMASK_MASK_STRATEGY_FAST_COMPILE=3, ///< Prefer lower preparation cost.
+    GLRMASK_MASK_STRATEGY_FAST_MASKS=4    ///< Prefer lower cost per mask.
 };
-/// Same as GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
-#define GLRMASK_MASK_STRATEGY_FAST_COMPILE GLRMASK_MASK_STRATEGY_TOKEN_TRIE
-/// Same as GLRMASK_MASK_STRATEGY_PARSER_DWA.
-#define GLRMASK_MASK_STRATEGY_FAST_MASKS GLRMASK_MASK_STRATEGY_PARSER_DWA
-/// How masks are computed at grammar boundaries.
+/// Cost preferences for masks at grammar boundaries; not performance guarantees.
 enum {
-    GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,        ///< GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA, or GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE when that would be too large. The default.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Builds a parser DWA across each boundary. Slower to compile, with faster masks. Fails with GLRMASK_RESOURCE_LIMIT if it would be too large.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE=2   ///< Walks the vocabulary at each boundary as needed. Faster to compile, with slower masks.
-};
-/// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE.
-#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE
-/// Same as GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA.
-#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
-/// How the parser is represented and run when masks are computed with GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
-enum {
-    GLRMASK_PARSER_BACKEND_LR_TABLE=0,     ///< An LR table. Faster to compile, with slower masks. The default.
-    GLRMASK_PARSER_BACKEND_TEMPLATE_DFA=1  ///< Template DFAs. Slower to compile, with faster masks.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,         ///< Let the library choose. The default.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE=3, ///< Prefer lower boundary preparation cost.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS=4    ///< Prefer lower boundary mask cost.
 };
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
@@ -128,18 +115,13 @@ typedef struct {
     uint32_t start; /**< First token ID in the range. */
     uint32_t end;   /**< One past the last token ID. */
 } glrmask_token_range;
-/// Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE. This layout is fixed; new options are appended to glrmask_compile_options.
-typedef struct {
-    uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value; 0 is an LR table.
-    uint32_t merge_equivalent_tokens; ///< Nonzero to merge tokens that the grammar treats the same, so masks walk fewer tokens. Tokens are not merged in a composition that includes precompiled parts.
-} glrmask_token_trie_settings;
 /// Options for compiling a grammar or module. Set `struct_size` to
 /// `sizeof(glrmask_compile_options)`; fields past `struct_size` count as zero.
 typedef struct {
     size_t struct_size;               ///< Size of this struct in bytes.
     uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
     uint32_t boundary_mask_strategy;  ///< A `GLRMASK_BOUNDARY_MASK_STRATEGY_*` value; 0 is Auto.
-    glrmask_token_trie_settings token_trie; ///< Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE; must be zero for any other strategy.
+    uint32_t reserved[2];             ///< Reserved; must be zero.
 } glrmask_compile_options;
 /// An extern declared by a grammar. Its `name` stays valid until the externs view
 /// is freed.

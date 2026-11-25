@@ -34,7 +34,7 @@ void basic() {
         auto v = vocabulary();
         auto g = simple();
         auto m = Module(g);
-        auto c = m.compile(v, strategy_options(i));
+        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
         auto s = c.start();
         const auto initial = s.mask();
         CHECK(allowed(initial,0)); CHECK(allowed(initial,31)); CHECK(allowed(initial,32));
@@ -61,7 +61,7 @@ void exact_and_unicode() {
     for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_lark(source);
         auto m = Module(g);
-        auto c = m.compile(v, strategy_options(i));
+        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
         auto s = c.start();
         CHECK(allowed(s.mask(),0)); CHECK(allowed(s.mask(),31));
         CHECK(s.commit_bytes(first)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
@@ -70,17 +70,17 @@ void exact_and_unicode() {
         auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root = T;)");
         auto em = Module(host);
         em.bind("T", TokenSet({31}));
-        auto exact = em.compile(v, strategy_options(i));
+        auto exact = em.compile(v, strategy_options(i==0?0:i==1?3:4));
         CHECK(allowed(exact.start().mask(),31)); CHECK(!allowed(exact.start().mask(),32));
         auto e = exact.start(); CHECK(e.commit_token(31)); CHECK(e.is_accepting());
 
         auto rm = Module(host);
         rm.bind("T", TokenSet({40}));
-        auto raw = rm.compile(v, strategy_options(i)).start(); CHECK(raw.commit_token(40)); CHECK(raw.is_accepting());
+        auto raw = rm.compile(v, strategy_options(i==0?0:i==1?3:4)).start(); CHECK(raw.commit_token(40)); CHECK(raw.is_accepting());
 
         auto cm = Module(host);
         cm.bind("T", TokenSet({99}));
-        auto control = cm.compile(v, strategy_options(i)).start(); CHECK(control.commit_token(99)); CHECK(control.is_accepting());
+        auto control = cm.compile(v, strategy_options(i==0?0:i==1?3:4)).start(); CHECK(control.commit_token(99)); CHECK(control.is_accepting());
     }
     auto merged = TokenSet::from_ranges({{31,33}});
     auto duplicate = TokenSet({31,31,32});
@@ -124,7 +124,7 @@ void end_tokens() {
     Vocab v({{0,"a"}});
     for (unsigned i=0; i<3; ++i) {
         CompileOptions o;
-        o.mask_strategy = static_cast<MaskStrategy>(i);
+        o.mask_strategy = static_cast<MaskStrategy>(i==0?0:i==1?3:4);
         auto m = Module(Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE"));
         m.bind("VALUE", Expr::sequence({Grammar::from_lark(R"(start: "a")"), TokenSet({99})}));
         auto s = m.compile(v, o).start();
@@ -172,7 +172,7 @@ void composition_and_persistence() {
     CHECK(restored.externs().unbound().empty());
 
     for (unsigned i=0; i<2; ++i) {
-        auto strat = (i == 0) ? MaskStrategy::Auto : MaskStrategy::ParserDwa;
+        auto strat = (i == 0) ? MaskStrategy::Auto : MaskStrategy::FastMasks;
         CompileOptions options;
         options.mask_strategy = strat;
         auto lc = left.compile(v, options);
@@ -192,7 +192,7 @@ void frontends() {
     auto v = vocabulary();
     for (unsigned i=0; i<3; ++i) {
         auto lm = Module(Grammar::from_lark("start: \"a\" \"b\""));
-        auto l = lm.compile(v, strategy_options(i)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
+        auto l = lm.compile(v, strategy_options(i==0?0:i==1?3:4)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
     }
     Vocab special({{0,"a"},{1,"a"}});
     for (unsigned i=0; i<3; ++i) {
@@ -200,7 +200,7 @@ void frontends() {
         auto m = Module(g);
         m.bind("begin", TokenSet({99}));
         m.bind("body", TokenSet({1}));
-        auto state = m.compile(special, strategy_options(i)).start();
+        auto state = m.compile(special, strategy_options(i==0?0:i==1?3:4)).start();
         CHECK(allowed(state.mask(),99)); CHECK(state.commit_token(99));
         CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); CHECK(state.commit_token(1)); CHECK(state.is_accepting());
     }
@@ -234,7 +234,7 @@ int thread_stack_probe(std::size_t stack_bytes) {
     auto v = vocabulary(); std::vector<Constraint> constraints;
     for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
-        constraints.push_back(m.compile(v, strategy_options(i)));
+        constraints.push_back(m.compile(v, strategy_options(i==0?0:i==1?3:4)));
     }
     struct Probe { std::vector<Constraint>* constraints; bool okay=false; } probe{&constraints};
     pthread_attr_t requested; CHECK(pthread_attr_init(&requested)==0);
@@ -270,7 +270,7 @@ int thread_stack_probe(std::size_t stack_bytes) {
 void commit_contract() {
     auto v = vocabulary();
     for (unsigned i=0; i<3; ++i) {
-        auto c = Module(simple()).compile(v, strategy_options(i));
+        auto c = Module(simple()).compile(v, strategy_options(i==0?0:i==1?3:4));
         auto s = c.start();
         CHECK(!s.commit_token(1));
         CHECK(!s.is_accepting()); CHECK(s.is_terminated());
@@ -302,7 +302,7 @@ void emit_parity() {
     for (unsigned i=0; i<3; ++i) {
         if (i) std::cout << ','; std::cout << "{\"mode\":" << i << ",\"states\":[";
         auto m = Module(simple());
-        auto s = m.compile(v, strategy_options(i)).start();
+        auto s = m.compile(v, strategy_options(i==0?0:i==1?3:4)).start();
         for (unsigned step=0; step<3; ++step) {
             if (step) { CHECK(s.commit_token(step-1)); std::cout << ','; }
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
@@ -321,7 +321,7 @@ void artifacts(const std::filesystem::path& directory, bool check) {
     std::filesystem::create_directories(directory); auto v = vocabulary();
     for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
-        auto c = m.compile(v, strategy_options(i));
+        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
         const auto path = directory/((check?"node-mode-":"cpp-mode-")+std::to_string(i)+".glr");
         if (check) {
             auto loaded = Constraint::load(read_bytes(path), v);
@@ -343,14 +343,12 @@ void canonical_modules() {
     auto original = parent; // copy constructor is a cheap snapshot
 
     auto child = Module(Grammar::from_lark("start: \"a\""));
-    CHECK(BoundaryMaskStrategy::FastCompile == BoundaryMaskStrategy::TokenTrie);
-    CHECK(BoundaryMaskStrategy::FastMasks == BoundaryMaskStrategy::ParserDwa);
-    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::TokenTrie) == GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE);
-    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
+    CHECK(BoundaryMaskStrategy::FastCompile != BoundaryMaskStrategy::FastMasks);
+    CHECK(MaskStrategy::Auto != MaskStrategy::FastCompile);
+    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::FastCompile) == GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE);
+    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::FastMasks) == GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS);
     CompileOptions child_options = strategy_options(
-        static_cast<unsigned>(MaskStrategy::TokenTrie), BoundaryMaskStrategy::TokenTrie);
-    child_options.token_trie.parser_backend = ParserBackend::TemplateDfa;
-    child_options.token_trie.merge_equivalent_tokens = true;
+        static_cast<unsigned>(MaskStrategy::FastMasks), BoundaryMaskStrategy::FastCompile);
     child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save());
@@ -425,39 +423,25 @@ void canonical_modules() {
     // Grammar::precompile is the module-returning mirror of Grammar::compile.
     auto open_host = host.precompile(v);
     auto precompiled_child = Grammar::from_lark("start: \"a\"").precompile(
-        v, strategy_options(static_cast<unsigned>(MaskStrategy::ParserDwa)));
+        v, strategy_options(static_cast<unsigned>(MaskStrategy::FastMasks)));
     CHECK(precompiled_child.save().size() > Module(Grammar::from_lark("start: \"a\"")).save().size());
     open_host.bind("child", precompiled_child);
     auto precompiled_state = open_host.compile(
-        v, strategy_options(static_cast<unsigned>(MaskStrategy::TokenTrie))).start();
+        v, strategy_options(static_cast<unsigned>(MaskStrategy::FastCompile))).start();
     CHECK(allowed(precompiled_state.mask(), 3));
     CHECK(precompiled_state.commit_token(3)); CHECK(precompiled_state.is_accepting());
 
-    // Designated initializers fill the nested TokenTrie settings.
-    CompileOptions designated{
-        .mask_strategy = MaskStrategy::TokenTrie,
-        .token_trie = {.parser_backend = ParserBackend::LrTable,
-                       .merge_equivalent_tokens = true}};
-    auto merged_lr = Grammar::from_lark("start: \"a\"").compile(v, designated);
-    CHECK(allowed(merged_lr.start().mask(), 1));
-    auto designated_native = Grammar::from_lark("start: \"a\"").compile(
-        v, CompileOptions{.mask_strategy = MaskStrategy::TokenTrie,
-                          .token_trie = {.parser_backend = ParserBackend::TemplateDfa,
-                                         .merge_equivalent_tokens = true}});
-    CHECK(allowed(designated_native.start().mask(), 1));
-
-    // token_trie with another strategy is an invalid argument.
+    // All nine pairs of cost preferences preserve the same language.
+    for(auto mask : {MaskStrategy::Auto, MaskStrategy::FastCompile, MaskStrategy::FastMasks})
+        for(auto boundary : {BoundaryMaskStrategy::Auto, BoundaryMaskStrategy::FastCompile, BoundaryMaskStrategy::FastMasks}) {
+            auto c = Grammar::from_lark("start: \"a\"").compile(v, CompileOptions{.mask_strategy=mask,.boundary_mask_strategy=boundary});
+            auto state=c.start();
+            CHECK(allowed(state.mask(), 1));
+        }
     CompileOptions wrong;
-    wrong.mask_strategy = MaskStrategy::Auto;
-    wrong.token_trie.merge_equivalent_tokens = true;
-    bool rejected = false;
-    try { Grammar::from_lark("start: \"a\"").compile(v, wrong); }
-    catch (const Error& error) {
-        rejected = true;
-        CHECK(error.status() == GLRMASK_INVALID_INPUT);
-        CHECK(std::string(error.what()) == "token_trie settings apply only to the TokenTrie mask strategy");
-    }
-    CHECK(rejected);
+    wrong.mask_strategy = static_cast<MaskStrategy>(1);
+    throws([&]{ Grammar::from_lark("start: \"a\"").compile(v, wrong); },GLRMASK_INVALID_INPUT);
+
 }
 
 int main(int argc, char** argv) {

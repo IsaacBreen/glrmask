@@ -5,7 +5,7 @@
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
-use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 /// Duplicate byte spellings, sparse IDs, an empty-byte token and a token used
 /// only as an explicit end token exercise the vocabulary surfaces shared by
@@ -348,7 +348,7 @@ fn ordinary_lr_and_o2_static_are_isolated_across_reload() {
         assert_eq!(native.parser_backend(), ParserBackend::TemplateDfa);
         std::fs::write(directory.join("native.constraint"), native.save()).unwrap();
         let static_constraint = Grammar::from_ebnf(source).unwrap().compile_with_build_options(&vocab,
-            BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
+            BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();
         assert_eq!(static_constraint.parser_backend(), ParserBackend::TemplateDfa);
         let loaded = Constraint::load(std::fs::read(directory.join("lr.constraint")).unwrap(), &vocab).unwrap();
         assert_eq!(loaded.parser_backend(), ParserBackend::LrTable);

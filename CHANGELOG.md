@@ -4,9 +4,12 @@
 
 - Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
 
-From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds and strategies. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.
+From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.
 
 ### Changes
+
+- MaskStrategy and BoundaryMaskStrategy expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine/backend settings are internal only. C ABI revision 5 rejects the old hard-selector codes and reserves the former tuning fields.
+
 
 - Expressions and `bind` take tokens only as a `TokenSet`.
 

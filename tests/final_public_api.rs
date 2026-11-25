@@ -1,6 +1,6 @@
 use glrmask::{
     BoundaryMaskStrategy, CompileOptions, Constraint, Expr, ExternKind, Grammar, MaskStrategy,
-    Module, TokenSet, TokenTrie, Vocab,
+    Module, TokenSet, Vocab,
 };
 
 fn vocab() -> Vocab {
@@ -384,10 +384,10 @@ fn focused_5_externs_get_iter_order_len_unbound() {
 fn focused_6_compile_options_never_touch_retained_work() {
     let v = vocab();
     let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    assert_eq!(MaskStrategy::FAST_COMPILE, MaskStrategy::TokenTrie(TokenTrie::new()));
-    assert_eq!(MaskStrategy::FAST_MASKS, MaskStrategy::ParserDwa);
-    assert_eq!(BoundaryMaskStrategy::TokenTrie, BoundaryMaskStrategy::TokenTrie);
-    assert_eq!(BoundaryMaskStrategy::FAST_MASKS, BoundaryMaskStrategy::ParserDwa);
+    assert_ne!(MaskStrategy::FastCompile, MaskStrategy::FastMasks);
+    assert_ne!(MaskStrategy::Auto, MaskStrategy::FastMasks);
+    assert_ne!(BoundaryMaskStrategy::Auto, BoundaryMaskStrategy::FastCompile);
+    assert_ne!(BoundaryMaskStrategy::FastCompile, BoundaryMaskStrategy::FastMasks);
 
     let mut m = m;
     m.precompile(&v).unwrap();
@@ -398,8 +398,8 @@ fn focused_6_compile_options_never_touch_retained_work() {
         .compile_with(
             &v,
             CompileOptions::default()
-                .mask_strategy(MaskStrategy::ParserDwa)
-                .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+                .mask_strategy(MaskStrategy::FastMasks)
+                .boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
         )
         .unwrap();
     let s = c.start();
@@ -412,28 +412,28 @@ fn focused_7_boundary_level_minimum() {
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
     m.precompile_with(
         &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
     )
     .unwrap();
 
     // Switching to the explicit static boundary keeps retained work valid.
     m.precompile_with(
         &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
     )
     .unwrap();
 
     // Switching back to the token-trie boundary also keeps retained work valid.
     m.precompile_with(
         &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
     )
     .unwrap();
 
     let c = m
         .compile_with(
             &v,
-            CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+            CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
         )
         .unwrap();
     let s = c.start();
@@ -444,7 +444,7 @@ fn focused_7_boundary_level_minimum() {
 fn focused_8_static_parts_are_never_downgraded() {
     let v = vocab();
     let mut leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastMasks))
         .unwrap();
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
@@ -452,7 +452,7 @@ fn focused_8_static_parts_are_never_downgraded() {
 
     // TokenTrie requests use the retained static parts instead of downgrading.
     let c = parent
-        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastCompile))
         .unwrap();
     assert!(allowed(&c.start().mask(), 4), "xay must compose statically");
 }
@@ -463,7 +463,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 1. Auto reuses retained ParserDwa
     let mut m_dwa = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_dwa.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+    m_dwa.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastMasks))
         .unwrap();
     let c_dwa = m_dwa.compile(&v).unwrap();
     let mut s_dwa = c_dwa.start();
@@ -481,7 +481,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
     let mut m_tt = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
+    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastCompile))
         .unwrap();
     // TokenTrie precompilation retains no work, so Auto builds ParserDwa.
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
@@ -573,7 +573,7 @@ fn focused_12_grammar_precompile_returns_a_module() {
     let configured = child
         .precompile_with(
             &v,
-            CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+            CompileOptions::default().mask_strategy(MaskStrategy::FastMasks),
         )
         .unwrap();
     let plain = Module::new(&child).compile(&v).unwrap();

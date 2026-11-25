@@ -16,15 +16,14 @@ import glrmask
 
 MODES = [
     {},
-    {"mask_strategy": glrmask.MaskStrategy.PARSER_DWA},
-    {"mask_strategy": glrmask.MaskStrategy.TOKEN_TRIE},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA)},
-    {"mask_strategy": glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA, merge_equivalent_tokens=True)},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
+    {"mask_strategy": glrmask.MaskStrategy.FAST_COMPILE},
 ]
 
 
-def test_parser_backend_is_public_but_constraint_inspection_is_internal():
-    assert hasattr(glrmask, "ParserBackend")
+def test_parser_backend_selection_is_not_public():
+    assert not hasattr(glrmask, "ParserBackend")
+    assert not hasattr(glrmask, "TokenTrie")
     assert not hasattr(glrmask, "ParserProgram")
     assert not hasattr(glrmask._glrmask, "ParserProgram")
     assert hasattr(glrmask._internal, "ParserProgram")
@@ -36,11 +35,11 @@ def test_parser_backend_is_public_but_constraint_inspection_is_internal():
     grammar = glrmask.Grammar.from_lark('start: "a" "b"?')
     public = grammar.compile(
         vocab,
-        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA),
+        mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
     )
     internal = glrmask._internal.compile_with_backend(
         grammar, vocab,
-        mask_strategy=glrmask.TokenTrie(parser_backend=glrmask.ParserBackend.TEMPLATE_DFA),
+        mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
     )
     assert np.array_equal(public.start().mask(), internal.start().mask())
 
