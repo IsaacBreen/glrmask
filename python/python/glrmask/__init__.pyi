@@ -92,23 +92,23 @@ class Grammar:
         """Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict."""
         ...
     @staticmethod
-    def from_expr(expr: Expr | Grammar | TokenSet, /) -> Grammar:
-        """Creates a grammar from an expression."""
+    def from_expr(expr: Expr | Grammar, /) -> Grammar:
+        """Creates a grammar from a portable expression (no Module or TokenSet, even nested)."""
         ...
     @property
     def externs(self) -> Externs:
         """The grammar's externs."""
         ...
     @overload
-    def bind(self, name: str, value: Grammar | Expr | TokenSet, /) -> None:
-        """Binds the extern `name` to `value`.
+    def bind(self, name: str, value: Grammar | Expr, /) -> None:
+        """Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
-    def bind(self, **bindings: Grammar | Expr | TokenSet) -> None:
-        """Binds the extern `name` to `value`.
+    def bind(self, **bindings: Grammar | Expr) -> None:
+        """Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """

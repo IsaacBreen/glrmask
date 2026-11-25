@@ -43,6 +43,7 @@ def test_token_sets_reject_a_huge_id(token_id):
 
 def test_the_maximum_id_is_accepted():
     grammar = token_extern()
+    grammar = glrmask.Module(grammar)
     grammar.bind("E", glrmask.TokenSet([MAX_TOKEN_ID]))
     assert glrmask.TokenSet.from_ranges([range(0, MAX_TOKEN_ID + 1)]) == glrmask.TokenSet.from_ranges(
         [range(0, MAX_TOKEN_ID + 1)]

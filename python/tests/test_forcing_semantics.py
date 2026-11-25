@@ -103,7 +103,7 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
 def test_long_token_cannot_cross_possible_root_acceptance(mode):
     vocab = glrmask.Vocab(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"abc", 9:b""})
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" | "ab"'), glrmask.TokenSet([9]))).compile(vocab, **mode)
+    compiled = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" | "ab"'), glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert assert_read_only_and_replay(state) == []
@@ -120,8 +120,9 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     grammar = glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
     )
+    grammar = glrmask.Module(grammar)
     grammar.bind("MARK", glrmask.TokenSet([1]))
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([9]))).compile(vocab, **mode)
+    compiled = _module_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert assert_read_only_and_replay(state) == []
@@ -144,3 +145,9 @@ def test_commit_forced_tokens_semantics_match_commit_tokens_replay():
     assert np.array_equal(state.mask(), replay.mask())
     assert state.is_accepting() == replay.is_accepting()
     assert state.is_terminated() == replay.is_terminated()
+
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module

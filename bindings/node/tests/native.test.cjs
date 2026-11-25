@@ -52,7 +52,9 @@ for(const {label:maskStrategy,options} of strategies) {
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
     const v=new Vocab([[0,b('a')]]);
-    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromLark('start: "a"'),new TokenSet([99]))).compileSync(v,{...options}).start();
+    const m=new Module(Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE'));
+    m.bind('VALUE',Expr.sequence(Grammar.fromLark('start: "a"'),new TokenSet([99])));
+    const s=m.compileSync(v,{...options}).start();
     assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.equal(s.commitToken(99),false);

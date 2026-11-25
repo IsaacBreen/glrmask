@@ -195,7 +195,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             // With an explicitly configured EOS token that is absent from
             // the vocabulary, stop admission must agree with the ORIGINAL
             // source grammar's acceptance (not merely with the fast parser).
-            let eos_module = Grammar::from_expr(Expr::sequence([
+            let eos_module = module_expr(Expr::sequence([
                 Expr::from(grammar.clone()),
                 Expr::from(TokenSet::new([99])),
             ]))
@@ -361,4 +361,11 @@ n2: "c" | "a" |
 n3: "c" |  | n3 n0 "a" | n1 n2
 "####;
     check_positive_word(lark, b"cccb", 3810);
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
 }

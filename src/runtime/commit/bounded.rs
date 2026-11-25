@@ -593,7 +593,7 @@ mod tests {
             let source=format!("extern token M start root nt root={body}");
             for tokens in [vec![0],vec![17],vec![29],vec![29,30,31],vec![0,17,29,4096]] {
                 for mode in MODES {
-                    let mut g=Grammar::from_glrm(&source).unwrap();g.bind("M",TokenSet::new(tokens.clone())).unwrap();
+                    let mut g=Grammar::from_glrm(&source).unwrap();g=g.bind_snapshot("M",TokenSet::new(tokens.clone())).unwrap();
                     let c=g.compile_with_build_options(&v,mode.build_options().end_tokens([4096])).unwrap();
                     explore(&c,&format!("{mode:?} {body} {tokens:?}"));
                 }
@@ -606,7 +606,7 @@ mod tests {
             (3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),(6,vec![0xc3]),(7,vec![0xa9]),
             (8,vec![0xc3,0xa9]),(10,b"x".to_vec())]);
         let mut child=Grammar::from_glrm("extern token M start item ignore SPACE t SPACE=/ +/ nt item=\"a\" M?").unwrap();
-        child.bind("M",TokenSet::new([9])).unwrap();
+        child=child.bind_snapshot("M",TokenSet::new([9])).unwrap();
         let mut p=Grammar::from_glrm("extern grammar C start root nt root=\"P\" C \" X\"").unwrap().prepare(&v).unwrap();
         p.bind("C",child.prepare(&v).unwrap()).unwrap();
         for mode in MODES {
@@ -779,7 +779,7 @@ mod differential_tests {
             let source=format!("extern token MARK start root nt root={body}");
             for set in [vec![],vec![0],vec![4],vec![7],vec![99],vec![99,130],vec![0,4,7,99]] {
                 for mode in MODES {
-                    let mut g=Grammar::from_glrm(&source).unwrap();g.bind("MARK",TokenSet::new(set.iter().copied())).unwrap();
+                    let mut g=Grammar::from_glrm(&source).unwrap();g=g.bind_snapshot("MARK",TokenSet::new(set.iter().copied())).unwrap();
                     let c=g.compile_with_build_options(&v,mode.build_options().end_tokens([130])).unwrap();
                     walk(&c,&format!("{body}, set={set:?}, {mode:?}"),2);
                 }

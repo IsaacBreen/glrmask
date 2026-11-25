@@ -15,6 +15,7 @@ def test_invalid_input():
     with pytest.raises(glrmask.GLRMaskError) as exc:
         g.compile(glrmask.Vocab({0: b"a"}))
     assert exc.value.kind == "invalid_input"
+    g = glrmask.Module(g)
     g.bind("E", glrmask.TokenSet([0]))
     with pytest.raises(glrmask.GLRMaskError) as exc:
         g.bind("E", glrmask.TokenSet([0]))

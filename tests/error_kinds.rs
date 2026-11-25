@@ -13,6 +13,7 @@ fn caller_errors_are_invalid_input() {
     assert_eq!(grammar.bind("missing", glrmask::TokenSet::new([0u32])).unwrap_err().kind(), ErrorKind::InvalidInput);
     let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     assert_eq!(grammar.compile(&vocab).unwrap_err().kind(), ErrorKind::InvalidInput);
+    let mut grammar = Module::new(&grammar);
     grammar.bind("E", glrmask::TokenSet::new([0u32])).unwrap();
     assert_eq!(grammar.bind("E", glrmask::TokenSet::new([0u32])).unwrap_err().kind(), ErrorKind::InvalidInput);
 }

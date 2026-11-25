@@ -11,8 +11,8 @@ fn compile(grammar: &Grammar, vocab: &Vocab, strategy: MaskMode) -> Constraint {
         .unwrap()
 }
 
-fn with_end_token(body: &Grammar, id: u32) -> Grammar {
-    Grammar::from_expr(Expr::sequence([
+fn with_end_token(body: &Grammar, id: u32) -> Module {
+    module_expr(Expr::sequence([
         Expr::from(body),
         Expr::from(TokenSet::new([id])),
     ]))
@@ -145,7 +145,7 @@ fn end_token_root_terminates_only_after_the_end_token() {
     for strategy in STRATEGIES {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
         let grammar = with_end_token(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap(), 99);
-        let constraint = compile(&grammar, &vocab, strategy);
+        let constraint = grammar.compile_with(&vocab, strategy.compile_options()).unwrap();
 
         let mut state = constraint.start();
         assert!(!state.is_terminated());
@@ -263,7 +263,7 @@ fn oracle_agrees_with_commit_for_every_prefix() {
             "ignore",
         );
         assert_oracle(
-            &compile(&json_root, &json_vocab, strategy),
+            &json_root.compile_with(&json_vocab, strategy.compile_options()).unwrap(),
             &json_vocab,
             &[99],
             br#"{"k":0,"k":1}"#,
@@ -357,3 +357,10 @@ fn empty_commits_preserve_state() {
     }
 }
 
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
+}

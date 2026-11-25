@@ -99,6 +99,14 @@ void reject_module_expr_in_grammar() {
     auto source = Grammar::from_lark("start: \"a\"");
     auto prepared = source.precompile(v);
     auto host = Grammar::from_glrm("start s extern grammar item nt s = item");
+    auto token = TokenSet({5});
+    throws([&]{ host.bind("item",token); }, GLRMASK_INVALID_INPUT);
+    for (const auto& expr : {Expr::choice({token,Expr::literal("x")}), Expr::sequence({Expr::literal(""),token}), Expr::sequence({Expr::choice({token,Expr::literal("x")}),Expr::literal("")})}) {
+        throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ host.bind("item",expr); }, GLRMASK_INVALID_INPUT);
+        auto outer=Module(host); outer.bind("item",expr);
+        auto state=outer.compile(v).start(); CHECK(state.commit_token(5) && state.is_accepting());
+    }
     for (const auto& m : {Module(source), prepared}) {
         for (const auto& expr : {Expr::sequence({m}), Expr::sequence({Expr::choice({m}), Expr::literal("")})}) {
             throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
@@ -117,9 +125,8 @@ void end_tokens() {
     for (unsigned i=0; i<3; ++i) {
         CompileOptions o;
         o.mask_strategy = static_cast<MaskStrategy>(i);
-        auto m = Module(Grammar::from_expr(Expr::sequence({
-            Grammar::from_lark(R"(start: "a")"), TokenSet({99})
-        })));
+        auto m = Module(Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE"));
+        m.bind("VALUE", Expr::sequence({Grammar::from_lark(R"(start: "a")"), TokenSet({99})}));
         auto s = m.compile(v, o).start();
         CHECK(!allowed(s.mask(),99)); CHECK(s.commit_token(0)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),99));
         CHECK(s.commit_token(99)); CHECK(s.is_accepting());
@@ -401,8 +408,8 @@ void canonical_modules() {
     CHECK(ext_unbound[1].name == "third");
 
     // A grammar's unbound view carries its own unbound externs.
-    auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern token one; extern token two; nt start = one two;");
-    grammar_externs.bind("one", TokenSet({1}));
+    auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern grammar one; extern grammar two; nt start = one two;");
+    grammar_externs.bind("one", Expr::literal("a"));
     auto grammar_unbound = grammar_externs.externs().unbound();
     CHECK(grammar_unbound.size() == 1 && grammar_unbound[0].name == "two");
     CHECK(grammar_externs.externs().size() == 2);

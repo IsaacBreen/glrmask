@@ -97,9 +97,9 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     empty = glrmask.TokenSet([])
     assert empty == glrmask.TokenSet.from_ranges([])
     for mode in MODES:
-        m = glrmask.Grammar.from_glrm(MARK)
+        m = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
         m.bind("MARK", empty)
-        impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
+        impossible = _module_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.copy().commit_forced_tokens() == [] and state.copy().commit_forced_tokens() == []
@@ -181,7 +181,7 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     mode = getattr(glrmask.MaskStrategy, mode_name)
     child_source = glrmask.Grammar.from_lark('start: "a"')
     child_mod = glrmask.Module(child_source)
-    child = glrmask.Grammar.from_expr(glrmask.Expr.sequence(child_source, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
+    child = _module_expr(glrmask.Expr.sequence(child_source, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
     child = glrmask.Constraint.load(child.save(), v)
     own_state = child.start()
     assert not own_state.mask()[127]
@@ -200,3 +200,9 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     assert state.commit_token(63)
     assert accepting(state)
     assert not np.any(state.mask())
+
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module

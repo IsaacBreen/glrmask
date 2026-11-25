@@ -1657,7 +1657,7 @@ fn special_token_commit_profiling_entry_points_preserve_semantics() {
             extern token SPECIAL;
             nt start = SPECIAL;
         "#).unwrap();
-    grammar.bind("SPECIAL", glrmask::TokenSet::new(vec![100])).unwrap();
+    grammar=grammar.bind_snapshot("SPECIAL", glrmask::TokenSet::new(vec![100])).unwrap();
     let constraint = with_stable_ti_env(|| {
         Constraint::compile(grammar, &vocab).unwrap()
     });
@@ -2507,7 +2507,7 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
 #[test]
 fn commit_tokens_commits_in_order_and_post_end_commits_error() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]).unwrap();
-    let constraint = glrmask::Grammar::from_expr(glrmask::Expr::sequence([
+    let constraint = module_expr(glrmask::Expr::sequence([
         glrmask::Expr::from(glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)),
         glrmask::Expr::from(glrmask::TokenSet::new([7])),
     ]))
@@ -2564,4 +2564,11 @@ fn batch_commit_counts_prefix_and_preserves_original_clone() {
     assert!(copy.is_terminated());
     assert!(!original.is_terminated());
     assert!(!original.is_accepting());
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
 }

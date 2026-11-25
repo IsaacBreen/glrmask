@@ -793,7 +793,7 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Creates a grammar from an expression.
+    /// Creates a grammar from a portable expression (no Module or TokenSet, even nested).
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)
@@ -869,15 +869,15 @@ impl Grammar {
     }
 
     /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind. A grammar can't bind a [`Module`]; use
-    /// [`Module::bind`] for that.
+    /// bound, or `value` is the wrong kind. A grammar accepts only portable grammars
+    /// and expressions. Bind token sets and modules using [`Module::bind`].
     pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
         let value = match value.into().0 {
             module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
             module::GrammarBindingKind::Expr(expr) => {
                 GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
             }
-            module::GrammarBindingKind::TokenSet(tokens) => GrammarValue::TokenSet(tokens),
+            module::GrammarBindingKind::TokenSet(_) => return Err(Error::InvalidInput("token IDs depend on the model; bind them on a Module: Module(grammar).bind(...)".into())),
         };
         let next = self.bind_value(name, value)?;
         *self = next;
@@ -7343,10 +7343,10 @@ mod module_build_overhead_tests {
                     .end_tokens([0u32]),
             )
             .expect("direct build");
-        let standalone = Grammar::from_expr(Expr::sequence([
+        let standalone = Module::from_expr(&Expr::sequence([
             Expr::from(grammar.clone()),
             Expr::from(TokenSet::new([0u32])),
-        ]))
+        ]), true)
         .expect("root expression")
         .compile(&vocab)
         .expect("module build");
@@ -7374,10 +7374,10 @@ mod module_build_overhead_tests {
                 )
                 .expect("warmup direct build");
             let grammar = Grammar::from_json_schema(&source).unwrap();
-            Grammar::from_expr(Expr::sequence([
+            Module::from_expr(&Expr::sequence([
                 Expr::from(grammar.clone()),
                 Expr::from(TokenSet::new([0u32])),
-            ]))
+            ]), true)
             .expect("root expression")
             .compile(&vocab)
             .expect("warmup module build");
@@ -7400,10 +7400,10 @@ mod module_build_overhead_tests {
 
             let grammar = Grammar::from_json_schema(&source).unwrap();
             let started = Instant::now();
-            Grammar::from_expr(Expr::sequence([
+            Module::from_expr(&Expr::sequence([
                 Expr::from(grammar.clone()),
                 Expr::from(TokenSet::new([0u32])),
-            ]))
+            ]), true)
             .expect("root expression")
             .compile(&vocab)
             .expect("module build");

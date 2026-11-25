@@ -173,9 +173,10 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
                                       5: b"x", 6: b"a", 7: b"", 8: b"b", 9: b"c",
                                       10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
+    grammar = glrmask.Module(grammar)
     grammar.bind("A", glrmask.TokenSet(range(6)) if compact else glrmask.TokenSet([0]))
     grammar.bind("B", glrmask.TokenSet(range(3, 10)) if compact else glrmask.TokenSet([1]))
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
+    constraint = _module_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()
     assert state.commit_token(0)
     assert state.commit_token(0)
@@ -193,8 +194,9 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
                                       8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
+    grammar = glrmask.Module(grammar)
     grammar.bind(A=glrmask.TokenSet(a), B=glrmask.TokenSet(b))
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
+    constraint = _module_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()
     assert state.commit_token(0)
     assert state.commit_token(0)
@@ -202,3 +204,8 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     assert not state.is_accepting()
     assert accepted_ids(state) == {15}
     assert not state.commit_token(0)
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module

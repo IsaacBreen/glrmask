@@ -377,7 +377,7 @@ pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<Gram
         return Ok(GrammarBinding::TokenSet(t.inner.clone()));
     }
     Err(PyTypeError::new_err(
-        "Grammar.bind accepts a Grammar, Expr, or TokenSet",
+        "Grammar.bind accepts a Grammar or Expr",
     ))
 }
 

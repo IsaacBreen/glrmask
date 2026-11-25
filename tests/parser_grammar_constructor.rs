@@ -252,7 +252,7 @@ fn exact_token_extern_mask_cache_agrees_with_commit_and_forcing() {
     let g = Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark \"b\";").unwrap();
     for strategy in [MaskStrategy::ParserDwa, MaskStrategy::FAST_COMPILE] {
         let options = CompileOptions::default().mask_strategy(strategy);
-        let mut bound = g.clone();
+        let mut bound = Module::new(&g);
         bound.bind("mark", TokenSet::new([70])).unwrap();
         let direct = bound.compile_with(&v, options.clone()).unwrap();
         let mut m = Module::new(&g);

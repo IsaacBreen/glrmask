@@ -177,7 +177,7 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
 fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     let v = vocab();
     let module = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    let root = Grammar::from_expr(Expr::sequence([
+    let root = module_expr(Expr::sequence([
         Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([130, 255])),
     ])).unwrap();
@@ -212,7 +212,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         constraint = Constraint::load(constraint.save(), &v).unwrap();
     }
     assert_eq!(module.compile(&v).unwrap().mask_len(), 1);
-    let root_b = Grammar::from_expr(Expr::sequence([
+    let root_b = module_expr(Expr::sequence([
         Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([63])),
     ])).unwrap();
@@ -223,7 +223,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
 #[test]
 fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     let v = vocab();
-    let constraint = Grammar::from_expr(Expr::sequence([
+    let constraint = module_expr(Expr::sequence([
         Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([7])),
     ])).unwrap().compile(&v).unwrap();
@@ -241,7 +241,7 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     assert!(valid.is_accepting());
     assert!(valid.mask().iter().all(|word| *word == 0));
     assert!(!valid.commit_token(1));
-    assert!(Grammar::from_expr(Expr::sequence([
+    assert!(module_expr(Expr::sequence([
         Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([7, 7])),
     ])).is_ok());
@@ -609,5 +609,35 @@ fn grammar_expressions_reject_modules_at_any_depth_but_module_bind_accepts_them(
             assert!(state.commit_token(1));
             assert!(state.is_accepting());
         }
+    }
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
+}
+
+#[test]
+fn grammar_rejects_token_sets_transitively_but_module_accepts() {
+    let token = TokenSet::new([5]);
+    let expression = Expr::from(token.clone());
+    let choice = Expr::choice([expression.clone(), Expr::literal("x")]);
+    let sequence = Expr::sequence([Expr::literal(""), expression.clone()]);
+    let nested = Expr::sequence([choice.clone(), Expr::literal("")]);
+    let host = Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE").unwrap();
+    let mut g = host.clone();
+    assert_eq!(g.bind("VALUE", &token).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+    assert_eq!(Grammar::from_expr(token).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+    for expr in [expression, choice, sequence, nested] {
+        let mut g = host.clone();
+        assert_eq!(g.bind("VALUE", &expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+        assert_eq!(Grammar::from_expr(&expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+        assert_eq!(g.externs().unbound().len(), 1);
+        let v = Vocab::new([(0, b"x".as_slice())]).unwrap();
+        let c = module_expr(expr).unwrap().compile(&v).unwrap();
+        let mut s = c.start();
+        assert!(s.commit_token(5) && s.is_accepting());
     }
 }

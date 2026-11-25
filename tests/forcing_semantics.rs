@@ -405,10 +405,10 @@ fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
             (&optional, vec![9], vec![0]),
             (&finite, vec![9,10], vec![0]),
         ] {
-            let mut root = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap();
+            let mut root = glrmask::Module::new(&Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap());
             root.bind("BODY", body.clone()).unwrap();
             root.bind("END", TokenSet::new(ends.clone())).unwrap();
-            let c = root.compile_with_build_options(&vocab, options.clone()).unwrap();
+            let c = root.compile_with(&vocab, mode.compile_options()).unwrap();
             for c in [c.clone(), Constraint::load(c.save(), &vocab).unwrap()] {
                 let forced = checked_force(&c);
                 assert!(expected.starts_with(&forced), "{mode:?}, ends={ends:?}, forced={forced:?}");
@@ -432,8 +432,8 @@ fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
     }
 }
 
-fn with_end(body: &Grammar, ends: &[u32]) -> Grammar {
-    let mut root = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap();
+fn with_end(body: &Grammar, ends: &[u32]) -> glrmask::Module {
+    let mut root = glrmask::Module::new(&Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap());
     root.bind("BODY", body.clone()).unwrap();
     root.bind("END", TokenSet::new(ends.iter().copied())).unwrap();
     root

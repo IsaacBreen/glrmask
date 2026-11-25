@@ -126,7 +126,7 @@ fn exact_model_events_and_marker_ids_are_distinct_namespaces() {
         for mode in MODES {
             let mut grammar=glrmask::__private::grammar_from_glrm_with_markers("start root\nextern token SEP\nnt root = \"a\" @mark(1) SEP @mark(2) \"b\" @mark(3)\n").unwrap()
                 ;
-            grammar.bind("SEP", TokenSet::new([2])).unwrap();
+            grammar=grammar.bind_snapshot("SEP", TokenSet::new([2])).unwrap();
             let c=grammar.compile_with_build_options(&v,mode.build_options()).unwrap();
             let mut s=c.start();assert!(s.commit_token(0));assert_eq!(events(&s),[(1,1)]);
             assert!(s.commit_token(2));assert_eq!(events(&s),[(2,1+spelling.len() as u64)],"special {mode:?}");

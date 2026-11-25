@@ -222,8 +222,8 @@ See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing
 
 A grammar can declare externs: named slots that you bind later.
 
-- `extern grammar NAME` takes a grammar, module, expression or token set.
-- `extern token NAME` takes a token set, and matches exactly one of those tokens. It never matches their text.
+- `extern grammar NAME` takes a portable grammar or expression on a Grammar; on a Module it can also take a module or token set.
+- `extern token NAME` can be declared on a Grammar but must be filled on a Module with a token set. It matches exactly one of those tokens, never their text.
 
 ```python
 import glrmask
@@ -260,7 +260,7 @@ and `externs().unbound()`).
 
 ### Modules
 
-A `Module` holds a grammar, its bindings and any precompiled work. `precompile(vocab)` compiles as much as it can now,
+A `Grammar` holds portable source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
 even with externs unbound, and `compile` reuses that work. Use modules when the same parts appear in many grammars. Tool
 calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 
@@ -288,7 +288,7 @@ and `load` checks that you pass the one it was compiled for. Bytes saved by one 
 
 `Expr.choice(*parts)` matches any one of its parts, `Expr.sequence(*parts)` matches them one after another, and
 `Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, expressions and
-token sets. `Grammar.from_expr` makes a grammar from an expression that contains no modules. Expressions containing modules can be bound to a `Module`.
+token sets. `Grammar.from_expr` makes a grammar from an expression that contains neither modules nor token sets, including nested parts. Expressions containing either can be bound to a `Module`.
 
 ## Token sets
 

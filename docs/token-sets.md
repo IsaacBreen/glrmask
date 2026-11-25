@@ -16,8 +16,9 @@ grammar = glrmask.Grammar.from_glrm('''
     start reply
     nt reply = /[a-z ]*/ | BEGIN_CALL "weather"
 ''')
-grammar.bind("BEGIN_CALL", begin_call)
-state = grammar.compile(vocab).start()
+module = glrmask.Module(grammar)
+module.bind("BEGIN_CALL", glrmask.TokenSet([begin_call]))
+state = module.compile(vocab).start()
 assert state.commit_token(begin_call)
 assert state.commit_bytes(b"weather")
 ```
@@ -40,10 +41,10 @@ as any other two ranges; built from IDs, it means reading 131,071 IDs first.
 
 ## Using a token set
 
-- Bind it to an `extern token`, or to an `extern grammar`, in which case it matches one token.
+- Bind it on a Module to an `extern token`, or to an `extern grammar`, in which case it matches one token.
 - Put it in an expression: `Expr.sequence(TokenSet([begin_call]), grammar)` requires a tool-call marker before
   `grammar`.
-- A single token ID binds the same as a set of one.
+- Use a one-element TokenSet for a single token ID. Token sets cannot be bound on a Grammar or included in Grammar.from_expr, even indirectly.
 
 In Lark, `<[5]>` matches token 5, `<[1,3-8]>` a list or inclusive range of IDs, `<[^1,3-8]>` any token except those, and
 `<[*]>` any token. These IDs are written into the grammar, so they are specific to one vocabulary; an extern keeps the

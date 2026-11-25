@@ -24,7 +24,7 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
     m.bind("eos",TokenSet::new([7])).unwrap();
     let c=m.compile(&v).unwrap();
     assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
-    let g=Grammar::from_expr(TokenSet::new([7])).unwrap();
+    let g=module_expr(TokenSet::new([7])).unwrap();
     let c=g.compile(&v).unwrap();
     assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
 }
@@ -118,4 +118,11 @@ fn ignored_terminals_remain_distinct_under_maximal_munch() {
         assert!(Grammar::from_glrm(bad).and_then(|g|g.compile(&v).map(|_|())).is_err());
     }
     assert!(Grammar::from_lark("%ignore \"a\"\n%ignore /b*/\nstart: \"b\"").unwrap().compile(&v).is_err());
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
 }

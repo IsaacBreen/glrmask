@@ -217,7 +217,7 @@ class Grammar extends Owned {
     else if (value instanceof Module) expr = invoke(() => native.NativeExpr.fromModule(handle(value, Module)));
     else if (value instanceof Grammar) expr = invoke(() => native.NativeExpr.fromGrammar(handle(value, Grammar)));
     else if (value instanceof TokenSet) expr = invoke(() => native.NativeExpr.fromTokenSet(handle(value, TokenSet)));
-    else throw new TypeError('Grammar.fromExpr requires an Expr, Grammar or TokenSet');
+    else throw new TypeError('Grammar.fromExpr requires an Expr or Grammar');
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
   }
   bind(nameOrBindings, value) {
@@ -237,7 +237,7 @@ class Grammar extends Owned {
     if (value instanceof Grammar) return invoke(() => target.bindGrammar(name, handle(value, Grammar)));
     if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));
     if (value instanceof TokenSet) return invoke(() => target.bindTokens(name, handle(value, TokenSet)));
-    throw new TypeError('Grammar.bind requires a Grammar, Expr, or TokenSet');
+    throw new TypeError('Grammar.bind requires a Grammar or Expr');
   }
   precompileSync(vocab, options) {
     const s = compileSettings(options);

@@ -98,7 +98,19 @@ int main(void) {
             CHECK(glrmask_module_bind_expr(outer,"item",4,cases[i])==GLRMASK_OK);
             glrmask_module_free(outer);
         }
-        glrmask_expr_free(nested);glrmask_grammar_free(parent);
+        glrmask_expr_free(nested);
+        const uint32_t id=5; glrmask_token_set* tokens=NULL; glrmask_expr* leaf=NULL;
+        CHECK(glrmask_token_set_new(&id,1,&tokens)==GLRMASK_OK);
+        CHECK(glrmask_grammar_bind_tokens(parent,"item",4,tokens)==GLRMASK_INVALID_INPUT);
+        const glrmask_expr_operand token_operand={GLRMASK_OPERAND_TOKEN_SET,tokens};
+        CHECK(glrmask_expr_sequence(&token_operand,1,&leaf)==GLRMASK_OK);
+        glrmask_grammar* bad=NULL;
+        CHECK(glrmask_grammar_from_expr(leaf,&bad)==GLRMASK_INVALID_INPUT && bad==NULL);
+        CHECK(glrmask_grammar_bind_expr(parent,"item",4,leaf)==GLRMASK_INVALID_INPUT);
+        CHECK(glrmask_module_new(parent,&outer)==GLRMASK_OK);
+        CHECK(glrmask_module_bind_expr(outer,"item",4,leaf)==GLRMASK_OK);
+        glrmask_module_free(outer);glrmask_expr_free(leaf);glrmask_token_set_free(tokens);
+        glrmask_grammar_free(parent);
     }
     glrmask_expr_free(expr);
     glrmask_expr* literal=NULL;CHECK(glrmask_expr_literal((const uint8_t*)"x",1,&literal)==GLRMASK_OK);glrmask_expr_free(literal);

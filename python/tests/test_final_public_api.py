@@ -97,7 +97,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
     v = vocab()
-    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
+    c = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     s = c.start()
     with pytest.raises(ValueError):
         s.fill_mask(np.zeros(1, dtype=np.int32))
@@ -124,7 +124,7 @@ def test_description_owns_source_bindings_after_collection():
 
 def test_artifact_ownership_and_existing_vocab_validation():
     v = vocab()
-    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
+    c = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     raw = c.save()
     assert isinstance(raw, bytes)
     del c
@@ -242,7 +242,7 @@ def test_module_load_takes_only_bytes_and_from_expr_is_positional():
     assert glrmask.Module.load(data) is not None
     with pytest.raises(TypeError):
         glrmask.Module.load(data, v)
-    grammar = glrmask.Grammar.from_expr(glrmask.TokenSet([0]))
+    grammar = _module_expr(glrmask.TokenSet([0]))
     assert grammar.compile(v).start().mask()[0]
 
 
@@ -280,10 +280,9 @@ def token_extern_grammar():
 def test_bind_requires_a_token_set_for_a_token_extern():
     v = vocab()
     grammar = token_extern_grammar()
-    assert grammar.bind("T", glrmask.TokenSet([0])) is None
-    assert len(grammar.externs.unbound) == 0
-    state = grammar.compile(v).start()
-    assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
+    with pytest.raises(glrmask.GLRMaskError, match="token IDs depend on the model"):
+        grammar.bind("T", glrmask.TokenSet([0]))
+    assert len(grammar.externs.unbound) == 1
 
     module = glrmask.Module(token_extern_grammar())
     assert module.bind("T", glrmask.TokenSet([0])) is None
@@ -299,9 +298,9 @@ def test_bind_requires_a_token_set_for_a_token_extern():
 
 
 def test_grammar_copy_binds_independently():
-    grammar = token_extern_grammar()
+    grammar = glrmask.Grammar.from_glrm("extern grammar T start root nt root = T")
     copy = grammar.copy()
-    assert copy.bind("T", glrmask.TokenSet([0])) is None
+    assert copy.bind("T", glrmask.Expr.literal("a")) is None
     assert len(copy.externs.unbound) == 0
     assert len(grammar.externs.unbound) == 1
     assert "T" in grammar.externs.unbound
@@ -309,10 +308,10 @@ def test_grammar_copy_binds_independently():
 
 def test_grammar_batch_bind_is_atomic():
     grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern token a; extern token b; nt root = a b;"
+        "glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;"
     )
     with pytest.raises(ValueError):
-        grammar.bind(a=glrmask.TokenSet([0]), b=glrmask.Grammar.from_lark('start: "a"'))
+        grammar.bind(a=glrmask.Expr.literal("a"), b=glrmask.TokenSet([1]))
     assert len(grammar.externs.unbound) == 2
     assert "a" in grammar.externs.unbound
     assert "b" in grammar.externs.unbound
@@ -324,7 +323,7 @@ def test_grammar_batch_bind_is_atomic():
     with pytest.raises(TypeError):
         glrmask.Module(grammar).bind()
 
-    assert grammar.bind(a=glrmask.TokenSet([0]), b=glrmask.TokenSet([1])) is None
+    assert grammar.bind(a=glrmask.Expr.literal("a"), b=glrmask.Expr.literal("b")) is None
     assert len(grammar.externs.unbound) == 0
 
 
@@ -373,10 +372,10 @@ def test_hashable_public_values_and_token_set_expr_parts():
         glrmask.Expr.sequence(5, 6)
     with pytest.raises(TypeError):
         glrmask.Expr.choice(5, 6)
-    state = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
+    state = _module_expr(glrmask.Expr.sequence(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert state.commit_tokens([5, 6]) == 2
     assert state.is_accepting()
-    choice = glrmask.Grammar.from_expr(glrmask.Expr.choice(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
+    choice = _module_expr(glrmask.Expr.choice(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert choice.commit_token(6)
     assert choice.is_accepting()
 
@@ -403,3 +402,24 @@ def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
             outer.bind("item", expr)
             state = outer.compile(v).start()
             assert state.commit_bytes(b"a") and state.is_accepting()
+
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module
+
+
+def test_grammar_rejects_tokens_transitively_and_module_accepts_them():
+    token = glrmask.TokenSet([5])
+    for value in (token, glrmask.Expr.choice(token, glrmask.Expr.literal("x")),
+                  glrmask.Expr.sequence(glrmask.Expr.literal(""), token),
+                  glrmask.Expr.sequence(glrmask.Expr.choice(glrmask.Expr.literal("x"), token), glrmask.Expr.literal(""))):
+        grammar = glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE")
+        for attempt in (lambda: grammar.bind("VALUE", value), lambda: glrmask.Grammar.from_expr(value)):
+            with pytest.raises(glrmask.GLRMaskError, match="token IDs depend on the model") as exc:
+                attempt()
+            assert exc.value.kind == "invalid_input"
+        assert len(grammar.externs.unbound) == 1
+        state = _module_expr(value).compile(glrmask.Vocab({0: b"x"})).start()
+        assert state.commit_token(5) and state.is_accepting()

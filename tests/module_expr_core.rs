@@ -178,7 +178,7 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
 #[test]
 fn final_end_tokens_are_root_only() {
     let v = vocab();
-    let root = Grammar::from_expr(Expr::sequence([
+    let root = module_expr(Expr::sequence([
         Expr::from(a()),
         Expr::from(TokenSet::new([99])),
     ]))
@@ -339,4 +339,11 @@ fn compile_succeeds_on_threads_with_small_stacks() {
     let constraint = worker.join().unwrap();
     assert!(allowed(&constraint.start().mask(), 17));
     assert!(accepts(&constraint, &[17]));
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
 }

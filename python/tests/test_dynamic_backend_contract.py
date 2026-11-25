@@ -62,7 +62,7 @@ MODES = [
 @pytest.mark.parametrize("mode", MODES)
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab(TOKENS)
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
+    compiled = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark(SOURCE), glrmask.TokenSet([26]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
@@ -115,3 +115,9 @@ def test_dynamic_empty_exact_special_id_remains_live():
         assert state.mask()[25] and not state.mask()[26]
         assert state.commit_token(25)
         assert state.is_accepting()
+
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module

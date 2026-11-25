@@ -48,7 +48,7 @@ def test_parser_backend_is_public_but_constraint_inspection_is_internal():
 @pytest.mark.parametrize("mode", MODES)
 def test_save_flag_preserves_default_and_external_roundtrips(mode):
     vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b", 3: b""})
-    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, **mode)
+    constraint = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, **mode)
     assert not hasattr(constraint, "save_with_external_vocab")
     self_contained = constraint.save()
     assert self_contained == constraint.save()
@@ -116,7 +116,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     assert hasattr(glrmask.ConstraintState, "is_accepting")
     vocab = glrmask.Vocab({0: b"a", 1: b"b"})
     end_token_ids = {130}
-    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, **mode)
+    compiled = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
@@ -142,3 +142,9 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
                 assert not ended.commit_bytes(b"a")
                 assert not ended.is_accepting() and not ended.mask().any()
             assert not state.is_accepting() and state.mask()[1] and state.mask()[130]
+
+
+def _module_expr(value):
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE"))
+    module.bind("VALUE", value)
+    return module

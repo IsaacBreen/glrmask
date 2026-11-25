@@ -132,24 +132,24 @@ test('Module: atomic multi-bind',()=>{
 
 test('Grammar: clone is independent and multi-bind is atomic',()=>{
   const v=vocab();
-  const g=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
+  const g=Grammar.fromGlrm('glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;');
   const copy=g.clone();
-  copy.bind('a',new TokenSet([1]));
+  copy.bind('a',source());
   assert.equal(g.externs.unbound.size,2);
   assert.equal(copy.externs.unbound.size,1);
   assert.ok(copy.externs.unbound.has('b'));
   assert.throws(()=>g.compileSync(v),/extern "a" is unbound/);
   assert.throws(()=>copy.compileSync(v),/extern "b" is unbound/);
 
-  const m=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
-  assert.throws(()=>m.bind({a:new TokenSet([1]),b:'not_a_valid_binding'}));
+  const m=Grammar.fromGlrm('glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;');
+  assert.throws(()=>m.bind({a:source(),b:'not_a_valid_binding'}));
   assert.equal(m.externs.unbound.size,2);
   assert.ok(m.externs.unbound.has('a'));
   assert.ok(m.externs.unbound.has('b'));
   // The failed batch left both externs unbound; 'a' would be named first if it had been bound.
   assert.throws(()=>m.compileSync(v),/extern "a" is unbound/);
 
-  m.bind({a:new TokenSet([1]),b:new TokenSet([2])});
+  m.bind({a:source(),b:source('b')});
   const state=m.compileSync(v).start();
   assert.ok(state.commitToken(1));assert.ok(state.commitToken(2));assert.ok(state.isAccepting());
 });
@@ -207,10 +207,10 @@ test('Module: asynchronous precompile rejects a stale completion atomically',asy
 });
 
 test('Grammar.clone and Module.clone return independent copies', () => {
-  const g1 = Grammar.fromGlrm('glrm 1; start root; extern token a; nt root = a;');
+  const g1 = Grammar.fromGlrm('glrm 1; start root; extern grammar a; nt root = a;');
   const g2 = g1.clone();
   assert.throws(() => g2.bind('a', 1), TypeError);
-  g2.bind('a', new TokenSet([1]));
+  g2.bind('a', source());
   assert.equal(g1.externs.unbound.size, 1);
   assert.equal(g2.externs.unbound.size, 0);
 
@@ -250,4 +250,21 @@ test('Grammar rejects direct and nested module expressions; Module.bind still ac
       const outer=new Module(parent());outer.bind('item',expr);accept(outer,v,[1]);
     }
   }
+});
+
+test('Grammar: reject direct and nested TokenSet; Module accepts',()=>{
+  const v=new Vocab([[0,Buffer.from('x')]]);
+  const g=Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE');
+  const token=new TokenSet([5]);
+  for(const value of [token,Expr.choice(token,Expr.literal('x')),Expr.sequence(Expr.literal(''),token),Expr.sequence(Expr.choice(token,Expr.literal('x')),Expr.literal(''))]){
+    for(const call of [()=>g.bind('VALUE',value),()=>Grammar.fromExpr(value)]){
+      assert.throws(call, e=>e.code==='GLRMASK_INVALID_INPUT' && /token IDs depend on the model/.test(e.message));
+    }
+    assert.equal(g.externs.unbound.size,1);
+    const m=new Module(g);m.bind('VALUE',value);
+    const state=m.compileSync(v).start();assert.ok(state.commitToken(5));assert.ok(state.isAccepting());
+  }
+  const t=Grammar.fromGlrm('extern token T start root nt root=T');
+  assert.throws(()=>t.bind('T',token),/token IDs depend on the model/);
+  const m=new Module(t);m.bind('T',token);assert.ok(m.compileSync(v).start().commitToken(5));
 });

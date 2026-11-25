@@ -185,16 +185,15 @@ GLRMASK_API void glrmask_token_set_free(glrmask_token_set* p);
 
 /// Creates a grammar from source text in `format`.
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const char* source,size_t n,glrmask_grammar** out);
-/// Creates a grammar from an expression.
+/// Creates a grammar from a portable expression (no modules or token sets, even nested).
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// or the value is the wrong kind for it. Bind token externs on a Module.
 GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_grammar* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// or the value is the wrong kind for it. Bind token externs on a Module.
 GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_expr* value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// Rejected with GLRMASK_INVALID_INPUT: token sets belong on a Module.
 GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_token_set* value);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* p,glrmask_grammar** out);

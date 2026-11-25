@@ -99,7 +99,12 @@ impl Expr {
                             }
                             (ExternKind::Grammar, Binding::from(m.clone()))
                         },
-                        ExprLeaf::TokenSet(t) => (ExternKind::Token, Binding::from(t.clone())),
+                        ExprLeaf::TokenSet(t) => {
+                            if !allow_modules {
+                                return Err(Error::InvalidInput("token IDs depend on the model; bind them on a Module: Module(grammar).bind(...)".into()));
+                            }
+                            (ExternKind::Token, Binding::from(t.clone()))
+                        },
                     };
                     externs.push((name.clone(), kind));
                     leaves.push((name.clone(), binding));

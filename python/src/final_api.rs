@@ -393,7 +393,7 @@ impl PyGrammar {
         Self::new(source, SourceKind::Lark)
     }
 
-    /// Creates a grammar from an expression.
+    /// Creates a grammar from a portable expression (no Module or TokenSet, even nested).
     #[staticmethod]
     #[pyo3(signature = (expr, /))]
     fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -403,7 +403,7 @@ impl PyGrammar {
         })
     }
 
-    /// Binds the extern `name` to `value`.
+    /// Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
     ///
     /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
     #[pyo3(signature = (*args, **kwargs))]

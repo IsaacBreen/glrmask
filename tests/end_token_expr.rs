@@ -22,8 +22,8 @@ fn body() -> Grammar {
     ).unwrap()
 }
 
-fn root(grammar: Grammar, ids: impl IntoIterator<Item = u32>) -> Grammar {
-    Grammar::from_expr(Expr::sequence([
+fn root(grammar: Grammar, ids: impl IntoIterator<Item = u32>) -> Module {
+    module_expr(Expr::sequence([
         Expr::from(grammar),
         Expr::from(TokenSet::new(ids)),
     ]))
@@ -124,4 +124,11 @@ fn empty_end_token_set_is_the_empty_language() {
         }
         Err(_) => {}
     }
+}
+
+fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+    let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
+    let mut module = glrmask::Module::new(&grammar);
+    module.bind("VALUE", value)?;
+    Ok(module)
 }

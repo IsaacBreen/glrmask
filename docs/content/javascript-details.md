@@ -48,7 +48,7 @@ call.bind('ARGS', weather);
 const constraint = await call.compile(vocab);
 ```
 
-`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
+On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
 at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
 same one in different ways. `externs` is a read-only `Map` of the declared externs, and `externs.unbound` holds the ones
 not yet bound.
@@ -59,6 +59,8 @@ not yet bound.
 const reply = Expr.choice(Grammar.fromLark('start: "yes"'), Grammar.fromLark('start: "no"'));
 const grammar = Grammar.fromExpr(Expr.sequence(Expr.literal('Answer: '), reply));
 ```
+
+Grammar bindings and Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
 
 ## Mask strategies
 

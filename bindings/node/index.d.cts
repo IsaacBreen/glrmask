@@ -142,8 +142,8 @@ export declare class Grammar implements Disposable {
   readonly externs: Externs;
   /** A copy of the grammar. Binding the copy does not change the original. */
   clone(): Grammar;
-  /** Creates a grammar from an expression. */
-  static fromExpr(expr: Expr | Grammar | TokenSet): Grammar;
+  /** Creates a grammar from a portable expression (no Module or TokenSet, even nested). */
+  static fromExpr(expr: Expr | Grammar): Grammar;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
   bind(name: string, value: GrammarBindValue): void;
   /** Binds several externs at once; if one fails, none is bound. */
@@ -167,7 +167,7 @@ export declare class Grammar implements Disposable {
 }
 
 
-export type GrammarBindValue = Grammar | Expr | TokenSet;
+export type GrammarBindValue = Grammar | Expr;
 
 /** A value that can be part of an `Expr`. */
 export type ExprPart = Grammar | Module | Expr | TokenSet;

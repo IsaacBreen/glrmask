@@ -290,15 +290,15 @@ public:
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
     /// Creates a grammar from Lark source.
     static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
-    /// Creates a grammar from an expression.
+    /// Creates a grammar from a portable expression (no modules or token sets).
     static Grammar from_expr(const Expr& value);
     /// Binds the extern `name` to a grammar.
     void bind(std::string_view name, const Grammar& value) {
         detail::check(glrmask_grammar_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Binds the extern `name` to an expression.
+    /// Binds the extern `name` to a portable expression.
     void bind(std::string_view name, const Expr& value);
-    /// Binds the extern `name` to a token set.
+    /// Rejected: bind token sets on a Module instead.
     void bind(std::string_view name, const TokenSet& value) {
         detail::check(glrmask_grammar_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }

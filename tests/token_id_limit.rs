@@ -66,16 +66,16 @@ fn a_huge_token_id_in_an_expression_is_an_error() {
 
 #[test]
 fn the_maximum_token_id_itself_is_accepted() {
-    let mut grammar = token_extern();
+    let mut grammar = Module::new(&token_extern());
     grammar.bind("E", glrmask::TokenSet::new([MAX_TOKEN_ID])).unwrap();
-    let mut grammar = token_extern();
+    let mut grammar = Module::new(&token_extern());
     grammar.bind("E", TokenSet::from_ranges(std::iter::once(5..))).unwrap();
     assert_eq!(TokenSet::from_ranges(std::iter::once(5..)), TokenSet::from_ranges(std::iter::once(5..=MAX_TOKEN_ID)));
 }
 
 #[test]
 fn ordinary_token_bindings_still_compile() {
-    let mut grammar = token_extern();
+    let mut grammar = Module::new(&token_extern());
     grammar.bind("E", glrmask::TokenSet::new([70_000u32])).unwrap();
     let constraint = grammar.compile(&small_vocab()).unwrap();
     let mut state = constraint.start();

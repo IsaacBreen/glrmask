@@ -158,19 +158,19 @@ nt start = CONTROL payload;
     assert!(!empty.start().is_accepting());
     assert!(empty.start().mask().iter().all(|word| *word == 0));
     // The legacy/internal explicit bind_token helper remains narrowly typed.
-    // Public Grammar::bind performs the intentional event-to-grammar widening.
+    // Public Module::bind performs the intentional event-to-grammar widening.
     let narrow = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7]).unwrap()
         .bind_token("payload", [7]).unwrap()
         .build().unwrap();
     assert!(narrow.compile().unwrap_err().to_string().contains("is a grammar extern"));
-    let mut widened = Grammar::from_glrm(source).unwrap();
+    let mut widened = glrmask::Module::new(&Grammar::from_glrm(source).unwrap());
     widened.bind("CONTROL", glrmask::TokenSet::new([7])).unwrap();
     widened.bind("payload", glrmask::TokenSet::new([7])).unwrap();
     for mode in MaskMode::ALL {
-        let constraint = widened.compile_with_build_options(
-            &vocab, mode.build_options()).unwrap();
+        let constraint = widened.compile_with(
+            &vocab, mode.compile_options()).unwrap();
         let mut state = constraint.start();
         for _ in 0..2 {
             assert!(!state.is_accepting());
