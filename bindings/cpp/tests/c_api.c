@@ -46,6 +46,25 @@ int main(void) {
     /* Canonical Module/Expr handles own snapshots across source destruction. */
     glrmask_module *module=NULL,*loaded=NULL;glrmask_expr* expr=NULL;glrmask_bytes* saved=NULL;
     CHECK(glrmask_module_new(grammar,&module)==GLRMASK_OK);
+    {
+        glrmask_constraint* sentinel=(glrmask_constraint*)(uintptr_t)1;
+        glrmask_externs* ext=(glrmask_externs*)(uintptr_t)1;
+        CHECK(glrmask_module_compile(NULL,vocab,NULL,&sentinel)==GLRMASK_INVALID_INPUT && sentinel==NULL);
+        CHECK(glrmask_grammar_externs(NULL,&ext)==GLRMASK_INVALID_INPUT && ext==NULL);
+        ext=(glrmask_externs*)(uintptr_t)1;
+        CHECK(glrmask_grammar_unbound_externs(NULL,&ext)==GLRMASK_INVALID_INPUT && ext==NULL);
+        ext=(glrmask_externs*)(uintptr_t)1;
+        CHECK(glrmask_module_externs(NULL,&ext)==GLRMASK_INVALID_INPUT && ext==NULL);
+        ext=(glrmask_externs*)(uintptr_t)1;
+        CHECK(glrmask_module_unbound_externs(NULL,&ext)==GLRMASK_INVALID_INPUT && ext==NULL);
+        const char open[]="start s extern grammar child nt s = child";
+        glrmask_grammar* open_g=NULL; glrmask_module* open_m=NULL;
+        CHECK(glrmask_grammar_from_source(GLRMASK_GLRM,open,strlen(open),&open_g)==GLRMASK_OK);
+        CHECK(glrmask_module_new(open_g,&open_m)==GLRMASK_OK);
+        sentinel=(glrmask_constraint*)(uintptr_t)1;
+        CHECK(glrmask_module_compile(open_m,vocab,NULL,&sentinel)!=GLRMASK_OK && sentinel==NULL);
+        glrmask_module_free(open_m); glrmask_grammar_free(open_g);
+    }
     glrmask_compile_options module_options; CHECK(glrmask_compile_options_init(&module_options,sizeof(module_options))==GLRMASK_OK);
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_TRIE;
     module_options.token_trie.parser_backend=GLRMASK_PARSER_BACKEND_TEMPLATE_DFA;

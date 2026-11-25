@@ -173,22 +173,22 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
-    ffi(|| unsafe {
+    ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs();
-        produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect())))
-    })
+        }).collect()))
+    }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_unbound_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
-    ffi(|| unsafe {
+    ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs().unbound();
-        produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect())))
-    })
+        }).collect()))
+    }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_compile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {
     ffi(|| unsafe { produce(out, || {

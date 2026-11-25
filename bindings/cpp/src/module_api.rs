@@ -103,33 +103,32 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_token_set, |t| g::Binding::from
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_compile(p: *const glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {
-    ffi(|| unsafe {
+    ffi(|| unsafe { produce(out, || {
         let m = &read(p)?.0;
         let vocab = &read(v)?.0;
         let opt = root_options(o)?;
-        let compiled = m.compile_with(vocab, opt)?;
-        produce(out, || Ok(glrmask_constraint(Arc::new(compiled))))
-    })
+        Ok(glrmask_constraint(Arc::new(m.compile_with(vocab, opt)?)))
+    }) })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_externs(p: *const glrmask_module, out: *mut *mut glrmask_externs) -> i32 {
-    ffi(|| unsafe {
+    ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs();
-        produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect())))
-    })
+        }).collect()))
+    }) })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_unbound_externs(p: *const glrmask_module, out: *mut *mut glrmask_externs) -> i32 {
-    ffi(|| unsafe {
+    ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs().unbound();
-        produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect())))
-    })
+        }).collect()))
+    }) })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_save(p: *const glrmask_module, out: *mut *mut glrmask_bytes) -> i32 {
