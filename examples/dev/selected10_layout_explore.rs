@@ -450,6 +450,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
                 }
             }
         } else if std::env::var_os("GLRMASK_EXPERIMENT_SHARED_SEGMENTED_COMPONENTS").is_some() {
+            #[allow(clippy::arc_with_non_send_sync)] // Required by the shared-composition API; this probe runs on one thread.
             let dispatch = Arc::new(dispatch);
             core.compose_compiled_subgrammars_shared(
                 &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&dispatch))],
