@@ -488,7 +488,7 @@ impl ConstraintState {
 /// Probe before allocating the mutable private cursor; most states are choices.
 pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> {
     resource_guard(|| {
-        if states.is_empty() || states.iter().any(|s| s.frontier_complete()){return Ok(Vec::new());}
+        if states.is_empty() || states.iter().any(|s| !s.state.is_empty() && s.is_accepting()){return Ok(Vec::new());}
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
         let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
@@ -497,15 +497,26 @@ pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> 
         let mut output=Vec::new();
         loop {
             let mut live=false;
+            let mut accepted_end=false;
             for cursor in &mut cursors {
                 if cursor.state.is_empty(){continue;}
+                // Internal root end IDs are reserved controls, not byte or
+                // exact-event successors. They complete a body only when its
+                // frontier accepts; the union stops at that accepting owner.
+                if cursor.constraint.end_tokens.binary_search(&id).is_ok() {
+                    if frontier_is_accepting(cursor.constraint,&cursor.state,false) {
+                        live=true;accepted_end=true;
+                    } else {cursor.state.clear();}
+                    continue;
+                }
                 match token_successor(cursor.constraint,&cursor.state,&mut cursor.buffers,id)? {
                     Some(next)=>{cursor.state=next;live=true;},None=>cursor.state.clear(),
                 }
             }
             if !live{return Ok(output);}
             output.push(id);
-            if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(s.constraint,&s.state,false)){break;}
+            if output.len()==MAX_FORCED || accepted_end || cursors.iter().any(|s|
+                s.constraint.end_tokens.is_empty() && frontier_is_accepting(s.constraint,&s.state,false)){break;}
             let mut witnesses=Witnesses::new(1);
             let mut over_limit=false;
             for cursor in &mut cursors {
