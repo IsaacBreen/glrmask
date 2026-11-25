@@ -327,20 +327,6 @@ impl Drop for PyModule {
     }
 }
 
-fn extract_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
-    if !value.is_instance_of::<pyo3::types::PyInt>() {
-        return Ok(None);
-    }
-    match value.extract::<u32>() {
-        Ok(id) => check_token_id(id).map(Some),
-        // An integer outside the u32 token-ID domain is a bad value, not a bad type.
-        Err(_) => Err(glrmask_error("invalid_input", format!(
-            "token ID {value} is out of range; token IDs go from 0 to {}",
-            glrmask::MAX_TOKEN_ID
-        ))),
-    }
-}
-
 fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     if let Ok(m) = value.extract::<PyRef<'_, PyModule>>() {
         return Ok(glrmask::Binding::from(m.snapshot()));
@@ -354,11 +340,8 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Binding::from(et.inner.clone()));
     }
-    if let Some(id) = extract_token_id(value)? {
-        return Ok(glrmask::Binding::from(id));
-    }
     Err(PyTypeError::new_err(
-        "Module.bind accepts a Grammar, Module, Expr, TokenSet or token ID",
+        "Module.bind accepts a Grammar, Module, Expr, or TokenSet",
     ))
 }
 
@@ -367,7 +350,6 @@ pub(super) enum GrammarBinding {
     Grammar(glrmask::Grammar),
     Expr(glrmask::Expr),
     TokenSet(glrmask::TokenSet),
-    Token(u32),
 }
 
 impl GrammarBinding {
@@ -380,7 +362,6 @@ impl GrammarBinding {
             Self::Grammar(value) => grammar.bind(name, value),
             Self::Expr(value) => grammar.bind(name, value),
             Self::TokenSet(value) => grammar.bind(name, value),
-            Self::Token(value) => grammar.bind(name, value),
         }
     }
 }
@@ -395,11 +376,8 @@ pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<Gram
     if let Ok(t) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(GrammarBinding::TokenSet(t.inner.clone()));
     }
-    if let Some(id) = extract_token_id(value)? {
-        return Ok(GrammarBinding::Token(id));
-    }
     Err(PyTypeError::new_err(
-        "Grammar.bind accepts a Grammar, Expr, TokenSet or token ID",
+        "Grammar.bind accepts a Grammar, Expr, or TokenSet",
     ))
 }
 

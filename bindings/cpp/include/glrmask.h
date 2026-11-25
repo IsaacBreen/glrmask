@@ -92,8 +92,8 @@ enum {
 };
 /// What an extern can be bound to.
 enum {
-    GLRMASK_EXTERN_TOKEN=0,    ///< A token set or token ID.
-    GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar, module, expression, token set or token ID.
+    GLRMASK_EXTERN_TOKEN=0,    ///< A token set.
+    GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar, module, expression, token set.
 };
 
 /// A model's tokens and their bytes.
@@ -104,7 +104,7 @@ typedef struct glrmask_token_set glrmask_token_set;
 typedef struct glrmask_grammar glrmask_grammar;
 /// A grammar you can compose with others and partly compile before its externs are bound.
 typedef struct glrmask_module glrmask_module;
-/// A choice or sequence of grammars, modules, token sets, token IDs and literals.
+/// A choice or sequence of grammars, modules, token sets and literals.
 typedef struct glrmask_expr glrmask_expr;
 /// A grammar compiled for a vocabulary.
 typedef struct glrmask_constraint glrmask_constraint;
@@ -188,20 +188,13 @@ GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const cha
 /// Creates a grammar from an expression.
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_grammar* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_expr* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
-GLRMASK_API glrmask_status glrmask_grammar_bind_token(glrmask_grammar* p,const char* name,size_t name_len,uint32_t value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar* p,const char* name,size_t name_len,const glrmask_token_set* value);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* p,glrmask_grammar** out);
@@ -225,24 +218,16 @@ GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module* p,glrmask_
 /// Frees the handle.
 GLRMASK_API void glrmask_module_free(glrmask_module* p);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module* p,const char* name,size_t name_len,const glrmask_grammar* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module* p,const char* name,size_t name_len,const glrmask_module* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module* p,const char* name,size_t name_len,const glrmask_expr* value);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
-GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module* p,const char* name,size_t name_len,uint32_t value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token ID or
-/// token set.
+/// or the value is the wrong kind for it. A token extern takes only a token set.
 GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module* p,const char* name,size_t name_len,const glrmask_token_set* value);
 /// Compiles as much as possible for `vocab` now, so later compiles are fast.
 /// `options` may be NULL.

@@ -236,8 +236,7 @@ class Grammar extends Owned {
     if (value instanceof Grammar) return invoke(() => target.bindGrammar(name, handle(value, Grammar)));
     if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));
     if (value instanceof TokenSet) return invoke(() => target.bindTokens(name, handle(value, TokenSet)));
-    if (typeof value === 'number') return invoke(() => target.bindToken(name, tokenId(value)));
-    throw new TypeError('Grammar.bind requires a Grammar, Expr, TokenSet or token ID');
+    throw new TypeError('Grammar.bind requires a Grammar, Expr, or TokenSet');
   }
   precompileSync(vocab, options) {
     const s = compileSettings(options);
@@ -340,9 +339,8 @@ class Module extends Owned {
         target.bindModule(name, handle(value, Module));
       }
       else if (value instanceof Expr) target.bindExpr(name, handle(value, Expr));
-      else if (typeof value === 'number') target.bindToken(name, tokenId(value));
       else if (value instanceof TokenSet) target.bindTokens(name, handle(value, TokenSet));
-      else throw new TypeError('Module.bind requires a Grammar, Module, Expr, TokenSet or token ID');
+      else throw new TypeError('Module.bind requires a Grammar, Module, Expr, or TokenSet');
     });
   }
 

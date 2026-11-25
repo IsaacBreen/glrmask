@@ -517,7 +517,7 @@ fn attached_path<'n,T:Clone>(name:&'n str, bindings:&OrdMap<String,T>) -> Option
 }
 fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     if matches!((kind,grammar),(ExternKind::Token,true)) {
-        return Err(Error::InvalidInput(format!("extern {name:?} is a token extern; bind it to a token ID or token set")));
+        return Err(Error::InvalidInput(format!("extern {name:?} is a token extern; bind it to a token set")));
     }
     Ok(())
 }

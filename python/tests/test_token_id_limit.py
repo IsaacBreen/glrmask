@@ -22,11 +22,11 @@ def test_vocab_rejects_a_huge_id(token_id):
 def test_binding_a_huge_id_is_an_error(token_id):
     grammar = token_extern()
     with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
-        grammar.bind("E", token_id)
+        grammar.bind("E", glrmask.TokenSet([token_id]))
     assert exc.value.kind == "invalid_input"
     module = glrmask.Module(token_extern())
     with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
-        module.bind("E", token_id)
+        module.bind("E", glrmask.TokenSet([token_id]))
     assert exc.value.kind == "invalid_input"
     assert "E" in module.externs.unbound
 
@@ -43,7 +43,7 @@ def test_token_sets_reject_a_huge_id(token_id):
 
 def test_the_maximum_id_is_accepted():
     grammar = token_extern()
-    grammar.bind("E", MAX_TOKEN_ID)
+    grammar.bind("E", glrmask.TokenSet([MAX_TOKEN_ID]))
     assert glrmask.TokenSet.from_ranges([range(0, MAX_TOKEN_ID + 1)]) == glrmask.TokenSet.from_ranges(
         [range(0, MAX_TOKEN_ID + 1)]
     )

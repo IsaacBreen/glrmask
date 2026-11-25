@@ -19,7 +19,7 @@ nt value = INTEGER | "(" value ")"
 | `internal t DIGIT = /[0-9]/` | A regular helper for other terminals. Rules and `ignore` can't use it. |
 | `nt value = INTEGER \| "(" value ")"` | A rule. Its body can use terminals, rules, literals and regular expressions. |
 | `ignore SPACE` | A terminal skipped wherever it can appear between others. |
-| `extern token END_CALL` | A token set, bound from your code. |
+| `extern token END_CALL` | One token from a token set, bound from your code. |
 | `extern grammar PAYLOAD` | A grammar, bound from your code. |
 | `grammar item { start v nt v = "item" }` | An inline grammar, with its own names, start rule and ignored terminals. |
 

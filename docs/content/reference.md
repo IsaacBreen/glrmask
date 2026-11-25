@@ -59,7 +59,7 @@ See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing
 A grammar can declare externs: named slots that you bind later.
 
 - `extern grammar NAME` takes a grammar, module, expression or token set.
-- `extern token NAME` takes a token ID or token set, and matches exactly one of those tokens. It never matches their text.
+- `extern token NAME` takes a token set, and matches exactly one of those tokens. It never matches their text.
 
 ```python
 import glrmask

@@ -124,14 +124,14 @@ class Grammar:
         """Creates a grammar from an expression."""
         ...
     @overload
-    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet, int], /) -> None:
+    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet], /) -> None:
         """Binds the extern `name` to `value`.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
-    def bind(self, **bindings: Union[Grammar, Expr, TokenSet, int]) -> None:
+    def bind(self, **bindings: Union[Grammar, Expr, TokenSet]) -> None:
         """Binds the extern `name` to `value`.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
@@ -220,14 +220,14 @@ class Module:
         """Creates a module from a grammar."""
         ...
     @overload
-    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet, int], /) -> None:
+    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet], /) -> None:
         """Binds the extern `name` to `value`.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
-    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet, int]) -> None:
+    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet]) -> None:
         """Binds the extern `name` to `value`.
 
         `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.

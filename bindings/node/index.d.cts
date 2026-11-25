@@ -165,7 +165,7 @@ export declare class Grammar implements Disposable {
 }
 
 
-export type GrammarBindValue = Grammar | Expr | TokenSet | number;
+export type GrammarBindValue = Grammar | Expr | TokenSet;
 
 /** A value that can be part of an `Expr`. */
 export type ExprPart = Grammar | Module | Expr | TokenSet;
@@ -202,9 +202,9 @@ export declare class Module implements Disposable {
   /** A copy of the module. Binding the copy does not change the original. */
   clone(): Module;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
-  bind(name: string, value: ExprPart | number): void;
+  bind(name: string, value: ExprPart): void;
   /** Binds several externs at once; if one fails, none is bound. */
-  bind(bindings: Record<string, ExprPart | number>): void;
+  bind(bindings: Record<string, ExprPart>): void;
   /** Like `precompileSync`, but returns a promise and doesn't block the event loop. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster. */

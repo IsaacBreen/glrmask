@@ -62,9 +62,9 @@ enum class ParserBackend : std::uint32_t {
 
 /// What an extern can be bound to.
 enum class ExternKind : std::uint32_t {
-    /// A token set or token ID.
+    /// A token set.
     Token = GLRMASK_EXTERN_TOKEN,
-    /// A grammar, module, expression, token set or token ID.
+    /// A grammar, module, expression, token set.
     Grammar = GLRMASK_EXTERN_GRAMMAR
 };
 
@@ -296,10 +296,6 @@ public:
     }
     /// Binds the extern `name` to an expression.
     void bind(std::string_view name, const Expr& value);
-    /// Binds the extern `name` to a token ID.
-    void bind(std::string_view name, TokenId value) {
-        detail::check(glrmask_grammar_bind_token(native_handle(), name.data(), name.size(), value));
-    }
     /// Binds the extern `name` to a token set.
     void bind(std::string_view name, const TokenSet& value) {
         detail::check(glrmask_grammar_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
@@ -404,10 +400,6 @@ public:
     /// Binds the extern `name` to an expression.
     void bind(std::string_view name, const Expr& value) {
         detail::check(glrmask_module_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
-    }
-    /// Binds the extern `name` to a token ID.
-    void bind(std::string_view name, TokenId value) {
-        detail::check(glrmask_module_bind_token(native_handle(), name.data(), name.size(), value));
     }
     /// Binds the extern `name` to a token set.
     void bind(std::string_view name, const TokenSet& value) {

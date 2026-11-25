@@ -46,7 +46,7 @@ int main(void) {
     CHECK(glrmask_module_compile(from_grammar,vocab,NULL,&precompiled_constraint)==GLRMASK_OK);
     glrmask_constraint_free(precompiled_constraint);glrmask_module_free(from_grammar);
     CHECK(glrmask_grammar_precompile(grammar,vocab,NULL,NULL)==GLRMASK_INVALID_INPUT);
-    CHECK(glrmask_module_bind_token(module,"missing",7,0)!=GLRMASK_OK);
+    CHECK(glrmask_module_bind_tokens(module,"missing",7,NULL)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);
     CHECK(glrmask_module_load(artifact,artifact_len,&loaded)==GLRMASK_OK);

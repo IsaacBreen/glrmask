@@ -45,7 +45,7 @@ call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```
 
-`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, `TokenSet` or token ID. It changes the grammar or module in
+`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. It changes the grammar or module in
 place; if it fails, nothing changes. Copy a grammar or module first to bind the same one in different ways. `externs()`
 lists the declared externs, and `externs().unbound()` the ones not yet bound.
 

@@ -105,7 +105,7 @@ call.bind('ARGS', weather);
 const constraint = await call.compile(vocab);
 ```
 
-`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, `TokenSet` or token ID, and `bind({A: a, B: b})` binds several
+`bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
 at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
 same one in different ways. `externs` is a read-only `Map` of the declared externs, and `externs.unbound` holds the ones
 not yet bound.

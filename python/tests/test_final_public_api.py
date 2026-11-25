@@ -277,16 +277,16 @@ def token_extern_grammar():
     )
 
 
-def test_bind_accepts_a_token_id_for_a_token_extern():
+def test_bind_requires_a_token_set_for_a_token_extern():
     v = vocab()
     grammar = token_extern_grammar()
-    assert grammar.bind("T", 0) is None
+    assert grammar.bind("T", glrmask.TokenSet([0])) is None
     assert len(grammar.externs.unbound) == 0
     state = grammar.compile(v).start()
     assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
 
     module = glrmask.Module(token_extern_grammar())
-    assert module.bind("T", 0) is None
+    assert module.bind("T", glrmask.TokenSet([0])) is None
     assert len(module.externs.unbound) == 0
     state = module.compile(v).start()
     assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
@@ -300,7 +300,7 @@ def test_bind_accepts_a_token_id_for_a_token_extern():
 def test_grammar_copy_binds_independently():
     grammar = token_extern_grammar()
     copy = grammar.copy()
-    assert copy.bind("T", 0) is None
+    assert copy.bind("T", glrmask.TokenSet([0])) is None
     assert len(copy.externs.unbound) == 0
     assert len(grammar.externs.unbound) == 1
     assert "T" in grammar.externs.unbound
@@ -311,19 +311,19 @@ def test_grammar_batch_bind_is_atomic():
         "glrm 1; start root; extern token a; extern token b; nt root = a b;"
     )
     with pytest.raises(ValueError):
-        grammar.bind(a=0, b=glrmask.Grammar.from_lark('start: "a"'))
+        grammar.bind(a=glrmask.TokenSet([0]), b=glrmask.Grammar.from_lark('start: "a"'))
     assert len(grammar.externs.unbound) == 2
     assert "a" in grammar.externs.unbound
     assert "b" in grammar.externs.unbound
 
     with pytest.raises(TypeError):
-        grammar.bind("a", 0, b=1)
+        grammar.bind("a", glrmask.TokenSet([0]), b=1)
     with pytest.raises(TypeError):
         grammar.bind()
     with pytest.raises(TypeError):
         glrmask.Module(grammar).bind()
 
-    assert grammar.bind(a=0, b=1) is None
+    assert grammar.bind(a=glrmask.TokenSet([0]), b=glrmask.TokenSet([1])) is None
     assert len(grammar.externs.unbound) == 0
 
 

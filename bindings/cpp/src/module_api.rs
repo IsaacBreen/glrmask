@@ -85,9 +85,6 @@ bind_handle!(glrmask_module_bind_module, glrmask_module, |m| g::Binding::from(m)
 bind_handle!(glrmask_module_bind_expr, glrmask_expr, |e| g::Binding::from(e));
 bind_handle!(glrmask_module_bind_tokens, glrmask_token_set, |t| g::Binding::from(t));
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_bind_token(p: *mut glrmask_module, name: *const c_char, n: usize, id: u32) -> i32 {
-    ffi(|| unsafe { let name = text(name, n)?; write(p)?.0.bind(name, g::TokenSet::new([core::token_id(id)?]))?; Ok(()) })
-}
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options) -> i32 {
     ffi(|| unsafe {

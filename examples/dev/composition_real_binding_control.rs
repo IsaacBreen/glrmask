@@ -35,6 +35,7 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             if prepared {dispatch.prepare_for_dynamic_composition(&vocab)?;}
             let child_ns=t.elapsed().as_nanos();
             eprintln!("BIND_CHILD_PREP_DONE ns={child_ns}");
+            #[allow(clippy::arc_with_non_send_sync)] // The internal shared-composition API requires Arc; this benchmark is single-threaded.
             let dispatch=Arc::new(dispatch);
             for repeat in 0..repeats {
                 let t=Instant::now();let parent=core.clone();let clone_ns=t.elapsed().as_nanos();

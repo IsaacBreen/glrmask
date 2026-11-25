@@ -6,7 +6,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 ### Changes
 
-- Expressions take tokens only as a `TokenSet`.
+- Expressions and `bind` take tokens only as a `TokenSet`.
 
 - Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable.
 
@@ -64,7 +64,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 ### Externs
 
-- A grammar declares `extern token NAME`, bound to a token ID or `TokenSet`, or `extern grammar NAME`, bound to a grammar,
+- A grammar declares `extern token NAME`, bound to a `TokenSet`, or `extern grammar NAME`, bound to a grammar,
   module or expression. In Lark, `<|name|>` declares a token extern and `@name` a grammar extern.
 - `bind(name, value)` binds in place. Each extern is bound once, on the grammar or module that declares it. A value that
   has unbound externs of its own can't be bound.

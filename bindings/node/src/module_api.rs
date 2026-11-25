@@ -89,10 +89,6 @@ impl NativeModule {
         })
     }
     #[napi]
-    pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
-        call(|| self.bind_value(&name, g::TokenSet::new([id(value)?])))
-    }
-    #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();

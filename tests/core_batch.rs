@@ -28,7 +28,7 @@ fn grammar_bind_accepts_every_binding_kind() {
     g.bind("EXPR",Expr::literal("a")).unwrap();
     g.bind("TOKENS",tokens).unwrap();
     g.bind("SET",&borrowed_tokens).unwrap();
-    g.bind("ID",9u32).unwrap();
+    g.bind("ID",glrmask::TokenSet::new([9u32])).unwrap();
     assert!(g.externs().unbound().is_empty());
     let c=g.compile_with_build_options(&v,options()).unwrap();let mut s=c.start();
     for id in [0,1,0,7,8,9] {assert!(s.commit_token(id));}

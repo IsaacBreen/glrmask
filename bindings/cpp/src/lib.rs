@@ -169,9 +169,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_expr(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const crate::module_api::glrmask_expr) -> i32 {
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_token(p: *mut glrmask_grammar, name: *const c_char, n: usize, id: u32) -> i32 {
-    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, g::TokenSet::new([core::token_id(id)?]))?; Ok(()) })
-}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_tokens(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_token_set) -> i32 {
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
 }

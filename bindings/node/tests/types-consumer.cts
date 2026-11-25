@@ -36,3 +36,8 @@ api.Expr.choice('invalid');
 // @ts-expect-error Token IDs must be wrapped in TokenSet.
 api.Expr.choice(5);
 void [entry, result, expr];
+
+// @ts-expect-error Plain token IDs are not valid bind values.
+g.bind("slot", 1);
+// @ts-expect-error Plain token IDs are not valid bind values.
+module.bind("slot", 1);
