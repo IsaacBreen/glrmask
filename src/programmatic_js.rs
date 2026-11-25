@@ -288,7 +288,7 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     crate::grammar::right_linear::retain_reachable_rules(&mut grammar);
     grammar.rules.retain(|rule| rule.name != synthetic);
     grammar.start = original_start;
-    Ok(crate::grammar::glrm::to_glrm_v1(&grammar).map_err(crate::error::from_grammar)?)
+    crate::grammar::glrm::to_glrm_v1(&grammar).map_err(crate::error::from_grammar)
 }
 
 fn dynamic_value_source() -> crate::Result<String> {

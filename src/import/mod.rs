@@ -29,7 +29,7 @@ use crate::runtime::Constraint;
 use crate::dynamic_constraint::DynamicConstraint;
 
 pub(crate) fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(ebnf::parse_ebnf_to_named(source).map_err(crate::error::from_grammar)?)
+    ebnf::parse_ebnf_to_named(source).map_err(crate::error::from_grammar)
 }
 
 /// Rejects token IDs written in grammar text that name special tokens.
@@ -74,25 +74,25 @@ pub(crate) fn validate_glrm_source(source: &str, vocab: &crate::Vocab) -> crate:
 }
 
 pub(crate) fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(lark::parse_lark_to_named(source).map_err(crate::error::from_grammar)?)
+    lark::parse_lark_to_named(source).map_err(crate::error::from_grammar)
 }
 
 pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm(source).map_err(crate::error::from_grammar)?)
+    crate::grammar::glrm::from_glrm(source).map_err(crate::error::from_grammar)
 }
 
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
     bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
+    crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
         source,
         bindings,
-    ).map_err(crate::error::from_grammar)?)
+    ).map_err(crate::error::from_grammar)
 }
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
-    Ok(json_schema::prepare_named_grammar(grammar).map_err(crate::error::from_grammar)?)
+    json_schema::prepare_named_grammar(grammar).map_err(crate::error::from_grammar)
 }
 
 /// Parse, factor and prepare one JSON Schema document exactly as the static
@@ -236,7 +236,7 @@ pub(crate) fn lower_factored_named_grammar(
     let grammar = ast::lower(&factored);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    Ok(grammar.map_err(crate::error::from_grammar)?)
+    grammar.map_err(crate::error::from_grammar)
 }
 
 /// Factor/transform/lower one already-parsed named grammar. This is the exact
@@ -248,7 +248,7 @@ pub(crate) fn lower_static_named_grammar(
 ) -> crate::Result<GrammarDef> {
     let mut factored = factor_named_grammar(named);
     append_end_token_choice(&mut factored, end_token_ids);
-    Ok(ast::lower(&factored).map_err(crate::error::from_grammar)?)
+    ast::lower(&factored).map_err(crate::error::from_grammar)
 }
 
 /// The static template route's EBNF input, before normalization.
@@ -342,7 +342,7 @@ fn lower_json_schema_for_vocab_partition(source: &str) -> crate::Result<GrammarD
     let grammar = ast::lower_with_resolved_terminal_exprs(&factored, resolved_terminal_exprs);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    Ok(grammar.map_err(crate::error::from_grammar)?)
+    grammar.map_err(crate::error::from_grammar)
 }
 
 
@@ -357,7 +357,7 @@ pub(crate) fn lower_source_for_vocab_partition(
         "glrm" => {
             let named = parse_glrm_with_external_terminal_bindings(source, &[])?;
             let factored = factor_named_grammar(named);
-            Ok(ast::lower(&factored).map_err(crate::error::from_grammar)?)
+            ast::lower(&factored).map_err(crate::error::from_grammar)
         }
         other => Err(crate::Error::Syntax(format!(
             "unsupported grammar source kind {other:?}"
@@ -744,7 +744,7 @@ fn component_shell_named(
 )->crate::Result<crate::grammar::glrm::GlrmWithExternalSubgrammars> {
     let has_open=component.declarations().names.iter().any(|name|!token_bindings.iter().any(|(bound,_)|*bound==name));
     let first=if has_open {first_external_placeholder_token_id(vocab)?}else{0};
-    Ok(component.lower_shell(first,std::iter::empty(),token_bindings).map_err(crate::error::from_grammar)?)
+    component.lower_shell(first,std::iter::empty(),token_bindings).map_err(crate::error::from_grammar)
 }
 
 fn compile_component_shell_using(
@@ -1142,7 +1142,7 @@ pub(crate) fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast
             started.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok(named.map_err(crate::error::from_grammar)?)
+    named.map_err(crate::error::from_grammar)
 }
 
 pub(crate) fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
@@ -1154,7 +1154,7 @@ pub(crate) fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Re
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, false);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    Ok(named.map_err(crate::error::from_grammar)?)
+    named.map_err(crate::error::from_grammar)
 }
 
 fn parse_json_schema_to_named_dynamic_vocab_partition(
@@ -1168,7 +1168,7 @@ fn parse_json_schema_to_named_dynamic_vocab_partition(
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, true);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    Ok(named.map_err(crate::error::from_grammar)?)
+    named.map_err(crate::error::from_grammar)
 }
 impl Constraint {
     /// Compile an EBNF grammar for `vocab`.

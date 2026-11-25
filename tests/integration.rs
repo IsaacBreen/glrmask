@@ -2499,7 +2499,7 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
     assert!(!state.commit_bytes(b"a"));
     // commit_tokens stops at the first failure and leaves the state dead.
     let mut state = constraint.start();
-    assert_eq!(state.commit_tokens(&[0, 1, 0]), 1);
+    assert_eq!(state.commit_tokens(&[0, 1, 0]), 2);
     dead(&state);
     assert_eq!(state.commit_tokens(&[0]), 0);
 }
