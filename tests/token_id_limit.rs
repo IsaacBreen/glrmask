@@ -69,8 +69,8 @@ fn the_maximum_token_id_itself_is_accepted() {
     let mut grammar = token_extern();
     grammar.bind("E", glrmask::TokenSet::new([MAX_TOKEN_ID])).unwrap();
     let mut grammar = token_extern();
-    grammar.bind("E", TokenSet::from_ranges([5..])).unwrap();
-    assert_eq!(TokenSet::from_ranges([5..]), TokenSet::from_ranges([5..=MAX_TOKEN_ID]));
+    grammar.bind("E", TokenSet::from_ranges(std::iter::once(5..))).unwrap();
+    assert_eq!(TokenSet::from_ranges(std::iter::once(5..)), TokenSet::from_ranges(std::iter::once(5..=MAX_TOKEN_ID)));
 }
 
 #[test]
