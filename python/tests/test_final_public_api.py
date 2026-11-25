@@ -291,10 +291,11 @@ def test_bind_requires_a_token_set_for_a_token_extern():
     state = module.compile(v).start()
     assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
 
-    with pytest.raises(ValueError):
-        token_extern_grammar().bind("T", -1)
-    with pytest.raises(ValueError):
-        glrmask.Module(token_extern_grammar()).bind("T", 2**32)
+    for token_id in (0, -1, 2**32):
+        with pytest.raises(TypeError):
+            token_extern_grammar().bind("T", token_id)
+        with pytest.raises(TypeError):
+            glrmask.Module(token_extern_grammar()).bind("T", token_id)
 
 
 def test_grammar_copy_binds_independently():
