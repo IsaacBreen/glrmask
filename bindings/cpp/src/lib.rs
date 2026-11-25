@@ -253,7 +253,7 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 
 macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $fn(p:*const $handle,out:*mut *const $ty,n:*mut usize)->i32 {
-        ffi(||unsafe{let out=write(out)?;let n=write(n)?;let data=&read(p)?.0;*out=data.as_ptr();*n=data.len();Ok(())})
+        ffi(||unsafe{let out=write(out)?;*out=ptr::null();let n=write(n)?;*n=0;let data=&read(p)?.0;*out=data.as_ptr();*n=data.len();Ok(())})
     }
 };}
 data!(glrmask_bytes_data, glrmask_bytes, u8);

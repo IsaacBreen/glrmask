@@ -128,5 +128,8 @@ int main(void) {
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_INPUT);CHECK(grammar==NULL);
     CHECK(glrmask_constraint_load(NULL,1,NULL,&constraint)==GLRMASK_INVALID_INPUT);CHECK(constraint==NULL);
+    const uint8_t* invalid_data=(const uint8_t*)(uintptr_t)1; size_t invalid_len=123;
+    CHECK(glrmask_bytes_data(NULL,&invalid_data,&invalid_len)==GLRMASK_INVALID_INPUT);
+    CHECK(invalid_data==NULL && invalid_len==0);
     puts("C ABI regression checks passed");return 0;
 }
