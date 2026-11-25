@@ -93,7 +93,7 @@ enum {
 /// What an extern can be bound to.
 enum {
     GLRMASK_EXTERN_TOKEN=0,    ///< A token set.
-    GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar, module, expression, token set.
+    GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar, module, expression or token set.
 };
 
 /// A model's tokens and their bytes.

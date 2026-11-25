@@ -14,7 +14,7 @@ pub struct glrmask_expr(pub(super) g::Expr);
     pub boundary_mask_strategy: u32,
     pub token_trie: glrmask_token_trie_settings,
 }
-/// kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 TokenSet. Inputs are borrowed for this call only.
+/// kind: 0 Grammar, 1 Module, 2 Expr, 4 TokenSet. Inputs are borrowed for this call only.
 #[repr(C)] pub struct glrmask_expr_operand { pub kind: u32, pub handle: *const c_void }
 
 pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g::CompileOptions> {

@@ -64,7 +64,7 @@ enum class ParserBackend : std::uint32_t {
 enum class ExternKind : std::uint32_t {
     /// A token set.
     Token = GLRMASK_EXTERN_TOKEN,
-    /// A grammar, module, expression, token set.
+    /// A grammar, module, expression or token set.
     Grammar = GLRMASK_EXTERN_GRAMMAR
 };
 

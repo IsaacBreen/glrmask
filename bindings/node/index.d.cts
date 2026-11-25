@@ -70,7 +70,7 @@ export declare class GLRMaskError extends Error {
 export interface TokenRange {
   /** The first ID. */
   readonly start: number;
-  /** The ID just past the range, at most 4294967296. */
+  /** The ID just past the range, at most 16777216. */
   readonly end: number;
 }
 /** A named placeholder in a grammar. */

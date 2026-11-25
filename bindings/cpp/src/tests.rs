@@ -57,10 +57,10 @@ fn invalid_foreign_lengths_and_null_outputs_fail_before_access() {
     unsafe {
         let entry = glrmask_vocab_entry { id: 0, bytes: ptr::null(), bytes_len: 0 };
         let mut vocab = ptr::dangling_mut();
-        assert_eq!(glrmask_vocab_new(&entry, usize::MAX, &mut vocab), 1);
+        assert_eq!(glrmask_vocab_new(&entry, usize::MAX, &mut vocab), 2);
         assert!(vocab.is_null());
-        assert_eq!(glrmask_vocab_new(&entry, 1, ptr::null_mut()), 1);
-        assert_eq!(glrmask_constraint_load(ptr::null(), 1, ptr::null(), ptr::null_mut()), 1);
+        assert_eq!(glrmask_vocab_new(&entry, 1, ptr::null_mut()), 2);
+        assert_eq!(glrmask_constraint_load(ptr::null(), 1, ptr::null(), ptr::null_mut()), 2);
     }
 }
 

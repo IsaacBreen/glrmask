@@ -1,7 +1,7 @@
 # GLRM
 
 GLRM is GLRMask's own grammar format. Source is UTF-8. Line breaks, indentation and semicolons don't matter, and no
-version header is needed.
+version header is needed. Grammars without a `glrm` header use version 1; `glrm 1;` pins it explicitly.
 
 ```glrm
 start value
