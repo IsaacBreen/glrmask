@@ -159,11 +159,13 @@ struct CompileOptions {
     TokenTrie token_trie{};
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
-        return {sizeof(glrmask_compile_options),
-                static_cast<std::uint32_t>(mask_strategy),
-                static_cast<std::uint32_t>(boundary_mask_strategy),
-                {static_cast<std::uint32_t>(token_trie.parser_backend),
-                 static_cast<std::uint32_t>(token_trie.merge_equivalent_tokens)}};
+        glrmask_compile_options options{};
+        (void)glrmask_compile_options_init(&options, sizeof(options));
+        options.mask_strategy = static_cast<std::uint32_t>(mask_strategy);
+        options.boundary_mask_strategy = static_cast<std::uint32_t>(boundary_mask_strategy);
+        options.token_trie.parser_backend = static_cast<std::uint32_t>(token_trie.parser_backend);
+        options.token_trie.merge_equivalent_tokens = static_cast<std::uint32_t>(token_trie.merge_equivalent_tokens);
+        return options;
     }
 };
 

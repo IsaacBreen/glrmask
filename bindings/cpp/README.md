@@ -206,7 +206,7 @@ threads at once.
 
 `glrmask.h` is the C interface; the C++ header is built on it. Each function returns a `glrmask_status`, and on failure
 `glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread. Free each object once
-with its `_free` function. Start a `glrmask_compile_options` from `glrmask_default_compile_options()`, or pass a null pointer for the
+with its `_free` function. Initialize a `glrmask_compile_options options` with `glrmask_compile_options_init(&options, sizeof(options))`, or pass a null pointer for the
 defaults. The header documents ownership in full.
 
 ## Building from source

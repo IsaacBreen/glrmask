@@ -128,7 +128,7 @@ typedef struct {
     uint32_t start; /**< First token ID in the range. */
     uint32_t end;   /**< One past the last token ID. */
 } glrmask_token_range;
-/// Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
+/// Settings for GLRMASK_MASK_STRATEGY_TOKEN_TRIE. This layout is fixed; new options are appended to glrmask_compile_options.
 typedef struct {
     uint32_t parser_backend;          ///< A GLRMASK_PARSER_BACKEND_* value; 0 is an LR table.
     uint32_t merge_equivalent_tokens; ///< Nonzero to merge tokens that the grammar treats the same, so masks walk fewer tokens. Tokens are not merged in a composition that includes precompiled parts.
@@ -163,8 +163,8 @@ GLRMASK_API uint32_t glrmask_abi_version(void);
 GLRMASK_API const char *glrmask_version(void);
 /// The last error on this thread, valid until the next GLRMask call on it.
 GLRMASK_API const char *glrmask_error_message(void);
-/// The default compile options.
-GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
+/// Initializes the caller-owned options buffer with defaults and its size in bytes.
+GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
 
 /// Creates a vocabulary from `entries`.
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,glrmask_vocab** out);

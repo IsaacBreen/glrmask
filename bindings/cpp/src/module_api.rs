@@ -22,12 +22,16 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     // The first three fields are the original ABI. A caller built against it
     // passes the shorter struct; its missing fields count as zero.
     let minimum = size_of::<usize>() + 2 * size_of::<u32>();
-    let struct_size = unsafe { std::ptr::addr_of!((*p).struct_size).read() };
-    if struct_size < minimum || struct_size > size_of::<glrmask_compile_options>() {
+    valid(p)?;
+    let struct_size = unsafe { p.cast::<usize>().read() };
+    if struct_size < minimum || struct_size > isize::MAX as usize {
         return Err(Error::invalid("compile-options struct_size does not match ABI"));
     }
     let mut o: glrmask_compile_options = unsafe { std::mem::zeroed() };
-    unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), struct_size) };
+    // Only whole fields are read, and unknown trailing fields are ignored.
+    let known_size = struct_size.min(size_of::<glrmask_compile_options>());
+    let complete_size = minimum + (known_size - minimum) / size_of::<u32>() * size_of::<u32>();
+    unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), complete_size) };
     o.struct_size = struct_size;
     let strategy = core::mask_strategy(o.mask_strategy)?;
     let settings_are_present = o.token_trie.parser_backend != 0
@@ -46,16 +50,19 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     ))
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_default_compile_options() -> glrmask_compile_options {
-    glrmask_compile_options {
-        struct_size: size_of::<glrmask_compile_options>(),
-        mask_strategy: 0,
-        boundary_mask_strategy: 0,
-        token_trie: glrmask_token_trie_settings {
-            parser_backend: 0,
-            merge_equivalent_tokens: 0,
-        },
-    }
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_compile_options_init(opts: *mut glrmask_compile_options, struct_size: usize) -> i32 {
+    ffi(|| unsafe {
+        valid(opts)?;
+        let minimum = size_of::<usize>() + 2 * size_of::<u32>();
+        if struct_size < minimum || struct_size > isize::MAX as usize {
+            return Err(Error::invalid("compile-options struct_size does not match ABI"));
+        }
+        // The caller owns exactly struct_size writable bytes, possibly fewer
+        // than the current struct. Never form a reference to the larger type.
+        ptr::write_bytes(opts.cast::<u8>(), 0, struct_size);
+        opts.cast::<usize>().write(struct_size);
+        Ok(())
+    })
 }
 
 free!(glrmask_module_free, glrmask_module);
