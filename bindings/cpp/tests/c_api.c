@@ -102,6 +102,10 @@ int main(void) {
     glrmask_state* copy=NULL;CHECK(glrmask_state_clone(state,&copy)==GLRMASK_OK);
     glrmask_state_free(state);CHECK(glrmask_state_is_accepting(copy,&accepting)==GLRMASK_OK && accepting==1);
     CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
+    CHECK(!glrmask_state_commit_token(NULL,0));CHECK(strlen(glrmask_error_message())>0);
+    CHECK(!glrmask_state_commit_token(copy,0));CHECK(strlen(glrmask_error_message())==0);
+    CHECK(glrmask_state_commit_tokens(NULL,NULL,0)==0);CHECK(strlen(glrmask_error_message())>0);
+    CHECK(!glrmask_state_commit_bytes(NULL,NULL,0));CHECK(strlen(glrmask_error_message())>0);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_INPUT);CHECK(grammar==NULL);

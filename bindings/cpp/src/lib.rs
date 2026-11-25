@@ -54,10 +54,15 @@ fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
         }
     }
 }
-/// Commit results are not errors: a disallowed commit returns false, and so does
-/// a NULL or poisoned state.
-fn commit(f: impl FnOnce() -> Result<bool>) -> bool {
-    matches!(core::guarded(f), Ok(true))
+/// Ordinary rejection is a successful call with a false/short result.
+fn commit<T: Default>(f: impl FnOnce() -> Result<T>) -> T {
+    match core::guarded(f) {
+        Ok(value) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); value }
+        Err(e) => {
+            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
+            T::default()
+        }
+    }
 }
 fn valid<T>(p: *const T) -> Result<()> {
     if p.is_null() { return Err(Error::invalid("null pointer")); }
@@ -229,7 +234,7 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     commit(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> usize {
-    core::guarded(|| unsafe { write(p)?.0.commit_tokens(input(ids, n)?) }).unwrap_or(0)
+    commit(|| unsafe { write(p)?.0.commit_tokens(input(ids, n)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> bool {
     commit(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })

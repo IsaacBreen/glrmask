@@ -287,6 +287,7 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uin
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* p,uint32_t* out,size_t out_len);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* p,uint32_t* out);
+/// Commit calls clear the last error on ordinary acceptance or rejection; invalid handles, arguments and internal failures set it.
 /// Commits a token. If it isn't allowed, returns `false` and terminates the
 /// state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_token(glrmask_state* p,uint32_t id);
