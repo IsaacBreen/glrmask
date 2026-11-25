@@ -55,7 +55,9 @@ export interface TokenTrie {
 }
 
 /** The kinds of `GLRMaskError`. */
-export type ErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
+export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
+/** Error codes may grow in a minor release. */
+export type ErrorCode = KnownErrorCode | (string & {});
 /** A GLRMask error. */
 export declare class GLRMaskError extends Error {
   /** What kind of error this is. */
@@ -76,7 +78,7 @@ export interface Extern {
   /** The extern's name. */
   readonly name: string;
   /** What the extern can be bound to: `'token'` or `'grammar'`. */
-  readonly kind: 'token' | 'grammar';
+  readonly kind: 'token' | 'grammar' | (string & {});
 }
 /** A grammar's or module's externs, in declaration order.
  *
