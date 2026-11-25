@@ -384,7 +384,7 @@ void canonical_modules() {
 
     // A grammar's unbound view carries its own unbound externs.
     auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern token one; extern token two; nt start = one two;");
-    grammar_externs.bind("one", TokenId{1});
+    grammar_externs.bind("one", TokenSet({1}));
     auto grammar_unbound = grammar_externs.externs().unbound();
     CHECK(grammar_unbound.size() == 1 && grammar_unbound[0].name == "two");
     CHECK(grammar_externs.externs().size() == 2);
