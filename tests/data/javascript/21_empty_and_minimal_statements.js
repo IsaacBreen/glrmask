@@ -1,0 +1,1 @@
+;{}try{}finally{}function empty(){}class Empty{method(){return this;}}

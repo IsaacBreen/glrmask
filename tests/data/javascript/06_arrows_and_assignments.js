@@ -1,0 +1,1 @@
+const identity=value=>value;const pair=(left=1,right=2)=>({left:left,right:right});const collect=(...items)=>items;const blockArrow=value=>{return value;};let value=1;value=2;value+=3;value-=1;value*=4;value/=2;value%=3;value**=2;value<<=1;value>>=1;value>>>=1;value&=7;value^=3;value|=1;const comma=(value=1,value+=2,value*3);

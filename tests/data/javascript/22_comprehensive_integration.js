@@ -1,0 +1,1 @@
+const source={numbers:[1,2,3],label:"integration"};class Counter{method(value){return value;}}function*mapValues(values,transform=value=>value){for(let index=0;index<3;index++){yield transform(values[index]);}}const counter=new Counter;const result=counter?.method(source.numbers[0])??0;switch(result){case(1):break;default:throw new Error;}export{result as total};

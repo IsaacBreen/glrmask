@@ -1,0 +1,1 @@
+const Base=function(value){return value;};const named=function inner(value=1){return value;};const asyncFunction=async function(value){return await value;};const generated=function*namedGenerator(value=1){yield value;};

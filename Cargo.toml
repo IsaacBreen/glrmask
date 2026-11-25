@@ -246,6 +246,10 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[test]]
+name = "glrm_checked_in_examples"
+path = "tests/glrm_checked_in_examples.rs"
+
+[[test]]
 name = "end_tokens"
 path = "tests/end_tokens.rs"
 

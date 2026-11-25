@@ -1,0 +1,1 @@
+const direct=box.value;const indexed=box["value"];const optionalDirect=box?.value;const optionalIndexed=box?.["value"];const chained=box.add(3).read();const constructed=new Box;

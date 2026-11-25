@@ -1,0 +1,1 @@
+const key="dynamic";const base={inherited:1};const shorthand=2;const record={shorthand:shorthand,plain:true,"hyphen-key":3,123:"numeric",[key]:4,...base,method(value=1){return value;},async asyncMethod(value){return await value;},*values(){yield(1);yield(2);},get total(){return this.plain;},set total(next){this.plain=next;},};const nested=[record,[1,2,[3,4]],{array:[5,6,],},];

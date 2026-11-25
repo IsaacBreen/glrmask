@@ -1,0 +1,1 @@
+const name="Ada";const escaped=`a backtick: \` and slash: \\`;const plain=`hello`;const regex=/[A-Z]+\/[0-9]{2}/giu;

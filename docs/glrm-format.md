@@ -47,7 +47,10 @@ character U+00E9; in a byte form, it's the byte E9. Byte forms can't contain non
 Regular expressions are matched against the whole terminal, not searched for. They support classes such as `[a-z]`,
 `\d` and `\p{L}`, groups, alternation, greedy quantifiers and the flags `i`, `s`, `x` and `u`. `/./` excludes newline,
 `/./s` matches any character and `b/./s` any byte. Backreferences, lookaround, anchors and lazy quantifiers are errors.
-Classes and `.` only work inside `/.../`.
+Classes and `.` only work inside `/.../`. A slash inside a bracket character class may be left unescaped (e.g.
+`/[^/]/`); use `\/` for a literal slash outside a class. The JavaScript regex spelling `[^]` is not supported; use
+`/./s` to match any Unicode character. If extended-mode comments make the closing delimiter ambiguous before a trailing
+`x` flag is seen, use an inline `(?x:...)` group or escape the slash.
 
 ## Operators
 

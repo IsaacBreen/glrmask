@@ -1,0 +1,1 @@
+outer:for(let row=0;row<3;row++){for(let column=0;column<3;column++){if(row===column){continue;}if(row+column>3){break outer;}}}switch(1){case(0):debugger;break;case(1):throw new Error;default:break;}try{throw new Error;}catch({message}){const recovered=message;}finally{const complete=true;}try{const safe=true;}catch(error){const fallback=false;}

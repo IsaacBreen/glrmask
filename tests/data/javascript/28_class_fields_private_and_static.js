@@ -1,0 +1,1 @@
+class Parent{static family="parent";#secret="hidden";field=1;constructor(value=1){this.value=value;}get secret(){return this.#secret;}set secret(next){this.#secret=next;}async load(value){return await value;}*iterate(){yield value;}}class Child extends Parent{static childField=2;#childSecret=3;constructor(value){super(value);}get childSecret(){return this.#childSecret;}}

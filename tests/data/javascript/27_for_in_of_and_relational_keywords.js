@@ -1,0 +1,1 @@
+const object={one:1,two:2};const values=[1,2,3];let total=0;for(const key in object){total+=object[key];}for(const value of values){total+=value;}const membership="one" in object;const instance=object instanceof Object;

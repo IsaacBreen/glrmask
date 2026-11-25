@@ -1,0 +1,1 @@
+const base={inherited:1};const object={...base,plain:1,["computed"]:2,method(){return this.plain;}};const list=[1,,3,];const type=typeof object;const empty=void object;const removed=delete object.plain;const invoked=object.method();

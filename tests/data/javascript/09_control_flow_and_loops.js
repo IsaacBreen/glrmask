@@ -1,0 +1,1 @@
+let total=0;if(total===0){total+=1;}else if(total===1){total+=2;}else{total+=3;}while(total<3){total++;}do{total--;}while(total>0);for(let index=0;index<3;index++){total+=index;}for(;;){break;}

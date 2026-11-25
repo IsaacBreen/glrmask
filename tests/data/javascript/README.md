@@ -1,0 +1,1 @@
+Curated JavaScript acceptance corpus copied unchanged from constraint-framework-analysis/data/sources/grammars/js_tests at main commit 68a8d5f2dbf1f70f0a674134fd64cd3687048440 (31 files). The public GLRM grammar integration test uses one byte per token, with no external tokenizer or corpus dependency.

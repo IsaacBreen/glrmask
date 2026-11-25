@@ -1,0 +1,1 @@
+const source={first:1,second:2,third:3,fourth:4};const items=[10,20,30,40,50];var plain=0,initialized=1,alsoPlain;let[firstItem,,thirdItem=30,...remainingItems]=items;const{first,second:renamedSecond=2,missing=99,...remainingFields}=source;let{third:{value=3}={value:3}}={third:{value:3}};

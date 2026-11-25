@@ -1,0 +1,1 @@
+class Parent{method(){return this.value;}get value(){return this._value;}set value(next){this._value=next;}static make(){return Parent;}}class Child extends Parent{method(){return this.value;}static create(){return Child;}}

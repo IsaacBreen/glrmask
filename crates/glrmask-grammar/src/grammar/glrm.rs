@@ -1161,13 +1161,42 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_regex_atom(&mut self, unicode: bool) -> Result<Tok, GlrMaskError> {
-        let pattern=self.lex_regex()?;
+        // Preserve the interpretation of existing literals (including extended-mode
+        // comments containing brackets). If the first unescaped slash cannot end
+        // a valid regex, retry with bracket classes shielding their inner slashes.
+        let start = self.pos;
+        let first = self.lex_regex_atom_with_classes(unicode, false, false);
+        if first.is_ok() {
+            return first;
+        }
+        let first_end = self.pos;
+        self.pos = start;
+        let bracket_aware = self.lex_regex_atom_with_classes(unicode, true, false);
+        if bracket_aware.is_ok() {
+            return bracket_aware;
+        }
+        // The trailing x flag is not known until the delimiter has been
+        // found. Try its lexical mode too, but require that flag at the end.
+        self.pos = start;
+        let extended = self.lex_regex_atom_with_classes(unicode, true, true);
+        if extended.is_ok() {
+            return extended;
+        }
+        self.pos = first_end;
+        first
+    }
+
+    fn lex_regex_atom_with_classes(&mut self, unicode: bool, classes: bool, extended: bool) -> Result<Tok, GlrMaskError> {
+        let pattern=self.lex_regex(classes, extended)?;
         if !unicode && !pattern.is_ascii() {
             return Err(err("byte regexes cannot contain raw non-ASCII characters"));
         }
         let start=self.pos;
         while self.peek().is_some_and(|b| b.is_ascii_alphabetic()) { self.pos+=1; }
         let flags=std::str::from_utf8(&self.src[start..self.pos]).unwrap();
+        if extended && !flags.contains('x') {
+            return Err(err("extended regex scan requires the x flag"));
+        }
         let pattern=checked_pattern(&pattern,flags,unicode).map_err(|e|err(&e))?;
         Ok(Tok::RegexLit(pattern))
     }
@@ -1193,19 +1222,87 @@ impl<'a> Lexer<'a> {
                         if self.advance().is_none(){return Err(err("unterminated comment in foreign pragma"));}
                     }
                 }
-                b'/' => { self.lex_regex()?; }
+                b'/' => { self.lex_regex(true, false)?; }
                 _ => {},
             }
         }
         Err(err("unterminated foreign pragma block"))
     }
 
-    fn lex_regex(&mut self) -> Result<String, GlrMaskError> {
+    fn lex_regex(&mut self, classes: bool, mut extended: bool) -> Result<String, GlrMaskError> {
         let mut pat = String::new();
+        // A leading ']' (including after '^') is a class member, not its end.
+        // Rust regex syntax also allows nested classes and set operations.
+        // States: 0 = just opened, 1 = after leading '^', 2 = has a member.
+        let mut class_stack: Vec<u8> = Vec::new();
+        let mut groups = Vec::new();
         loop {
             match self.advance() {
-                Some(b'/') => return Ok(pat),
+                Some(b'/') if class_stack.is_empty() => return Ok(pat),
+                // Extended-mode whitespace/comments do not count as class
+                // members or delimiters. Outside classes the slash still
+                // delimits the GLRM literal, even in a regex comment.
+                Some(b'#') if classes && extended => {
+                    pat.push('#');
+                    while let Some(next) = self.peek() {
+                        if next == b'/' && class_stack.is_empty() { break; }
+                        self.advance();
+                        if next == b'\\' && self.peek() == Some(b'/') {
+                            self.advance();
+                            pat.push('/');
+                            continue;
+                        }
+                        if next.is_ascii() { pat.push(next as char); }
+                        else { self.push_utf8_char_from(self.pos - 1, &mut pat); }
+                        if next == b'\n' { break; }
+                    }
+                }
+                Some(b) if classes && extended && b.is_ascii_whitespace() => pat.push(b as char),
+                Some(b'(') if classes && class_stack.is_empty() => {
+                    // An inline flag group can change x within its scope.
+                    let mut end = self.pos + 1;
+                    let mut next = extended;
+                    let mut enabled = true;
+                    if self.peek() == Some(b'?') {
+                        while let Some(&flag) = self.src.get(end) {
+                            if flag == b'-' { enabled = false; }
+                            else if b"imsuxUR".contains(&flag) {
+                                if flag == b'x' { next = enabled; }
+                            } else { break; }
+                            end += 1;
+                        }
+                        if end > self.pos + 1 && matches!(self.src.get(end), Some(b':' | b')')) {
+                            if self.src[end] == b':' { groups.push(extended); }
+                            extended = next;
+                            pat.push('(');
+                            pat.push_str(std::str::from_utf8(&self.src[self.pos..=end]).unwrap());
+                            self.pos = end + 1;
+                            continue;
+                        }
+                    }
+                    groups.push(extended);
+                    pat.push('(');
+                }
+                Some(b')') if classes && class_stack.is_empty() => {
+                    if let Some(previous) = groups.pop() { extended = previous; }
+                    pat.push(')');
+                }
+                Some(b'[') if classes => {
+                    if let Some(state) = class_stack.last_mut() { *state = 2; }
+                    class_stack.push(0);
+                    pat.push('[');
+                }
+                Some(b']') if !class_stack.is_empty() => {
+                    if *class_stack.last().unwrap() == 2 { class_stack.pop(); }
+                    else { *class_stack.last_mut().unwrap() = 2; }
+                    pat.push(']');
+                }
+                Some(b'^') if class_stack.last() == Some(&0) => {
+                    *class_stack.last_mut().unwrap() = 1;
+                    pat.push('^');
+                }
                 Some(b'\\') => {
+                    if let Some(state) = class_stack.last_mut() { *state = 2; }
                     match self.advance() {
                         Some(b'/') => pat.push('/'),  // escaped slash
                         Some(c) => {
@@ -1219,8 +1316,14 @@ impl<'a> Lexer<'a> {
                         None => return Err(err("unexpected EOF in regex escape")),
                     }
                 }
-                Some(b) if b.is_ascii() => pat.push(b as char),
-                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut pat),
+                Some(b) if b.is_ascii() => {
+                    if let Some(state) = class_stack.last_mut() { *state = 2; }
+                    pat.push(b as char);
+                }
+                Some(_) => {
+                    if let Some(state) = class_stack.last_mut() { *state = 2; }
+                    self.push_utf8_char_from(self.pos - 1, &mut pat);
+                }
                 None => return Err(err("unterminated regex literal")),
             }
         }

@@ -460,7 +460,7 @@ t _REGEX_FLAGS = b/[A-Za-z_$]/+ ;
 //TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
 t TEMPLATE_LITERAL = '`' _TEMPLATE_CHARS '`' ;
 t _TEMPLATE_CHARS = _TEMPLATE_CHAR+ ;
-t _TEMPLATE_CHAR = /[^`\\]/ | '\\' /[^]/ ;
+t _TEMPLATE_CHAR = /[^`\\]/ | '\\' /./s ;
 
 //template_literal = 'asdfasdfasdfasdfasdfsaf' ;
 

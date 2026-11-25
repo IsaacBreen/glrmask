@@ -1,0 +1,1 @@
+export default class DefaultClass{method(){return this;}}export function exportedFunction(value=1){return value;}
