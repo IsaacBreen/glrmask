@@ -117,9 +117,10 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
 def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     vocab = glrmask.Vocab(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"c", 9:b""})
-    grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
+    grammar = glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
-    ), "MARK", glrmask.TokenSet([1]))
+    )
+    grammar.bind("MARK", glrmask.TokenSet([1]))
     compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([9]))).compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
