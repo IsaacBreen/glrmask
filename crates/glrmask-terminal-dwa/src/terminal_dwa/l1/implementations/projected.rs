@@ -2741,8 +2741,7 @@ fn projected_kernel_auto(input: BuildInput<'_>) -> ProjectedKernel {
     }
 }
 
-/// Build L1 only through projected representations. `quotient` remains an
-/// explicit diagnostic/reference implementation but is never used here.
+/// Choose the exact projected kernel for this input shape.
 pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     profile_vector_projection_shape(input);
     let kernel = projected_kernel(input);
