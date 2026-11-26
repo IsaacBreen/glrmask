@@ -113,7 +113,14 @@ jobs:
           workspaces: . -> target/rust-ci
           cache-workspace-crates: 'true'
           cache-bin: 'false'
+      - name: Setup compiler cache (test only)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - name: Run shard
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: sccache
         run: python3 scripts/ci-rust-shard.py "${{ matrix.group }}"
 
   clippy:

@@ -355,7 +355,14 @@ jobs:
           python bindings/ci/check.py
       # The 128 KiB pthread regression requires full optimizer stack layout.
       # This cached build is for testing only; no release artifacts are uploaded.
+      - name: Setup compiler cache (test only)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - name: Build non-distributable test libraries
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: sccache
         run: |
           cargo build --locked --release -p glrmask-c -p glrmask-node
           npm --prefix bindings/node run build -- --profile release
@@ -386,7 +393,14 @@ jobs:
           workspaces: . -> target/abi-pr
           cache-workspace-crates: 'true'
           cache-bin: 'false'
+      - name: Setup compiler cache (test only)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - name: Binding ownership and C ABI parity
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: sccache
         run: |
           cargo test --locked --profile ci-test -p glrmask-binding-core -p glrmask-c
 
@@ -411,6 +425,13 @@ jobs:
           workspaces: . -> target/debug-pr
           cache-workspace-crates: 'true'
           cache-bin: 'false'
+      - name: Setup compiler cache (test only)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - name: Library tests with debug assertions
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: sccache
         run: |
           cargo test --locked --profile ci-test -p glrmask --features internal-api --lib
