@@ -276,6 +276,7 @@ class ConstraintState:
     def fill_mask(self, bitmask: NDArray[np.int32] | NDArray[np.uint32], /) -> None:
         """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
 
+        Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """
         ...

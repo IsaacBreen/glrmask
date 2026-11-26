@@ -39,3 +39,32 @@ def test_mask_domain(n):
         s.fill_mask(p)
         assert np.array_equal(p, s.mask())
         assert s.mask_bit_len() == n
+
+
+def test_threaded_fill_mask_matches_sequential():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    v = glrmask.Vocab({i: bytes([97 + i % 3]) for i in range(4097)})
+    c = glrmask.Grammar.from_lark('start: "a" "b" "c"').compile(v)
+    states = [c.start() for _ in range(8)]
+    for i, s in enumerate(states):
+        for token in range(i % 3):
+            assert s.commit_token(token)
+    expected = [s.mask().copy() for s in states]
+    # Use fresh states so the first parallel fill need not hit a cached mask.
+    states = [s.copy() for s in states]
+    barrier = Barrier(len(states))
+    def fill(i):
+        dtype = np.int32 if i % 2 else np.uint32
+        out = np.zeros((c.mask_bit_len()+31)//32+2, dtype=dtype)
+        barrier.wait(timeout=30)
+        for _ in range(5):
+            s = states[i]
+            s.fill_mask(out)
+            np.testing.assert_array_equal(out[:-2].view(np.uint32), expected[i])
+            assert not np.any(out[-2:])
+        return out
+    with ThreadPoolExecutor(max_workers=len(states)) as pool:
+        results = list(pool.map(fill, range(len(states))))
+    assert len(results) == len(states)

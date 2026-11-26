@@ -977,11 +977,16 @@ impl PyDynamicConstraintState {
 
     /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
+    /// Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
-    fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
-        with_mask_buffer(bitmask, self.mask_bit_len.div_ceil(32), |buf| {
-            with_state(&self.inner, |state| state.fill_mask(buf));
+    fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
+        let required = self.mask_bit_len.div_ceil(32);
+        // Hold the exclusive PyO3 state borrow and the NumPy write guard for
+        // the whole detached call. Other calls on this state fail to borrow.
+        let state = &mut self.inner;
+        with_mask_buffer(bitmask, required, |buf| {
+            py.detach(|| state.fill_mask(buf));
         })
     }
 
@@ -1063,11 +1068,16 @@ impl PyConstraintState {
 
     /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
+    /// Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
-    fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
-        with_mask_buffer(bitmask, self.mask_bit_len.div_ceil(32), |buf| {
-            with_state(&self.inner, |state| state.fill_mask(buf));
+    fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
+        let required = self.mask_bit_len.div_ceil(32);
+        // Hold the exclusive PyO3 state borrow and the NumPy write guard for
+        // the whole detached call. Other calls on this state fail to borrow.
+        let state = &mut self.inner;
+        with_mask_buffer(bitmask, required, |buf| {
+            py.detach(|| state.fill_mask(buf));
         })
     }
 

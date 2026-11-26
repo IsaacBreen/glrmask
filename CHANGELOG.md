@@ -18,7 +18,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 - Expressions and `bind` take tokens only as a `TokenSet`.
 
-- Python: `fill_mask` also accepts `uint32` arrays, strategies and token sets and externs are hashable.
+- Python: `fill_mask` accepts `int32` and `uint32` arrays and releases the GIL during computation; use distinct states and nonoverlapping output buffers for concurrent calls. Strategies, token sets and externs are hashable.
 
 - GLRM reserves `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. Extra semicolons are allowed.
 
