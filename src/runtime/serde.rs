@@ -61,16 +61,7 @@ const V30_SECTION_MAGIC: [u8; 4] = *b"S30\0";
 const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R35\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
-const PREVIOUS_STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM2";
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
-const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
-    PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
-const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C20\0";
-const PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
-    PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
-const PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
-const PREVIOUS_CURRENT_CORE_HEADER_LEN: usize = PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_MAGIC: [u8; 4] = *b"C22\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
@@ -136,13 +127,6 @@ where
     ConstraintSerde::serialize(constraint.as_data(), serializer)
 }
 
-fn deserialize_constraint<'de, D>(deserializer: D) -> Result<Constraint, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    ConstraintSerde::deserialize(deserializer).map(Constraint::from_data)
-}
-
 // Keep the large runtime object out of the core visitor and the nested Rayon
 // join results. Source-bound compilation can itself be running on a worker;
 // retaining inline core copies at each join exhausts its ordinary stack.
@@ -196,27 +180,6 @@ struct ConstraintArtifactCurrentCoreBase {
     late_grammar_slots: Vec<crate::runtime::artifact::LateGrammarSlot>,
 }
 
-/// Core payload used by C21, before unresolved named slots were persisted.
-#[derive(Deserialize)]
-struct ConstraintArtifactPreviousOverlayCoreBase {
-    #[serde(deserialize_with = "deserialize_constraint")]
-    constraint: Constraint,
-    ignore_expr: Option<Expr>,
-    parser_state_domain_labels: Vec<i32>,
-    static_dynamic_overlay: Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
-}
-
-/// Core payload used by serialization artifact v19 (C19/C20). Composition
-/// metadata lived only on the diverged composition branch at that point, so it
-/// is absent from the canonical v19 payload and must default empty on load.
-#[derive(Deserialize)]
-struct ConstraintArtifactPreviousCurrentCoreBase {
-    #[serde(deserialize_with = "deserialize_constraint")]
-    constraint: Constraint,
-    ignore_expr: Option<Expr>,
-    parser_state_domain_labels: Vec<i32>,
-}
-
 fn decode_current_core(
     input: &[u8],
     backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
@@ -224,107 +187,19 @@ fn decode_current_core(
     ConstraintArtifactCurrentCoreBase,
     Option<crate::runtime::artifact::DeferredTerminalExprBytes>,
 ), String> {
-    let (header_len, flags, base_len, expr_len, has_current_overlay, has_late_slots) =
-        if input.starts_with(&CURRENT_CORE_MAGIC) {
-        if input.len() < CURRENT_CORE_HEADER_LEN {
-            return Err("truncated current constraint core header".to_owned());
-        }
-        let flags = u32::from_le_bytes(
-            input[4..8]
-                .try_into()
-                .expect("current core flags have fixed width"),
-        );
-        if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
-            return Err("unsupported current constraint core flags".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[8..16]
-                .try_into()
-                .expect("current core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[16..24]
-                .try_into()
-                .expect("current core expression length has fixed width"),
-        );
-        (CURRENT_CORE_HEADER_LEN, flags, base_len, expr_len, true, true)
-    } else if input.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC) {
-        if input.len() < PREVIOUS_CURRENT_CORE_HEADER_LEN {
-            return Err("truncated previous current-core header".to_owned());
-        }
-        let flags = u32::from_le_bytes(
-            input[4..8]
-                .try_into()
-                .expect("previous current-core flags have fixed width"),
-        );
-        if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
-            return Err("unsupported previous current constraint core flags".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[8..16]
-                .try_into()
-                .expect("previous current-core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[16..24]
-                .try_into()
-                .expect("previous current-core expression length has fixed width"),
-        );
-        (
-            PREVIOUS_CURRENT_CORE_HEADER_LEN,
-            flags,
-            base_len,
-            expr_len,
-            true,
-            false,
-        )
-    } else if input.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
-        if input.len() < PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
-            return Err("truncated previous-previous current-core header".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[4..12]
-                .try_into()
-                .expect("previous-previous current-core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[12..20]
-                .try_into()
-                .expect("previous-previous current-core expression length has fixed width"),
-        );
-        (
-            PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
-            0,
-            base_len,
-            expr_len,
-            false,
-            false,
-        )
-    } else if input.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
-        if input.len() < PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
-            return Err("truncated previous-previous-previous current-core header".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[4..12]
-                .try_into()
-                .expect("previous-previous-previous current-core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[12..20]
-                .try_into()
-                .expect("previous-previous-previous current-core expression length has fixed width"),
-        );
-        (
-            PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
-            0,
-            base_len,
-            expr_len,
-            false,
-            false,
-        )
-    } else {
+    let header_len = CURRENT_CORE_HEADER_LEN;
+    if !input.starts_with(&CURRENT_CORE_MAGIC) {
         return Err("invalid current constraint core header".to_owned());
-    };
+    }
+    if input.len() < header_len {
+        return Err("truncated current constraint core header".to_owned());
+    }
+    let flags = u32::from_le_bytes(input[4..8].try_into().unwrap());
+    if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
+        return Err("unsupported current constraint core flags".to_owned());
+    }
+    let base_len = u64::from_le_bytes(input[8..16].try_into().unwrap());
+    let expr_len = u64::from_le_bytes(input[16..24].try_into().unwrap());
     let base_len = usize::try_from(base_len)
         .map_err(|_| "current core base length does not fit platform".to_owned())?;
     let expr_len = usize::try_from(expr_len)
@@ -342,34 +217,10 @@ fn decode_current_core(
         crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
             flags & CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0,
         );
-    let decoded = if has_late_slots {
-        bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(&input[header_len..base_end])
-            .map_err(|err| err.to_string())
-    } else if has_current_overlay {
-        bincode::deserialize::<ConstraintArtifactPreviousOverlayCoreBase>(
-            &input[header_len..base_end],
-        )
-        .map(|base| ConstraintArtifactCurrentCoreBase {
-            constraint: Box::new(base.constraint),
-            ignore_expr: base.ignore_expr,
-            parser_state_domain_labels: base.parser_state_domain_labels,
-            static_dynamic_overlay: base.static_dynamic_overlay,
-            late_grammar_slots: Vec::new(),
-        })
-        .map_err(|err| err.to_string())
-    } else {
-        bincode::deserialize::<ConstraintArtifactPreviousCurrentCoreBase>(
-            &input[header_len..base_end],
-        )
-        .map(|base| ConstraintArtifactCurrentCoreBase {
-            constraint: Box::new(base.constraint),
-            ignore_expr: base.ignore_expr,
-            parser_state_domain_labels: base.parser_state_domain_labels,
-            static_dynamic_overlay: None,
-            late_grammar_slots: Vec::new(),
-        })
-        .map_err(|err| err.to_string())
-    };
+    let decoded = bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(
+        &input[header_len..base_end],
+    )
+    .map_err(|err| err.to_string());
     crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
         previous_omit_tsid_inverse,
     );
@@ -2835,15 +2686,13 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     if section.len() < 16 {
         return Err("invalid static residual mask wire header".to_owned());
     }
-    let sparse = section.starts_with(&STATIC_RESIDUAL_MASK_MAGIC);
-    let dense_legacy = section.starts_with(&PREVIOUS_STATIC_RESIDUAL_MASK_MAGIC);
-    if !sparse && !dense_legacy {
+    if !section.starts_with(&STATIC_RESIDUAL_MASK_MAGIC) {
         return Err("invalid static residual mask wire header".to_owned());
     }
     let count = u32::from_le_bytes(section[4..8].try_into().unwrap()) as usize;
     let tokenizer_len = usize::try_from(u64::from_le_bytes(section[8..16].try_into().unwrap()))
         .map_err(|_| "static residual tokenizer length does not fit platform".to_owned())?;
-    let descriptor_width = if sparse { 56usize } else { 48usize };
+    let descriptor_width = 56usize;
     let descriptor_bytes = count.checked_mul(descriptor_width).ok_or_else(|| "static residual descriptor length overflow".to_owned())?;
     let mut pos = 16usize;
     let descriptor_end = pos.checked_add(descriptor_bytes).ok_or_else(|| "static residual descriptor overflow".to_owned())?;
@@ -2853,12 +2702,12 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
         let terminal = u32::from_le_bytes(section[pos..pos+4].try_into().unwrap()); pos += 4;
         let state_offset = u32::from_le_bytes(section[pos..pos+4].try_into().unwrap()); pos += 4;
         let map_len = usize::try_from(u64::from_le_bytes(section[pos..pos+8].try_into().unwrap())).map_err(|_| "static residual map length does not fit platform".to_owned())?; pos += 8;
-        let live_count = if sparse {
+        let live_count = {
             let value = usize::try_from(u64::from_le_bytes(section[pos..pos+8].try_into().unwrap())).map_err(|_| "static residual live map length does not fit platform".to_owned())?;
             pos += 8;
             if value > map_len { return Err("static residual live map length exceeds dense length".to_owned()); }
             value
-        } else { map_len };
+        };
         let oracle_len = usize::try_from(u64::from_le_bytes(section[pos..pos+8].try_into().unwrap())).map_err(|_| "static residual oracle length does not fit platform".to_owned())?; pos += 8;
         let expr_len = usize::try_from(u64::from_le_bytes(section[pos..pos+8].try_into().unwrap())).map_err(|_| "static residual expression length does not fit platform".to_owned())?; pos += 8;
         let mask_max = usize::try_from(u64::from_le_bytes(section[pos..pos+8].try_into().unwrap())).map_err(|_| "static residual mask max does not fit platform".to_owned())?; pos += 8;
@@ -2868,7 +2717,7 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     let tokenizer_local_start = descriptor_end;
     let tokenizer_local_end = tokenizer_local_start.checked_add(tokenizer_len).ok_or_else(|| "static residual tokenizer range overflow".to_owned())?;
     if tokenizer_local_end > section.len() { return Err("truncated static residual tokenizer".to_owned()); }
-    let mask_state_count = if sparse {
+    let mask_state_count = {
         let tokenizer_wire = &section[tokenizer_local_start..tokenizer_local_end];
         if tokenizer_wire.len() < 12
             || !(tokenizer_wire.starts_with(b"TKF2")
@@ -2879,10 +2728,8 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
             return Err("SRM3 requires a supported mask tokenizer wire".to_owned());
         }
         u32::from_le_bytes(tokenizer_wire[8..12].try_into().unwrap())
-    } else {
-        0
     };
-    if sparse {
+    {
         for index in 0..descriptors.len() {
             let start = descriptors[index].1;
             let end = descriptors.get(index + 1).map_or(mask_state_count, |next| next.1);
@@ -2897,17 +2744,15 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     pos = tokenizer_local_end;
     let mut projections = Vec::with_capacity(count);
     for (descriptor_index, (terminal, state_offset, map_len, live_count, oracle_len, expr_len, mask_max, crossed_boundaries)) in descriptors.iter().copied().enumerate() {
-        let component_state_count = if sparse {
+        let component_state_count = {
             descriptors
                 .get(descriptor_index + 1)
                 .map_or(mask_state_count, |next| next.1)
                 .checked_sub(state_offset)
                 .ok_or_else(|| "invalid static residual projection component width".to_owned())?
-        } else {
-            0
         };
-        let mut map = if sparse { vec![u32::MAX; map_len] } else { Vec::with_capacity(map_len) };
-        if sparse {
+        let mut map = vec![u32::MAX; map_len];
+        {
             let map_bytes = live_count.checked_mul(8).ok_or_else(|| "static residual sparse map byte length overflow".to_owned())?;
             let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual sparse map range overflow".to_owned())?;
             if map_end > section.len() { return Err("truncated static residual sparse projection map".to_owned()); }
@@ -2926,12 +2771,6 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
                 previous = Some(index);
             }
             pos = map_end;
-        } else {
-            let map_bytes = map_len.checked_mul(4).ok_or_else(|| "static residual map byte length overflow".to_owned())?;
-            let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual map range overflow".to_owned())?;
-            if map_end > section.len() { return Err("truncated static residual projection map".to_owned()); }
-            for word in section[pos..map_end].as_chunks::<4>().0.iter() { map.push(u32::from_le_bytes(*word)); }
-            pos = map_end;
         }
         let oracle_end = pos.checked_add(oracle_len).ok_or_else(|| "static residual oracle range overflow".to_owned())?;
         if oracle_end > section.len() { return Err("truncated static residual oracle".to_owned()); }
@@ -2941,15 +2780,10 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
         if expr_end > section.len() { return Err("truncated static residual expression".to_owned()); }
         let runtime_expr_bytes = section[pos..expr_end].to_vec();
         pos = expr_end;
-        let projection = if sparse {
+        let projection = {
             crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact::from_validated_wire(
                 terminal, state_offset, map, oracle_bytes, runtime_expr_bytes, mask_max,
                 crossed_boundaries, component_state_count,
-            )
-        } else {
-            crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact::from_wire(
-                terminal, state_offset, map, oracle_bytes, runtime_expr_bytes, mask_max,
-                crossed_boundaries,
             )
         };
         projections.push(projection);
@@ -6599,11 +6433,7 @@ impl Constraint {
                         );
                     let core_started = profile.then(std::time::Instant::now);
                     let decoded = if uses_external_runtime_sections(version) {
-                        if core_section.starts_with(&CURRENT_CORE_MAGIC)
-                            || core_section.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC)
-                            || core_section.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
-                            || core_section.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
-                        {
+                        if core_section.starts_with(&CURRENT_CORE_MAGIC) {
                             let core_backing = current_backing.as_ref().and_then(|backing| {
                                 let base = backing.as_ptr() as usize;
                                 let start = (core_section.as_ptr() as usize).checked_sub(base)?;
