@@ -4,14 +4,13 @@ use super::{check_token_id, PyConstraint, PyVocab};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
-use std::sync::Arc;
 
 pub(super) fn api_error(error: glrmask::Error) -> PyErr {
     super::glrmask_error(super::kind_name(error.kind()), error.to_string())
 }
 
 pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
-    PyConstraint { inner: Arc::new(inner) }
+    PyConstraint::from_inner(inner)
 }
 
 /// A preference for faster compiling or faster masks.

@@ -265,10 +265,10 @@ class ConstraintState:
 
 @final
 class Externs(Mapping[str, "Extern"]):
-    """Externs by name, in declaration order."""
+    """Externs by name, in name order."""
     @property
     def unbound(self) -> Externs:
-        """The externs not yet bound."""
+        """Unbound names at the time of the snapshot."""
         ...
     def __getitem__(self, key: str, /) -> Extern:
         ...

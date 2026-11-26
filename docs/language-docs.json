@@ -21,8 +21,8 @@
     "Vocab": "Each token ID and its bytes.",
     "Extern": "A named placeholder in a grammar.",
     "Extern.kind": "What the extern can be bound to.",
-    "Externs": "Externs by name, in declaration order.",
-    "Externs.unbound": "The externs not yet bound.",
+    "Externs": "Externs by name, in name order.",
+    "Externs.unbound": "Unbound names at the time of the snapshot.",
     "Expr": "A grammar expression.",
     "Expr.choice": "Matches any one of `parts`.",
     "Expr.sequence": "Matches `parts` in order.",
@@ -172,8 +172,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "99c2f57434ad7bf06742dd2bc47f4412452d3ea2ca6fc34840936cb30f759953",
-    "bindings/node/README.md": "51293a195dd9fd251600db545b1973f6d9da37a0e94456115cfcf5318a699a72",
+    "bindings/cpp/README.md": "64bd3c007e9025ec3b120b66453fd65d98d6644bdb55f1b3ba5ed6740cde399c",
+    "bindings/node/README.md": "26dc483c92d6a55a8ed69d228878819c41b1aed6ca708b4c8ad37d45ed44b32b",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -181,5 +181,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "d231fffad4147d354dfa4bba73fef560cfe90a82becf4dc9cf4d497d2d3a7195"
+  "content_sha256": "16d058e2c4319e01179a05d14bcee8dda820bba78029f73d06ac369e8027c85b"
 }

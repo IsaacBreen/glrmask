@@ -1,21 +1,34 @@
 ```js
-import assert from 'node:assert/strict';
 import { Vocab, Grammar } from '@glrmask/node';
 
-const vocab = new Vocab([
-  [0, Buffer.from('hello')],
-  [1, Buffer.from(' ')],
-  [2, Buffer.from('world')],
-]);
-const grammar = Grammar.fromLark('start: "hello" " " "world"');
-const constraint = await grammar.compile(vocab);
-const state = constraint.start();
-const mask = new Uint32Array(Math.ceil(constraint.maskBitLength / 32));
+const grammar = Grammar.fromJsonSchema({
+  type: 'object',
+  properties: { color: { enum: ['red', 'green', 'blue'] } },
+  required: ['color'],
+  additionalProperties: false,
+});
 
-for (const [id, expected] of [[0, 1], [1, 2], [2, 4]]) {
-  state.fillMask(mask);
-  assert.equal(mask[0] & 7, expected);
-  assert.equal(state.commitToken(id), true);
+// One token per byte; with a real model, use its tokenizer.
+const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
+const EOS = 256;
+const state = (await grammar.compile(vocab)).start();
+const sample = Buffer.from('{"color": "blue"}');
+const output = [];
+while (true) {
+  // Stand-in scores for a model that wants to produce sample.
+  const logits = new Float32Array(257).fill(-1);
+  logits[output.length < sample.length ? sample[output.length] : EOS] = 1;
+  const mask = state.mask();
+  let token = -1;
+  for (let id = 0; id <= EOS; id++) {
+    const allowed = id === EOS ? state.isAccepting()
+      : ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
+    if (allowed && (token < 0 || logits[id] > logits[token])) token = id;
+  }
+  if (token < 0) throw new Error('No allowed token');
+  if (token === EOS) break;
+  if (!state.commitToken(token)) throw new Error('Commit failed');
+  output.push(token);
 }
-assert.equal(state.isAccepting(), true);
+console.log(Buffer.from(output).toString());
 ```

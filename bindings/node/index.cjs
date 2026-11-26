@@ -75,6 +75,9 @@ class ExternsMap {
   [Symbol.iterator]() { return this.#map.entries(); }
   forEach(callback, thisArg) { this.#map.forEach((v, k) => callback.call(thisArg, v, k, this)); }
   get unbound() { return this.#unbound ?? this; }
+  [inspect.custom](depth, options) {
+    return `Externs(${inspect(this.#map, {...options, depth: depth - 1})}, unbound=${inspect([...this.unbound.keys()], options)})`;
+  }
 }
 
 function formatExterns(raw, rawUnbound) {

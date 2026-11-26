@@ -638,3 +638,30 @@ fn mask_bit_domain_lengths() {
         }
     }
 }
+
+#[test]
+fn externs_value_equality_and_debug() {
+    let g = Grammar::from_glrm(HOST).unwrap();
+    let mut m = Module::new(&g);
+    assert_eq!(g.externs(), m.externs());
+    assert_eq!(m.externs(), m.externs().unbound());
+    let before = m.clone();
+    m.bind("child", Grammar::from_lark(r#"start: "a""#).unwrap()).unwrap();
+    assert_ne!(before.externs(), m.externs());
+    assert!(format!("{:?}", before.externs()).contains("unbound: [\"child\"]"));
+    assert!(format!("{:?}", m.externs()).contains("unbound: []"));
+}
+
+#[test]
+fn cached_mask_extent_roundtrips_and_survives_commits() {
+    for n in [0u32, 33, 63, 64] {
+        let v = Vocab::new(if n == 0 { vec![] } else { vec![(n - 1, b"a".to_vec())] }).unwrap();
+        let c = Grammar::from_lark(r#"start: "a""#).unwrap().compile(&v).unwrap();
+        assert_eq!(c.mask_bit_len(), n as usize);
+        let restored = Constraint::load(c.save(), &v).unwrap();
+        let mut s = restored.start();
+        assert_eq!(s.mask_bit_len(), n as usize);
+        if n > 0 { assert!(s.commit_token(n - 1)); }
+        assert_eq!(s.mask_bit_len(), n as usize);
+    }
+}

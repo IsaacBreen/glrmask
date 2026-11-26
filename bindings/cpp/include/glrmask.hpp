@@ -48,25 +48,23 @@ public:
 
 /// A named placeholder in a grammar.
 struct Extern {
-    /// The extern's name.
     std::string name;
     /// What the extern can be bound to.
     ExternKind kind;
+    bool operator==(const Extern& other) const { return name == other.name && kind == other.kind; }
+    bool operator!=(const Extern& other) const { return !(*this == other); }
 };
 
-/// A grammar's or module's externs, in declaration order.
+/// Externs by name, in name order.
 class Externs {
     std::vector<Extern> entries_;
     std::shared_ptr<std::vector<Extern>> unbound_;
 public:
-    /// An empty view.
     Externs() : entries_{}, unbound_{std::make_shared<std::vector<Extern>>()} {}
-    /// Used by the library.
     explicit Externs(std::vector<Extern> entries, std::vector<Extern> unbound = {})
         : entries_(std::move(entries)), unbound_(std::make_shared<std::vector<Extern>>(std::move(unbound))) {}
 
     using const_iterator = std::vector<Extern>::const_iterator;
-    /// Iterators over the externs.
     const_iterator begin() const noexcept { return entries_.begin(); }
     /// Iterators over the externs.
     const_iterator end() const noexcept { return entries_.end(); }
@@ -75,12 +73,9 @@ public:
     /// Iterators over the externs.
     const_iterator cend() const noexcept { return entries_.cend(); }
 
-    /// The number of externs.
     std::size_t size() const noexcept { return entries_.size(); }
-    /// Whether there are no externs.
     bool empty() const noexcept { return entries_.empty(); }
 
-    /// The extern at `index`.
     const Extern& operator[](std::size_t index) const { return entries_[index]; }
     /// The extern at `index`; throws `std::out_of_range` if there is none.
     const Extern& at(std::size_t index) const { return entries_.at(index); }
@@ -100,18 +95,23 @@ public:
         return false;
     }
 
-    /// Only the externs that are not yet bound.
+    /// Unbound names at the time of the snapshot.
     Externs unbound() const {
         if (!unbound_) return Externs{};
-        return Externs(*unbound_, {});
+        return Externs(*unbound_, *unbound_);
     }
+    bool operator==(const Externs& other) const {
+        if (entries_ != other.entries_) return false;
+        if (unbound_ && other.unbound_) return *unbound_ == *other.unbound_;
+        return (!unbound_ || unbound_->empty()) && (!other.unbound_ || other.unbound_->empty());
+    }
+    bool operator!=(const Externs& other) const { return !(*this == other); }
 };
 
 /// Options for compiling a grammar or module.
 struct CompileOptions {
-    /// How masks are computed. Defaults to `MaskStrategy::Auto`.
+    /// Defaults to `MaskStrategy::Auto`.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
-    /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         glrmask_compile_options options{};
         (void)glrmask_compile_options_init(&options, sizeof(options));
@@ -122,11 +122,8 @@ struct CompileOptions {
 
 /// One vocabulary entry: a token ID and its exact bytes.
 struct VocabEntry {
-    /// The token ID.
     TokenId id;
-    /// The token's exact bytes.
     Bytes bytes;
-    /// Creates an entry.
     VocabEntry(TokenId id_, Bytes bytes_) : id(id_), bytes(std::move(bytes_)) {}
     /// Creates an entry.
     VocabEntry(TokenId id_, std::string_view bytes_) : id(id_), bytes(bytes_.begin(), bytes_.end()) {}
@@ -242,7 +239,7 @@ public:
     }
     /// Binds the extern `name` to an expression.
     void bind(std::string_view name, const Expr& value);
-    /// The grammar's externs, in declaration order.
+    /// A snapshot; read it again after `bind()`.
     Externs externs() const {
         glrmask_externs* p_all = nullptr;
         detail::check(glrmask_grammar_externs(native_handle(), &p_all));
@@ -354,7 +351,7 @@ public:
     /// Reuses any precompiled work, which must be for the same vocabulary.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 
-    /// The module's externs, in declaration order.
+    /// A snapshot; read it again after `bind()`.
     Externs externs() const {
         glrmask_externs* p_all = nullptr;
         detail::check(glrmask_module_externs(native_handle(), &p_all));
@@ -367,10 +364,7 @@ public:
         return Externs(std::move(all_items), std::move(unbound_items));
     }
 
-    /// Saves the module, including precompiled work, as bytes.
-    ///
-    /// The vocabulary is not included. Bytes saved by one GLRMask version may not
-    /// load in another.
+    /// Serializes the module with its precompiled work, without its vocabulary. Other GLRMask versions may not load it.
     Bytes save() const {
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
@@ -399,12 +393,9 @@ public:
     ConstraintState start() const;
     /// One more than the largest token ID.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
-    /// Saves the constraint as bytes, without the vocabulary.
-    ///
-    /// Bytes saved by one GLRMask version may not load in another.
+    /// Serializes the constraint without its vocabulary. Other GLRMask versions may not load it.
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
-    /// Loads a constraint saved with `save()`. Fails if `vocab` isn't the one
-    /// it was compiled for.
+    /// `vocab` must be the one it was compiled with.
     static Constraint load(const Bytes& bytes, const Vocab& vocab) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes.data(), bytes.size(), vocab.native_handle(), &p)); return Constraint(p);
     }
@@ -426,11 +417,7 @@ public:
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
-    /// Allowed token IDs as a packed bitmask.
-    ///
-    /// Token `id` is allowed when bit `id % 32` of word `id / 32` is set. No bits
-    /// are set when nothing can follow: the sequence is complete, or a commit
-    /// failed.
+    /// Which tokens may come next: bit `id % 32` of word `id / 32`.
     std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
     /// Whether nothing more can be committed.
     bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }

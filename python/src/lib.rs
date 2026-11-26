@@ -642,20 +642,22 @@ impl PyVocabPartition {
 #[derive(Clone)]
 pub struct PyConstraint {
     inner: Arc<glrmask::Constraint>,
-
+    mask_bit_len: usize,
 }
 
 impl PyConstraint {
+    fn from_inner(inner: glrmask::Constraint) -> Self {
+        let mask_bit_len = inner.mask_bit_len();
+        Self { inner: Arc::new(inner), mask_bit_len }
+    }
+
     fn from_constraint_result<E: std::fmt::Display>(
         constraint: Result<glrmask::Constraint, E>,
         _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
 
-        Ok(Self {
-            inner: Arc::new(constraint),
-
-        })
+        Ok(Self::from_inner(constraint))
     }
 
 
@@ -691,7 +693,7 @@ impl PyConstraint {
         let loaded = py.detach(move || glrmask::Constraint::load(data, &vocab));
         let inner = loaded.map_err(final_api::api_error)?;
 
-        Ok(Self { inner: Arc::new(inner) })
+        Ok(Self::from_inner(inner))
     }
 
     /// Starts a new sequence.
@@ -699,14 +701,14 @@ impl PyConstraint {
         PyConstraintState {
             inner: self.inner.start(),
 
-            mask_bit_len: self.inner.mask_bit_len(),
+            mask_bit_len: self.mask_bit_len,
         }
     }
 
     /// One more than the largest token ID.
     #[getter]
     fn mask_bit_len(&self) -> usize {
-        self.inner.mask_bit_len()
+        self.mask_bit_len
     }
 
 }
@@ -2025,10 +2027,7 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
     let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
-    Ok(PyConstraint {
-        inner: std::sync::Arc::new(constraint),
-
-    })
+    Ok(PyConstraint::from_inner(constraint))
 }
 
 #[pyfunction]

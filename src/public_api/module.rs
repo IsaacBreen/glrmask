@@ -437,7 +437,7 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// The module's externs, borrowed from this module. Read it again after `bind()`.
+    /// Borrowed until the next `bind()`.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),
@@ -1027,7 +1027,9 @@ impl Module {
 
     /// Like [`compile`](Self::compile), with `options`.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint> {
-        with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))
+        let constraint = with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))?;
+        constraint.mask_bit_len();
+        Ok(constraint)
     }
 
     fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions, end_tokens: &[u32]) -> Result<RuntimeConstraint> {

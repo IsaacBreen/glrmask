@@ -393,6 +393,8 @@ void canonical_modules() {
     auto multi_mod = Module(multi);
     auto ext_all = multi_mod.externs();
     CHECK(ext_all.size() == 3);
+    CHECK(ext_all == multi_mod.externs());
+    CHECK(ext_all == ext_all.unbound());
     CHECK(ext_all[0].name == "first" && ext_all[0].kind == ExternKind::Token);
     CHECK(ext_all[1].name == "second" && ext_all[1].kind == ExternKind::Grammar);
     CHECK(ext_all[2].name == "third" && ext_all[2].kind == ExternKind::Token);
@@ -400,6 +402,8 @@ void canonical_modules() {
     multi_mod.bind("second", Grammar::from_lark("start: \"a\""));
     auto ext_unbound = multi_mod.externs().unbound();
     CHECK(ext_unbound.size() == 2);
+    CHECK(ext_unbound == ext_unbound.unbound());
+    CHECK(ext_all != multi_mod.externs());
     CHECK(ext_unbound[0].name == "first");
     CHECK(ext_unbound[1].name == "third");
 

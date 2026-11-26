@@ -244,9 +244,9 @@ def test_public_reprs_are_stable_and_python_quoted():
     assert repr(externs["TOK"]) == "Extern(name='TOK', kind='token')"
     assert repr(externs) == (
         "Externs({'TOK': Extern(name='TOK', kind='token'), "
-        "'child': Extern(name='child', kind='grammar')})"
+        "'child': Extern(name='child', kind='grammar')}, unbound=['TOK', 'child'])"
     )
-    assert repr(glrmask.Grammar.from_lark('start: "a"').externs) == "Externs({})"
+    assert repr(glrmask.Grammar.from_lark('start: "a"').externs) == "Externs({}, unbound=[])"
 
 
 def token_extern_grammar():

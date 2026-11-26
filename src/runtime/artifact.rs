@@ -10379,15 +10379,16 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// A grammar compiled for a vocabulary, ready to use. Call [`start`](Self::start) for each sequence you generate.
+/// A compiled grammar, ready to use.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     pub(crate) data: Arc<ConstraintData>,
+    pub(crate) cached_mask_bit_len: OnceLock<usize>,
 }
 
 impl Constraint {
     pub(crate) fn from_data(data: ConstraintData) -> Self {
-        Self { data: Arc::new(data) }
+        Self { data: Arc::new(data), cached_mask_bit_len: OnceLock::new() }
     }
 
     pub(crate) fn as_data(&self) -> &ConstraintData {
@@ -10406,6 +10407,9 @@ impl std::ops::Deref for Constraint {
 impl std::ops::DerefMut for Constraint {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Internal compilation, linking and loading may change the token domain.
+        // Invalidate this handle only; other handles retain their immutable data.
+        self.cached_mask_bit_len.take();
         Arc::make_mut(&mut self.data)
     }
 }

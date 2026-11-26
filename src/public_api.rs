@@ -197,7 +197,6 @@ pub struct Extern {
 }
 
 impl Extern {
-    /// The extern's name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -207,8 +206,8 @@ impl Extern {
     }
 }
 
-/// A grammar's or module's externs, in declaration order.
-#[derive(Debug, Clone)]
+/// Externs by name, in name order.
+#[derive(Clone)]
 pub struct Externs<'a> {
     pub(crate) source: ExternsSource<'a>,
     pub(crate) only_unbound: bool,
@@ -235,6 +234,22 @@ impl ExternsSource<'_> {
     }
 }
 
+impl PartialEq for Externs<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter()) && self.unbound().iter().eq(other.unbound().iter())
+    }
+}
+impl Eq for Externs<'_> {}
+
+impl std::fmt::Debug for Externs<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Externs")
+            .field("entries", &self.iter().collect::<Vec<_>>())
+            .field("unbound", &self.unbound().iter().map(|e| e.name).collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 impl<'a> Externs<'a> {
     /// The extern named `name`, if any.
     pub fn get(&self, name: &str) -> Option<Extern> {
@@ -249,7 +264,6 @@ impl<'a> Externs<'a> {
         })
     }
 
-    /// The number of externs.
     pub fn len(&self) -> usize {
         let Some(declared) = self.source.declarations() else { return 0; };
         if self.only_unbound {
@@ -259,12 +273,11 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// Whether there are no externs.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// The externs not yet bound.
+    /// Unbound names in this view.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
             source: self.source.clone(),
@@ -272,7 +285,6 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// The externs, in declaration order.
     pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
         let items: Vec<Extern> = match self.source.declarations() {
             Some(declared) => declared
@@ -852,7 +864,7 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// The grammar's externs, borrowed from this grammar. Read it again after `bind()`.
+    /// Borrowed until the next `bind()`.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Grammar(self),
@@ -875,7 +887,6 @@ impl Grammar {
         Ok(())
     }
 
-    /// Compiles the grammar for `vocab`. Fails if any extern is unbound.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         Module::new(self).compile(vocab)
     }

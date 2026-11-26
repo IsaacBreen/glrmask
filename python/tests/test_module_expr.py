@@ -228,9 +228,22 @@ def test_externs_are_snapshots():
     for owner in [g.Grammar.from_glrm(HOST), g.Module(g.Grammar.from_glrm(HOST))]:
         before = owner.externs
         assert "child" in before.unbound
+        assert before == owner.externs
+        assert before == before.unbound
+        assert before.unbound == before.unbound.unbound
+        assert "unbound=['child']" in repr(before)
+        assert before["child"] == owner.externs["child"]
+        with pytest.raises(TypeError):
+            hash(before)
         owner.bind("child", source())
+        after = owner.externs
         assert "child" in before.unbound
-        assert "child" not in owner.externs.unbound
+        assert "child" not in after.unbound
+        assert list(before) == list(after)
+        assert before != after
+        assert after == owner.externs
+        assert "unbound=[]" in repr(after)
+        assert after["child"] == before["child"]
 
 def test_stronger_preparation_survives_fast_compile():
     v = vocab()
@@ -250,3 +263,16 @@ def test_stronger_preparation_survives_fast_compile():
         assert a.commit_tokens(ids) == b.commit_tokens(ids) == len(ids)
         assert list(a.mask()) == list(b.mask())
         assert a.is_accepting() == b.is_accepting()
+
+def test_externs_equality_uses_name_order_and_kind():
+    def externs(first, second, kind="grammar"):
+        return g.Grammar.from_glrm(
+            f"extern {kind} {first} extern grammar {second} start r nt r={first}"
+        ).externs
+    original = externs("A", "B")
+    assert original == externs("A", "B")
+    assert original == externs("B", "A")
+    assert list(original) == ["A", "B"]
+    assert original != externs("A", "C")
+    assert original != externs("A", "B", "token")
+    assert original != {"A": original["A"], "B": original["B"]}

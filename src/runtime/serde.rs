@@ -5906,8 +5906,7 @@ impl Constraint {
         bytes
     }
 
-    /// Loads a constraint saved with [`save`](Self::save). Fails if `vocab` isn't
-    /// the one it was compiled for.
+    /// `vocab` must be the one it was compiled with.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
@@ -5925,6 +5924,7 @@ impl Constraint {
             constraint
                 .bind_vocab_exact(vocab)
                 .map_err(crate::Error::Serialization)?;
+            constraint.mask_bit_len();
             Ok(constraint)
         })
     }

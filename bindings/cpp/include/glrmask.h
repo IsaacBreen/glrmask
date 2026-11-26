@@ -87,14 +87,13 @@ typedef struct glrmask_grammar glrmask_grammar;
 typedef struct glrmask_module glrmask_module;
 /// A choice or sequence of grammars, modules, token sets and literals.
 typedef struct glrmask_expr glrmask_expr;
-/// A grammar compiled for a vocabulary.
+/// A compiled grammar, ready to use.
 typedef struct glrmask_constraint glrmask_constraint;
 /// The state of one generated sequence.
 typedef struct glrmask_state glrmask_state;
 /// A byte buffer.
 typedef struct glrmask_bytes glrmask_bytes;
-/// A buffer of 32-bit token IDs.
-/// A list of externs.
+/// Externs in name order.
 typedef struct glrmask_externs glrmask_externs;
 
 /// One vocabulary entry: a token ID and its exact bytes.
@@ -170,9 +169,9 @@ GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* grammar,co
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* grammar,glrmask_grammar** out);
 /// Frees the handle.
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar* grammar);
-/// Writes the grammar's externs, in declaration order.
+/// A snapshot; read it again after binding.
 GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar* grammar,glrmask_externs** out);
-/// Writes the grammar's externs that are not yet bound.
+/// Unbound names at the time of the snapshot.
 GLRMASK_API glrmask_status glrmask_grammar_unbound_externs(const glrmask_grammar* grammar,glrmask_externs** out);
 /// Compiles the grammar for `vocab`. Fails if any extern is unbound. `options`
 /// may be NULL for defaults.
@@ -203,7 +202,7 @@ GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module* module,cons
 /// extern is unbound or the module was precompiled for another vocabulary.
 /// `options` may be NULL.
 GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options,glrmask_constraint** out);
-/// Writes the module's externs, in declaration order.
+/// Writes the module's externs, in name order.
 GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module* module,glrmask_externs** out);
 /// Writes the module's externs that are not yet bound.
 GLRMASK_API glrmask_status glrmask_module_unbound_externs(const glrmask_module* module,glrmask_externs** out);

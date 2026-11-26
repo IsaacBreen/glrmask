@@ -30,25 +30,38 @@ GLRMask has four core types:
 ## Quickstart
 
 ```js
-import assert from 'node:assert/strict';
 import { Vocab, Grammar } from '@glrmask/node';
 
-const vocab = new Vocab([
-  [0, Buffer.from('hello')],
-  [1, Buffer.from(' ')],
-  [2, Buffer.from('world')],
-]);
-const grammar = Grammar.fromLark('start: "hello" " " "world"');
-const constraint = await grammar.compile(vocab);
-const state = constraint.start();
-const mask = new Uint32Array(Math.ceil(constraint.maskBitLength / 32));
+const grammar = Grammar.fromJsonSchema({
+  type: 'object',
+  properties: { color: { enum: ['red', 'green', 'blue'] } },
+  required: ['color'],
+  additionalProperties: false,
+});
 
-for (const [id, expected] of [[0, 1], [1, 2], [2, 4]]) {
-  state.fillMask(mask);
-  assert.equal(mask[0] & 7, expected);
-  assert.equal(state.commitToken(id), true);
+// One token per byte; with a real model, use its tokenizer.
+const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
+const EOS = 256;
+const state = (await grammar.compile(vocab)).start();
+const sample = Buffer.from('{"color": "blue"}');
+const output = [];
+while (true) {
+  // Stand-in scores for a model that wants to produce sample.
+  const logits = new Float32Array(257).fill(-1);
+  logits[output.length < sample.length ? sample[output.length] : EOS] = 1;
+  const mask = state.mask();
+  let token = -1;
+  for (let id = 0; id <= EOS; id++) {
+    const allowed = id === EOS ? state.isAccepting()
+      : ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
+    if (allowed && (token < 0 || logits[id] > logits[token])) token = id;
+  }
+  if (token < 0) throw new Error('No allowed token');
+  if (token === EOS) break;
+  if (!state.commitToken(token)) throw new Error('Commit failed');
+  output.push(token);
 }
-assert.equal(state.isAccepting(), true);
+console.log(Buffer.from(output).toString());
 ```
 
 ## Learn more
@@ -107,8 +120,7 @@ const constraint = await call.compile(vocab);
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
 at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
-same one in different ways. `externs` is a read-only `Map` of the declared externs, and `externs.unbound` holds the ones
-not yet bound.
+same one in different ways. `externs` is a read-only mapping snapshot; read it again after `bind()`. `externs.unbound` gives the unbound names at the time of that snapshot.
 
 `Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
 
@@ -126,11 +138,10 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 | `MaskStrategy` | Value | Preference |
 | --- | --- | --- |
 | `Auto` | `'auto'` | Let the library choose (default). |
-| `FastCompile` | `'fast-compile'` | Prefer lower preparation cost. |
-| `FastMasks` | `'fast-masks'` | Prefer lower mask cost. |
+| `FastCompile` | `'fast-compile'` | Prefer faster compiling over faster masks. |
+| `FastMasks` | `'fast-masks'` | Prefer faster masks over faster compiling. |
 
-These preferences do not
-guarantee a specific implementation or speed; another supported plan may be selected on a deterministic decline.
+These are preferences, not speed guarantees.
 See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
 ## Generating

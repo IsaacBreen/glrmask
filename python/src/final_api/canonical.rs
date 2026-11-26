@@ -68,7 +68,7 @@ impl From<glrmask::Extern> for PyExtern {
     }
 }
 
-/// A grammar's or module's externs, in declaration order.
+/// A grammar's or module's externs, in name order.
 ///
 /// A read-only mapping from name to `Extern`.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
@@ -78,9 +78,15 @@ pub(super) struct PyExterns {
     pub(super) unbound_entries: Option<Vec<PyExtern>>,
 }
 
+impl PyExterns {
+    fn unbound_records(&self) -> &[PyExtern] {
+        self.unbound_entries.as_deref().unwrap_or(&self.entries)
+    }
+}
+
 #[pymethods]
 impl PyExterns {
-    /// The externs not yet bound.
+    /// Unbound names at the time of the snapshot.
     #[getter]
     fn unbound(&self) -> Self {
         match &self.unbound_entries {
@@ -142,13 +148,16 @@ impl PyExterns {
             let key = PyString::new(py, &entry.name).repr()?.to_string();
             pairs.push(format!("{key}: {}", extern_repr(py, &entry.name, &entry.kind)?));
         }
-        Ok(format!("Externs({{{}}})", pairs.join(", ")))
+        let names = self.unbound_records().iter().map(|e| {
+            Ok(PyString::new(py, &e.name).repr()?.to_string())
+        }).collect::<PyResult<Vec<_>>>()?;
+        Ok(format!("Externs({{{}}}, unbound=[{}])", pairs.join(", "), names.join(", ")))
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = other.py();
         match other.extract::<PyRef<'_, Self>>() {
-            Ok(other) => Ok(pyo3::types::PyBool::new(py, self.entries == other.entries)
+            Ok(other) => Ok(pyo3::types::PyBool::new(py, self.entries == other.entries && self.unbound_records() == other.unbound_records())
                 .to_owned()
                 .into_any()
                 .unbind()),
@@ -509,7 +518,7 @@ impl PyModule {
     /// A snapshot; read it again after `bind()`.
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
-        let snapshot = slf.borrow().snapshot();
+        let snapshot = slf.try_borrow()?.snapshot();
         let all_externs: Vec<PyExtern> = snapshot.externs().iter().map(PyExtern::from).collect();
         let unbound_externs: Vec<PyExtern> = snapshot
             .externs()

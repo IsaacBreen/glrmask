@@ -76,3 +76,26 @@ def test_mask_bit_len_is_read_only():
         assert owner.mask_bit_len == 1
         with pytest.raises(AttributeError):
             owner.mask_bit_len = 3
+
+@pytest.mark.parametrize("n", [0, 33, 63, 64])
+def test_cached_mask_bit_len_survives_load_and_state_copy(n):
+    v = glrmask.Vocab({n-1: b"a"} if n else {})
+    original = glrmask.Grammar.from_lark('start: "a"').compile(v)
+    restored = glrmask.Constraint.load(original.save(), v)
+    assert original.mask_bit_len == restored.mask_bit_len == n
+    state = restored.start()
+    assert state.copy().mask_bit_len == n
+    if n:
+        assert state.commit_token(n-1)
+    assert state.mask_bit_len == state.copy().mask_bit_len == n
+
+def test_cached_mask_bit_len_includes_exact_token():
+    v = glrmask.Vocab({0: b"a", 63: b""})
+    module = glrmask.Module(glrmask.Grammar.from_glrm("extern token T start r nt r=T"))
+    module.bind("T", glrmask.TokenSet([63]))
+    c = module.compile(v)
+    for constraint in [c, glrmask.Constraint.load(c.save(), v)]:
+        state = constraint.start()
+        assert constraint.mask_bit_len == state.mask_bit_len == 64
+        assert state.commit_token(63)
+        assert state.mask_bit_len == 64

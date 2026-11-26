@@ -21,29 +21,24 @@ export type ErrorCode = KnownErrorCode | (string & {});
 export declare class GLRMaskError extends Error {
   /** What kind of error this is. */
   readonly code: ErrorCode;
-  /** Creates an error. GLRMask throws these; you don't need to create them. */
   constructor(code: ErrorCode, message: string, options?: ErrorOptions);
 }
 
 /** A range of token IDs from `start` up to, but not including, `end`. */
 export interface TokenRange {
-  /** The first ID. */
   readonly start: number;
   /** The ID just past the range, at most 16777216. */
   readonly end: number;
 }
 /** A named placeholder in a grammar. */
 export interface Extern {
-  /** The extern's name. */
   readonly name: string;
   /** What the extern can be bound to: `'token'` or `'grammar'`. */
   readonly kind: 'token' | 'grammar' | (string & {});
 }
-/** A grammar's or module's externs, in declaration order.
- *
- * A read-only map from name to `Extern`. */
+/** Externs by name, in name order. */
 export interface Externs extends ReadonlyMap<string, Extern> {
-  /** The externs not yet bound. */
+  /** Unbound names at the time of the snapshot. */
   readonly unbound: Externs;
 }
 
@@ -65,7 +60,6 @@ export declare class TokenSet implements Disposable {
   private readonly __tokenSetBrand: void;
 
   constructor(ids: Iterable<number>);
-  /** Creates a set from `ranges`. */
   static fromRanges(ranges: Iterable<TokenRange>): TokenSet;
   /** Whether `other` is a set with the same IDs. */
   equals(other: unknown): boolean;
@@ -81,7 +75,7 @@ export declare class TokenSet implements Disposable {
 
 /** Options for compiling a grammar or module. */
 export interface CompileOptions {
-  /** Cost preference for computing masks. Defaults to `MaskStrategy.Auto`. */
+  /** Defaults to `MaskStrategy.Auto`. */
   maskStrategy?: MaskStrategy;
 }
 
@@ -108,9 +102,7 @@ export declare class Grammar implements Disposable {
    *
    * Throws if any extern is unbound. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Compiles the grammar for `vocab`.
-   *
-   * Throws if any extern is unbound. */
+  /** Throws if any extern is unbound. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -173,9 +165,7 @@ export declare class Module implements Disposable {
   save(): Promise<Uint8Array>;
   /** Serializes the module with its precompiled work. Other GLRMask versions may not load it. */
   saveSync(): Uint8Array;
-  /** Like `loadSync`, but returns a promise and doesn't block the event loop.
-   *
-   * Loads a module saved with `save()` or `saveSync()`. */
+  /** Like `loadSync`, but asynchronous. */
   static load(data: Uint8Array): Promise<Module>;
 
   static loadSync(data: Uint8Array): Module;
@@ -197,9 +187,7 @@ export declare class Constraint implements Disposable {
   start(): ConstraintState;
   /** Like `saveSync`, but returns a promise and doesn't block the event loop. */
   save(): Promise<Uint8Array>;
-  /** Saves the constraint as bytes, without the vocabulary.
-   *
-   * Bytes saved by one GLRMask version may not load in another. */
+  /** Serializes the constraint without its vocabulary. Other GLRMask versions may not load it. */
   saveSync(): Uint8Array;
   /** Like `loadSync`, but returns a promise and doesn't block the event loop.
    *

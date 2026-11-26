@@ -268,3 +268,12 @@ test('Grammar: reject direct and nested TokenSet; Module accepts',()=>{
   assert.throws(()=>t.bind('T',token),/token IDs depend on the model/);
   const m=new Module(t);m.bind('T',token);assert.ok(m.compileSync(v).start().commitToken(5));
 });
+
+test('Externs inspect includes unbound names',()=>{
+  const m=new Module(host()), before=m.externs;
+  assert.match(require('node:util').inspect(before),/unbound=.*child/);
+  m.bind('child',source());
+  assert.equal(before.unbound.size,1);
+  assert.equal(m.externs.unbound.size,0);
+  assert.match(require('node:util').inspect(m.externs),/unbound=\[\]/);
+});

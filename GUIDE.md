@@ -314,7 +314,7 @@ between parts.
 
 `bind` changes the grammar or module in place; copy it first to bind the same one in different ways. Each extern is
 bound once, on the grammar or module that declares it. A value can't be bound while it has unbound externs of its own.
-`externs` lists the externs in declaration order, and `externs.unbound` the ones not yet bound (in Rust, `externs()`
+`externs` lists the externs in name order, and `externs.unbound` the ones not yet bound (in Rust, `externs()`
 and `externs().unbound()`).
 
 ### Modules

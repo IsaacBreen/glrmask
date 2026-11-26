@@ -12618,7 +12618,7 @@ impl Constraint {
 
     /// One more than the largest token ID.
     pub fn mask_bit_len(&self) -> usize {
-        self.max_original_token_id().map_or(0, |id| id as usize + 1)
+        *self.cached_mask_bit_len.get_or_init(|| self.max_original_token_id().map_or(0, |id| id as usize + 1))
     }
 
     #[cfg(any(test, feature = "internal-api"))]
