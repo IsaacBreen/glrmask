@@ -1016,11 +1016,12 @@ impl Module {
         }
     }
 
-    /// Reuses any precompiled work, which must be for the same vocabulary.
+    /// Finishes compiling the module into a constraint.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
 
+    /// Finishes compiling the module into a constraint.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint> {
         self.compile_inner_with(vocab, options).map(Constraint::from_runtime)
     }
@@ -1382,9 +1383,8 @@ impl Module {
         Ok(grammar)
     }
 
-    /// Includes precompiled work.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Loads what `save()` wrote, in the same GLRMask version.
+    /// May fail if saved by a different GLRMask version.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
     }

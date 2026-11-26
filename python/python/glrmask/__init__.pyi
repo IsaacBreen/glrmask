@@ -123,6 +123,7 @@ class Grammar:
         *,
         mask_strategy: MaskStrategy | None = None,
     ) -> Constraint:
+        """Compiles the grammar into a constraint."""
         ...
     def copy(self) -> Grammar:
         ...
@@ -190,14 +191,13 @@ class Module:
         *,
         mask_strategy: MaskStrategy | None = None,
     ) -> Constraint:
-        """Reuses any precompiled work, which must be for the same vocabulary."""
+        """Finishes compiling the module into a constraint."""
         ...
     def save(self) -> bytes:
-        """Includes precompiled work."""
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
-        """Loads what `save()` wrote, in the same GLRMask version."""
+        """May fail if saved by a different GLRMask version."""
         ...
     def copy(self) -> Module:
         ...
@@ -208,45 +208,43 @@ class Module:
 
 @final
 class Constraint:
-    """A compiled grammar, ready to use."""
     def start(self) -> ConstraintState:
         """Starts a new sequence."""
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits: one per token ID, from 0."""
+        """The mask's length in bits (the largest token ID plus one)."""
         ...
     def save(self) -> bytes:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with."""
+        """May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with."""
         ...
 
 @final
 class ConstraintState:
-    """The state of one generated sequence."""
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
-        """Which tokens may come next: one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`), or one boolean per token ID with `dtype=bool`."""
+        """Which tokens are allowed next. By default, one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`); with `dtype=bool`, one boolean per token ID."""
         ...
     def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
         """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits: one per token ID, from 0."""
+        """The mask's length in bits (the largest token ID plus one)."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
-        """If the token isn't allowed, returns `False` and the state ends."""
+        """Advances the state by one token. If it isn't allowed, returns `False` and the state ends."""
         ...
     def commit_tokens(self, token_ids: Sequence[int], /) -> int:
-        """Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed."""
+        """Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """If the bytes aren't allowed, returns `False` and the state ends."""
+        """Advances the state by these bytes. If they aren't allowed, returns `False` and the state ends."""
         ...
     def forced_bytes(self) -> bytes:
-        """The bytes that must come next, if any. Commit them with `commit_bytes()`."""
+        """The bytes that every allowed continuation starts with."""
         ...
     def is_accepting(self) -> bool:
         """Whether the output so far is a complete match."""
@@ -263,13 +261,13 @@ class ConstraintState:
 
 @final
 class MaskStrategy:
-    """A preference for faster compiling or faster masks."""
+    """Controls how the constraint is compiled."""
     AUTO: ClassVar[MaskStrategy]
-    """Currently `FAST_MASKS`, or whatever the module was precompiled with."""
+    """The default; currently `FAST_MASKS`."""
     FAST_COMPILE: ClassVar[MaskStrategy]
-    """Prefer faster compiling over faster masks."""
+    """Faster compiling, slower masks."""
     FAST_MASKS: ClassVar[MaskStrategy]
-    """Prefer faster masks over faster compiling."""
+    """Faster masks, slower compiling."""
 
 @final
 class Externs(Mapping[str, "Extern"]):
@@ -307,7 +305,7 @@ class Extern:
         ...
     @property
     def kind(self) -> Literal["token", "grammar"]:
-        """What the extern can be bound to."""
+        """`"grammar"` or `"token"`."""
         ...
     def __repr__(self) -> str:
         ...
@@ -316,4 +314,4 @@ class Extern:
 
 class GLRMaskError(ValueError):
     kind: str
-    """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. More may be added."""
+    """Currently one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`."""

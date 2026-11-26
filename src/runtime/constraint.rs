@@ -12616,7 +12616,7 @@ impl Constraint {
         state
     }
 
-    /// The mask's length in bits: one per token ID, from 0.
+    /// The mask's length in bits (the largest token ID plus one).
     pub fn mask_bit_len(&self) -> usize {
         *self.cached_mask_bit_len.get_or_init(|| self.max_original_token_id().map_or(0, |id| id as usize + 1))
     }

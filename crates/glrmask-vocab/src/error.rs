@@ -36,7 +36,6 @@ pub struct Error {
     span: Option<SourceSpan>,
 }
 
-/// More kinds may be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -57,6 +56,7 @@ pub enum ErrorKind {
 }
 
 impl Error {
+    /// Currently one of `ErrorKind::Syntax`, `ErrorKind::InvalidInput`, `ErrorKind::Compilation`, `ErrorKind::ResourceLimit`, `ErrorKind::StrategyUnsupported`, `ErrorKind::Serialization`, or `ErrorKind::Internal`.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }

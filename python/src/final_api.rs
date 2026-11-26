@@ -13,16 +13,16 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
     PyConstraint::from_inner(inner)
 }
 
-/// A preference for faster compiling or faster masks.
+/// Controls how the constraint is compiled.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyMaskStrategy {
-    /// Currently `FAST_MASKS`, or whatever the module was precompiled with.
+    /// The default; currently `FAST_MASKS`.
     AUTO = 0,
-    /// Prefer faster compiling over faster masks.
+    /// Faster compiling, slower masks.
     FAST_COMPILE = 3,
-    /// Prefer faster masks over faster compiling.
+    /// Faster masks, slower compiling.
     FAST_MASKS = 4,
 }
 #[pymethods]
@@ -299,6 +299,7 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
+    /// Compiles the grammar into a constraint.
     #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,

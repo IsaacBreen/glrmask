@@ -37,9 +37,9 @@ export declare class Grammar implements Disposable {
   bind(name: string, value: GrammarBindValue): void;
   /** If one fails, none are bound. */
   bind(bindings: Record<string, GrammarBindValue>): void;
-  /** Throws if any extern is unbound. */
+  /** Compiles the grammar into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Throws if any extern is unbound. */
+  /** Compiles the grammar into a constraint. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   clone(): Grammar;
   /** Frees the native handle now instead of at garbage collection. */
@@ -112,18 +112,16 @@ export declare class Module implements Disposable {
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles what it can for `vocab` now, even with externs unbound. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
-  /** Reuses any precompiled work, which must be for the same vocabulary. Throws if an extern is unbound. */
+  /** Finishes compiling the module into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Reuses any precompiled work, which must be for the same vocabulary. */
+  /** Finishes compiling the module into a constraint. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
-  /** Includes precompiled work. */
   save(): Promise<Uint8Array>;
-  /** Includes precompiled work. */
   saveSync(): Uint8Array;
-  /** Loads what `save()` wrote, in the same GLRMask version. */
+  /** May fail if saved by a different GLRMask version. */
   static load(data: Uint8Array): Promise<Module>;
 
-  /** Loads what `saveSync()` wrote, in the same GLRMask version. */
+  /** May fail if saved by a different GLRMask version. */
   static loadSync(data: Uint8Array): Module;
   clone(): Module;
   /** Frees the native handle now instead of at garbage collection. */
@@ -131,21 +129,20 @@ export declare class Module implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A compiled grammar, ready to use. */
 export declare class Constraint implements Disposable {
   private constructor();
   private readonly __constraintBrand: void;
   /** Starts a new sequence. */
   start(): ConstraintState;
-  /** The mask's length in bits: one per token ID, from 0. */
+  /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
 
   save(): Promise<Uint8Array>;
 
   saveSync(): Uint8Array;
-  /** Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** Loads what `saveSync()` wrote, in the same GLRMask version and with the vocab it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   clone(): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
@@ -153,24 +150,23 @@ export declare class Constraint implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** The state of one generated sequence. */
 export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;
 
-  /** Which tokens may come next: one bit per token ID in `Uint32Array` words (bit `i % 32` of word `Math.floor(i / 32)`). */
+  /** Which tokens are allowed next. One bit per token ID in `Uint32Array` words (bit `i % 32` of word `Math.floor(i / 32)`). */
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Extra words are set to 0. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
-  /** The mask's length in bits: one per token ID, from 0. */
+  /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
-  /** If the token isn't allowed, returns `false` and the state ends. */
+  /** Advances the state by one token. If it isn't allowed, returns `false` and the state ends. */
   commitToken(id: number): boolean;
-  /** Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed. */
+  /** Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed. */
   commitTokens(ids: Iterable<number> | Uint32Array): number;
-  /** If the bytes aren't allowed, returns `false` and the state ends. */
+  /** Advances the state by these bytes. If they aren't allowed, returns `false` and the state ends. */
   commitBytes(bytes: Uint8Array): boolean;
-  /** The bytes that must come next, if any. Commit them with `commitBytes()`. */
+  /** The bytes that every allowed continuation starts with. */
   forcedBytes(): Uint8Array;
   /** Whether the output so far is a complete match. */
   isAccepting(): boolean;
@@ -182,18 +178,18 @@ export declare class ConstraintState implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A preference for faster compiling or faster masks. */
+/** Controls how the constraint is compiled. */
 export declare const MaskStrategy: Readonly<{
-  /** Currently `FastMasks`, or whatever the module was precompiled with. */
+  /** The default; currently `FastMasks`. */
   Auto: 'auto';
-  /** Prefer faster compiling over faster masks. */
+  /** Faster compiling, slower masks. */
   FastCompile: 'fast-compile';
-  /** Prefer faster masks over faster compiling. */
+  /** Faster masks, slower compiling. */
   FastMasks: 'fast-masks';
 }>;
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
 
-/** Externs by name, in name order. */
+/** A read-only mapping of extern names to `Extern`. */
 export interface Externs extends ReadonlyMap<string, Extern> {
   readonly unbound: Externs;
 }
@@ -201,14 +197,14 @@ export interface Externs extends ReadonlyMap<string, Extern> {
 /** A named placeholder in a grammar. */
 export interface Extern {
   readonly name: string;
-  /** What the extern can be bound to: `'token'` or `'grammar'`. */
+  /** `"grammar"` or `"token"`. */
   readonly kind: 'token' | 'grammar' | (string & {});
 }
 
 export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
-/** Error codes may grow in a minor release. */
 export type ErrorCode = KnownErrorCode | (string & {});
 export declare class GLRMaskError extends Error {
+  /** Currently one of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`. */
   readonly code: ErrorCode;
   constructor(code: ErrorCode, message: string, options?: ErrorOptions);
 }

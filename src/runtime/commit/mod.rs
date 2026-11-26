@@ -9137,7 +9137,7 @@ impl ConstraintState {
         true
     }
 
-    /// If the token isn't allowed, returns `false` and the state ends.
+    /// Advances the state by one token. If it isn't allowed, returns `false` and the state ends.
     #[must_use]
     pub fn commit_token(
         &mut self,
@@ -9146,7 +9146,7 @@ impl ConstraintState {
         self.commit_token_raw(token_id).is_ok()
     }
 
-    /// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed.
+    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed.
     #[must_use]
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> usize {
         for (i, &token_id) in token_ids.iter().enumerate() {
@@ -9444,7 +9444,7 @@ impl ConstraintState {
         result
     }
 
-    /// If the bytes aren't allowed, returns `false` and the state ends.
+    /// Advances the state by these bytes. If they aren't allowed, returns `false` and the state ends.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {

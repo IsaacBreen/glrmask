@@ -69,7 +69,7 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // ---------------------------------------------------------------------------
 
 pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyValueError,
-    "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python.");
+    "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: currently one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
 
 pub(crate) fn glrmask_error(kind: &str, message: impl Into<String>) -> PyErr {
     let error = GLRMaskError::new_err(message.into());
@@ -637,7 +637,6 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// A compiled grammar, ready to use.
 #[pyclass(name = "Constraint", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -683,7 +682,7 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
@@ -704,7 +703,7 @@ impl PyConstraint {
         }
     }
 
-    /// The mask's length in bits: one per token ID, from 0.
+    /// The mask's length in bits (the largest token ID plus one).
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
@@ -1019,7 +1018,6 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// The state of one generated sequence.
 #[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
     inner: glrmask::ConstraintState,
@@ -1041,14 +1039,14 @@ impl PyConstraintState {
         Ok(copy)
     }
 
-    /// The mask's length in bits: one per token ID, from 0.
+    /// The mask's length in bits (the largest token ID plus one).
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
     }
 
 
-    /// Which tokens may come next: one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`), or one boolean per token ID with `dtype=bool`.
+    /// Which tokens are allowed next. By default, one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`); with `dtype=bool`, one boolean per token ID.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
@@ -1066,7 +1064,7 @@ impl PyConstraintState {
         })
     }
 
-    /// If the token isn't allowed, returns `False` and the state ends.
+    /// Advances the state by one token. If it isn't allowed, returns `False` and the state ends.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Some(id) = resolve_token_id(token_id)? else {
@@ -1076,7 +1074,7 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed.
+    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
         if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
@@ -1100,13 +1098,13 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)))
     }
 
-    /// If the bytes aren't allowed, returns `False` and the state ends.
+    /// Advances the state by these bytes. If they aren't allowed, returns `False` and the state ends.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
     }
 
-    /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
+    /// The bytes that every allowed continuation starts with.
     fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
         PyBytes::new(py, &bytes)

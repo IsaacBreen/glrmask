@@ -514,7 +514,6 @@ impl CommitBuffers {
     }
 }
 
-/// The state of one generated sequence.
 pub struct ConstraintState {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
@@ -580,7 +579,7 @@ impl ConstraintState {
     }
 
 
-    /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
+    /// The bytes that every allowed continuation starts with.
     pub fn forced_bytes(&self) -> Vec<u8> {
         crate::runtime::forced_bytes_for_states(std::slice::from_ref(self))
     }

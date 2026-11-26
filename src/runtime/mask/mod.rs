@@ -8521,7 +8521,7 @@ impl ConstraintState {
         returned_profile
     }
 
-    /// Which tokens may come next: one bit per token ID in `u32` words (bit `i % 32` of word `i / 32`).
+    /// Which tokens are allowed next. One bit per token ID in `u32` words (bit `i % 32` of word `i / 32`).
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
         self.fill_mask(&mut buf);
@@ -8791,7 +8791,7 @@ impl ConstraintState {
         }
     }
 
-    /// The mask's length in bits: one per token ID, from 0.
+    /// The mask's length in bits (the largest token ID plus one).
     pub fn mask_bit_len(&self) -> usize {
         self.constraint.mask_bit_len()
     }

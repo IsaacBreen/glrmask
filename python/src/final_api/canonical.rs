@@ -25,7 +25,7 @@ impl PyExtern {
         &self.name
     }
 
-    /// What the extern can be bound to.
+    /// `"grammar"` or `"token"`.
     #[getter]
     fn kind(&self) -> &str {
         &self.kind
@@ -68,8 +68,6 @@ impl From<glrmask::Extern> for PyExtern {
     }
 }
 
-/// A grammar's or module's externs, in name order.
-///
 /// A read-only mapping of extern names to `Extern`.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug)]
@@ -497,7 +495,7 @@ impl PyModule {
         Ok(())
     }
 
-    /// Reuses any precompiled work, which must be for the same vocabulary.
+    /// Finishes compiling the module into a constraint.
     #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
@@ -544,14 +542,13 @@ impl PyModule {
         Ok(copy)
     }
 
-    /// Includes precompiled work.
     fn save<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = slf.try_borrow()?.snapshot();
         let bytes = slf.py().detach(move || snapshot.save());
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
-    /// Loads what `save()` wrote, in the same GLRMask version.
+    /// May fail if saved by a different GLRMask version.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

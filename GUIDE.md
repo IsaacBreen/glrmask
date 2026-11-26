@@ -244,8 +244,8 @@ while True:
 print(text.decode())
 ```
 
-Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
-Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
+Masks indicate which tokens are allowed next. Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID plus one, or zero if empty), including gaps.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
@@ -265,8 +265,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 # buffer until the asynchronous transfer completes.
 ```
 
-`commit_token` returns whether the token was allowed. `commit_tokens` commits several in order and returns the number committed. `commit_bytes`
-commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
+`commit_token` advances the state by one token. `commit_tokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. `commit_bytes` advances it by these bytes, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
 token without committing to it, copy the state first.
 
 `is_accepting()` says whether the output so far is a complete match. More may still be allowed: `1+2` is complete, but
@@ -274,7 +273,7 @@ token without committing to it, copy the state first.
 
 ### Forced bytes
 
-`forced_bytes()` returns the bytes that must come next, if any. Commit them with `commit_bytes()`. If feeding tokens to a model, tokenize the bytes and commit those tokens instead. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
+`forced_bytes()` returns the bytes that every allowed continuation starts with. Commit them with `commit_bytes()`. If feeding tokens to a model, tokenize the bytes and commit those tokens instead. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
 
 
 ## Composing grammars
@@ -314,13 +313,13 @@ between parts.
 
 `bind` changes the grammar or module in place; copy it first to bind the same one in different ways. Each extern is
 bound once, on the grammar or module that declares it. A value can't be bound while it has unbound externs of its own.
-`externs` lists the externs in name order, and `externs.unbound` the ones not yet bound (in Rust, `externs()`
+`externs` is a read-only mapping of extern names to `Extern`, and `externs.unbound` lists the ones not yet bound (in Rust, `externs()`
 and `externs().unbound()`).
 
 ### Modules
 
 A `Grammar` holds source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
-even with externs unbound, and `compile` reuses that work. Use modules when the same parts appear in many grammars. Tool
+even with externs unbound, and `compile` finishes compiling the module into a constraint. Use modules when the same parts appear in many grammars. Tool
 calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 
 ```python
@@ -360,11 +359,11 @@ Tokens with no bytes, such as tool-call markers, are special tokens. They never 
 
 ## Mask strategies
 
-`MaskStrategy` expresses a cost preference:
+`MaskStrategy` controls how the constraint is compiled:
 
-- `AUTO` (Rust/Python), `Auto` (Node/C++): currently fast masks, or whatever the module was precompiled with. The default.
-- `FAST_COMPILE` (Rust/Python), `FastCompile` (Node/C++): prefer faster compiling over faster masks.
-- `FAST_MASKS` (Rust/Python), `FastMasks` (Node/C++): prefer faster masks over faster compiling.
+- `AUTO` (Rust/Python), `Auto` (Node/C++): The default; currently `FAST_MASKS` (`FastMasks` in Node/C++).
+- `FAST_COMPILE` (Rust/Python), `FastCompile` (Node/C++): Faster compiling, slower masks.
+- `FAST_MASKS` (Rust/Python), `FastMasks` (Node/C++): Faster masks, slower compiling.
 
 These are preferences, not speed guarantees. GLRMask may use another strategy; masks have the same semantics.
 
@@ -379,7 +378,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
 Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization` or `Internal`. `source_span()` gives its place in the source.
-Python raises `GLRMaskError` (a `ValueError`) with a `kind` string. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`. New kinds may be added in a minor release.
+Python raises `GLRMaskError` (a `ValueError`) with a `kind` string: currently one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 
 ## Grammar formats
 

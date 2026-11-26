@@ -64,9 +64,9 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 
 | `MaskStrategy` | Preference |
 | --- | --- |
-| `Auto` | Let the library choose (default). |
-| `FastCompile` | Prefer faster compiling over faster masks. |
-| `FastMasks` | Prefer faster masks over faster compiling. |
+| `Auto` | The default; currently `FastMasks`. |
+| `FastCompile` | Faster compiling, slower masks. |
+| `FastMasks` | Faster masks, slower compiling. |
 
 These are preferences, not speed guarantees.
 See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
@@ -87,15 +87,15 @@ glrmask::TokenId id = 42;
 bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 ```
 
-A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of word `id / 32` is set. `fill_mask` writes it
+A mask indicates which tokens are allowed next, one bit per token ID: token `id` is allowed when bit `id % 32` of word `id / 32` is set. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token` and `commit_bytes` return whether the input was allowed. `commit_tokens` returns the number of tokens committed. A failed commit ends the state,
+`commit_token` and `commit_bytes` advance the state by a token or bytes and return whether the input was allowed. `commit_tokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. A failed commit ends the state,
 so copy it first to try a token without committing to it. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 
 `is_accepting()` says whether the input so far is a complete match, and `is_terminated()` whether nothing more can be
-committed. `forced_bytes()` returns the grammar-forced bytes without changing the state. Tokenize and commit them yourself; exact token-set items are not included.
+committed. `forced_bytes()` returns the bytes that every allowed continuation starts with. Tokenize and commit them yourself; exact token-set items are not included.
 
 [examples/generate.cpp](https://github.com/IsaacBreen/glrmask/blob/main/bindings/cpp/examples/generate.cpp) is a
 complete generation loop.
@@ -118,7 +118,7 @@ load saved bytes from untrusted sources.
 
 ## Errors
 
-Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message, and `status()` one of:
+Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message, and `status()` currently one of:
 
 | Status | |
 | --- | --- |

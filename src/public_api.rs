@@ -33,7 +33,7 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// A preference for faster compiling or faster masks.
+/// Controls how the constraint is compiled.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MaskStrategy(MaskPreference);
 
@@ -41,11 +41,11 @@ pub struct MaskStrategy(MaskPreference);
 enum MaskPreference { Auto, FastCompile, FastMasks }
 
 impl MaskStrategy {
-    /// Currently `FAST_MASKS`, or whatever the module was precompiled with.
+    /// The default; currently `FAST_MASKS`.
     pub const AUTO: Self = Self(MaskPreference::Auto);
-    /// Prefer faster compiling over faster masks.
+    /// Faster compiling, slower masks.
     pub const FAST_COMPILE: Self = Self(MaskPreference::FastCompile);
-    /// Prefer faster masks over faster compiling.
+    /// Faster masks, slower compiling.
     pub const FAST_MASKS: Self = Self(MaskPreference::FastMasks);
 }
 
@@ -211,13 +211,13 @@ impl Extern {
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// What the extern can be bound to.
+    /// `ExternKind::Grammar` or `ExternKind::Token`.
     pub fn kind(&self) -> ExternKind {
         self.kind
     }
 }
 
-/// Externs by name, in name order.
+/// A read-only mapping of extern names to `Extern`.
 #[derive(Clone)]
 pub struct Externs<'a> {
     pub(crate) source: ExternsSource<'a>,
@@ -895,10 +895,12 @@ impl Grammar {
         Ok(())
     }
 
+    /// Compiles the grammar into a constraint.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         Module::new(self).compile(vocab)
     }
 
+    /// Compiles the grammar into a constraint.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
