@@ -15,7 +15,7 @@ slow-tests = []
 
 [dependencies]
 bincode = "1"
-glrmask-finite-automata = { version = "=0.2.0", path = "../glrmask-finite-automata" }
+glrmask-finite-automata = { version = "=0.3.0", path = "../glrmask-finite-automata" }
 glrmask-vocab = { version = "=0.4.0", path = "../glrmask-vocab", features = ["internal-api"] }
 rayon = "1"
 range-set-blaze = "0.8.0"

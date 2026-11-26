@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-artifact"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "glrmask-finite-automata",
  "glrmask-weight",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-finite-automata"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glrmask-invariant",
  "rustc-hash 1.1.0",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-invariant"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "glrmask-json-schema"
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-weight"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "dashmap",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-weighted-automata"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "glrmask-weight",

@@ -45,7 +45,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 ### Sub-crates
 
-- The grammar, vocabulary, lexer, GLR, JSON Schema, terminal-DWA, parser-DWA and DWA-merge sub-crates are at 0.4.0. Supporting crates retain their own versions.
+- The grammar, vocabulary, lexer, GLR, JSON Schema, terminal-DWA, parser-DWA and DWA-merge sub-crates are at 0.4.0. The weight, weighted-automata and artifact crates are at 0.4.0, and the invariant and finite-automata crates at 0.3.0.
 
 ## 0.5.0
 
