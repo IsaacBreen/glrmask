@@ -174,6 +174,8 @@ pub(crate) struct Node {
     pub(crate) force_parser_dwa_decline: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Type erasure bounds recursive Send/Sync evaluation for downstream callers.
+/// A concrete Arc<PreparedGrammar> here overflows the default recursion limit.
 pub(crate) trait RetainedPreparation: Send + Sync + std::fmt::Debug {
     fn prepared(&self) -> &PreparedGrammar;
     /// Rehydrates a vocabulary-free retained body, or returns an equivalent

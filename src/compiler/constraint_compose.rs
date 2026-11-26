@@ -87,10 +87,6 @@ use crate::runtime::{
 use crate::Vocab;
 use super::{macro_parallelism_disabled, report_macro_item_timings};
 
-mod structural_sharing;
-#[cfg(test)]
-use structural_sharing::{composition_terminal_classes, quotient_composed_table_structurally, structural_nonterminal_classes};
-
 #[inline]
 pub(crate) fn compose_profile_enabled() -> bool {
     crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
@@ -10083,7 +10079,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_sharing_quotients_duplicate_child_lr_regions() {
+    fn duplicate_children_from_independent_artifacts_compose() {
         let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"<abc>,<abc>".to_vec()),
             (2, b"<".to_vec()),
@@ -10112,85 +10108,6 @@ mod tests {
         )
         .unwrap();
         let loaded_child = Constraint::load(child.save(), &vocab).unwrap();
-        let children = [
-            CompiledSubgrammarInput {
-                placeholder_terminal: terminal(&parent, "LEFT"),
-                additional_placeholder_terminals: &[],
-constraint: &child,
-            },
-            CompiledSubgrammarInput {
-                placeholder_terminal: terminal(&parent, "RIGHT"),
-                additional_placeholder_terminals: &[],
-constraint: &loaded_child,
-            },
-        ];
-        let parent_table = compiler_table_fixture(&parent);
-        let child_tables = children.iter().map(|input| compiler_table_fixture(input.constraint)).collect::<Vec<_>>();
-        let table_inputs = children
-            .iter()
-            .enumerate().map(|(index, child)| SubgrammarTableInput {
-                placeholder_terminal: child.placeholder_terminal,
-                additional_placeholder_terminals: &[],
-table: &child_tables[index],
-                ignore_terminal: child.constraint.ignore_terminal,
-                start_nullable: child.constraint.composition_start_nullable().unwrap(),
-            })
-            .collect::<Vec<_>>();
-        let mut composed = compose_subgrammar_tables(&parent_table, None, &table_inputs).unwrap();
-        let before = composed.table.num_states;
-        let terminal_analysis = composition_terminal_classes(&parent, &children, &composed);
-        assert!(
-            loaded_child.tokenizer.terminal_exprs().is_none()
-                && loaded_child.retained_terminal_exprs().is_some(),
-            "current serialized artifacts should retain terminal proof expressions lazily",
-        );
-        assert!(
-            terminal_analysis
-                .classes
-                .iter()
-                .enumerate()
-                .any(|(terminal, &class)| terminal as u32 != class),
-            "the separately loaded child should still form terminal aliases",
-        );
-        let nonterminal_classes = structural_nonterminal_classes(
-            &composed.table,
-            &terminal_analysis.classes,
-            &composed.boundary_nonterminals,
-        );
-        let (candidate_groups, contextual_saved) =
-            structural_sharing::contextually_share_composed_tables(
-                &mut composed,
-                &parent_table,
-                &child_tables.iter().collect::<Vec<_>>(),
-                &terminal_analysis.classes,
-                &nonterminal_classes,
-            );
-        let _ = quotient_composed_table_structurally(
-            &mut composed,
-            &terminal_analysis,
-            &nonterminal_classes,
-        )
-        .unwrap();
-
-        assert!(candidate_groups > 0);
-        assert!(
-            contextual_saved > 0 && composed.table.num_states < before,
-            "duplicate independently compiled children should share at least one LR state",
-        );
-
-        let shared_local_states = composed.state_relations[1]
-            .iter()
-            .zip(&composed.state_relations[2])
-            .filter(|(left, right)| left == right)
-            .count();
-        assert!(
-            shared_local_states > 0,
-            "at least one corresponding child-local LR state should map to the same quotient state",
-        );
-
-        // Exercise the real artifact-reuse path as well: component parser DWAs
-        // are transported through the many-to-one LR-state relation rather
-        // than rebuilt from the quotient table.
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
@@ -10214,83 +10131,6 @@ table: &child_tables[index],
         assert!(actual.commit_token(0));
         assert!(actual.is_accepting());
 
-    }
-
-    #[test]
-    fn contextual_sharing_rejects_ambiguity_with_no_stack_provenance() {
-        let vocab = byte_vocab();
-        let parent = Constraint::from_glrm_with_token_ids(
-            r#"
-                start document;
-                t P = "p";
-                t Q = "p";
-                t BANG = "!";
-                t QUESTION = "?";
-                extern token LEFT;
-                extern token RIGHT;
-                nt left_prefix = P;
-                nt right_prefix = Q;
-                nt left_branch = left_prefix LEFT;
-                nt right_branch = right_prefix RIGHT;
-                nt document = left_branch BANG | right_branch QUESTION;
-            "#,
-            &vocab, &[("LEFT", 998), ("RIGHT", 999)], &[])
-        .unwrap();
-        let child = Constraint::from_glrm_grammar(
-            r#"
-                start child;
-                t CA = "a";
-                t CB = "b";
-                t CC = "c";
-                nt child = CA CB CC;
-            "#,
-            &vocab,
-        )
-        .unwrap();
-        let children = [
-            CompiledSubgrammarInput {
-                placeholder_terminal: terminal(&parent, "LEFT"),
-                additional_placeholder_terminals: &[],
-constraint: &child,
-            },
-            CompiledSubgrammarInput {
-                placeholder_terminal: terminal(&parent, "RIGHT"),
-                additional_placeholder_terminals: &[],
-constraint: &child,
-            },
-        ];
-        let parent_table = compiler_table_fixture(&parent);
-        let child_tables = children.iter().map(|input| compiler_table_fixture(input.constraint)).collect::<Vec<_>>();
-        let table_inputs = children
-            .iter()
-            .enumerate().map(|(index, child)| SubgrammarTableInput {
-                placeholder_terminal: child.placeholder_terminal,
-                additional_placeholder_terminals: &[],
-table: &child_tables[index],
-                ignore_terminal: child.constraint.ignore_terminal,
-                start_nullable: child.constraint.composition_start_nullable().unwrap(),
-            })
-            .collect::<Vec<_>>();
-        let mut shared = compose_subgrammar_tables(&parent_table, None, &table_inputs).unwrap();
-        let terminal_analysis = composition_terminal_classes(&parent, &children, &shared);
-        let nonterminal_classes = structural_nonterminal_classes(
-            &shared.table,
-            &terminal_analysis.classes,
-            &shared.boundary_nonterminals,
-        );
-        let (candidate_count, saved) =
-            structural_sharing::contextually_share_composed_tables(
-                &mut shared,
-                &parent_table,
-                &child_tables.iter().collect::<Vec<_>>(),
-                &terminal_analysis.classes,
-                &nonterminal_classes,
-            );
-        assert!(candidate_count > 0, "the duplicate child states should be detected structurally");
-        assert_eq!(
-            saved, 0,
-            "when two linked copies have the exact same lower stack context, a table-only quotient must preserve their distinct LR states",
-        );
     }
 
     #[test]
@@ -14180,7 +14020,7 @@ table: &child_table,
     }
 
     #[test]
-    fn contextual_structural_sharing_remains_recomposable_when_children_share_whole_start_alternative() {
+    fn nested_composition_preserves_overlapping_child_start_alternatives() {
         let vocab = byte_vocab();
 
         let expr = Constraint::from_glrm_grammar(
@@ -14243,9 +14083,8 @@ table: &child_table,
             .unwrap();
 
         // The two argument children both expose the same nested `expr` as a
-        // whole-start alternative. Contextual structural sharing can prove an
-        // interior quotient for that overlap. The resulting table must still
-        // remain a valid child for a *later* composition level.
+        // whole-start alternative. The resulting composition must remain a
+        // valid child for a later composition level.
         let outer_parent = Constraint::from_glrm_with_token_ids(
             r#"
                 start document;
