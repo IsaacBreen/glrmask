@@ -73,8 +73,8 @@ fn main() {
     for (example_index, tokens) in token_sequences.iter().enumerate() {
         let mut state = constraint.start();
         let mut loaded_state = loaded.start();
-        let mut mask = vec![0u32; constraint.mask_len()];
-        let mut loaded_mask = vec![0u32; loaded.mask_len()];
+        let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
+        let mut loaded_mask = vec![0u32; loaded.mask_bit_len().div_ceil(32)];
         for (token_index, &token) in tokens.iter().enumerate() {
             // Alternate call order so neither representation systematically
             // gets the warmer instruction/data-cache position in this probe.

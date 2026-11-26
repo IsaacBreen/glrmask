@@ -376,7 +376,7 @@ fn code_bound_token_set_with_unregistered_id_is_allowed_after_literal() {
     let mut module = glrmask::Module::new(&Grammar::from_glrm("glrm 1; start root; extern token SPECIAL; nt root = \"hello \" SPECIAL;").unwrap());
     module.bind("SPECIAL", TokenSet::new([99])).unwrap();
     let constraint = module.compile(&vocab).unwrap();
-    assert!(constraint.mask_len() * 32 > 99);
+    assert!(constraint.mask_bit_len().div_ceil(32) * 32 > 99);
     let mut state = constraint.start();
     assert!(!allows(&state.mask(), 99));
     assert!(state.commit_token(0));
@@ -461,7 +461,7 @@ fn caller_eos_equivalence_at_sampled_prefixes() {
             let b=body.compile_with(&vocab,options.clone()).unwrap();
             for ends in [&[130][..], &[130,160][..]] {
                 let a=with_end(&body,ends).compile_with(&vocab,options.clone()).unwrap();
-                let words=a.mask_len().max(b.mask_len()).max(6);
+                let words=a.mask_bit_len().div_ceil(32).max(b.mask_bit_len().div_ceil(32)).max(6);
                 for (a,b) in [(a.clone(),b.clone()),(Constraint::load(a.save(),&vocab).unwrap(),Constraint::load(b.save(),&vocab).unwrap())] {
                     for _ in 0..4 {
                         let mut x=a.start();let mut y=b.start();

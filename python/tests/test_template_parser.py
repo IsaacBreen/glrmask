@@ -19,6 +19,8 @@ import pytest
 
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 class GrammarCalls:
     """Keep public default paths and explicit internal controls separate."""
     def __init__(self, grammar): self.grammar = grammar
@@ -157,7 +159,7 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
             assert right.is_accepting() == (depth == 0)
             for token_id, word in enumerate(words):
                 expected = depth_after(word, depth, ignore_whitespace=False)
-                assert bool(right.mask()[token_id]) == (expected is not None), (prefix, word)
+                assert bool(token_allowed(right.mask(), token_id)) == (expected is not None), (prefix, word)
                 if expected is not None:
                     branch = compiled.start()
                     assert branch.commit_bytes(prefix)
@@ -187,7 +189,7 @@ def test_python_data_only_program_matches_literal_language(mode, as_json):
             state = compiled.start()
             assert state.commit_bytes(prefix)
             assert not state.is_accepting()
-            mask = state.mask()
+            mask = unpack_mask(state.mask())
             for token_id, word in enumerate(words):
                 assert bool(mask[token_id]) == (depth_after(word, depth) is not None), (prefix, word)
             assert bool(mask[64]) == (depth == 0)
@@ -231,7 +233,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
     # executable roots are not implicitly converted into reusable components.
     for root in [body.compile(vocab, **mode), body.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS)]:
         for restored in representations(root, vocab):
-            assert restored.start().mask().tolist() == [True, False, False]
+            assert restored.start().mask().tolist() == [1]
     prepared = body.prepare(vocab)
     parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
     for source in [prepared, glrmask.Module.load(prepared.save()),
@@ -248,7 +250,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
                     assert state.is_accepting() == (prefix == b"a")
                     for token_id, word in tokens.items():
                         expected = b"a".startswith(prefix + word)
-                        assert bool(state.mask()[token_id]) == expected, (prefix, word)
+                        assert bool(token_allowed(state.mask(), token_id)) == expected, (prefix, word)
                         if expected:
                             branch = compiled.start()
                             assert branch.commit_bytes(prefix)
@@ -267,12 +269,12 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
         end_tokens=[6])
     for compiled in representations(linked, vocab):
         state = compiled.start()
-        assert np.array_equal(state.mask(), np.array([True, False, False, True, True, False, False]))
+        assert np.array_equal(state.mask(), np.array([25], dtype=np.uint32))
         for token in [3, 4]:
             state = compiled.start()
             assert state.commit_token(token)
             assert not state.is_accepting()
-            assert state.mask()[6]
+            assert token_allowed(state.mask(), 6)
             assert state.commit_token(6)
             assert state.is_accepting() and not state.mask().any()
             assert not state.mask().any()
@@ -309,9 +311,9 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     for compiled in representations(compiled, vocab):
         assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
         state = compiled.start()
-        assert state.mask()[3]
+        assert token_allowed(state.mask(), 3)
         assert state.commit_token(3)
-        assert not state.is_accepting() and state.mask()[8]
+        assert not state.is_accepting() and token_allowed(state.mask(), 8)
         assert state.commit_token(8)
         assert state.is_accepting() and not state.mask().any()
         assert not state.mask().any()
@@ -319,7 +321,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
         for count in [0, 1, 31, 4996, 4997, 4998]:
             state = compiled.start()
             assert state.commit_bytes(b'p"x:' + b"a" * count)
-            mask = state.mask()
+            mask = unpack_mask(state.mask())
             for token, payload_size in [(5, 1), (6, 3)]:
                 assert bool(mask[token]) == (2 + count + payload_size <= 5000), (count, token)
             assert mask[7]  # Completing the URI and returning to the parent.
@@ -348,7 +350,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(mode):
             for prefix in [b"", b"x", b"xa", b"xy", b"xay"]:
                 state = compiled.start()
                 assert state.commit_bytes(prefix)
-                mask = state.mask()
+                mask = unpack_mask(state.mask())
                 assert not state.is_accepting()
                 assert bool(mask[8]) == (prefix in language)
                 for token_id, word in tokens.items():

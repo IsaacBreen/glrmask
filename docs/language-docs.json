@@ -7,7 +7,7 @@
     "rust": "cargo add glrmask"
   },
   "quickstarts": {
-    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
+    "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_lark('start: \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
     "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new([\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ])?;\n    let grammar = Grammar::from_lark(r#\"start: \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
   },
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
@@ -70,13 +70,11 @@
     "Grammar.__deepcopy__": "Same as `copy()`.",
     "Constraint": "A grammar compiled for a vocabulary. Call `start()` for each sequence you generate.",
     "Constraint.start": "A new state with nothing committed.",
-    "Constraint.mask_len": "The number of `int32` words that `fill_mask` needs.",
     "Constraint.save": "Saves the constraint as bytes, without the vocabulary.\n\nBytes saved by one GLRMask version may not load in another.",
     "Constraint.load": "Loads a constraint saved with `save()`. Raises `GLRMaskError` if `vocab` isn't the one it was compiled for.",
     "ConstraintState": "A constraint's state during generation.",
-    "ConstraintState.mask_len": "The number of `int32` words that `fill_mask` needs.",
-    "ConstraintState.mask": "The tokens allowed next, as a NumPy `bool` array indexed by token ID.\n\n`size` sets the array length, for example to match your logits; it must cover every token ID.",
-    "ConstraintState.fill_mask": "Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.\n\nToken `id` is allowed when bit `id % 32` of word `id // 32` is set.",
+    "ConstraintState.mask": "Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID. For signed packed words, use mask().view(np.int32) without copying. To pad to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool).",
+    "ConstraintState.fill_mask": "Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.\n\nToken `id` is allowed when bit `id % 32` of word `id // 32` is set.",
     "ConstraintState.commit_token": "Commits a token. If it isn't allowed, returns `False` and terminates the state.",
     "ConstraintState.commit_tokens": "Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.",
     "ConstraintState.commit_bytes": "Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.",
@@ -89,7 +87,9 @@
     "ConstraintState.__copy__": "Same as `copy()`.",
     "ConstraintState.__deepcopy__": "Same as `copy()`.",
     "GLRMaskError": "Raised when GLRMask can't do what was asked. Wrong argument types still raise `TypeError`, and a missing `Externs` key raises `KeyError`, as usual in Python.",
-    "GLRMaskError.kind": "What went wrong: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`. New kinds may be added in a minor release."
+    "GLRMaskError.kind": "What went wrong: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`. New kinds may be added in a minor release.",
+    "Constraint.mask_bit_len": "Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words.",
+    "ConstraintState.mask_bit_len": "Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words."
   },
   "python_releases": {
     "0.3": {
@@ -195,8 +195,8 @@
     }
   },
   "native_guides": {
-    "bindings\\cpp\\README.md": "03ab5636c4238512a1fc302d4fa7f6d0ad5b1e047eb4c02ad07c46f4cd4c1266",
-    "bindings\\node\\README.md": "98c1505b3a0976eff8da11af44691ae238cda735364707d26b9a758c0680a489",
+    "bindings\\cpp\\README.md": "d73f63d83adf4f62058abaf9c246a998cbc34784ca2c052d94c9eccd52524353",
+    "bindings\\node\\README.md": "bce9968549bd3a95bbded54572791f1427605e4129e6b71b77333cd4b5d77517",
     "docs\\content\\releases\\0.3\\cpp.md": "a429dfbbd09455e1a1b999e547778b09f4a896b09d6a11309989410d7ad27371",
     "docs\\content\\releases\\0.3\\javascript.md": "325c01694d45220dcb62bf41ae7d0ca27c37fa9830ca42192214454265821197"
   },
@@ -204,5 +204,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "63d78fbf102a1089b14e41f82c6e29f28d135cde7536673c194dd4592b025129"
+  "content_sha256": "ba8c5ccb67fdc858c8b19c97bd94bc3f99f92b2799e5d6a1e46dadadd6701303"
 }

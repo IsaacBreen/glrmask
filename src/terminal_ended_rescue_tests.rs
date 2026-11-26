@@ -227,7 +227,7 @@ fn fill_mask(constraint: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
         assert!(state
             .commit_token(token));
     }
-    let mut mask = vec![0u32; constraint.mask_len()];
+    let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
     state.fill_mask(&mut mask);
     (mask, state.is_accepting())
 }
@@ -278,7 +278,7 @@ fn check_exact_oracle_with_tokens(constraint: &Constraint, case: &Case, tokens: 
         if !seen.insert(prefix.clone()) {
             continue;
         }
-        let mut mask = vec![0u32; constraint.mask_len()];
+        let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
         state.fill_mask(&mut mask);
         for (token, token_bytes) in tokens.iter().enumerate() {
             let mut candidate = prefix.clone();

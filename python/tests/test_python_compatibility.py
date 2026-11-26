@@ -18,11 +18,11 @@ def test_basic_masking_lifecycle():
     c = g.compile(v)
     s = c.start()
 
-    assert s.mask().tolist() == [True, False, False]
+    assert s.mask().tolist() == [1]
     assert s.commit_token(0)
-    assert s.mask().tolist() == [False, True, False]
+    assert s.mask().tolist() == [2]
     assert s.commit_token(1)
-    assert s.mask().tolist() == [False, False, True]
+    assert s.mask().tolist() == [4]
     assert s.commit_token(2)
     assert s.is_accepting()
 
@@ -38,7 +38,7 @@ def test_forcing_tokens_query():
     forced = s.copy().commit_forced_tokens()
     assert forced == [0, 1]
     assert s.copy().commit_forced_tokens() == forced
-    assert s.mask().tolist() == [True, False]
+    assert s.mask().tolist() == [1]
 
 
 def test_gil_status_contract():

@@ -12616,11 +12616,10 @@ impl Constraint {
         state
     }
 
-    /// The number of `u32` words in a mask.
-    pub fn mask_len(&self) -> usize {
-        self.max_original_token_id()
-            .map(|token_id| (token_id as usize / 32) + 1)
-            .unwrap_or(0)
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    pub fn mask_bit_len(&self) -> usize {
+        self.max_original_token_id().map_or(0, |id| id as usize + 1)
     }
 
     #[cfg(any(test, feature = "internal-api"))]
@@ -13355,7 +13354,7 @@ impl Constraint {
     /// tokens so the ordinary compiler can build the parent grammar. Once a
     /// terminal is recorded in `late_grammar_slots`, that backing token ID is
     /// no longer a public/model token. Leaving it in the original-token map
-    /// makes persisted sparse mask fragments wider than `mask_len()`, which
+    /// makes persisted sparse mask fragments wider than `mask_bit_len().div_ceil(32)`, which
     /// correctly excludes unresolved linker sentinels.
     pub(crate) fn sanitize_late_grammar_placeholder_token_domain(&mut self) -> bool {
         if self.late_grammar_slots.is_empty() {
@@ -14859,7 +14858,7 @@ mod dense_internal_token_mask_tests {
                     let mut committed = 0;
                     for &token in sequence {
                         let mask = actual.mask();
-                        let mut expected = vec![0u32; rebuilt.mask_len()];
+                        let mut expected = vec![0u32; rebuilt.mask_bit_len().div_ceil(32)];
                         if committed < 2 { expected[..16].fill(u32::MAX); }
                         if committed < 2 { expected[16] = 0b1100; }
                         if committed == 1 { expected[16] |= 1; }

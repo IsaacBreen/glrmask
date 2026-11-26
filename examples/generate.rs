@@ -22,7 +22,7 @@ fn main() -> glrmask::Result<()> {
 
     let mut model = Model { seed: 7 };
     let mut state = constraint.start();
-    let mut mask = vec![0; constraint.mask_len().max(eos as usize / 32 + 1)];
+    let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32).max(eos as usize / 32 + 1)];
     let mut text = Vec::new();
     loop {
         let mut scores = model.scores(eos as usize + 1);

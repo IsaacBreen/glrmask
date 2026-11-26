@@ -601,7 +601,7 @@ mod epsilon_reset_boundary_tests {
 
     fn mask_with_budget(state: &ConstraintState, budget: u8) -> (Vec<u32>, usize) {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-        let mut mask = vec![u32::MAX; state.constraint.mask_len() + 2];
+        let mut mask = vec![u32::MAX; state.constraint.mask_bit_len().div_ceil(32) + 2];
         let mut proved = 0;
         assert!(with_provider(state, vocab.max_token_byte_len(), |provider| {
             // The NFA configuration executor is exact for deterministic lexers
@@ -618,7 +618,7 @@ mod epsilon_reset_boundary_tests {
             provider.validate_mask_result()?;
             Ok(filled)
         }).unwrap());
-        assert!(mask[state.constraint.mask_len()..].iter().all(|&word| word == 0));
+        assert!(mask[state.constraint.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
         (mask, proved)
     }
 
@@ -688,7 +688,7 @@ mod closed_admission_support_tests {
 
     fn mask_with_policy(state: &ConstraintState, direct: bool) -> (Vec<u32>, usize) {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-        let mut mask = vec![u32::MAX; state.constraint.mask_len() + 2];
+        let mut mask = vec![u32::MAX; state.constraint.mask_bit_len().div_ceil(32) + 2];
         let mut queries = 0;
         assert!(with_provider(state, vocab.max_token_byte_len(), |provider| {
             // Select the exact NFA carrier even for deterministic small fixtures.
@@ -702,7 +702,7 @@ mod closed_admission_support_tests {
             provider.validate_mask_result()?;
             Ok(filled)
         }).unwrap());
-        assert!(mask[state.constraint.mask_len()..].iter().all(|&word| word == 0));
+        assert!(mask[state.constraint.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
         (mask, queries)
     }
 

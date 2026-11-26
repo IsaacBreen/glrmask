@@ -423,8 +423,8 @@ class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_f
 public:
     /// Creates a state for one generated sequence.
     ConstraintState start() const;
-    /// The number of `uint32_t` words in a mask.
-    std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_len(native_handle(), &n)); return n; }
+    /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
     /// Saves the constraint as bytes, without the vocabulary.
     ///
     /// Bytes saved by one GLRMask version may not load in another.
@@ -442,22 +442,22 @@ class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, 
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
 public:
-    /// The number of `uint32_t` words in a mask.
-    std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_len(native_handle(), &n)); return n; }
+    /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Writes the mask into `output`, setting extra words to zero.
     ///
-    /// Throws `Error` if `word_count` is less than `mask_len()`.
+    /// Throws `Error` if `word_count` is less than `(mask_bit_len() + 31) / 32`.
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
     /// Writes the mask into `output`, setting extra words to zero.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
-    /// The tokens allowed next, as a bitmask.
+    /// Allowed token IDs as a packed bitmask.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id / 32` is set. No bits
     /// are set when nothing can follow: the sequence is complete, or a commit
     /// failed.
-    std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out(mask_len()); fill_mask(out); return out; }
+    std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
     /// Whether nothing more can be committed.
     bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
     /// Commits a token. If it isn't allowed, returns `false` and terminates the state.

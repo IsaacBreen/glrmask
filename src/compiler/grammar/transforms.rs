@@ -1785,8 +1785,8 @@ mod tests {
             v["backend"] == "acyclic-template-dfa" && v["lr_table_present"] == false));
         for depth in [0, 1, 2, 17, 257, 1024] {
             let mut state = constraint.start();
-            let mut mask = vec![0; constraint.mask_len()];
-            let mut expected = vec![0; constraint.mask_len()];
+            let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
+            let mut expected = vec![0; constraint.mask_bit_len().div_ceil(32)];
             for token in *b"!x" { expected[token as usize / 32] |= 1 << (token % 32); }
             for _ in 0..depth {
                 state.fill_mask(&mut mask);

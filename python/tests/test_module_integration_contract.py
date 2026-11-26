@@ -4,6 +4,8 @@ import pytest
 import glrmask
 
 
+from mask_helpers import token_allowed, unpack_mask
+
 def vocab():
     return glrmask.Vocab(
         {0: b"a", 1: b"b", 2: b"ab", 3: b",", 4: b"a,b", 5: b""}
@@ -31,7 +33,7 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
     assert parent.save() == persisted
     assert first.compile(v).start().mask().tolist() != second.compile(v).start().mask().tolist()
     state = first.compile(v).start()
-    assert state.mask()[2]
+    assert token_allowed(state.mask(), 2)
     assert state.commit_token(2)
     assert state.is_accepting()
     assert not state.mask().any()
@@ -58,7 +60,7 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     ))
     grammar_slot.bind("EVENT", glrmask.TokenSet([5]))
     state = glrmask.Module.load(grammar_slot.save()).compile(v).start()
-    assert state.mask()[5]
+    assert token_allowed(state.mask(), 5)
     assert state.commit_token(5)
     assert state.is_accepting()
     token_slot = glrmask.Module(glrmask.Grammar.from_glrm(

@@ -42,7 +42,7 @@ int main() {
         R"(start: "hello" " " "world")");
     auto constraint = grammar.compile(vocab);
     auto state = constraint.start();
-    std::vector<glrmask::TokenId> mask(constraint.mask_len());
+    std::vector<glrmask::TokenId> mask((constraint.mask_bit_len() + 31) / 32);
 
     for (auto [id, expected] : std::vector<std::pair<glrmask::TokenId, glrmask::TokenId>>{
              {0, 1}, {1, 2}, {2, 4}}) {
@@ -143,7 +143,7 @@ auto constraint = grammar.compile(vocab, options);
 
 ```cpp
 auto state = constraint.start();
-std::vector<std::uint32_t> mask(constraint.mask_len());
+std::vector<std::uint32_t> mask((constraint.mask_bit_len() + 31) / 32);
 state.fill_mask(mask);
 glrmask::TokenId id = 42;
 bool allowed = (mask[id / 32] >> (id % 32)) & 1;
@@ -191,7 +191,7 @@ Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
 | `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
-| `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `mask_len()`. |
+| `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `(mask_bit_len() + 31) / 32`. |
 | `GLRMASK_CLOSED` | The object was moved from or disposed. |
 
 ## Objects and threads

@@ -10,7 +10,7 @@ const vocab = new Vocab([
 const grammar = Grammar.fromLark('start: "hello" " " "world"');
 const constraint = await grammar.compile(vocab);
 const state = constraint.start();
-const mask = new Uint32Array(constraint.maskLength);
+const mask = new Uint32Array(Math.ceil(constraint.maskBitLength / 32));
 
 for (const [id, expected] of [[0, 1], [1, 2], [2, 4]]) {
   state.fillMask(mask);

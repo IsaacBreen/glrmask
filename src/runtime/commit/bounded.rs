@@ -475,8 +475,8 @@ impl ConstraintState {
         resource_guard(|| {
             let BoundedIds::Exact(ids)=probe_views([View::of(self)],max_allowed)? else{return Ok(None)};
             let mut mask=Vec::new();
-            mask.try_reserve_exact(self.constraint.mask_len()).map_err(|_|state_error("mask allocation failed".into()))?;
-            mask.resize(self.constraint.mask_len(),0);
+            mask.try_reserve_exact(self.constraint.mask_bit_len().div_ceil(32)).map_err(|_|state_error("mask allocation failed".into()))?;
+            mask.resize(self.constraint.mask_bit_len().div_ceil(32),0);
             for id in ids {mask[id as usize/32]|=1<<(id%32);}
             Ok(Some(mask))
         })
@@ -534,7 +534,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> 
 pub(crate) fn mask_for_states_at_most(states:&[ConstraintState],max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
     resource_guard(|| {
         let BoundedIds::Exact(ids)=probe_views(states.iter().map(View::of),max_allowed)? else{return Ok(None)};
-        let width=states.iter().map(|s|s.constraint.mask_len()).max().unwrap_or(0);
+        let width=states.iter().map(|s|s.constraint.mask_bit_len().div_ceil(32)).max().unwrap_or(0);
         let mut mask=Vec::new();mask.try_reserve_exact(width).map_err(|_|state_error("mask allocation failed".into()))?;
         mask.resize(width,0);for id in ids {mask[id as usize/32]|=1<<(id%32);}Ok(Some(mask))
     })

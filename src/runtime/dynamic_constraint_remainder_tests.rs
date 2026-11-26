@@ -229,8 +229,8 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
                 let mut state = constraint.start();
                 assert!(state.commit_bytes(&prefix));
 
-                let expected = expected_mask(&vocab, &prefix, constraint.mask_len());
-                let mut actual = vec![0u32; constraint.mask_len()];
+                let expected = expected_mask(&vocab, &prefix, constraint.mask_bit_len().div_ceil(32));
+                let mut actual = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                 state.fill_mask(&mut actual);
                 assert_eq!(actual, expected, "prefix length {}", prefix.len());
                 assert_eq!(state.is_accepting(), byte_oracle(&prefix).1);
@@ -244,11 +244,11 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
                     assert_eq!(result, admitted, "token {id}");
                     if admitted {
                         assert_eq!(branch.is_accepting(), accepting);
-                        let mut after = vec![0u32; constraint.mask_len()];
+                        let mut after = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                         branch.fill_mask(&mut after);
                         assert_eq!(
                             after,
-                            expected_mask(&vocab, &extension, constraint.mask_len()),
+                            expected_mask(&vocab, &extension, constraint.mask_bit_len().div_ceil(32)),
                         );
                     }
                 }
@@ -303,7 +303,7 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
                 assert!(state.commit_bytes(prefix));
                 assert_eq!(
                     state.mask(),
-                    expected_mask(&vocab, prefix, constraint.mask_len()),
+                    expected_mask(&vocab, prefix, constraint.mask_bit_len().div_ceil(32)),
                 );
                 assert_eq!(state.is_accepting(), byte_oracle(prefix).1);
             }

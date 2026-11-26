@@ -135,9 +135,7 @@ vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
 grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
-for token_id, expected in [(0, [True, False, False]),
-                           (1, [False, True, False]),
-                           (2, [False, False, True])]:
+for token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:
     assert state.mask().tolist() == expected
     assert state.commit_token(token_id)
 assert state.is_accepting()
@@ -190,7 +188,8 @@ state = constraint.start()
 text = b""
 while True:
     logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
-    allowed = state.mask(size=len(logits))
+    allowed = np.zeros(len(logits), dtype=bool)
+    allowed[:state.mask_bit_len()] = state.mask(dtype=bool)
     allowed[eos] = state.is_accepting()
     assert allowed.any()
     logits[~allowed] = -np.inf
@@ -202,9 +201,26 @@ while True:
 print(text.decode())
 ```
 
-`mask()` returns a Boolean array indexed by token ID; `size` makes it as long as your logits. `fill_mask` is faster: it
-writes a packed bitmask into a buffer you reuse: bit `id % 32` of word `id / 32` is set when token `id` is allowed.
-`Constraint.mask_len()` gives the buffer's minimum length in words; allocate enough words for the EOS ID too. In Rust, Node.js, C and C++, masks are always packed.
+Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
+`mask_bit_len()` returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
+Allocate `(mask_bit_len() + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
+Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
+one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
+To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
+For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
+1-D NumPy int32 or uint32 arrays (not bool); surplus words are zeroed.
+
+For PyTorch serving with V equal to the logits width (at least every state mask bit length):
+
+```python
+# CPU staging buffer, with each row reused for one sequence.
+bitmask = torch.empty((len(states), (V + 31) // 32), dtype=torch.int32, pin_memory=True)
+for i, state in enumerate(states):
+    state.fill_mask(bitmask[i].numpy())  # zero-copy NumPy view of CPU row
+mask_on_device = bitmask.to(device, non_blocking=True)
+# Apply mask_on_device with your packed-mask kernel. Do not reuse the CPU
+# buffer until the asynchronous transfer completes.
+```
 
 `commit_token` returns whether the token was allowed. `commit_tokens` commits several in order and returns the number committed. `commit_bytes`
 commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a

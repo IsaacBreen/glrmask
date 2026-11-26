@@ -80,7 +80,7 @@ See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#m
 
 ```js
 const state = constraint.start();
-const mask = new Uint32Array(constraint.maskLength);
+const mask = new Uint32Array(Math.ceil(constraint.maskBitLength / 32));
 state.fillMask(mask);
 const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 ```
@@ -136,7 +136,7 @@ Arguments of the wrong type throw `TypeError`, and token IDs out of range throw 
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
 | `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
-| `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `maskLength`. |
+| `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `Math.ceil(maskBitLength / 32)`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
 
 Async methods reject with the same errors.

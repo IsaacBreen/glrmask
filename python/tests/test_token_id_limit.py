@@ -50,10 +50,9 @@ def test_the_maximum_id_is_accepted():
     )
 
 
-def test_mask_size_is_capped():
+def test_mask_size_keyword_is_not_supported():
     vocab = glrmask.Vocab({0: b"a"})
     state = glrmask.Grammar.from_glrm('start s nt s = "a"').compile(vocab).start()
-    with pytest.raises(glrmask.GLRMaskError, match="at most") as exc:
+    with pytest.raises(TypeError):
         state.mask(size=4 * 10**9)
-    assert exc.value.kind == "invalid_input"
-    assert state.mask(size=MAX_TOKEN_ID + 1).shape == (MAX_TOKEN_ID + 1,)
+    assert state.mask().shape == ((state.mask_bit_len()+31)//32,) == (1,)

@@ -133,34 +133,6 @@ fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
-fn words_to_bool_array<'py>(
-    py: Python<'py>,
-    words: &[u32],
-    token_count: usize,
-) -> Bound<'py, PyArray1<bool>> {
-    let n = token_count;
-    let n_full_words = n / 32;
-    let remainder = n % 32;
-    let mut bools = vec![false; n];
-    for (wi, &word) in words[..n_full_words.min(words.len())].iter().enumerate() {
-        let base = wi * 32;
-        let mut w = word;
-        for bit in &mut bools[base..base + 32] {
-            *bit = w & 1 != 0;
-            w >>= 1;
-        }
-    }
-    if remainder > 0 && n_full_words < words.len() {
-        let base = n_full_words * 32;
-        let mut w = words[n_full_words];
-        for bit in &mut bools[base..] {
-            *bit = w & 1 != 0;
-            w >>= 1;
-        }
-    }
-    PyArray1::from_vec(py, bools)
-}
-
 /// Extract a Python token ID. `Ok(None)` means the int is outside the `u32`
 /// domain; anything that is not an int stays a `TypeError`.
 fn resolve_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
@@ -173,22 +145,30 @@ fn resolve_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
     }
 }
 
-fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usize> {
-    let minimum = max_token as usize + 1;
-    let size = requested.unwrap_or(minimum);
-    if size < minimum {
-        return Err(glrmask_error("invalid_input", format!(
-            "size must be at least {minimum}"
-        )));
+#[derive(Clone, Copy)]
+enum MaskDtype { U32, Bool }
+
+impl<'a, 'py> FromPyObject<'a, 'py> for MaskDtype {
+    type Error = PyErr;
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let py = obj.py();
+        let np = py.import("numpy")?;
+        if obj.is(&np.getattr("uint32")?) { Ok(Self::U32) }
+        else if obj.is(&py.get_type::<pyo3::types::PyBool>()) { Ok(Self::Bool) }
+        else { Err(PyTypeError::new_err("dtype must be numpy.uint32 or bool")) }
     }
-    // A mask has one entry per token ID, so it never needs more than this.
-    let maximum = glrmask::MAX_TOKEN_ID as usize + 1;
-    if size > maximum {
-        return Err(glrmask_error("invalid_input", format!(
-            "size must be at most {maximum}, one more than the maximum token ID"
-        )));
-    }
-    Ok(size)
+}
+
+fn allocate_mask<'py>(
+    py: Python<'py>, n: usize, dtype: MaskDtype,
+    fill: impl FnOnce(&mut [u32]),
+) -> PyResult<Bound<'py, PyAny>> {
+    let mut words = vec![0u32; n.div_ceil(32)];
+    fill(&mut words);
+    Ok(match dtype {
+        MaskDtype::U32 => PyArray1::from_vec(py, words).into_any(),
+        MaskDtype::Bool => PyArray1::from_vec(py, (0..n).map(|i| words[i / 32] & (1 << (i % 32)) != 0).collect()).into_any(),
+    })
 }
 
 fn bitmask_u32_view<'a, 'py>(
@@ -208,7 +188,7 @@ fn with_mask_buffer(
     required: usize,
     fill: impl FnOnce(&mut [u32]),
 ) -> PyResult<()> {
-    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D int32 NumPy array");
+    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D int32 or uint32 NumPy array");
     let checked = |len| {
         if len < required {
             Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")))
@@ -668,7 +648,7 @@ impl PyVocabPartition {
 #[derive(Clone)]
 pub struct PyConstraint {
     inner: Arc<glrmask::Constraint>,
-    max_token: u32,
+
 }
 
 impl PyConstraint {
@@ -677,10 +657,10 @@ impl PyConstraint {
         _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
-        let max_token = constraint.max_original_token_id().unwrap_or(0);
+
         Ok(Self {
             inner: Arc::new(constraint),
-            max_token,
+
         })
     }
 
@@ -721,22 +701,22 @@ impl PyConstraint {
         let vocab = vocab.inner.clone();
         let loaded = py.detach(move || glrmask::Constraint::load(data, &vocab));
         let inner = loaded.map_err(final_api::api_error)?;
-        let max_token = inner.max_original_token_id().unwrap_or(0);
-        Ok(Self { inner: Arc::new(inner), max_token })
+
+        Ok(Self { inner: Arc::new(inner) })
     }
 
     /// A new state with nothing committed.
     fn start(&self) -> PyConstraintState {
         PyConstraintState {
             inner: self.inner.start(),
-            max_token: self.max_token,
-            mask_len: self.inner.mask_len(),
+
+            mask_bit_len: self.inner.mask_bit_len(),
         }
     }
 
-    /// The number of `int32` words that `fill_mask` needs.
-    fn mask_len(&self) -> usize {
-        self.inner.mask_len()
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need ceil(mask_bit_len / 32) 32-bit words.
+    fn mask_bit_len(&self) -> usize {
+        self.inner.mask_bit_len()
     }
 
 }
@@ -749,7 +729,7 @@ impl PyConstraint {
 #[derive(Clone)]
 pub struct PyDynamicConstraint {
     inner: Arc<glrmask::DynamicConstraint>,
-    max_token: u32,
+
 }
 
 impl PyDynamicConstraint {
@@ -758,10 +738,10 @@ impl PyDynamicConstraint {
         _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
-        let max_token = constraint.max_original_token_id().unwrap_or(0);
+
         Ok(Self {
             inner: Arc::new(constraint),
-            max_token,
+
         })
     }
 }
@@ -871,14 +851,14 @@ impl PyDynamicConstraint {
         self.inner.save_without_vocab()
     }
 
-    fn mask_len(&self) -> usize {
-        self.inner.mask_len()
+    fn mask_bit_len(&self) -> usize {
+        self.inner.mask_bit_len()
     }
 
     fn start(&self) -> PyDynamicConstraintState {
         PyDynamicConstraintState {
             inner: self.inner.start(),
-            max_token: self.max_token,
+            mask_bit_len: self.inner.mask_bit_len(),
         }
     }
 }
@@ -886,11 +866,14 @@ impl PyDynamicConstraint {
 #[pyclass(name = "DynamicConstraintState", module = "glrmask._glrmask")]
 pub struct PyDynamicConstraintState {
     inner: glrmask::DynamicConstraintState,
-    max_token: u32,
+    mask_bit_len: usize,
 }
 
 #[pymethods]
 impl PyDynamicConstraintState {
+    /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    fn mask_bit_len(&self) -> usize { self.mask_bit_len }
+
     /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
@@ -992,12 +975,12 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
-        with_mask_buffer(bitmask, (self.max_token as usize + 1).div_ceil(32), |buf| {
+        with_mask_buffer(bitmask, self.mask_bit_len.div_ceil(32), |buf| {
             with_state(&self.inner, |state| state.fill_mask(buf));
         })
     }
@@ -1029,19 +1012,11 @@ impl PyDynamicConstraintState {
         with_state(&self.inner, |state| state.is_terminated())
     }
 
-    /// The tokens allowed next, as a NumPy `bool` array indexed by token ID.
-    ///
-    /// `size` sets the array length, for example to match your logits; it must cover every token ID.
-    #[pyo3(signature = (size=None))]
-    fn mask<'py>(
-        &self,
-        py: Python<'py>,
-        size: Option<usize>,
-    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let size = resolved_mask_size(self.max_token, size)?;
-        let mut words = vec![0u32; size.div_ceil(32)];
-        with_state(&self.inner, |state| state.fill_mask(&mut words));
-        Ok(words_to_bool_array(py, &words, size))
+    /// Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID.
+    /// For signed packed words, use mask().view(np.int32) without copying. To pad a Boolean mask to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool).
+    #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
+    fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
+        allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 }
 
@@ -1053,15 +1028,15 @@ impl PyDynamicConstraintState {
 #[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
     inner: glrmask::ConstraintState,
-    max_token: u32,
-    mask_len: usize,
+
+    mask_bit_len: usize,
 }
 
 #[pymethods]
 impl PyConstraintState {
     /// A copy of the state.
     fn copy(&self) -> Self {
-        Self { inner: self.inner.clone(), max_token: self.max_token, mask_len: self.mask_len }
+        Self { inner: self.inner.clone(), mask_bit_len: self.mask_bit_len }
     }
 
     /// Same as `copy()`.
@@ -1073,33 +1048,25 @@ impl PyConstraintState {
         Ok(copy)
     }
 
-    /// The number of `int32` words that `fill_mask` needs.
-    fn mask_len(&self) -> usize {
-        self.mask_len
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need ceil(mask_bit_len / 32) 32-bit words.
+    fn mask_bit_len(&self) -> usize {
+        self.mask_bit_len
     }
 
 
-    /// The tokens allowed next, as a NumPy `bool` array indexed by token ID.
-    ///
-    /// `size` sets the array length, for example to match your logits; it must cover every token ID.
-    #[pyo3(signature = (*, size=None))]
-    fn mask<'py>(
-        &self,
-        py: Python<'py>,
-        size: Option<usize>,
-    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let size = resolved_mask_size(self.max_token, size)?;
-        let mut words = vec![0u32; size.div_ceil(32)];
-        with_state(&self.inner, |state| state.fill_mask(&mut words));
-        Ok(words_to_bool_array(py, &words, size))
+    /// Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID.
+    /// For signed packed words, use mask().view(np.int32) without copying. To pad a Boolean mask to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool).
+    #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
+    fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
+        allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     ///
     /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&self, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
-        with_mask_buffer(bitmask, self.mask_len, |buf| {
+        with_mask_buffer(bitmask, self.mask_bit_len.div_ceil(32), |buf| {
             with_state(&self.inner, |state| state.fill_mask(buf));
         })
     }
@@ -2072,10 +2039,10 @@ fn prepare_vocab_for_dynamic_compile(vocab: &PyVocab) {
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
     let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-    let max_token = constraint.max_original_token_id().unwrap_or(0);
+
     Ok(PyConstraint {
         inner: std::sync::Arc::new(constraint),
-        max_token,
+
     })
 }
 

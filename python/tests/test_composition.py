@@ -9,6 +9,8 @@ def _bound_snapshot(module, name, value):
 import glrmask
 
 
+from mask_helpers import token_allowed, unpack_mask
+
 def _prepare_glrm(source, vocab, *, subgrammars=None):
     parent = glrmask.Module(glrmask.Grammar.from_glrm(source))
     for name, child in (subgrammars or {}).items():
@@ -114,7 +116,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     assert actual.commit_token(0)
     assert expected.commit_token(0)
     assert actual.mask().tolist() == expected.mask().tolist()
-    assert actual.mask().tolist()[1]
+    assert token_allowed(actual.mask(), 1)
     assert actual.commit_token(1)
     assert expected.commit_token(1)
     assert actual.is_accepting()
@@ -355,7 +357,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         for token in sequence:
             assert state.commit_token(token)
         assert state.is_accepting()
-        mask = state.mask(size=end_token + 1)
+        mask = unpack_mask(state.mask(), end_token + 1)
         assert not mask[end_token]
         mask[end_token] = True
         assert mask[end_token]

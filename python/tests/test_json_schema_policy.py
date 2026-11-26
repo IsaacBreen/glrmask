@@ -4,6 +4,8 @@ import pytest
 import glrmask
 
 
+from mask_helpers import token_allowed, unpack_mask
+
 def compile_schema(schema):
     vocab = glrmask.Vocab({b: bytes([b]) for b in range(256)})
     return glrmask.Grammar.from_json_schema(schema).compile(vocab)
@@ -12,7 +14,7 @@ def compile_schema(schema):
 def accepts(constraint, value):
     state = constraint.start()
     for byte in json.dumps(value, ensure_ascii=False).encode():
-        if not state.mask()[byte]:
+        if not token_allowed(state.mask(), byte):
             return False
         assert state.commit_token(byte)
     return state.is_accepting()

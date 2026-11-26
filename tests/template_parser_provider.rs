@@ -32,7 +32,7 @@ fn reconverging_push_and_pop_languages_remain_shared_across_reload() {
         let restored=Constraint::load(&bytes, &vocabulary).unwrap();
         for constraint in [&fresh,&restored] {
             assert_eq!(constraint.parser_backend(),ParserBackend::TemplateDfa);
-            let mut state=constraint.start();let mut mask=vec![0;constraint.mask_len()];
+            let mut state=constraint.start();let mut mask=vec![0;constraint.mask_bit_len().div_ceil(32)];
             state.fill_mask(&mut mask);assert_eq!(mask[0]&63,21);assert!(state.is_accepting());
             for (token,expected,complete) in [(0,31,false),(0,63,false),(1,31,false),(1,21,true)] {
                 assert!(state.commit_token(token));state.fill_mask(&mut mask);
@@ -80,7 +80,7 @@ fn check_all_prefixes(c:&Constraint) {
             let mut state=c.start(); assert!(state.commit_bytes(&prefix));
             // Acceptance needs the configured end token, never just completion.
             assert!(!state.is_accepting(),"unexpected acceptance at {prefix:?}");
-            let mut mask=vec![0;c.mask_len()]; state.fill_mask(&mut mask);
+            let mut mask=vec![0;c.mask_bit_len().div_ceil(32)]; state.fill_mask(&mut mask);
             for (i,word) in words().iter().enumerate() {
                 let allowed=mask[i/32] & (1 << (i%32)) != 0;
                 assert_eq!(allowed,depth(word.as_bytes(),d).is_some(),"prefix={prefix:?} token={word:?}");
@@ -136,7 +136,7 @@ fn explicit_dead_edge_shadows_default_in_a_user_supplied_program() {
     let p=ParserProgram::new(ParserDefinition{stack_symbol_count:2,terminals:vec![a,b],completion:StackTemplate::identity()}).unwrap();
     let l=LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec()),TerminalPattern::literal(b"b".to_vec())]);
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ba".to_vec()),(3,b"ab".to_vec())]).unwrap();
-    let c=p.compile(&l,&v).unwrap();let mut s=c.start();let mut m=vec![0;c.mask_len()];s.fill_mask(&mut m);
+    let c=p.compile(&l,&v).unwrap();let mut s=c.start();let mut m=vec![0;c.mask_bit_len().div_ceil(32)];s.fill_mask(&mut m);
     assert_eq!(m[0]&15,0b0110);assert!(s.commit_token(1));s.fill_mask(&mut m);assert_eq!(m[0]&15,1);
 }
 
@@ -204,7 +204,7 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
     for prefix in prefixes {
         let mut state=compiled.start();assert!(state.commit_bytes(&prefix));
         assert_eq!(state.is_accepting(),language.contains(&prefix.as_slice()),"completion at {prefix:?}");
-        let mut mask=vec![0;compiled.mask_len()];state.fill_mask(&mut mask);
+        let mut mask=vec![0;compiled.mask_bit_len().div_ceil(32)];state.fill_mask(&mut mask);
         for (token,bytes) in vocab.iter() {
             let mut next=prefix.clone();next.extend_from_slice(bytes);
             let expected=language.iter().any(|complete|complete.starts_with(&next));
@@ -335,7 +335,7 @@ fn exponentially_many_custom_push_outputs_remain_runnable_after_roundtrip() {
     let c = program.compile(&lexer, &v).unwrap();
     for parser in [&c, &Constraint::load(c.save(), &v).unwrap()] {
         assert_eq!(parser.parser_backend(), ParserBackend::TemplateDfa);
-        let mut state = parser.start(); let mut mask = vec![0; parser.mask_len()];
+        let mut state = parser.start(); let mut mask = vec![0; parser.mask_bit_len().div_ceil(32)];
         for _ in 0..3 {
             state.fill_mask(&mut mask); assert_eq!(mask[0] & 7, 3);
             assert!(state.commit_token(0)); assert!(state.is_accepting());
@@ -370,7 +370,7 @@ fn epsilon_read_links_apply_after_popping_the_last_concrete_symbol() {
                 };
                 let Some(count)=advance(&prefix,1)else{continue;};
                 let mut state=constraint.start();assert!(state.commit_bytes(&prefix));
-                assert!(state.is_accepting());let mut mask=vec![0;constraint.mask_len()];state.fill_mask(&mut mask);
+                assert!(state.is_accepting());let mut mask=vec![0;constraint.mask_bit_len().div_ceil(32)];state.fill_mask(&mut mask);
                 for (i,word) in words.iter().enumerate() {
                     assert_eq!(mask[i/32]&(1<<(i%32))!=0,advance(word.as_bytes(),count).is_some(),
                         "prefix={prefix:?} word={word}");
@@ -407,7 +407,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
     for constraint in [&compiled,&loaded] {
         assert_eq!(constraint.parser_backend(),glrmask::ParserBackend::TemplateDfa);
         let mut state = constraint.start();
-        let mut mask = vec![0;constraint.mask_len()];
+        let mut mask = vec![0;constraint.mask_bit_len().div_ceil(32)];
         state.fill_mask(&mut mask);
         for byte in br#"{"key": "a", "value": "b"}"# {
             let token = u32::from(*byte-32);

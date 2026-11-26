@@ -395,7 +395,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
         .unwrap()
         .link()
         .unwrap();
-    assert_eq!(bound.mask_len(), 1);
+    assert_eq!(bound.mask_bit_len().div_ceil(32), 1);
     assert_eq!(bound.start().mask().len(), 1);
     assert_static_xy_matches(&reference, &bound);
 }

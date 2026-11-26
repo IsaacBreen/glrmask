@@ -37,7 +37,7 @@ def strict_reference(state):
     out=[]
     for _ in range(10_000):
         if cursor.is_accepting():break
-        ids=np.flatnonzero(cursor.mask())
+        ids=np.flatnonzero(np.unpackbits(cursor.mask().view(np.uint8), bitorder="little"))
         if len(ids)!=1:break
         id=int(ids[0]);out.append(id);cursor.commit_token(id)
     return out
@@ -66,7 +66,7 @@ def verify_state(state):
     cursor=state.clone()
     for id in forced:
         assert not cursor.is_accepting()
-        allowed=np.flatnonzero(cursor.mask()).tolist()
+        allowed=np.flatnonzero(np.unpackbits(cursor.mask().view(np.uint8), bitorder="little")).tolist()
         assert id in allowed,(id,allowed)
         if args.forcing_contract=="strict":assert allowed==[id]
         cursor.commit_token(id)
@@ -87,7 +87,7 @@ def walk(c):
         state,depth=todo.pop()
         verify_state(state)
         if depth==2:continue
-        for id in np.flatnonzero(state.mask()).tolist()[:8]:
+        for id in np.flatnonzero(np.unpackbits(state.mask().view(np.uint8), bitorder="little")).tolist()[:8]:
             child=state.clone();child.commit_token(int(id));todo.append((child,depth+1))
 
 v=g.Vocab({0:b"a",1:b"b",2:b"ab",3:b"abc",4:b"a",5:b" ",6:b"c",7:b"",8:b"x",32:b"\xc3",33:b"\xa9",34:chr(233).encode(),67:b"a",99:b"",130:b""})

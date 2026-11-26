@@ -307,7 +307,7 @@ fn main() {
             // multiple runs exist only to reduce scheduler noise.
             for run in 0..runs {
                 let constraint = Constraint::load(artifact.clone(), &vocab).unwrap();
-                mask_words = constraint.mask_len();
+                mask_words = constraint.mask_bit_len().div_ceil(32);
                 let mut sample_index = 0usize;
                 for (example_index, tokens) in token_sequences.iter().enumerate() {
                     let started = Instant::now();
@@ -402,13 +402,13 @@ fn main() {
             let right = Constraint::load(std::fs::read(&args[3]).unwrap(), &vocab).unwrap();
             let token_sequences: Vec<Vec<u32>> =
                 serde_json::from_slice(&std::fs::read(&args[4]).unwrap()).unwrap();
-            assert_eq!(left.mask_len(), right.mask_len());
+            assert_eq!(left.mask_bit_len().div_ceil(32), right.mask_bit_len().div_ceil(32));
             let mut sample_index = 0usize;
             for (example_index, tokens) in token_sequences.iter().enumerate() {
                 let mut left_state = left.start();
                 let mut right_state = right.start();
-                let mut left_mask = vec![0u32; left.mask_len()];
-                let mut right_mask = vec![0u32; right.mask_len()];
+                let mut left_mask = vec![0u32; left.mask_bit_len().div_ceil(32)];
+                let mut right_mask = vec![0u32; right.mask_bit_len().div_ceil(32)];
                 for (token_index, &token) in tokens.iter().enumerate() {
                     left_state.fill_mask(&mut left_mask);
                     right_state.fill_mask(&mut right_mask);

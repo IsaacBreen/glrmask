@@ -2586,7 +2586,7 @@ mod tests {
             &[101, 100, 101],
         )
         .unwrap();
-        assert_eq!(constraint.mask_len(), 4);
+        assert_eq!(constraint.mask_bit_len().div_ceil(32), 4);
 
         let mut state = constraint.start();
         assert!(!token_allowed(&state.mask(), 100));
@@ -2647,12 +2647,12 @@ mod tests {
         )
         .unwrap();
         let state = constraint.start();
-        let mut oversized = vec![u32::MAX; constraint.mask_len() + 3];
+        let mut oversized = vec![u32::MAX; constraint.mask_bit_len().div_ceil(32) + 3];
         state.fill_mask(&mut oversized);
-        assert!(oversized[constraint.mask_len()..].iter().all(|&word| word == 0));
+        assert!(oversized[constraint.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
         oversized.fill(u32::MAX);
         state.fill_mask(&mut oversized);
-        assert!(oversized[constraint.mask_len()..].iter().all(|&word| word == 0));
+        assert!(oversized[constraint.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
 
         let dynamic = DynamicConstraint::from_json_schema_with_end_tokens(
             r#"{"const":"a"}"#,
@@ -2660,13 +2660,13 @@ mod tests {
             &[100],
         )
         .unwrap();
-        let mut dynamic_mask = vec![u32::MAX; dynamic.mask_len() + 3];
+        let mut dynamic_mask = vec![u32::MAX; dynamic.mask_bit_len().div_ceil(32) + 3];
         let dynamic_state = dynamic.start();
         dynamic_state.fill_mask(&mut dynamic_mask);
-        assert!(dynamic_mask[dynamic.mask_len()..].iter().all(|&word| word == 0));
+        assert!(dynamic_mask[dynamic.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
         dynamic_mask.fill(u32::MAX);
         dynamic_state.fill_mask(&mut dynamic_mask);
-        assert!(dynamic_mask[dynamic.mask_len()..].iter().all(|&word| word == 0));
+        assert!(dynamic_mask[dynamic.mask_bit_len().div_ceil(32)..].iter().all(|&word| word == 0));
     }
 
     #[test]

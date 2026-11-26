@@ -82,7 +82,7 @@ fn bundled_javascript_accepts_all_curated_examples() {
     assert_eq!(examples.len(), 31);
     for (name, program) in examples {
         let mut state = constraint.start();
-        let mut mask = vec![0; constraint.mask_len()];
+        let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
         for (offset, &byte) in program.iter().enumerate() {
             state.fill_mask(&mut mask);
             let id = byte as u32;

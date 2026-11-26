@@ -37,7 +37,7 @@ fn mask(c: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
     for &token in prefix {
         assert!(state.commit_token(token));
     }
-    let mut words = vec![0; c.mask_len()];
+    let mut words = vec![0; c.mask_bit_len().div_ceil(32)];
     state.fill_mask(&mut words);
     (words, state.is_accepting())
 }

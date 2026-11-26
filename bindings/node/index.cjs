@@ -331,7 +331,7 @@ class Module extends Owned {
 }
 
 class Constraint extends Owned {
-  get maskLength() { return invoke(() => handle(this, Constraint).maskLen); }
+  get maskBitLength() { return invoke(() => handle(this, Constraint).maskBitLen); }
   clone() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
   saveSync() { return invoke(() => handle(this, Constraint).saveSync()); }
@@ -346,7 +346,7 @@ class Constraint extends Owned {
 }
 
 class ConstraintState extends Owned {
-  get maskLength() { return invoke(() => handle(this, ConstraintState).maskLen); }
+  get maskBitLength() { return invoke(() => handle(this, ConstraintState).maskBitLen); }
   clone() { return wrap(ConstraintState, invoke(() => handle(this, ConstraintState).clone())); }
   mask() { return invoke(() => handle(this, ConstraintState).mask()); }
   fillMask(output) {

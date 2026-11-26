@@ -10,6 +10,8 @@ def _bound_snapshot(source, name, value):
 import pytest
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 ONE = "glrm 1; start start; extern token T; nt start = T;"
 MODES = [
     {},
@@ -24,7 +26,7 @@ def vocab(n=128):
 
 
 def accepted_ids(state):
-    return set(state.mask().nonzero()[0].tolist())
+    return set(unpack_mask(state.mask()).nonzero()[0].tolist())
 
 
 def test_range_inputs_are_normalized_to_one_set():
@@ -102,7 +104,7 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
         module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
         constraint = module.compile(v, **mode)
         state = constraint.start()
-        mask = state.mask()
+        mask = unpack_mask(state.mask())
         assert int(mask.sum()) == n - (excluded is not None)
         assert bool(mask[n - 1])
         if excluded is not None:

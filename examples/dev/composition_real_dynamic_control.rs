@@ -43,7 +43,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let profile_previous_traces=std::env::var_os("PROFILE_PREVIOUS_TRACES").is_some();
     let mut out=BufWriter::new(fs::File::create(&args[6])?);
     writeln!(out,"trace,step,token,static_mask_ns,dynamic_mask_ns,static_commit_ns,dynamic_commit_ns,hash")?;
-    let words=static_constraint.mask_len().max(dynamic_constraint.mask_len());
+    let words=static_constraint.mask_bit_len().div_ceil(32).max(dynamic_constraint.mask_bit_len().div_ceil(32));
     let mut a_mask=vec![0;words];let mut b_mask=vec![0;words];let mut samples=0usize;
     'traces: for (trace_id,trace) in traces.iter().enumerate() {
         if profile_step.is_some() && trace_id!=profile_trace {

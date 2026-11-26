@@ -187,7 +187,7 @@ fn check(
     assert_eq!(eos.commit_token(255) && eos.is_accepting(), complete,
         "completion case{case} {representation} prefix{prefix:?} words{expected:?} completion={done:?}"
     );
-    let mut mask = vec![0; c.mask_len()];
+    let mut mask = vec![0; c.mask_bit_len().div_ceil(32)];
     state.fill_mask(&mut mask);
     for (id, bytes) in pieces {
         let yes = if *id == 255 {

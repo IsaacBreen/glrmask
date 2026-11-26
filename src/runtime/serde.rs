@@ -7130,7 +7130,7 @@ impl Constraint {
             // placeholder token IDs removed from the public token coordinate.
             // Repair older/current-process artifacts that were saved before
             // that invariant was enforced, before any derived mask cache is
-            // rebuilt against the smaller public `mask_len()`.
+            // rebuilt against the smaller public `mask_bit_len().div_ceil(32)`.
             constraint.sanitize_late_grammar_placeholder_token_domain();
             if constraint.uses_dynamic_runtime() {
                 constraint.rebuild_dynamic_runtime_caches();

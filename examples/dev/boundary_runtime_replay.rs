@@ -90,7 +90,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let block=std::env::var("INTERLEAVE_BLOCK").ok().and_then(|s|s.parse().ok()).unwrap_or(16usize).max(1);
     let mut out=BufWriter::new(fs::File::create(&args[6])?);
     writeln!(out,"trace,step,token,static_mask_ns,dynamic_mask_ns,static_commit_ns,dynamic_commit_ns,hash,static_cpu_ns,dynamic_cpu_ns,static_boundary_dispatch_ns,dynamic_boundary_dispatch_ns,dynamic_only_ns,dynamic_only_calls")?;
-    let words=static_constraint.mask_len().max(dynamic_constraint.mask_len());
+    let words=static_constraint.mask_bit_len().div_ceil(32).max(dynamic_constraint.mask_bit_len().div_ceil(32));
     let mut a_mask=vec![0;words];let mut b_mask=vec![0;words];let mut samples=0usize;
     'traces: for (trace_id,trace) in traces.iter().enumerate() {
         if profile_step.is_some() && trace_id!=profile_trace {

@@ -223,7 +223,7 @@ impl NativeConstraint {
     #[napi]
     pub fn start(&self) -> napi::Result<NativeState> { call(|| Ok(NativeState { inner: Handle::new(core::State::start(live(&self.inner)?.clone())?) })) }
     #[napi(getter)]
-    pub fn mask_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_len() as f64)) }
+    pub fn mask_bit_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_bit_len() as f64)) }
     #[napi]
     pub fn save_sync(&self) -> napi::Result<Buffer> {
         call(|| Ok(live(&self.inner)?.save().into()))
@@ -243,7 +243,7 @@ impl NativeState {
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
     #[napi(getter)]
-    pub fn mask_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_len() as f64)) }
+    pub fn mask_bit_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_bit_len() as f64)) }
     #[napi]
     pub fn mask(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.mask()?.into())) }
     #[napi]

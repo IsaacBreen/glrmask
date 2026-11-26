@@ -29,7 +29,7 @@ def reference(s):
     state=s.clone();out=[]
     for _ in range(10_000):
         if state.is_accepting():break
-        ids=np.flatnonzero(state.mask())
+        ids=np.flatnonzero(np.unpackbits(state.mask().view(np.uint8), bitorder="little"))
         if len(ids)!=1:break
         id=int(ids[0]);out.append(id);state.commit_token(id)
     return out

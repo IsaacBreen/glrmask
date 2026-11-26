@@ -1132,7 +1132,7 @@ fn snapshot_mask_membership(
     if assertion_flags & COMMIT_ASSERT_MASK_EQUIVALENCE == 0 {
         return None;
     }
-    let mut mask = vec![0u32; state.constraint.mask_len()];
+    let mut mask = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
     state.fill_mask(&mut mask);
     Some(token_in_mask(&mask, token_id))
 }
@@ -9242,7 +9242,7 @@ impl ConstraintState {
         }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = if assertion_flags & COMMIT_ASSERT_MASK_EQUIVALENCE != 0 {
-            let mut mask = vec![0u32; constraint.mask_len()];
+            let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
             self.fill_mask_dynamic(&mut mask);
             Some(token_in_mask(&mask, token_id))
         } else {

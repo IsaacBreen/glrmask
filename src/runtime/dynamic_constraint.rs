@@ -3631,11 +3631,12 @@ impl DynamicConstraint {
         Self::load_with_vocab(bytes, vocab)
     }
 
-    /// Return the number of `u32` words required for a packed token mask.
-    pub fn mask_len(&self) -> usize {
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    pub fn mask_bit_len(&self) -> usize {
         std::iter::once(&self.inner)
             .chain(self.alternatives.iter())
-            .map(Constraint::mask_len)
+            .map(Constraint::mask_bit_len)
             .max()
             .unwrap_or(0)
     }
@@ -3654,7 +3655,7 @@ impl DynamicConstraint {
                 .chain(self.alternatives.iter())
                 .map(Constraint::start_dynamic)
                 .collect(),
-            mask_len: self.mask_len(),
+            mask_bit_len: self.mask_bit_len(),
         }
     }
 }
@@ -3663,7 +3664,7 @@ impl DynamicConstraint {
 #[derive(Clone)]
 pub struct DynamicConstraintState {
     alternatives: Vec<ConstraintState>,
-    mask_len: usize,
+    mask_bit_len: usize,
 }
 
 #[cfg(test)]
@@ -3723,8 +3724,8 @@ mod parser_replacement_compile_tests {
             assert!(constraint.table.as_lr().is_none());
             let mut left = reference.start();
             let mut right = constraint.start();
-            let mut a = vec![0; reference.mask_len()];
-            let mut b = vec![0; constraint.mask_len()];
+            let mut a = vec![0; reference.mask_bit_len().div_ceil(32)];
+            let mut b = vec![0; constraint.mask_bit_len().div_ceil(32)];
             for token in 0..words.len() as u32 {
                 left.fill_mask(&mut a);
                 right.fill_mask(&mut b);
@@ -3834,7 +3835,7 @@ impl DynamicConstraintState {
 
     /// Fill `buf` with the allowed-token mask as a packed bitset.
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        assert!(buf.len() >= self.mask_len, "mask buffer is smaller than constraint mask");
+        assert!(buf.len() >= self.mask_bit_len.div_ceil(32), "mask buffer is smaller than constraint mask");
         let Some((first, rest)) = self.alternatives.split_first() else {
             buf.fill(0);
             return;
@@ -3919,9 +3920,13 @@ impl DynamicConstraintState {
         self.alternatives.iter().any(ConstraintState::frontier_complete)
     }
 
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    pub fn mask_bit_len(&self) -> usize { self.mask_bit_len }
+
     /// Return the allowed-token mask as a packed `u32` bitmask.
     pub fn mask(&self) -> Vec<u32> {
-        let mut mask = vec![0u32; self.mask_len];
+        let mut mask = vec![0u32; self.mask_bit_len.div_ceil(32)];
         self.fill_mask(&mut mask);
         mask
     }
@@ -4602,7 +4607,7 @@ mod tests {
             loaded.inner.retained_terminal_exprs(),
             constraint.inner.retained_terminal_exprs(),
         );
-        assert_eq!(constraint.mask_len(), loaded.mask_len());
+        assert_eq!(constraint.mask_bit_len().div_ceil(32), loaded.mask_bit_len().div_ceil(32));
         assert_eq!(constraint.start().mask(), loaded.start().mask());
     }
 

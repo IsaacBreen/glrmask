@@ -10,7 +10,7 @@ int main() {
         R"(start: "hello" " " "world")");
     auto constraint = grammar.compile(vocab);
     auto state = constraint.start();
-    std::vector<glrmask::TokenId> mask(constraint.mask_len());
+    std::vector<glrmask::TokenId> mask((constraint.mask_bit_len() + 31) / 32);
 
     for (auto [id, expected] : std::vector<std::pair<glrmask::TokenId, glrmask::TokenId>>{
              {0, 1}, {1, 2}, {2, 4}}) {

@@ -23,7 +23,7 @@ const actual=modes.map((maskStrategy,mode)=>{
   const c=grammar.compileSync(vocab,{maskStrategy}),s=c.start(),states=[];
   for (let step=0;step<3;++step) {
     if(step) s.commitToken(step-1);
-    states.push({mask:Array.from(s.mask()),accepting:s.isAccepting(),terminated:s.isTerminated()});
+    states.push({mask:Array.from(s.mask()),accepting:s.isAccepting(),terminated:s.isTerminated(),maskBitLength:s.maskBitLength});
   }
   s.dispose();c.dispose();return {mode,states};
 });

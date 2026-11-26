@@ -35,7 +35,7 @@ fn vocabulary() -> Vocab {
 }
 
 fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
-    assert_eq!(reference.mask_len(), candidate.mask_len());
+    assert_eq!(reference.mask_bit_len().div_ceil(32), candidate.mask_bit_len().div_ceil(32));
     let cases = [
         "",
         "{",
@@ -58,7 +58,7 @@ fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
     for prefix in cases {
         let mut a = reference.start();
         let mut b = candidate.start();
-        let mut am = vec![0; reference.mask_len()];
+        let mut am = vec![0; reference.mask_bit_len().div_ceil(32)];
         let mut bm = am.clone();
         for byte in prefix.bytes().map(Some).chain([None]) {
             a.fill_mask(&mut am);
@@ -191,8 +191,8 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
         assert!(right.commit_bytes(literal.as_bytes()));
         assert_eq!(left.is_accepting(), right.is_accepting());
         assert!(left.is_accepting());
-        let mut a = vec![0; fresh.mask_len()];
-        let mut b = vec![0; loaded.mask_len()];
+        let mut a = vec![0; fresh.mask_bit_len().div_ceil(32)];
+        let mut b = vec![0; loaded.mask_bit_len().div_ceil(32)];
         left.fill_mask(&mut a);
         right.fill_mask(&mut b);
         assert_eq!(a, b);

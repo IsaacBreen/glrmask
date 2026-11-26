@@ -9,6 +9,8 @@ def _bound_snapshot(source, name, value):
 import pytest
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
@@ -54,7 +56,7 @@ def test_named_external_terminal_binding(factory):
     constraint = factory()
     state = constraint.start()
     assert state.commit_token(0)
-    mask = state.mask(size=79)
+    mask = unpack_mask(state.mask(), 79)
     assert mask[77] and mask[78]
     assert state.commit_token(77)
     assert state.is_accepting()
@@ -81,12 +83,12 @@ def test_empty_event_binding_recognizes_no_output():
         # The preceding literal can be a locally viable parser prefix. Empty
         # event sets promise no successful event/complete match, not a new global
         # dead-production elimination policy. Check the actual event boundary.
-        prefix_mask = state.mask(size=79)
+        prefix_mask = unpack_mask(state.mask(), 79)
         assert not prefix_mask[1:].any()
         if prefix_mask[0]:
             assert state.commit_token(0)
         assert not state.is_accepting()
-        assert not state.mask(size=79).any()
+        assert not unpack_mask(state.mask(), 79).any()
         assert not state.copy().commit_forced_tokens()
 
 

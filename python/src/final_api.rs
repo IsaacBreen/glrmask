@@ -12,8 +12,7 @@ pub(super) fn api_error(error: glrmask::Error) -> PyErr {
 }
 
 pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
-    let max_token = inner.max_original_token_id().unwrap_or(0);
-    PyConstraint { inner: Arc::new(inner), max_token }
+    PyConstraint { inner: Arc::new(inner) }
 }
 
 /// Cost preferences, not engine selections or performance guarantees.

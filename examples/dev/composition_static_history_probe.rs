@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let step = args[5].parse::<usize>()?;
     let repeats = args.get(7).map(|v| v.parse::<usize>()).transpose()?.unwrap_or(501);
     assert!(selected < traces.len() && step <= traces[selected].token_ids.len() && repeats > 0);
-    let mut mask = vec![0; constraint.mask_len()];
+    let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
     for trace in traces.iter().take(selected) {
         let mut state = constraint.start();
         for &token in &trace.token_ids {

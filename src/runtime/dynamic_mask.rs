@@ -9096,7 +9096,7 @@ pub(crate) fn try_fill_recursive_mask_shared(
     if !state.constraint.uses_compact_segmented_parser_runtime() {
         return Ok(false);
     }
-    let required = state.constraint.mask_len();
+    let required = state.constraint.mask_bit_len().div_ceil(32);
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (mask, tail) = buf.split_at_mut(required);
     tail.fill(0);
@@ -9206,7 +9206,7 @@ fn fill_recursive_mask_using_roots<T: FullWalkTransitionTable>(
     state: &ConstraintState, buf: &mut [u32], transitions: &mut T,
     vocab: &DynamicMaskVocab, roots: &DynamicBranches,
 ) -> Result<bool, String> {
-    let required = state.constraint.mask_len();
+    let required = state.constraint.mask_bit_len().div_ceil(32);
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (buf, tail) = buf.split_at_mut(required);
     tail.fill(0);
@@ -9542,7 +9542,7 @@ impl PreparedMaskVocabulary {
             max_original_byte_len = max_original_byte_len.max(
                 constraint.token_bytes_for_id(token).map_or(0, <[u8]>::len));
             let word = token as usize / 32;
-            if word >= constraint.mask_len() {
+            if word >= constraint.mask_bit_len().div_ceil(32) {
                 return Err(format!("candidate token {token} exceeds the model vocabulary"));
             }
             // Invalid IDs remain errors even if no byte head can be consumed.
@@ -9588,7 +9588,7 @@ impl PreparedMaskVocabulary {
             buf.get(id as usize / 32).is_none_or(|&w| w & (1 << (id % 32)) == 0)
         }).collect::<Vec<_>>();
         if pending.is_empty() { return Ok(true); }
-        let mut scratch = vec![0u32; state.constraint.mask_len()];
+        let mut scratch = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
         let filled = if let Some(vocab) = self.cached_vocab(&self.original_ids)? {
             fill_recursive_mask_additive_vocab(state, &mut scratch, &vocab, buf)?
         } else if self.policy == PreparedVocabularyPolicy::DeadHeadPreflight
@@ -9626,7 +9626,7 @@ impl PreparedMaskVocabulary {
             buf.get(id as usize / 32).is_none_or(|w| w & (1 << (id % 32)) == 0)
         }).collect::<Vec<_>>();
         if key.is_empty() { return Ok(true); }
-        let mut mask = vec![0u32; state.constraint.mask_len()];
+        let mut mask = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
         let profile = crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDARY_CANDIDATE_TRIE").is_some();
         // Includes view selection and actual construction, not only warm walk.
         let started = profile.then(Instant::now);
@@ -10399,7 +10399,7 @@ mod tests {
                     assert_eq!(a.full_walk_token_markers(),b.full_walk_token_markers());
                     for prefix in [b"".as_slice(),b"P",b"Pa",b"Pab",b"Pac",b"PabQ"] {
                         let mut state=c.start();assert!(state.commit_bytes(prefix));
-                        let mut x=vec![0;c.mask_len()];let mut y=x.clone();
+                        let mut x=vec![0;c.mask_bit_len().div_ceil(32)];let mut y=x.clone();
                         assert!(try_fill_recursive_mask_with_vocab(&state,&mut x,&a).unwrap());
                         assert!(try_fill_recursive_mask_with_vocab(&state,&mut y,&b).unwrap());
                         assert_eq!(x,y,"nullable={nullable}, ids={ids:?}, prefix={prefix:?}");
@@ -10471,7 +10471,7 @@ mod tests {
                     }
                 }
                 saw_simultaneous_siblings |= owners.len() >= 2;
-                let mut expected = vec![0; constraint.mask_len()];
+                let mut expected = vec![0; constraint.mask_bit_len().div_ceil(32)];
                 state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                 for _ in 0..3 {
                     assert_eq!(state.mask(), expected, "mode={mode}, prefix={prefix:?}, owners={owners:?}");
@@ -10510,7 +10510,7 @@ mod tests {
         let prepared = PreparedMaskVocabulary::new(&bound,&ids).unwrap();
         let filtered = PreparedMaskVocabulary::new(&bound,&ids).unwrap();
         let mut state = bound.start(); assert!(state.commit_bytes(b"X"));
-        let mut full = vec![0;bound.mask_len()];
+        let mut full = vec![0;bound.mask_bit_len().div_ceil(32)];
         state.fill_recursive_mask_by_exact_full_walk(&mut full);
         let mut seed=0xb3ea1935u32;
         // More distinct views than the bounded cache can hold. Preserve all
@@ -10554,7 +10554,7 @@ mod tests {
                 let reference = PreparedMaskVocabulary::new_with_policy(&bound, &ids, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
                 let reusable = PreparedMaskVocabulary::new_with_policy(&bound, &ids, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
                 for seed in 0..7u32 {
-                    let initial = (0..bound.mask_len()).map(|w| match seed {
+                    let initial = (0..bound.mask_bit_len().div_ceil(32)).map(|w| match seed {
                         0=>0,1=>u32::MAX,2=>0x55555555,3=>0xaaaaaaaa,
                         _=>(w as u32).wrapping_mul(1664525).wrapping_add(seed*101390422),
                     }).collect::<Vec<_>>();
@@ -10562,7 +10562,7 @@ mod tests {
                     assert!(reference.or_mask_filtered(&state,&mut a).unwrap());
                     assert!(reusable.or_mask_with_pre_admission(&state,&mut b).unwrap());
                     assert_eq!(a,b,"nullable={nullable} prefix={prefix:?} seed={seed}");
-                    let mut full_a=vec![0;bound.mask_len()];let mut full_b=full_a.clone();
+                    let mut full_a=vec![0;bound.mask_bit_len().div_ceil(32)];let mut full_b=full_a.clone();
                     assert!(reference.or_mask_filtered(&state,&mut full_a).unwrap());
                     assert!(reusable.or_mask_filtered(&state,&mut full_b).unwrap());
                     assert_eq!(full_a,full_b,"partial result must not poison full result cache");
@@ -10651,7 +10651,7 @@ mod tests {
     /// Check the independent oracle, natural probation/store path, and a
     /// genuine cached hit. A hit must not run the vocabulary walker again.
     fn assert_recursive_persistent_roundtrip(state: &ConstraintState) {
-        let mut expected = vec![0; state.constraint.mask_len()];
+        let mut expected = vec![0; state.constraint.mask_bit_len().div_ceil(32)];
         state.fill_recursive_mask_by_exact_full_walk(&mut expected);
         let mut output = vec![u32::MAX; expected.len() + 3];
         for _ in 0..2 {
@@ -10698,7 +10698,7 @@ mod tests {
                 }
                 for prefix in ["","X","Xa","Xa!"] {
                     let mut state=constraint.start();assert!(state.commit_bytes(prefix.as_bytes()));
-                    let mut a=vec![0;constraint.mask_len()];let mut b=a.clone();
+                    let mut a=vec![0;constraint.mask_bit_len().div_ceil(32)];let mut b=a.clone();
                     assert_eq!(try_fill_recursive_mask_with_vocab(&state,&mut a,&owned).unwrap(),
                         try_fill_recursive_mask_with_vocab(&state,&mut b,&borrowed).unwrap());
                     assert_eq!(a,b,"domain={domain:?} prefix={prefix:?}");
@@ -10737,7 +10737,7 @@ mod tests {
                 }
                 for prefix in ["","X","Xa","Xa!"] {
                     let mut state=constraint.start();assert!(state.commit_bytes(prefix.as_bytes()));
-                    let mut a=vec![0;constraint.mask_len()];let mut b=a.clone();
+                    let mut a=vec![0;constraint.mask_bit_len().div_ceil(32)];let mut b=a.clone();
                     assert_eq!(try_fill_recursive_mask_with_vocab(&state,&mut a,&owned).unwrap(),
                         try_fill_recursive_mask_with_vocab(&state,&mut b,&borrowed).unwrap());
                     assert_eq!(a,b,"domain={domain:?} prefix={prefix:?}");
@@ -10766,7 +10766,7 @@ mod tests {
                     for depth in [1,2] {
                         let domain=PureMaskByteDomain::for_ids_with_depth(constraint,&[id],depth).unwrap();
                         let called=std::cell::Cell::new(false);
-                        let mut mask=vec![0;constraint.mask_len()];
+                        let mut mask=vec![0;constraint.mask_bit_len().div_ceil(32)];
                         assert!(fill_pure_byte_mask_with_factory(&state,&mut mask,domain,||{
                             called.set(true);PreparedMaskVocabulary::make_vocab(constraint,&[id])
                         }).unwrap());
@@ -10817,7 +10817,7 @@ mod tests {
         for fail_at in [1,2] {
             let mut transitions=Fails{calls:0,fail_at,pending:false};
             let called=std::cell::Cell::new(false);
-            let mut mask=vec![0;constraint.mask_len()];
+            let mut mask=vec![0;constraint.mask_bit_len().div_ceil(32)];
             let result=fill_pure_byte_mask_using_factory(&state,&mut mask,&mut transitions,domain.clone(),||{
                 called.set(true); PreparedMaskVocabulary::make_vocab(&constraint,&[0])
             });
@@ -10847,7 +10847,7 @@ mod tests {
                 constraint, &domain, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
             assert!(prepared.vocab.get().is_none());
             let mut state = constraint.start(); assert!(state.commit_bytes(b"P"));
-            let mut mask = vec![0; constraint.mask_len()];
+            let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
             assert!(prepared.or_mask(&state, &mut mask).unwrap());
             assert!(mask.iter().all(|&word| word == 0));
             assert!(prepared.vocab.get().is_none(), "all dead heads must not build the base");
@@ -10903,7 +10903,7 @@ mod tests {
                 for prefix in [b"".as_slice(), b"P", b"Px", b"Pxa", b"Pxa!"] {
                     let mut state = constraint.start(); assert!(state.commit_bytes(prefix));
                     for seed in 0..16u32 {
-                        let mut a = vec![0; constraint.mask_len()];
+                        let mut a = vec![0; constraint.mask_bit_len().div_ceil(32)];
                         for &id in &[0u32, 1, 2, 3, 5, 7, 8, 9, 20, 9001] {
                             if id.wrapping_mul(1664525).wrapping_add(seed) % 5 <= 1 {
                                 a[id as usize / 32] |= 1 << (id % 32);
@@ -10919,7 +10919,7 @@ mod tests {
             let mut state = constraint.start(); assert!(state.commit_bytes(b"P"));
             let prepared = PreparedMaskVocabulary::new_with_policy(constraint, &[2, 7, 9001],
                 PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
-            let mut mask = vec![0; constraint.mask_len()];
+            let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
             assert!(prepared.or_mask(&state, &mut mask).unwrap());
             assert!(token_allowed(&mask, 2) && token_allowed(&mask, 9001));
             assert!(!token_allowed(&mask, 7), "ordinary byte alias has no special route");
@@ -10949,7 +10949,7 @@ mod tests {
                 for prefix in ["", "X", "Xa", "Xaa", "Xa!"] {
                     let mut state = constraint.start();
                     assert!(state.commit_bytes(prefix.as_bytes()));
-                    let mut full = vec![0; constraint.mask_len()];
+                    let mut full = vec![0; constraint.mask_bit_len().div_ceil(32)];
                     state.fill_recursive_mask_by_exact_full_walk(&mut full);
                     for baseline in [vec![0; full.len()], full.clone()] {
                         let mut expected = baseline.clone();
@@ -10981,7 +10981,7 @@ mod tests {
             let prepared = PreparedMaskVocabulary::new(&bound, &[1,3,4]).unwrap();
             let mut state = bound.start(); assert!(state.commit_bytes(b"X"));
             for _ in 0..3 {
-                let mut actual = vec![0; bound.mask_len()];
+                let mut actual = vec![0; bound.mask_bit_len().div_ceil(32)];
                 prepared.or_mask(&state, &mut actual).unwrap();
                 assert!(token_allowed(&actual,1));
                 assert_eq!(token_allowed(&actual,3), word=="a");
@@ -11006,7 +11006,7 @@ mod tests {
             let prepared=PreparedMaskVocabulary::new(&bound,&domain).unwrap();
             for prefix in ["", "X", "Xa", "Xa!"] {
                 let mut state=bound.start();assert!(state.commit_bytes(prefix.as_bytes()));
-                let mut full=vec![0;bound.mask_len()];state.fill_recursive_mask_by_exact_full_walk(&mut full);
+                let mut full=vec![0;bound.mask_bit_len().div_ceil(32)];state.fill_recursive_mask_by_exact_full_walk(&mut full);
                 let mut expected=vec![0;full.len()];for &id in &domain {
                     expected[id as usize/32]|=full[id as usize/32]&(1<<(id%32));
                 }
@@ -11225,9 +11225,9 @@ mod tests {
                 for prefix in &prefixes {
                     let mut state = constraint.start_dynamic();
                     assert!(state.commit_bytes(prefix));
-                    let mut reference = vec![0u32; constraint.mask_len()];
+                    let mut reference = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                     state.fill_recursive_mask_by_exact_full_walk(&mut reference);
-                    let mut shared = vec![0u32; constraint.mask_len()];
+                    let mut shared = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                     for capacity in [0, 1, 2, 256, 2048] {
                         TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
                         assert!(
@@ -11356,7 +11356,7 @@ mod tests {
         // A colliding hash is only a bucket hint; exact equality remains
         // mandatory before a cached payload can be returned.
         let dyn_vocab = bound.dynamic_mask_vocab_for_runtime();
-        let mut actual = vec![0; bound.mask_len()];
+        let mut actual = vec![0; bound.mask_bit_len().div_ceil(32)];
         assert!(!dyn_vocab.copy_cached_mask_with_predicate(
             hash, |candidate| candidate == &ordinary_coordinate, &mut actual));
 
@@ -11409,8 +11409,8 @@ mod tests {
             assert_recursive_persistent_roundtrip(&state_a);
             assert_recursive_persistent_roundtrip(&state_b);
         }
-        let mut mask_a = vec![0; bound_a.mask_len()];
-        let mut mask_b = vec![0; bound_b.mask_len()];
+        let mut mask_a = vec![0; bound_a.mask_bit_len().div_ceil(32)];
+        let mut mask_b = vec![0; bound_b.mask_bit_len().div_ceil(32)];
         try_fill_recursive_mask_shared(&state_a, &mut mask_a).unwrap();
         try_fill_recursive_mask_shared(&state_b, &mut mask_b).unwrap();
         assert_ne!(mask_a, mask_b);
@@ -11455,7 +11455,7 @@ mod tests {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
                     assert!(state.commit_bytes(prefix.as_bytes()));
-                    let mut expected = vec![0;constraint.mask_len()];
+                    let mut expected = vec![0;constraint.mask_bit_len().div_ceil(32)];
                     state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                     let mut actual = vec![0;expected.len()];
                     struct CapacityGuard(usize);
@@ -12940,7 +12940,7 @@ nt start = A;
                 for prefix in ["X", "Xa", "Xaa"] {
                     let mut state = constraint.start();
                     assert!(state.commit_bytes(prefix.as_bytes()));
-                    let mut expected = vec![0; constraint.mask_len()];
+                    let mut expected = vec![0; constraint.mask_bit_len().div_ceil(32)];
                     state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                     for capacity in [0, 1, 2, 16, 2048] {
                         TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
@@ -12987,7 +12987,7 @@ nt start = A;
             // just to find zero-byte spellings, including after artifact load.
             let was_lazy = constraint.lazy_dynamic_mask_vocab.get().is_some();
             let blank = constraint.start();
-            let mut invalid = vec![0; constraint.mask_len()];
+            let mut invalid = vec![0; constraint.mask_bit_len().div_ceil(32)];
             for id in [0u32, 7, 31] { set_mask_bit(&mut invalid, id); }
             blank.clear_late_grammar_placeholder_mask(&mut invalid);
             assert!(invalid.iter().all(|&word| word == 0));
@@ -12995,7 +12995,7 @@ nt start = A;
             for prefix in ["", "X", "Xa", "Xa!"] {
                 let mut state = constraint.start();
                 assert!(state.commit_bytes(prefix.as_bytes()));
-                let mut oracle = vec![0; constraint.mask_len()];
+                let mut oracle = vec![0; constraint.mask_bit_len().div_ceil(32)];
                 state.fill_recursive_mask_by_exact_full_walk(&mut oracle);
                 let mut actual = vec![u32::MAX; oracle.len()];
                 assert!(recursive_provider::fill(&state, &mut actual).unwrap());

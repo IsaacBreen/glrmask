@@ -92,9 +92,9 @@ export declare class TokenSet implements Disposable {
 
 /** Options for compiling a grammar or module. */
 export interface CompileOptions {
-  /** How masks are computed. Defaults to `MaskStrategy.Auto`. */
+  /** Cost preference for computing masks. Defaults to `MaskStrategy.Auto`. */
   maskStrategy?: MaskStrategy;
-  /** How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
+  /** Cost preference for masks at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
   boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
@@ -207,8 +207,8 @@ export declare class Module implements Disposable {
 export declare class Constraint implements Disposable {
   private constructor();
   private readonly __constraintBrand: void;
-  /** The number of `u32` words in a mask. */
-  readonly maskLength: number;
+  /** Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need Math.ceil(N / 32) words, where N is this value. */
+  readonly maskBitLength: number;
   /** A new handle to the same object. */
   clone(): Constraint;
   /** A new state with nothing committed. */
@@ -235,13 +235,13 @@ export declare class Constraint implements Disposable {
 export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;
-  /** The number of `u32` words in a mask. */
-  readonly maskLength: number;
+  /** Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need Math.ceil(N / 32) words, where N is this value. */
+  readonly maskBitLength: number;
   /** A copy of the state. */
   clone(): ConstraintState;
-  /** The tokens allowed next, as a bitmask. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
+  /** Allowed token IDs as a packed bitmask. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
   mask(): Uint32Array;
-  /** Writes the mask into `output`, zeroing any extra elements. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `maskLength` elements. */
+  /** Writes the mask into `output`, zeroing any extra elements. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
   /** Commits a token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;

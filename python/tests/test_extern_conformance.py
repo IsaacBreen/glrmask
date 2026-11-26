@@ -1,5 +1,7 @@
 """Exact event semantics must survive open preparation, caching and serialization."""
 import glrmask as g
+from mask_helpers import token_allowed, unpack_mask
+
 import pytest
 
 
@@ -40,7 +42,7 @@ def verify(constraint, prefix, allowed, accepting, forced, *, conservative=False
     else:
         assert actual == forced
     for token in actual:
-        assert state.mask()[token]
+        assert token_allowed(state.mask(), token)
         assert state.commit_token(token)
     assert branch.is_accepting() == state.is_accepting()
     assert (branch.mask() == state.mask()).all()

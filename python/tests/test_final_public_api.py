@@ -6,6 +6,8 @@ import pytest
 import glrmask
 
 
+from mask_helpers import token_allowed, unpack_mask
+
 def vocab():
     return glrmask.Vocab({0: b'a', 1: b'b', 2: b'a', 3: b'x', 7: b'a', 8: b'', 63: b''})
 
@@ -63,7 +65,7 @@ def test_json_schema_constructor_accepts_text_and_objects():
     for schema in ['{"const":1}', {'const': 1}]:
         c = glrmask.Grammar.from_json_schema(schema).compile(v)
         s = c.start()
-        assert s.mask()[0] and not s.mask()[1]
+        assert token_allowed(s.mask(), 0) and not token_allowed(s.mask(), 1)
         assert s.commit_token(0)
         assert s.is_accepting()
 
@@ -90,7 +92,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
         _bound_snapshot(bound, 'C::sub', child)
     complete = _bound_snapshot(bound, 'C', child)
     assert list(complete.externs.unbound) == []
-    assert complete.compile(v).start().mask()[7]
+    assert token_allowed(complete.compile(v).start().mask(), 7)
 
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
@@ -103,9 +105,9 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     s.fill_mask(words)
     assert words[-2:].tolist() == [0, 0]
     assert not s.is_accepting() and not (not s.mask().any())
-    assert s.mask()[0]
+    assert token_allowed(s.mask(), 0)
     assert s.commit_token(0)
-    assert s.mask()[130]
+    assert token_allowed(s.mask(), 130)
     assert s.commit_token(130)
     assert s.is_accepting() and not np.any(s.mask())
     assert not s.commit_token(0)
@@ -117,7 +119,7 @@ def test_description_owns_source_bindings_after_collection():
     a = _bound_snapshot(parent, 'C', child_source)
     del parent, child_source, v
     gc.collect()
-    assert a.compile(vocab()).start().mask()[0]
+    assert token_allowed(a.compile(vocab()).start().mask(), 0)
 
 
 def test_artifact_ownership_and_existing_vocab_validation():
@@ -130,7 +132,7 @@ def test_artifact_ownership_and_existing_vocab_validation():
     c = glrmask.Constraint.load(raw, v)
     s = c.start()
     assert s.commit_token(0)
-    assert s.mask()[130]
+    assert token_allowed(s.mask(), 130)
     with pytest.raises(ValueError):
         glrmask.Constraint.load(raw[:-1], v)
     other = glrmask.Vocab({0: b'changed'})
@@ -166,12 +168,12 @@ def test_token_set_and_sparse_membership_validation():
         glrmask.TokenSet([2**24])
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
-        assert np.flatnonzero(c.start().mask()).tolist() == [id]
+        assert np.flatnonzero(unpack_mask(c.start().mask())).tolist() == [id]
     text = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(ValueError):
         _bound_snapshot(g, "item", text)
     general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
-    assert np.flatnonzero(_bound_snapshot(general, "item", text).compile(v).start().mask()).tolist() == [2, 7]
+    assert np.flatnonzero(unpack_mask(_bound_snapshot(general, "item", text).compile(v).start().mask())).tolist() == [2, 7]
 
 
 def test_source_constructors_reject_invalid_source_at_construction():
@@ -195,7 +197,7 @@ def test_strategy_presets_are_distinct_and_legacy_tuning_is_not_public():
     for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS):
         for boundary in (glrmask.BoundaryMaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS):
             c = grammar.compile(vocab(), mask_strategy=mode, boundary_mask_strategy=boundary)
-            assert c.start().mask()[0]
+            assert token_allowed(c.start().mask(), 0)
     for bad in ["token-trie", "parser-dwa", 2, object(), {"kind": "token-trie"}]:
         with pytest.raises(TypeError):
             grammar.compile(vocab(), mask_strategy=bad)
@@ -221,7 +223,7 @@ def test_module_load_takes_only_bytes_and_from_expr_is_positional():
     with pytest.raises(TypeError):
         glrmask.Module.load(data, v)
     grammar = _module_expr(glrmask.TokenSet([0]))
-    assert grammar.compile(v).start().mask()[0]
+    assert token_allowed(grammar.compile(v).start().mask(), 0)
 
 
 def test_public_reprs_are_stable_and_python_quoted():
@@ -266,7 +268,7 @@ def test_bind_requires_a_token_set_for_a_token_extern():
     assert module.bind("T", glrmask.TokenSet([0])) is None
     assert len(module.externs.unbound) == 0
     state = module.compile(v).start()
-    assert state.mask()[0] and state.commit_token(0) and state.is_accepting()
+    assert token_allowed(state.mask(), 0) and state.commit_token(0) and state.is_accepting()
 
     for token_id in (0, -1, 2**32):
         with pytest.raises(TypeError):

@@ -333,7 +333,7 @@ mod tests {
             assert!(constraint.table.as_lr().is_none());
             MASK_SUCCESSES.with(|count| count.set(0));
             let mut state = constraint.start();
-            let mut mask = vec![0u32; constraint.mask_len()];
+            let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
             let mut balance = 0i32;
             for committed in [None, Some(0u32), Some(1u32)] {
                 if let Some(token) = committed {
@@ -552,7 +552,7 @@ mod tests {
                 let mut state = constraint.start();
                 SUCCESSES.with(|count| count.set(0));
                 for _ in 0..3 {
-                    let mut mask = vec![0; constraint.mask_len()];
+                    let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
                     state.fill_mask(&mut mask);
                     assert_ne!(mask[0] & 1, 0);
                     assert!(state.commit_token(0));

@@ -2110,7 +2110,7 @@ fn nullable_terminal_root_loop_is_preserved_by_isolated_partitions() {
 fn plan_style_mask_buffer_matches_mask() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let mut state = constraint.start();
-    let mut buffer = vec![0; constraint.mask_len()];
+    let mut buffer = vec![0; constraint.mask_bit_len().div_ceil(32)];
 
     state.fill_mask(&mut buffer);
     assert_eq!(buffer, state.mask());

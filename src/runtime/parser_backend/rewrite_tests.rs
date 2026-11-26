@@ -194,8 +194,8 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
             let mut b = constraint.start();
             assert_eq!(a.commit_bytes(bytes), b.commit_bytes(bytes));
             assert_eq!(a.is_accepting(), b.is_accepting());
-            let mut left = vec![0; candidate.mask_len()];
-            let mut right = vec![0; constraint.mask_len()];
+            let mut left = vec![0; candidate.mask_bit_len().div_ceil(32)];
+            let mut right = vec![0; constraint.mask_bit_len().div_ceil(32)];
             a.fill_mask(&mut left);
             b.fill_mask(&mut right);
             assert_eq!(left, right, "prefix {bytes:?}");
@@ -461,7 +461,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
                 let mut state = constraint.start();
                 assert!(state.commit_bytes(&prefix));
                 assert_eq!(state.mask().get(2).is_some_and(|word| word & 1 != 0), depth == 0);
-                let mut mask = vec![0; constraint.mask_len()];
+                let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
                 state.fill_mask(&mut mask);
                 assert!(mask[0] & 1 != 0);
                 assert_eq!(mask[0] & 2 != 0, depth != 0);

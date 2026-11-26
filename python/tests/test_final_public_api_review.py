@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
@@ -52,8 +54,8 @@ def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     c = _bound_snapshot(parent, "child", child).compile(v)
     state = c.start()
     mask = np.asarray(state.mask())
-    assert mask.dtype == np.bool_
-    assert mask[4]
+    assert mask.dtype == np.uint32
+    assert token_allowed(mask, 4)
     assert state.commit_token(4)
     assert accepting(state)
     with pytest.raises((ValueError, RuntimeError)):
@@ -71,7 +73,7 @@ def test_module_save_load_remains_open_and_immutable():
     loaded = glrmask.Module.load(artifact)
     child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     bound = _bound_snapshot(loaded, "child", child).compile(v)
-    assert bound.start().mask()[4]
+    assert token_allowed(bound.start().mask(), 4)
     for open_mod in [host, loaded]:
         with pytest.raises((ValueError, RuntimeError)):
             open_mod.compile(v)
@@ -86,8 +88,8 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     assert repr(value) == "TokenSet.from_ranges([range(7, 8), range(63, 64)])"
     c = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", value).compile(v)
     mask = c.start().mask()
-    assert mask[7] and mask[63]
-    assert not mask[1]  # Same bytes as token 7, not the same token ID.
+    assert token_allowed(mask, 7) and token_allowed(mask, 63)
+    assert not token_allowed(mask, 1)  # Same bytes as token 7, not the same token ID.
     empty = glrmask.TokenSet([])
     assert empty == glrmask.TokenSet.from_ranges([])
     for mode in MODES:
@@ -112,9 +114,9 @@ def test_nested_path_and_open_child_are_rejected():
     parent.bind("child", child)
     c = parent.compile(v)
     state = c.start()
-    assert not state.mask()[4]
+    assert not token_allowed(state.mask(), 4)
     assert state.commit_token(0)
-    assert state.mask()[7] and not state.mask()[1]
+    assert token_allowed(state.mask(), 7) and not token_allowed(state.mask(), 1)
     assert state.commit_token(7)
     assert state.commit_token(3)
     assert accepting(state)
@@ -130,7 +132,7 @@ def test_precompiled_module_with_precompiled_child():
     parent.bind("child", child)
     state = parent.compile(v).start()
     for token in [0, 7, 3]:
-        assert state.mask()[token]
+        assert token_allowed(state.mask(), token)
         assert state.commit_token(token)
     assert accepting(state)
 
@@ -141,7 +143,7 @@ def test_state_retains_constraint_after_python_owner_is_collected():
     state = constraint.start()
     del constraint, v
     gc.collect()
-    assert state.mask()[1]
+    assert token_allowed(state.mask(), 1)
     assert state.commit_token(1)
     assert accepting(state)
 
@@ -153,12 +155,12 @@ def test_token_membership_is_checked_against_target_without_identity_guarantees(
     desc = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.TokenSet([7]))
     for target in [v, vocab(different)]:
         mask = desc.compile(target).start().mask()
-        assert mask[7] and not mask[1]
+        assert token_allowed(mask, 7) and not token_allowed(mask, 1)
     with pytest.raises(ValueError):
         _bound_snapshot(desc, "missing", glrmask.TokenSet([7]))
 
 
-def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
+def test_packed_numpy_fill_mask_agrees_with_allocating_mask():
     v = vocab()
     c = _bound_snapshot(glrmask.Module(glrmask.Grammar.from_glrm(MARK)), "MARK", glrmask.TokenSet([7, 63, 127])).compile(v)
     state = c.start()
@@ -166,7 +168,11 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
     state.fill_mask(words)
     actual = words.view(np.uint32)
     assert actual.tolist() == [1 << 7, 1 << 31, 0, 1 << 31, 0, 0]
-    assert np.flatnonzero(state.mask()).tolist() == [7, 63, 127]
+    packed = state.mask()
+    assert packed.dtype == np.uint32 and len(packed) == (c.mask_bit_len() + 31) // 32 == (state.mask_bit_len() + 31) // 32
+    assert np.array_equal(packed, actual[:len(packed)])
+    assert np.array_equal(state.mask(dtype=bool), unpack_mask(packed, state.mask_bit_len()))
+    assert np.flatnonzero(unpack_mask(state.mask())).tolist() == [7, 63, 127]
 
 
 @pytest.mark.parametrize("mode_name", ["AUTO", "FAST_COMPILE", "FAST_MASKS"])
@@ -178,19 +184,19 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     child = _module_expr(glrmask.Expr.sequence(child_source, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
     child = glrmask.Constraint.load(child.save(), v)
     own_state = child.start()
-    assert not own_state.mask()[127]
+    assert not token_allowed(own_state.mask(), 127)
     assert own_state.commit_token(1)
-    assert not accepting(own_state) and own_state.mask()[127]
+    assert not accepting(own_state) and token_allowed(own_state.mask(), 127)
     parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
     root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
     root.bind(BODY=parent_mod, END=glrmask.TokenSet([63]))
     c = root.compile(v, mask_strategy=mode)
     state = c.start()
-    assert state.mask()[4]
+    assert token_allowed(state.mask(), 4)
     assert state.commit_token(4)
     assert not accepting(state)
-    assert state.mask()[63] and not state.mask()[127]
+    assert token_allowed(state.mask(), 63) and not token_allowed(state.mask(), 127)
     assert state.commit_token(63)
     assert accepting(state)
     assert not np.any(state.mask())

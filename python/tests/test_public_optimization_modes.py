@@ -11,6 +11,8 @@ import numpy as np
 import pytest
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
@@ -36,9 +38,9 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             assert state.copy().commit_forced_tokens() == expected.copy().commit_forced_tokens()
             assert state.is_accepting() == expected.is_accepting()
             assert not state.is_accepting()
-            assert not mask[25]
+            assert not token_allowed(mask, 25)
             snapshot = state.copy()
-            if mask[100]:
+            if token_allowed(mask, 100):
                 assert state.commit_token(100)
                 assert state.is_accepting()
             else:
@@ -83,8 +85,8 @@ def test_exact_token_identity_survives_source_compilation(mode):
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
-        assert state.mask()[15]
-        assert not state.mask()[0]
+        assert token_allowed(state.mask(), 15)
+        assert not token_allowed(state.mask(), 0)
         assert state.commit_token(15)
         assert state.is_accepting()
 
@@ -107,7 +109,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
             if n == 30:
                 assert state.commit_token(1)
                 assert not state.is_accepting()
-                assert state.mask()[100]
+                assert token_allowed(state.mask(), 100)
                 assert state.commit_token(100)
                 assert state.is_accepting() and not state.mask().any()
                 assert not state.mask().any()
@@ -135,8 +137,8 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
             assert state.copy().commit_forced_tokens() == expected.copy().commit_forced_tokens()
             assert np.array_equal(state.copy().mask(), expected.mask())
         state = constraint.start()
-        assert state.mask()[3] and state.mask()[7]
-        assert not state.mask()[8] and not state.mask()[9]
+        assert token_allowed(state.mask(), 3) and token_allowed(state.mask(), 7)
+        assert not token_allowed(state.mask(), 8) and not token_allowed(state.mask(), 9)
         assert state.commit_token(7)
         assert not state.is_accepting()
         assert state.commit_token(100)

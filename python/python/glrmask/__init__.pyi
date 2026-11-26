@@ -26,9 +26,7 @@ vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
 grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
 constraint = grammar.compile(vocab)
 state = constraint.start()
-for token_id, expected in [(0, [True, False, False]),
-                           (1, [False, True, False]),
-                           (2, [False, False, True])]:
+for token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:
     assert state.mask().tolist() == expected
     assert state.commit_token(token_id)
 assert state.is_accepting()
@@ -255,8 +253,8 @@ class Constraint:
     def start(self) -> ConstraintState:
         """A new state with nothing committed."""
         ...
-    def mask_len(self) -> int:
-        """The number of `int32` words that `fill_mask` needs."""
+    def mask_bit_len(self) -> int:
+        """Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words."""
         ...
     def save(self) -> bytes:
         """Saves the constraint as bytes, without the vocabulary.
@@ -272,20 +270,17 @@ class Constraint:
 @final
 class ConstraintState:
     """A constraint's state during generation."""
-    def mask(self, *, size: int | None = None) -> NDArray[np.bool_]:
-        """The tokens allowed next, as a NumPy `bool` array indexed by token ID.
-
-        `size` sets the array length, for example to match your logits; it must cover every token ID.
-        """
+    def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
+        """Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID. For signed packed words, use mask().view(np.int32) without copying. To pad to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool)."""
         ...
     def fill_mask(self, bitmask: NDArray[np.int32] | NDArray[np.uint32], /) -> None:
-        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `Constraint.mask_len()` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
 
         Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
         """
         ...
-    def mask_len(self) -> int:
-        """The number of `int32` words that `fill_mask` needs."""
+    def mask_bit_len(self) -> int:
+        """Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
         """Commits a token. If it isn't allowed, returns `False` and terminates the state."""

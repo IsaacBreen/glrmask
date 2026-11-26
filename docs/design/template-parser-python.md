@@ -1,3 +1,5 @@
+> Historical internal design note; its old API examples are not the GLRMask 1.0 public surface.
+
 > Design notes from development. Type and option names may be out of date; [GUIDE.md](../../GUIDE.md) describes the current API.
 
 # Table-free parsers from Python
@@ -79,9 +81,9 @@ constraint = program.compile(
     end_tokens=[63],
 )
 state = constraint.start()
-assert state.mask()[0] and state.mask()[1] and not state.mask()[2]
+assert int(state.mask()[0]) & 7 == 3
 state.commit_token(1)
-assert state.is_accepting() and state.mask()[63]
+assert state.is_accepting() and (int(state.mask()[1]) & (1 << 31))
 ```
 
 Each transition has `{"label": {"Symbol": 0}, "target": 1}` shape. A POP default

@@ -89,7 +89,7 @@ fn run(case:&str,text:&str,mode:MaskMode,n:usize,reps:usize)->Result<Value,Box<d
     let (ploaded,prepared_load_ns)=time(||Prepared::load(psaved,&v));assert_eq!(mask_trace(&ploaded?.link_with(options.clone())?,&ids),fingerprint);
     // Validation and allocator warmup are outside the sampled trace loop.
     for _ in 0..20 {black_box(mask_trace(&c,&ids));}
-    let mut start_times=Vec::new();let mut masks=Vec::new();let mut commits=Vec::new();let mut total=Vec::new();let mut output=vec![0;c.mask_len()];
+    let mut start_times=Vec::new();let mut masks=Vec::new();let mut commits=Vec::new();let mut total=Vec::new();let mut output=vec![0;c.mask_bit_len().div_ceil(32)];
     for _ in 0..reps {
         let begin=Instant::now();let (mut s,t)=time(||c.start());start_times.push(t);
         for &id in &ids {

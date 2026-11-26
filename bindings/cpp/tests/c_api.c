@@ -6,7 +6,7 @@
 int main(void) {
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==5);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
+    CHECK(glrmask_abi_version()==6);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_INPUT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,&vocab)==GLRMASK_OK);
     {
@@ -40,9 +40,13 @@ int main(void) {
             glrmask_compile_options requested; CHECK(glrmask_compile_options_init(&requested,sizeof(requested))==GLRMASK_OK);
             requested.mask_strategy=modes[i]; requested.boundary_mask_strategy=modes[j];
             CHECK(glrmask_grammar_compile(grammar,vocab,&requested,&constraint)==GLRMASK_OK);
-            glrmask_state* probe=NULL;uint32_t words[1]={0};
+            size_t n=0,m=0;glrmask_state* probe=NULL;uint32_t words[2]={0xffffffff,0xffffffff};
+            CHECK(glrmask_constraint_mask_bit_len(constraint,&n)==GLRMASK_OK && n==32);
             CHECK(glrmask_constraint_start(constraint,&probe)==GLRMASK_OK);
-            CHECK(glrmask_state_fill_mask(probe,words,1)==GLRMASK_OK && words[0]==0x80000001);
+            CHECK(glrmask_state_mask_bit_len(probe,&m)==GLRMASK_OK && n==m);
+            CHECK(glrmask_state_fill_mask(probe,words,(n+31)/32)==GLRMASK_OK && words[0]==0x80000001);
+            CHECK(glrmask_state_fill_mask(probe,words,0)==GLRMASK_BUFFER_TOO_SMALL);
+            CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[1]==0);
             glrmask_state_free(probe);glrmask_constraint_free(constraint);constraint=NULL;
         }
     }
@@ -158,5 +162,26 @@ int main(void) {
     const uint8_t* invalid_data=(const uint8_t*)(uintptr_t)1; size_t invalid_len=123;
     CHECK(glrmask_bytes_data(NULL,&invalid_data,&invalid_len)==GLRMASK_INVALID_INPUT);
     CHECK(invalid_data==NULL && invalid_len==0);
+    {
+        const size_t lengths[]={0,33,63,64};
+        for (size_t i=0;i<4;i++){
+            size_t n=lengths[i],w=(n+31)/32,cn=99,sn=99;
+            glrmask_vocab_entry e={(uint32_t)(n?n-1:0),a,1};
+            CHECK(glrmask_vocab_new(n?&e:NULL,n?1:0,&vocab)==GLRMASK_OK);
+            CHECK(glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&grammar)==GLRMASK_OK);
+            CHECK(glrmask_grammar_compile(grammar,vocab,NULL,&constraint)==GLRMASK_OK);
+            CHECK(glrmask_constraint_mask_bit_len(constraint,&cn)==GLRMASK_OK && cn==n);
+            CHECK(glrmask_constraint_start(constraint,&state)==GLRMASK_OK);
+            CHECK(glrmask_state_mask_bit_len(state,&sn)==GLRMASK_OK && sn==n);
+            uint32_t out[4]={123,123,123,123};
+            if(w){CHECK(glrmask_state_fill_mask(state,out,w-1)==GLRMASK_BUFFER_TOO_SMALL);CHECK(out[0]==123);}
+            CHECK(glrmask_state_fill_mask(state,out,w)==GLRMASK_OK);
+            if(n) CHECK(out[(n-1)/32] & (UINT32_C(1)<<((n-1)%32)));
+            CHECK(glrmask_state_fill_mask(state,out,w+2)==GLRMASK_OK);
+            CHECK(out[w]==0 && out[w+1]==0);
+            if(n){CHECK(glrmask_state_commit_token(state,(uint32_t)(n-1)));CHECK(glrmask_state_fill_mask(state,out,w)==GLRMASK_OK);for(size_t j=0;j<w;j++)CHECK(out[j]==0);}
+            glrmask_state_free(state);glrmask_constraint_free(constraint);glrmask_grammar_free(grammar);glrmask_vocab_free(vocab);
+        }
+    }
     puts("C ABI regression checks passed");return 0;
 }

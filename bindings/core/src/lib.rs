@@ -99,7 +99,7 @@ pub fn compile_options(
 /// A panicking operation poisons this state; it must then be discarded.
 pub struct State {
     state: glrmask::ConstraintState,
-    mask_len: usize,
+    mask_bit_len: usize,
     poisoned: AtomicBool,
 }
 
@@ -107,7 +107,7 @@ impl State {
     pub fn start(owner: Arc<glrmask::Constraint>) -> Result<Self> {
         guarded(|| Ok(Self {
             state: owner.start(),
-            mask_len: owner.mask_len(),
+            mask_bit_len: owner.mask_bit_len(),
             poisoned: AtomicBool::new(false),
         }))
     }
@@ -132,11 +132,11 @@ impl State {
         self.check()?;
         guarded(|| Ok(Self {
             state: self.state.clone(),
-            mask_len: self.mask_len,
+            mask_bit_len: self.mask_bit_len,
             poisoned: AtomicBool::new(false),
         }))
     }
-    pub fn mask_len(&self) -> usize { self.mask_len }
+    pub fn mask_bit_len(&self) -> usize { self.mask_bit_len }
     /// Rejects the state, exactly as a commit of an unknown token ID does.
     pub fn reject(&mut self) -> Result<()> {
         use glrmask::__private::ConstraintStateReject as _;
@@ -144,7 +144,7 @@ impl State {
     }
     pub fn mask(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.mask())) }
     pub fn fill_mask(&self, output: &mut [u32]) -> Result<()> {
-        let required = self.mask_len();
+        let required = self.mask_bit_len().div_ceil(32);
         if output.len() < required {
             return Err(Error::new(ErrorKind::BufferTooSmall, format!("mask needs at least {required} u32 words")));
         }

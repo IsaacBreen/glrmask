@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     let reparsed_compile_ns = started.elapsed().as_nanos();
     let original_report = native_report(&original)?;
     let reparsed_report = native_report(&reparsed)?;
-    if original.mask_len() != reparsed.mask_len() {
+    if original.mask_bit_len().div_ceil(32) != reparsed.mask_bit_len().div_ceil(32) {
         return Err("mask coordinates differ".into());
     }
 
@@ -101,8 +101,8 @@ fn main() -> Result<()> {
         ("combined_hex_value", r#"{"name": "x", "layoutId": "0123456789abcdefABCDEF01", "viewTags": {"tag": "x"}}"#, true),
         ("combined_null_invalid_key", r#"{"name": "x", "layoutId": null, "viewTags": {"tag!": "x"}}"#, false),
     ];
-    let mut original_mask = vec![0u32; original.mask_len()];
-    let mut reparsed_mask = vec![0u32; reparsed.mask_len()];
+    let mut original_mask = vec![0u32; original.mask_bit_len().div_ceil(32)];
+    let mut reparsed_mask = vec![0u32; reparsed.mask_bit_len().div_ceil(32)];
     let mut prefix_checks = 0usize;
     let mut byte_commit_checks = 0usize;
     let mut document_records = Vec::new();
@@ -218,9 +218,9 @@ fn main() -> Result<()> {
         "reparsed_glrm": fs::canonicalize(&args[2])?,
         "vocab_dump": fs::canonicalize(&args[3])?,
         "optimization": "FastRuntime", "parser_backend": "TemplateDfa",
-        "vocab_entries": vocab_count, "mask_words": original.mask_len(),
+        "vocab_entries": vocab_count, "mask_words": original.mask_bit_len().div_ceil(32),
         "full_mask_comparisons": prefix_checks,
-        "mask_words_compared": prefix_checks * original.mask_len(),
+        "mask_words_compared": prefix_checks * original.mask_bit_len().div_ceil(32),
         "byte_commit_comparisons": byte_commit_checks,
         "admitted_token_commit_comparisons": token_commit_checks,
         "original_compile_ns": original_compile_ns,

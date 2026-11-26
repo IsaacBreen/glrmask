@@ -100,7 +100,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskMode)
     let expected_mask = constraint.start().mask();
     assert_eq!(expected_mask.iter().map(|word| word.count_ones() as usize).sum::<usize>(), cardinality);
     assert_eq!(linked.start().mask(), expected_mask);
-    let mut mask = vec![0u32; constraint.mask_len()];
+    let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
     let mut start_samples = Vec::with_capacity(repetitions);
     let mut mask_samples = Vec::with_capacity(repetitions);
     let mut commit_samples = Vec::with_capacity(repetitions);
@@ -167,7 +167,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
     assert!(check.is_accepting());
     assert!(check.mask().iter().all(|&word| word == 0));
 
-    let mut mask = vec![0; constraint.mask_len()];
+    let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
     let mut starts = Vec::with_capacity(repetitions);
     let mut first_masks = Vec::with_capacity(repetitions);
     let mut second_masks = Vec::with_capacity(repetitions);

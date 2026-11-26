@@ -16,10 +16,10 @@ fn sequences() -> Vec<Vec<u32>> {
     all
 }
 fn compare_static(left: &Constraint, right: &Constraint) {
-    assert_eq!(left.mask_len(), right.mask_len());
+    assert_eq!(left.mask_bit_len().div_ceil(32), right.mask_bit_len().div_ceil(32));
     for tokens in sequences() {
         let mut a=left.start(); let mut b=right.start();
-        let mut am=vec![0;left.mask_len()]; let mut bm=am.clone();
+        let mut am=vec![0;left.mask_bit_len().div_ceil(32)]; let mut bm=am.clone();
         for token in tokens.into_iter().map(Some).chain([None]) {
             a.fill_mask(&mut am); b.fill_mask(&mut bm);
             assert_eq!(am,bm,"static mask at next token {token:?}");
@@ -31,10 +31,10 @@ fn compare_static(left: &Constraint, right: &Constraint) {
     }
 }
 fn compare_dynamic(left: &DynamicConstraint, right: &DynamicConstraint) {
-    assert_eq!(left.mask_len(), right.mask_len());
+    assert_eq!(left.mask_bit_len().div_ceil(32), right.mask_bit_len().div_ceil(32));
     for tokens in sequences() {
         let mut a=left.start(); let mut b=right.start();
-        let mut am=vec![0;left.mask_len()]; let mut bm=am.clone();
+        let mut am=vec![0;left.mask_bit_len().div_ceil(32)]; let mut bm=am.clone();
         for token in tokens.into_iter().map(Some).chain([None]) {
             a.fill_mask(&mut am); b.fill_mask(&mut bm);
             assert_eq!(am,bm,"dynamic mask at next token {token:?}");

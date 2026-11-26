@@ -34,7 +34,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             glrmask_constraint_free(constraint);
             glrmask_module_free(module);
             for token in [Some(0), Some(1), None] {
-                let mut words = vec![u32::MAX; rust.mask_len()];
+                let mut words = vec![u32::MAX; rust.mask_bit_len().div_ceil(32)];
                 assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), words.len()), 0);
                 assert_eq!(words, reference.mask(), "strategy {strategy}");
                 let mut accepting = 99;
@@ -167,7 +167,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
 
 #[test]
 fn status_codes_distinguish_error_kinds() {
-    assert_eq!(glrmask_abi_version(), 5);
+    assert_eq!(glrmask_abi_version(), 6);
     assert_eq!(status(core::ErrorKind::Syntax), 1);
     assert_eq!(status(core::ErrorKind::InvalidInput), 2);
     assert_eq!(status(core::ErrorKind::Compilation), 3);

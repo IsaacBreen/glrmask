@@ -38,8 +38,8 @@ void basic() {
         auto s = c.start();
         const auto initial = s.mask();
         CHECK(allowed(initial,0)); CHECK(allowed(initial,31)); CHECK(allowed(initial,32));
-        CHECK(!allowed(initial,1)); CHECK(!allowed(initial,65)); CHECK(s.mask_len()==3);
-        std::vector<TokenId> buffer(s.mask_len()+2, 0xffffffff);
+        CHECK(!allowed(initial,1)); CHECK(!allowed(initial,65)); CHECK(s.mask_bit_len()==66); CHECK(initial.size()==(s.mask_bit_len()+31)/32);
+        std::vector<TokenId> buffer((s.mask_bit_len()+31)/32+2, 0xffffffff);
         s.fill_mask(buffer); CHECK(std::equal(initial.begin(), initial.end(), buffer.begin()));
         CHECK(buffer[3]==0 && buffer[4]==0);
         std::vector<TokenId> short_buffer(1, 123); throws([&]{ s.fill_mask(short_buffer); }, GLRMASK_BUFFER_TOO_SMALL);
@@ -213,7 +213,7 @@ void threads_and_errors() {
     auto v = vocabulary(); auto c = simple().compile(v); std::atomic<bool> okay{true}; std::vector<std::thread> threads;
     for (int i=0; i<4; ++i) threads.emplace_back([&]{ try { for (int j=0; j<8; ++j) { auto s = c.start(); CHECK(s.commit_token(31)); if (!s.is_accepting()) okay=false; } } catch(...) { okay=false; } });
     for (auto& thread : threads) thread.join(); CHECK(okay);
-    std::size_t ignored = 0; CHECK(glrmask_constraint_mask_len(nullptr, &ignored)==GLRMASK_INVALID_INPUT);
+    std::size_t ignored = 0; CHECK(glrmask_constraint_mask_bit_len(nullptr, &ignored)==GLRMASK_INVALID_INPUT);
     const std::string main_error = glrmask_error_message();
     std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
     CHECK(main_error==glrmask_error_message());
@@ -308,7 +308,7 @@ void emit_parity() {
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
             for (std::size_t j=0; j<mask_words.size(); ++j) { if (j) std::cout << ','; std::cout << mask_words[j]; }
             std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false")
-                      << ",\"terminated\":" << (s.is_terminated()?"true":"false") << '}';
+                      << ",\"terminated\":" << (s.is_terminated()?"true":"false") << ",\"maskBitLength\":" << s.mask_bit_len() << '}';
         } std::cout << "]}";
     } std::cout << "]\n";
 }
@@ -437,11 +437,33 @@ void canonical_modules() {
             auto c = Grammar::from_lark("start: \"a\"").compile(v, CompileOptions{.mask_strategy=mask,.boundary_mask_strategy=boundary});
             auto state=c.start();
             CHECK(allowed(state.mask(), 1));
+            CHECK(state.mask().size()==(state.mask_bit_len()+31)/32 && state.mask_bit_len()==c.mask_bit_len());
         }
     CompileOptions wrong;
     wrong.mask_strategy = static_cast<MaskStrategy>(1);
     throws([&]{ Grammar::from_lark("start: \"a\"").compile(v, wrong); },GLRMASK_INVALID_INPUT);
 
+}
+
+void mask_bit_domain_lengths() {
+    for (std::size_t n : {0u,33u,63u,64u}) {
+        std::vector<VocabEntry> entries;
+        if (n) entries.emplace_back(static_cast<TokenId>(n-1),"a");
+        auto v = Vocab(entries);
+        auto c = Grammar::from_lark(R"(start: "a")").compile(v);
+        auto s = c.start();
+        CHECK(c.mask_bit_len()==n && s.mask_bit_len()==n);
+        auto packed=s.mask(); std::size_t w=(n+31)/32;
+        CHECK(packed.size()==w);
+        if (n) CHECK(allowed(packed,static_cast<TokenId>(n-1)));
+        for (std::size_t len : {w,w+2}) {
+            std::vector<TokenId> out(len,0xffffffff);
+            s.fill_mask(out);
+            CHECK(std::equal(packed.begin(),packed.end(),out.begin()));
+            CHECK(std::all_of(out.begin()+w,out.end(),[](auto x){return x==0;}));
+        }
+        if(w){std::vector<TokenId> out(w-1,123);throws([&]{s.fill_mask(out);},GLRMASK_BUFFER_TOO_SMALL);CHECK(std::all_of(out.begin(),out.end(),[](auto x){return x==123;}));CHECK(s.commit_token(static_cast<TokenId>(n-1)));s.fill_mask(packed);CHECK(packed==s.mask());}
+    }
 }
 
 int main(int argc, char** argv) {
@@ -455,6 +477,7 @@ int main(int argc, char** argv) {
         CHECK(argc==1);
         canonical_modules();
         basic();
+        mask_bit_domain_lengths();
         exact_and_unicode();
         end_tokens();
         reject_module_expr_in_grammar();

@@ -51,11 +51,11 @@ fn assert_pair_trace(
     trace: &[u32],
     final_accepting: bool,
 ) {
-    assert_eq!(left.mask_len(), right.mask_len());
+    assert_eq!(left.mask_bit_len().div_ceil(32), right.mask_bit_len().div_ceil(32));
     let mut a = left.start();
     let mut b = right.start();
-    let mut left_mask = vec![0u32; left.mask_len()];
-    let mut right_mask = vec![0u32; right.mask_len()];
+    let mut left_mask = vec![0u32; left.mask_bit_len().div_ceil(32)];
+    let mut right_mask = vec![0u32; right.mask_bit_len().div_ceil(32)];
     left_mask.fill(0);
     right_mask.fill(0);
     a.fill_mask(&mut left_mask);
@@ -95,8 +95,8 @@ fn assert_positive_trace(source: &str, trace: &[u32], final_accepting: bool) {
 
     let mut left = lr.start();
     let mut right = native.start();
-    let mut left_mask = vec![0u32; lr.mask_len()];
-    let mut right_mask = vec![0u32; native.mask_len()];
+    let mut left_mask = vec![0u32; lr.mask_bit_len().div_ceil(32)];
+    let mut right_mask = vec![0u32; native.mask_bit_len().div_ceil(32)];
     left.fill_mask(&mut left_mask);
     right.fill_mask(&mut right_mask);
     assert_eq!(left_mask, right_mask, "initial masks differ for {source:?}");
@@ -147,8 +147,8 @@ fn assert_parity_trace(source: &str, trace: &[u32]) {
     let native = compile(&vocab, source, ParserBackend::TemplateDfa);
     let mut left = lr.start();
     let mut right = native.start();
-    let mut left_mask = vec![0u32; lr.mask_len()];
-    let mut right_mask = vec![0u32; native.mask_len()];
+    let mut left_mask = vec![0u32; lr.mask_bit_len().div_ceil(32)];
+    let mut right_mask = vec![0u32; native.mask_bit_len().div_ceil(32)];
     for &token in trace {
         left_mask.fill(0);
         right_mask.fill(0);
@@ -181,7 +181,7 @@ fn acyclic_positive_trace_and_end_token() {
     assert!(state.commit_token(END_TOKEN), "end token commit at completion");
     assert!(state.is_accepting());
     // Root termination policy: the mask becomes empty and further commits fail.
-    assert_eq!(state.mask(), vec![0u32; lr.mask_len()]);
+    assert_eq!(state.mask(), vec![0u32; lr.mask_bit_len().div_ceil(32)]);
     assert!(!state.commit_token(0), "commit after termination must fail");
 
     // Committing an end token before grammar completion never reaches acceptance.
@@ -238,12 +238,12 @@ fn known_invalid_commit_drives_fail_state_like_native() {
     assert_eq!(left_result, right_result, "commit result must match native");
     assert_eq!(
         left.mask(),
-        vec![0u32; lr.mask_len()],
+        vec![0u32; lr.mask_bit_len().div_ceil(32)],
         "explicit LR fail-state mask must be all zero",
     );
     assert_eq!(
         right.mask(),
-        vec![0u32; native.mask_len()],
+        vec![0u32; native.mask_bit_len().div_ceil(32)],
         "native fail-state mask must be all zero",
     );
     assert_eq!(left.is_accepting(), right.is_accepting());

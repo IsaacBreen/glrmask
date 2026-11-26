@@ -3,6 +3,8 @@ import copy
 import gc
 
 import glrmask as g
+from mask_helpers import token_allowed, unpack_mask
+
 import pytest
 
 HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
@@ -20,7 +22,7 @@ def source(text='a'):
 def accepts(module, v, ids):
     state = module.compile(v).start()
     for token in ids:
-        assert state.mask()[token]
+        assert token_allowed(state.mask(), token)
         assert state.commit_token(token)
     assert state.is_accepting()
 
@@ -46,7 +48,7 @@ def test_compile_options_and_helpers():
         mask_strategy=g.MaskStrategy.FAST_MASKS,
         boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_COMPILE,
     ).start()
-    assert state.mask()[1]
+    assert token_allowed(state.mask(), 1)
     assert state.commit_token(1)
     assert state.is_accepting()
     accepts(module, v, [1])
@@ -61,9 +63,9 @@ def test_local_precompilation_and_root_only_compile():
     root = g.Module(g.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
     root.bind(BODY=parent, END=g.TokenSet([63]))
     state = root.compile(v, mask_strategy=g.MaskStrategy.FAST_MASKS).start()
-    assert not state.mask()[63]
+    assert not token_allowed(state.mask(), 63)
     assert state.commit_token(4)
-    assert not state.is_accepting() and state.mask()[63]
+    assert not state.is_accepting() and token_allowed(state.mask(), 63)
     assert state.commit_token(63)
     assert state.is_accepting() and not state.mask().any()
     for keyword in ['optimization', 'boundary_trigger']:
@@ -136,7 +138,7 @@ def test_grammar_precompile_returns_a_module():
     module = open_grammar.precompile(v)
     module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS))
     state = module.compile(v).start()
-    assert state.mask()[4]
+    assert token_allowed(state.mask(), 4)
     assert state.commit_token(4)
     assert state.is_accepting()
 
@@ -183,13 +185,13 @@ def test_expression_union_sequence_and_module_binding():
     parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar E; nt start = E;'))
     parent.bind('E', expr)
     state = parent.compile(v).start()
-    assert state.mask()[0] and state.mask()[2]
+    assert token_allowed(state.mask(), 0) and token_allowed(state.mask(), 2)
     assert state.commit_token(2)
     assert state.is_accepting()
 
     host = g.Module(g.Grammar.from_glrm(HOST))
     host.bind('child', g.Expr.choice(source(), source('b')))
-    assert host.compile(v).start().mask()[4]
+    assert token_allowed(host.compile(v).start().mask(), 4)
 
 
 def test_expression_whole_token_crosses_boundaries():
@@ -198,7 +200,7 @@ def test_expression_whole_token_crosses_boundaries():
     parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar S; nt start = S;'))
     parent.bind('S', expr)
     state = parent.compile(v).start()
-    assert state.mask()[4]
+    assert token_allowed(state.mask(), 4)
     assert state.commit_token(4)
     assert state.is_accepting()
 

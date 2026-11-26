@@ -12,7 +12,7 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
     assert branch.commit_token(1)
     assert not branch.is_accepting()
     assert not state.is_accepting()
-    assert state.mask().tolist() == [False, True, True, False]
+    assert state.mask().tolist() == [6]
     assert branch.commit_token(3)
     for ended in [branch, branch.copy()]:
         assert ended.is_accepting() and not ended.mask().any()
@@ -20,7 +20,7 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
         assert not ended.commit_token(0)
         assert not ended.commit_bytes(b"a")
     assert not state.is_accepting() and not (not state.mask().any())
-    assert state.mask().tolist() == [False, True, True, False]
+    assert state.mask().tolist() == [6]
     assert state.commit_token(2)
     assert not state.is_accepting()
     assert state.commit_token(3)
@@ -35,7 +35,7 @@ def test_clone_preserves_rejection_without_changing_saved_prefix():
     assert not state.commit_token(1)
     assert (not state.mask().any())
     assert (not state.copy().mask().any())
-    assert snapshot.mask().tolist() == [True, False]
+    assert snapshot.mask().tolist() == [1]
     assert snapshot.commit_token(0)
     assert snapshot.is_accepting()
 

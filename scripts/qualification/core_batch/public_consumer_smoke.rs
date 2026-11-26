@@ -11,7 +11,7 @@ fn main() -> glrmask::Result<()> {
     let mut state = constraint.start();
     let forced = state.forced_tokens()?;
     assert_eq!(forced, vec![0]);
-    let mut mask = vec![0; constraint.mask_len()];
+    let mut mask = vec![0; constraint.mask_bit_len().div_ceil(32)];
     state.fill_mask(&mut mask);
     state.commit_token(0)?;
     assert!(state.is_accepting());

@@ -183,7 +183,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     ])).unwrap();
     let mut constraint = root.compile(&v).unwrap();
     for _ in 0..4 {
-        assert_eq!(constraint.mask_len(), 8);
+        assert_eq!(constraint.mask_bit_len().div_ceil(32), 8);
         let mut state = constraint.start();
         let mut buffer = vec![u32::MAX; 10];
         state.fill_mask(&mut buffer);
@@ -211,13 +211,13 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert!(!other.commit_token(1));
         constraint = Constraint::load(constraint.save(), &v).unwrap();
     }
-    assert_eq!(module.compile(&v).unwrap().mask_len(), 1);
+    assert_eq!(module.compile(&v).unwrap().mask_bit_len().div_ceil(32), 1);
     let root_b = module_expr(Expr::sequence([
         Expr::from(Grammar::from_ebnf(r#"start ::= "a""#).unwrap()),
         Expr::from(TokenSet::new([63])),
     ])).unwrap();
     let policy_b = root_b.compile(&v).unwrap();
-    assert_eq!(policy_b.mask_len(), 2);
+    assert_eq!(policy_b.mask_bit_len().div_ceil(32), 2);
 }
 
 #[test]
@@ -639,5 +639,35 @@ fn grammar_rejects_token_sets_transitively_but_module_accepts() {
         let c = module_expr(expr).unwrap().compile(&v).unwrap();
         let mut s = c.start();
         assert!(s.commit_token(5) && s.is_accepting());
+    }
+}
+
+#[test]
+fn mask_bit_domain_lengths() {
+    for n in [0usize, 33, 63, 64] {
+        let entries = if n == 0 { vec![] } else { vec![(n as u32 - 1, b"a".to_vec())] };
+        let v = Vocab::new(entries).unwrap();
+        let c = Grammar::from_lark(r#"start: "a""#).unwrap().compile(&v).unwrap();
+        let mut s = c.start();
+        assert_eq!(c.mask_bit_len(), n);
+        assert_eq!(s.mask_bit_len(), n);
+        let w = n.div_ceil(32);
+        let mut packed = s.mask();
+        assert_eq!(packed.len(), w);
+        if n != 0 { assert!(allowed(&packed, n as u32 - 1)); }
+        for len in [w, w+2] {
+            let mut buf = vec![u32::MAX; len];
+            s.fill_mask(&mut buf);
+            assert_eq!(&buf[..w], packed.as_slice());
+            assert!(buf[w..].iter().all(|&x| x == 0));
+        }
+        if w > 0 {
+            let mut short = vec![u32::MAX; w-1];
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.fill_mask(&mut short))).is_err());
+            assert!(short.iter().all(|&x| x == u32::MAX));
+            assert!(s.commit_token(n as u32 - 1));
+            s.fill_mask(&mut packed);
+            assert_eq!(packed, s.mask());
+        }
     }
 }

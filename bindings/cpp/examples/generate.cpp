@@ -32,7 +32,7 @@ int main() {
         std::mt19937 rng(7);
         std::uniform_real_distribution<float> model(0.0f, 1.0f);
         auto state = constraint.start();
-        std::vector<std::uint32_t> mask(std::max(constraint.mask_len(), static_cast<std::size_t>(eos / 32 + 1)));
+        std::vector<std::uint32_t> mask(std::max((constraint.mask_bit_len() + 31) / 32, static_cast<std::size_t>(eos / 32 + 1)));
         std::string text;
         while (true) {
             std::vector<float> scores(eos + 1);

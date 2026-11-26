@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_table_free(&parser_backend_report(&external_loaded));
     let mut csv = BufWriter::new(fs::File::create(output.join("exact-replay.csv"))?);
     writeln!(csv, "trace,step,token,lr_mask_ns,template_mask_ns,self_load_mask_ns,external_load_mask_ns,hash")?;
-    let mut reference_mask = vec![0; reference.mask_len()]; let mut mask = vec![0; candidate.mask_len()];
+    let mut reference_mask = vec![0; reference.mask_bit_len().div_ceil(32)]; let mut mask = vec![0; candidate.mask_bit_len().div_ceil(32)];
     assert_eq!(reference_mask.len(), mask.len()); let mut samples = 0usize;
     for (index, trace) in traces.iter().enumerate() {
         let mut oracle = reference.start(); let mut fresh = candidate.start();

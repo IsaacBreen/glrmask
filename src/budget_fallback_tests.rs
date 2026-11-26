@@ -183,7 +183,7 @@ fn check_exact_oracle(constraint: &Constraint, case: Case) {
         if !seen.insert(prefix.clone()) {
             continue;
         }
-        let mut mask = vec![0u32; constraint.mask_len()];
+        let mut mask = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
         state.fill_mask(&mut mask);
         for (token, token_bytes) in bytes.iter().enumerate() {
             let mut candidate = prefix.clone();

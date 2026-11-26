@@ -516,7 +516,7 @@ mod tests {
                     for actual in [&candidate,&loaded] {
                         let mut a=actual.start();let mut b=reference.start();
                         for prefix in 0..=word.len() {
-                            let mut actual_mask=vec![0;actual.mask_len()];let mut expected_mask=vec![0;reference.mask_len()];
+                            let mut actual_mask=vec![0;actual.mask_bit_len().div_ceil(32)];let mut expected_mask=vec![0;reference.mask_bit_len().div_ceil(32)];
                             a.fill_mask(&mut actual_mask);b.fill_mask(&mut expected_mask);
                             assert_eq!(actual_mask,expected_mask,"nullable={nullable} word={word:?} prefix={prefix}");
                             assert_eq!(a.is_accepting(),b.is_accepting());assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
@@ -595,7 +595,7 @@ mod tests {
             for text in [b"x".as_slice(),b"xa",b"xaa",b"xaaa"] {
                 let mut actual = candidate.start(); let mut expected = reference.start();
                 for prefix in 0..=text.len() {
-                    let mut a = vec![0; candidate.mask_len()]; let mut b = vec![0; reference.mask_len()];
+                    let mut a = vec![0; candidate.mask_bit_len().div_ceil(32)]; let mut b = vec![0; reference.mask_bit_len().div_ceil(32)];
                     actual.fill_mask(&mut a); expected.fill_mask(&mut b);
                     assert_eq!(a,b,"retain={retain} prefix={prefix} text={text:?}");
                     assert_eq!(actual.is_accepting(),expected.is_accepting());

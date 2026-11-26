@@ -11,6 +11,8 @@ import numpy as np
 import pytest
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
@@ -27,7 +29,7 @@ def assert_read_only_and_replay(state):
     cursor = state.copy()
     for token in result:
         assert not cursor.is_accepting()
-        assert cursor.mask()[token]
+        assert token_allowed(cursor.mask(), token)
         assert cursor.commit_token(token)
         assert cursor.is_accepting() or cursor.mask().any()
     return result
@@ -53,7 +55,7 @@ def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
         compiled = glrmask.Grammar.from_lark(source).compile(vocab, **mode)
         for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
             state = constraint.start()
-            assert np.flatnonzero(state.mask()).tolist() == [0, 1]
+            assert np.flatnonzero(unpack_mask(state.mask())).tolist() == [0, 1]
             assert assert_read_only_and_replay(state) == expected
 
 
@@ -64,7 +66,7 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
         'extern token MARK; start root; nt root = "ab" | MARK;'
     ), "MARK", glrmask.TokenSet([9]))
     state = grammar.compile(vocab, **mode).start()
-    assert state.mask()[9]
+    assert token_allowed(state.mask(), 9)
     assert not hasattr(state, "forced")
     assert assert_read_only_and_replay(state) == []
 
@@ -88,10 +90,10 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
     compiled = grammar.compile(vocab, **mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
-        assert state.mask()[0] and state.mask()[2]
+        assert token_allowed(state.mask(), 0) and token_allowed(state.mask(), 2)
         assert assert_read_only_and_replay(state) == []
         assert state.commit_token(0)
-        assert state.mask()[1] and state.mask()[9]
+        assert token_allowed(state.mask(), 1) and token_allowed(state.mask(), 9)
         assert assert_read_only_and_replay(state) == []
         assert state.commit_token(9)
         assert assert_read_only_and_replay(state) == [3]
@@ -107,7 +109,7 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
         assert assert_read_only_and_replay(state) == []
         assert state.commit_token(0)
         # With end tokens configured, completion alone is not acceptance.
-        assert not state.is_accepting() and state.mask()[1] and state.mask()[9]
+        assert not state.is_accepting() and token_allowed(state.mask(), 1) and token_allowed(state.mask(), 9)
         assert assert_read_only_and_replay(state) == []
 
 
@@ -127,7 +129,7 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
         assert state.commit_token(0)
         assert assert_read_only_and_replay(state) == [1]
         assert state.commit_token(1)
-        assert not state.is_accepting() and state.mask()[3] and state.mask()[9]
+        assert not state.is_accepting() and token_allowed(state.mask(), 3) and token_allowed(state.mask(), 9)
         assert assert_read_only_and_replay(state) == []
 
 

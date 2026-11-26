@@ -4,6 +4,8 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 
 import glrmask
+from mask_helpers import token_allowed, unpack_mask
+
 import numpy as np
 import pytest
 
@@ -35,7 +37,7 @@ def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
         fork = method(untouched)
         assert fork.bind("M", glrmask.TokenSet([29])) is None
         assert list(untouched.externs.unbound) == ["M"]
-        assert np.flatnonzero(fork.compile(v).start().mask()).tolist() == [29]
+        assert np.flatnonzero(unpack_mask(fork.compile(v).start().mask())).tolist() == [29]
 
 
 def test_child_and_sibling_snapshots_survive_later_edits():
@@ -54,7 +56,7 @@ def test_child_and_sibling_snapshots_survive_later_edits():
     state = constraint.start()
     assert state.copy().commit_forced_tokens() == [17, 29]
     for token in state.copy().commit_forced_tokens():
-        assert state.mask()[token]
+        assert token_allowed(state.mask(), token)
         assert state.commit_token(token)
     assert state.is_accepting()
     assert not hasattr(state, "forced")
@@ -76,7 +78,7 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
         b = m2.compile(v, **mode)
         assert np.array_equal(a.start().mask(), b.start().mask())
         for constraint in [a, b, glrmask.Constraint.load(b.save(), v)]:
-            assert constraint.start().mask()[17]
+            assert token_allowed(constraint.start().mask(), 17)
             state = constraint.start()
             assert not state.commit_bytes(b"a")
             state = constraint.start()

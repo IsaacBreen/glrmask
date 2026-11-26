@@ -22,7 +22,7 @@ const arithmetic = Grammar.fromGlrm(`
 const constraint = await arithmetic.compile(vocab);
 
 const state = constraint.start();
-const mask = new Uint32Array(Math.max(constraint.maskLength, (eos >>> 5) + 1));
+const mask = new Uint32Array(Math.max(Math.ceil(constraint.maskBitLength / 32), (eos >>> 5) + 1));
 const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 let text = '';
 while (true) {

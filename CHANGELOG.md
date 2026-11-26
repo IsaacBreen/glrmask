@@ -3,12 +3,17 @@
 ## 1.0.0 (unreleased)
 
 - Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
+- Lark numeric token atoms, lists, complements and wildcards are rejected; use named token externs bound on a Module.
 
 From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.
 
 ### Changes
 
-- MaskStrategy and BoundaryMaskStrategy expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine/backend settings are internal only. C ABI revision 5 rejects the old hard-selector codes and reserves the former tuning fields.
+- The grammar, vocabulary, lexer, GLR, JSON Schema, terminal-DWA, parser-DWA and DWA-merge sub-crates are at 0.4.0; supporting crates retain their own versions.
+
+- MaskStrategy and BoundaryMaskStrategy expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine/backend settings are internal only. C ABI revision 6 rejects the old hard-selector codes and reserves the former tuning fields.
+
+- Rename mask_len to mask_bit_len (Node: maskBitLength), returning the number of token slots instead of packed words, including zero for an empty domain. Python `mask(*, dtype=np.uint32)` returns packed uint32 words by default, or a Boolean array with `dtype=bool`. `fill_mask` accepts int32 and uint32 packed buffers. C ABI revision 6.
 
 
 - Expressions and `bind` take tokens only as a `TokenSet`.
@@ -28,10 +33,10 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 - In C, single-token and byte commits return `bool`, batch commits return a count, and `GLRMASK_REJECTED` is gone.
 - Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
 - 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
-- Rust: `ConstraintState::mask_len` is new, matching the other bindings.
+- Rust: `ConstraintState::mask_bit_len` is new, matching the other bindings.
 - Vocab: one constructor from `{id: bytes}`. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result` (duplicate ID or ID above the maximum: `InvalidInput`), instead of panicking. Python: `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
 - Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
-- Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`. Python's `mask(size=...)` is capped at 16,777,216.
+- Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`.
 
 - Errors: `ErrorKind` has no payloads and new kinds (`Syntax`, `InvalidInput`, `Internal` replace `GrammarParse`, `InternalInvariant`; caller mistakes moved from `Compilation` to `InvalidInput`); `kind()` returns it by value; the public `From` impls for internal error types are gone. Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. C status codes are 0 (OK), 1 (Syntax), 2 (InvalidInput), 3 (Compilation), 4 (ResourceLimit), 5 (StrategyUnsupported), 6 (Serialization), 7 (Internal), 8 (BufferTooSmall), and 9 (Closed). Caught Rust panics are reported as Internal in C and Node.
 
@@ -42,7 +47,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 - In C and C++, token ranges are now `{start, end}` with `end` excluded, as in Rust, Python and Node.js. They used to be `{first, last}` with `last` included.
 - Markers (`@mark(id)`, `marker_events()` and `marker_ids()`) are removed for now. They will return in a later release.
 - Removed EBNF as a grammar format; use Lark or GLRM. In C, `GLRMASK_EBNF` is gone and the other format constants keep their values.
-- Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_len()` for the mask's length.
+- Removed the vocabulary's length (`len(vocab)` in Python, `vocab.size` in Node.js, `Vocab::size()` in C++, `glrmask_vocab_len` in C). It counted only tokens with bytes; use `mask_bit_len()` for the number of token slots.
 - Weight union, combine, `is_disjoint` and `is_subset` use the joins in range-set-blaze 0.8, contributed by Carl Kadie.
 - The minimum supported Rust version is now 1.89.
 - Lark grammar source rejects numeric token atoms, lists/ranges, complements, wildcard and @token(...); use named token slots and bind TokenSets on a Module.

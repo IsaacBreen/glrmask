@@ -1,4 +1,6 @@
 import glrmask
+from mask_helpers import token_allowed, unpack_mask
+
 import pytest
 
 
@@ -48,9 +50,9 @@ def test_special_tokens_are_explicit():
     module = glrmask.Module(glrmask.Grammar.from_lark("start: <|begin|> <|body|>"))
     module.bind(begin=glrmask.TokenSet([99]), body=glrmask.TokenSet([1]))
     state = module.compile(body).start()
-    assert state.mask()[99] and not state.mask()[0]
+    assert token_allowed(state.mask(), 99) and not token_allowed(state.mask(), 0)
     assert state.commit_token(99)
-    assert state.mask()[1] and not state.mask()[0]
+    assert token_allowed(state.mask(), 1) and not token_allowed(state.mask(), 0)
     assert state.commit_token(1)
     assert state.is_accepting()
     with pytest.raises(ValueError):

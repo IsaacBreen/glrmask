@@ -2085,7 +2085,7 @@ mod tests {
             for constraint in [&original, &loaded] {
                 let state = constraint.start();
                 for seed in [0u32, 0x5555_5555, 0xffff_ffff] {
-                    let mut actual = vec![seed; constraint.mask_len() + 2];
+                    let mut actual = vec![seed; constraint.mask_bit_len().div_ceil(32) + 2];
                     let mut expected = actual.clone();
                     let source: Vec<_> = (0..actual.len() + 1)
                         .map(|i| if seed == 0 { u32::MAX } else { seed.rotate_left(i as u32) })
@@ -2282,7 +2282,7 @@ mod tests {
         let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
         let trie = vocab.trie.as_ref();
         let mut buffers = super::CommitBuffers::default();
-        let mut output = vec![0u32; state.constraint.mask_len()];
+        let mut output = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
         let mut stack = vec![None; usize::from(trie.full_walk_max_parent_depth()) + 2];
         stack[0] = Some(state.state.clone());
         let mark = |node, output: &mut [u32]| {
@@ -2379,11 +2379,11 @@ mod tests {
             for constraint in [&bound, &loaded] {
                 assert!(constraint.uses_compact_segmented_parser_runtime());
                 let check = |state: &super::ConstraintState| {
-                    let mut actual = vec![0u32; constraint.mask_len()];
+                    let mut actual = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                     state.fill_recursive_mask_by_exact_full_walk(&mut actual);
                     assert_eq!(actual, recursive_unpruned_reference(state), "nullable={nullable}");
                     for budget in [0, 1, 2] {
-                        let mut bounded = vec![0u32; constraint.mask_len()];
+                        let mut bounded = vec![0u32; constraint.mask_bit_len().div_ceil(32)];
                         state.or_recursive_dynamic_full_walk_exact_with_budget(&mut bounded, budget);
                         assert_eq!(bounded, actual, "cache budget={budget}, nullable={nullable}");
                     }
@@ -2459,7 +2459,7 @@ mod tests {
                 assert!(state.commit_bytes(prefix));
                 let expected = recursive_unpruned_reference(&state);
                 for budget in [0, 2, 256] {
-                    let mut actual = vec![0u32; bound.mask_len()];
+                    let mut actual = vec![0u32; bound.mask_bit_len().div_ceil(32)];
                     state.or_recursive_dynamic_full_walk_exact_with_budget(&mut actual, budget);
                     assert_eq!(actual, expected, "prefix={prefix:?} budget={budget} leaf={leaf_source}");
                 }
@@ -5141,7 +5141,7 @@ impl ConstraintState {
                 if self.constraint.uses_compact_segmented_parser_runtime() {
                     // Use the same shared provider walk as all-dynamic
                     // composition, then union with the static contribution.
-                    let mut dynamic = vec![0u32; self.constraint.mask_len()];
+                    let mut dynamic = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
                     self.fill_mask_dynamic(&mut dynamic);
                     for (out, value) in buf.iter_mut().zip(dynamic) { *out |= value; }
                 } else {
@@ -8521,17 +8521,17 @@ impl ConstraintState {
         returned_profile
     }
 
-    /// The tokens allowed next, as a bitmask. Token `id` is allowed when bit
+    /// Allowed token IDs as a packed bitmask: 32-bit words, bit i%32 of word i//32 is token ID i. Token `id` is allowed when bit
     /// `id % 32` of word `id / 32` is set.
     pub fn mask(&self) -> Vec<u32> {
-        let mut buf = vec![0u32; self.constraint.mask_len()];
+        let mut buf = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
         self.fill_mask(&mut buf);
         buf
     }
 
     // Fill `buf` with the allowed-token mask.
     //
-    // `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
+    // `buf` must contain at least `constraint.mask_bit_len().div_ceil(32)` words. Any extra
     // words are cleared.
     fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {
         let reset_state = self.constraint.runtime_commit_initial_state();
@@ -8770,9 +8770,9 @@ impl ConstraintState {
     ///
     /// # Panics
     ///
-    /// Panics if `buf` is shorter than [`mask_len`](Self::mask_len).
+    /// Panics if `buf` is shorter than `self.mask_bit_len().div_ceil(32)`.
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is shorter than mask_len()");
+        assert!(buf.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by mask_bit_len()");
         if self.terminated {
             buf.fill(0);
             return;
@@ -8792,9 +8792,10 @@ impl ConstraintState {
         }
     }
 
-    /// The number of `u32` words in a mask.
-    pub fn mask_len(&self) -> usize {
-        self.constraint.mask_len()
+    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    pub fn mask_bit_len(&self) -> usize {
+        self.constraint.mask_bit_len()
     }
 
     pub(crate) fn fill_body_mask(&self, buf: &mut [u32]) {

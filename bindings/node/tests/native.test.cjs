@@ -18,7 +18,7 @@ const closed=fn=>assert.throws(fn,e=>e instanceof GLRMaskError && e.code==='GLRM
 for(const {label:maskStrategy,options} of strategies) {
   test(`${maskStrategy}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,()=>{
     const v=vocab(),g=simple(),c=g.compileSync(v,{...options}),s=c.start();
-    assert.equal(version,require('../package.json').version);assert.equal(c.maskLength,3);assert.equal(s.maskLength,3);
+    assert.equal(version,require('../package.json').version);assert.equal(c.maskBitLength,66);assert.equal(s.maskBitLength,66);
     const initial=s.mask();assert.ok(types.isUint32Array(initial));
     assert.ok(allowed(initial,0));assert.ok(allowed(initial,31));assert.ok(allowed(initial,32));
     assert.ok(!allowed(initial,1));assert.ok(!allowed(initial,65));
@@ -141,7 +141,10 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.equal(require('../index.cjs').ParserBackend,undefined);
   for(const maskStrategy of Object.values(MaskStrategy)) for(const boundaryMaskStrategy of Object.values(BoundaryMaskStrategy)){
     const c=simple().compileSync(v,{maskStrategy,boundaryMaskStrategy}), state=c.start();
-    assert.ok(allowed(state.mask(),0));
+    assert.equal(state.mask().length,Math.ceil(state.maskBitLength/32));
+    assert.equal(state.maskBitLength,c.maskBitLength);
+    const words=new Uint32Array(Math.ceil(state.maskBitLength/32));
+    state.fillMask(words); assert.deepEqual(words,state.mask());
   }
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
@@ -239,4 +242,29 @@ test('out-of-range token IDs fail closed instead of throwing',()=>{
   assert.equal(ok.commitToken(0),true);
   assert.equal(ok.commitToken(1),true);
   assert.equal(ok.isAccepting(),true);
+});
+
+test('mask bit extent includes gaps, empty and non-word-aligned domains',()=>{
+  for(const n of [0,33,63,64]){
+    const v=new Vocab(n?[[n-1,b('a')]]:[]);
+    const c=Grammar.fromLark('start: "a"').compileSync(v);
+    const s=c.start(), w=Math.ceil(n/32);
+    assert.equal(c.maskBitLength,n);assert.equal(s.maskBitLength,n);
+    const packed=s.mask();
+    assert.equal(packed.length,w);
+    if(n)assert.ok(allowed(packed,n-1));
+    for(const len of [w,w+2]){
+      const out=new Uint32Array(len).fill(0xffffffff);
+      s.fillMask(out);
+      assert.deepEqual(out.slice(0,w),packed);
+      assert.ok(out.slice(w).every(x=>x===0));
+    }
+    if(w){
+      const out=new Uint32Array(w-1).fill(123);
+      assert.throws(()=>s.fillMask(out),e=>e.code==='GLRMASK_BUFFER_TOO_SMALL');
+      assert.ok(out.every(x=>x===123));
+    }
+    if(n){assert.ok(s.commitToken(n-1));s.fillMask(packed);assert.deepEqual(packed,s.mask());}
+    s.dispose();c.dispose();v.dispose();
+  }
 });

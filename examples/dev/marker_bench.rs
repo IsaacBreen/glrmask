@@ -42,7 +42,7 @@ fn workloads(marked: bool) -> Vec<Workload> {
 }
 fn measure(c: &Constraint, sequence: &[u32], samples: usize, rounds: usize) -> Result<Value,Box<dyn std::error::Error>> {
     // Validate once and warm both APIs. Timings never cover compilation/start.
-    let mut mask=vec![0; c.mask_len()];
+    let mut mask=vec![0; c.mask_bit_len().div_ceil(32)];
     for _ in 0..4 {
         let mut state=c.start();
         for &token in sequence { state.fill_mask(&mut mask);assert!(mask[token as usize/32]&(1<<(token%32))!=0);assert!(state.commit_token(token)); }

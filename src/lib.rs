@@ -1141,7 +1141,7 @@ pub mod __private {
         }
 
         fn fill_mask_dynamic_vec(&self) -> Vec<u32> {
-            let mut buf = vec![0u32; self.constraint.mask_len()];
+            let mut buf = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
             ConstraintState::fill_mask_dynamic(self, &mut buf);
             buf
         }

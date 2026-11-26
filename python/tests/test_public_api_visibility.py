@@ -14,6 +14,8 @@ import pytest
 
 import glrmask
 
+from mask_helpers import token_allowed, unpack_mask
+
 MODES = [
     {},
     {"mask_strategy": glrmask.MaskStrategy.FAST_MASKS},
@@ -62,7 +64,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
             assert actual.commit_bytes(prefix)
             assert np.array_equal(expected.mask(), actual.mask())
             assert expected.is_accepting() == actual.is_accepting()
-            if actual.mask()[3]:
+            if token_allowed(actual.mask(), 3):
                 assert not actual.is_accepting()
                 assert actual.commit_token(3)
                 assert actual.is_accepting() and not actual.mask().any()
@@ -106,7 +108,7 @@ def test_boundary_request_applies_to_compile_after_save_and_bind():
         restored = glrmask.Module.load(module.save())
         restored.bind("child", child)
         requested = restored.compile(vocab, boundary_mask_strategy=detail)
-        assert requested.start().mask()[3]
+        assert token_allowed(requested.start().mask(), 3)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -121,15 +123,15 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
         state = constraint.start()
         assert hasattr(state, "is_terminated")
         assert not state.is_accepting() and not (not state.mask().any())
-        assert not state.mask()[130]
+        assert not token_allowed(state.mask(), 130)
         assert state.commit_token(0)
         # The grammar is complete; acceptance needs the end token.
         assert not state.is_accepting() and not (not state.mask().any())
-        assert state.mask()[1] and state.mask()[130]
+        assert token_allowed(state.mask(), 1) and token_allowed(state.mask(), 130)
         for sequence in [(130,), (1, 130)]:
             branch = state.copy()
             for token_id in sequence:
-                assert branch.mask()[token_id]
+                assert token_allowed(branch.mask(), token_id)
                 assert branch.commit_token(token_id)
                 if token_id in end_token_ids:
                     break
@@ -140,7 +142,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
                 assert not ended.commit_token(0)
                 assert not ended.commit_bytes(b"a")
                 assert not ended.is_accepting() and not ended.mask().any()
-            assert not state.is_accepting() and state.mask()[1] and state.mask()[130]
+            assert not state.is_accepting() and token_allowed(state.mask(), 1) and token_allowed(state.mask(), 130)
 
 
 def _module_expr(value):
