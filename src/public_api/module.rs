@@ -165,7 +165,7 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     pub(crate) source: Arc<Grammar>,
-    pub(crate) prepared: BTreeMap<u8, Arc<PreparedGrammar>>,
+    pub(crate) prepared: BTreeMap<u8, Arc<dyn RetainedPreparation>>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
     #[cfg(test)]
@@ -174,8 +174,15 @@ pub(crate) struct Node {
     pub(crate) force_parser_dwa_decline: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl PreparedGrammar {
-    fn rehydrate_vocab(&self, vocab: &Vocab) -> Result<Arc<PreparedGrammar>> {
+pub(crate) trait RetainedPreparation: Send + Sync + std::fmt::Debug {
+    fn prepared(&self) -> &PreparedGrammar;
+    /// Rehydrates a vocabulary-free retained body, or returns an equivalent
+    /// already-bound preparation.
+    fn rehydrate_vocab(&self, vocab: &Vocab) -> Result<Arc<dyn RetainedPreparation>>;
+}
+impl RetainedPreparation for PreparedGrammar {
+    fn prepared(&self) -> &PreparedGrammar { self }
+    fn rehydrate_vocab(&self, vocab: &Vocab) -> Result<Arc<dyn RetainedPreparation>> {
         let Some(wire) = self.retained_artifact.as_ref() else {
             return Ok(Arc::new(self.clone()));
         };
@@ -183,8 +190,15 @@ impl PreparedGrammar {
             return Err(invalid("the module was precompiled for a different vocabulary"));
         }
         prepared_artifact::load(wire.as_ref(), Some(vocab))
-            .map(Arc::new)
+            .map(|prepared| Arc::new(prepared) as Arc<dyn RetainedPreparation>)
     }
+}
+impl std::ops::Deref for dyn RetainedPreparation {
+    type Target = PreparedGrammar;
+    fn deref(&self) -> &Self::Target { self.prepared() }
+}
+pub(crate) fn retain_local(prepared: PreparedGrammar) -> Arc<dyn RetainedPreparation> {
+    Arc::new(prepared)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -247,7 +261,7 @@ fn own_local(grammar: &Grammar) -> Grammar {
 /// The best retained preparation, in mask-speed order: `ParserDwa` (key 1),
 /// merged `TokenTrie` (key 3), then a retained template-DFA `TokenTrie` shell
 /// (key 2).
-fn best_retained(prepared: &BTreeMap<u8, Arc<PreparedGrammar>>) -> Option<Engine> {
+fn best_retained(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<Engine> {
     if prepared.contains_key(&Engine::ParserDwa.key()) {
         Some(Engine::ParserDwa)
     } else if prepared.contains_key(&Engine::MergedTokenTrie.key()) {
@@ -298,7 +312,7 @@ struct NodePlan {
 /// template-backed because it will be linked with template parts.
 fn plan_node(
     requested: Engine,
-    prepared: &BTreeMap<u8, Arc<PreparedGrammar>>,
+    prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>,
     any_retained: bool,
     requested_backend: ParserBackend,
 ) -> NodePlan {
@@ -598,6 +612,7 @@ impl Module {
         let expected = crate::compiler::compile::vocab_fingerprint(vocab);
         for module in &self.index()? {
             for prepared in module.node.prepared.values() {
+                let prepared = prepared.prepared();
                 let recorded = prepared
                     .retained_vocab_fingerprint
                     .unwrap_or_else(|| prepared.inner.vocab_fingerprint());
@@ -686,7 +701,7 @@ impl Module {
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
         if self.index()?.iter().any(|module| module.node.prepared.values().any(|prepared| {
-            prepared.retained_artifact.is_some()
+            prepared.prepared().retained_artifact.is_some()
         })) {
             *self = self.rehydrate_retained(vocab)?;
         }
@@ -700,13 +715,13 @@ impl Module {
         // A source can occur in several module snapshots with different retained
         // engines. Reuse the strongest compatible local work; a weaker
         // occurrence must not hide it or suppress a requested upgrade.
-        let mut locals: HashMap<(usize, usize), (Engine, Arc<PreparedGrammar>)> = HashMap::new();
+        let mut locals: HashMap<(usize, usize), (Engine, Arc<dyn RetainedPreparation>)> = HashMap::new();
 
         for m in &modules {
             let Some(engine) = best_retained(&m.node.prepared) else { continue; };
             let p = &m.node.prepared[&engine.key()];
             let source = local_preparation_key(m);
-            if p.boundary_trigger >= target_b
+            if p.prepared().boundary_trigger >= target_b
                 && locals.get(&source).is_none_or(|(old, _)| preparation_strength(engine) > preparation_strength(*old))
             {
                 locals.insert(source, (engine, p.clone()));
@@ -739,7 +754,7 @@ impl Module {
             let _probe = preparation_probe::enter(m);
             let source = local_preparation_key(m);
             let (engine, prepared) = match m.prepare_local_for(vocab, plan.engine, target_b, build_boundary, backend_of(plan)) {
-                Ok(p) => (plan.engine, Arc::new(p)),
+                Ok(p) => (plan.engine, retain_local(p)),
                 Err(error) if (requested == Engine::Auto || options.prefers_fast_masks())
                     && plan.engine == Engine::ParserDwa
                     && any_retained
@@ -753,7 +768,7 @@ impl Module {
                     } else {
                         let fallback = NodePlan { engine: Engine::TokenTrie, backend: ParserBackend::TemplateDfa };
                         let p = m.prepare_local_for(vocab, fallback.engine, target_b, build_boundary, backend_of(fallback))?;
-                        (fallback.engine, Arc::new(p))
+                        (fallback.engine, retain_local(p))
                     }
                 }
                 Err(error) => return Err(error),
@@ -773,7 +788,7 @@ impl Module {
             let source = local_preparation_key(&m);
             let node = Arc::make_mut(&mut next.node);
             if let Some((engine, prepared)) = locals.get(&source)
-                && node.prepared.get(&engine.key()).is_none_or(|old| old.boundary_trigger < target_b)
+                && node.prepared.get(&engine.key()).is_none_or(|old| old.prepared().boundary_trigger < target_b)
             {
                 node.prepared.insert(engine.key(), prepared.clone());
             }
@@ -798,7 +813,7 @@ impl Module {
         backend: crate::runtime::parser_backend::DynamicParserBackend,
     ) -> Result<PreparedGrammar> {
         if let Some(existing) = self.node.prepared.get(&engine.key()) {
-            let mut upgraded = existing.as_ref().clone();
+            let mut upgraded = existing.prepared().clone();
             if build_boundary && upgraded.inner.boundary_trigger.detail() < target_b {
                 Arc::make_mut(&mut upgraded.inner)
                     .build_boundary_trigger(target_b)
@@ -825,7 +840,7 @@ impl Module {
                 let mut next = m.clone();
                 let p = m.prepare_local_for(vocab, engine, target_b, build_boundary, backend)?;
                 let node = Arc::make_mut(&mut next.node);
-                node.prepared.insert(engine.key(), Arc::new(p));
+                node.prepared.insert(engine.key(), retain_local(p));
                 node.certificate = Arc::new(OnceLock::new());
                 for (name, value) in &m.node.bindings {
                     if let BoundValue::Module(child) = value {
@@ -835,11 +850,11 @@ impl Module {
                 instances.insert(Arc::as_ptr(&m.node) as usize, next);
             }
             module = instances.remove(&(Arc::as_ptr(&module.node) as usize)).unwrap();
-            let mut local = module.node.prepared.get(&engine.key()).ok_or_else(|| error("module is not prepared"))?.as_ref().clone();
+            let mut local = module.node.prepared.get(&engine.key()).ok_or_else(|| error("module is not prepared"))?.prepared().clone();
             for (name, value) in &module.node.bindings {
                 match value {
                     BoundValue::Module(child) => {
-                        let child_prep = child.node.prepared.get(&engine.key()).ok_or_else(|| error("child is not prepared"))?.as_ref().clone();
+                        let child_prep = child.node.prepared.get(&engine.key()).ok_or_else(|| error("child is not prepared"))?.prepared().clone();
                         local.bind(name, child_prep)?;
                     }
                     BoundValue::TokenSet(t) => local.bind(name, t.clone())?,
@@ -1424,7 +1439,7 @@ mod precompile_boundary_tests {
             .prepared
             .values()
             .next()
-            .and_then(|prepared| tokens(&prepared.inner))
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("precompiled Module must carry a Tokens trigger");
         let compiled = module
             .compile_inner_with(&vocab, CompileOptions::default())
@@ -1448,7 +1463,7 @@ mod precompile_boundary_tests {
             .prepared
             .values()
             .next()
-            .and_then(|prepared| tokens(&prepared.inner))
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("loaded Module must keep its TokenSet");
         assert_eq!(loaded_trigger.as_ref(), prepared_trigger.as_ref());
 
@@ -1481,7 +1496,7 @@ mod precompile_boundary_tests {
             .node
             .prepared
             .get(&Engine::ParserDwa.key())
-            .and_then(|prepared| tokens(&prepared.inner))
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("ParserDwa preparation must carry a Tokens trigger");
 
         let compiled = module

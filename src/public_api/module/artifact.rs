@@ -104,18 +104,18 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
         let mut preps = Vec::new();
         for (&engine, p) in &node.prepared {
             let engine_u8 = engine;
-            let prep_key = Arc::as_ptr(p) as usize;
+            let prep_key = Arc::as_ptr(p) as *const () as usize;
             let prep_id = *prepared_ids.entry(prep_key).or_insert_with(|| {
                 let id = prepared.len() as u32;
                 prepared.push(Preparation {
                     source: source_id,
                     engine: engine_u8,
-                    boundary: p.boundary_trigger as u8,
-                    token_set: match &p.inner.boundary_trigger {
+                    boundary: p.prepared().boundary_trigger as u8,
+                    token_set: match &p.prepared().inner.boundary_trigger {
                         crate::runtime::BoundaryTrigger::TokenSet(tokens) => Some(tokens.to_vec()),
                         _ => None,
                     },
-                    bytes: p.save(),
+                    bytes: p.prepared().save(),
                 });
                 id
             });
@@ -235,7 +235,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
             Arc::make_mut(&mut prepared.inner).boundary_trigger =
                 crate::runtime::BoundaryTrigger::TokenSet(Arc::from(tokens.into_boxed_slice()));
         }
-        Ok(Arc::new(prepared))
+        Ok(retain_local(prepared))
     }).collect::<Result<Vec<_>>>()?;
 
     let mut instances = Vec::<Module>::new();
