@@ -70,9 +70,9 @@ pub fn vocab(entries: Vec<(u32, Vec<u8>)>) -> Result<glrmask::Vocab> {
 
 pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
     match val {
-        0 => Ok(glrmask::MaskStrategy::Auto),
-        3 => Ok(glrmask::MaskStrategy::FastCompile),
-        4 => Ok(glrmask::MaskStrategy::FastMasks),
+        0 => Ok(glrmask::MaskStrategy::AUTO),
+        3 => Ok(glrmask::MaskStrategy::FAST_COMPILE),
+        4 => Ok(glrmask::MaskStrategy::FAST_MASKS),
         _ => Err(Error::invalid("unknown mask strategy; expected Auto (0), FastCompile (3) or FastMasks (4)")),
     }
 }

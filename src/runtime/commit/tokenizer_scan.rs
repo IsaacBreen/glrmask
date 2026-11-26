@@ -505,7 +505,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 #[cfg(test)]
 mod reset_projection_tests {
     use super::*;
-    use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, Vocab};
+    use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, Vocab};
 
     #[test]
     fn medium_and_large_reset_projections_match_generic_lexer_execution() {

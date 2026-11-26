@@ -282,8 +282,8 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
                 optimization.build_options(),
             )
             .unwrap();
-        let loaded = crate::Constraint::load(direct.save(), &vocab).unwrap();
-        let external = crate::Constraint::load(
+        let loaded = crate::runtime::Constraint::load(direct.save(), &vocab).unwrap();
+        let external = crate::runtime::Constraint::load(
             direct.save(),
             &vocab,
         )

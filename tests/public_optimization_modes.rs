@@ -1,6 +1,6 @@
 //! Public root policy and state operations across actual Dynamic, O2, and Static.
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, TokenSet, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, InternalMaskStrategy, TokenSet, Vocab};
 
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn allowed(mask: &[u32], id: u32) -> bool {
@@ -48,7 +48,7 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
 fn force_and_exact_token_aliases_agree_across_modes() {
     let v = vocab();
     let g = Grammar::from_ebnf(r#"start ::= "(" ")""#).unwrap();
-    let reference = g.compile(&v).unwrap();
+    let reference = g.compile(&v).unwrap().__into_inner();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, mode.build_options()).unwrap();
         let mut a = c.start(); let mut r = reference.start();
@@ -73,7 +73,7 @@ fn source_dynamic_composition_and_precompiled_link_have_distinct_scopes() {
     let child = Grammar::from_ebnf(r#"start ::= ")""#).unwrap();
     let grammar = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"(\" child;").unwrap()
         .bind_snapshot("child", &child).unwrap();
-    let reference = grammar.compile(&v).unwrap();
+    let reference = grammar.compile(&v).unwrap().__into_inner();
     for mode in MODES {
         let c=grammar.compile_with_build_options(&v,mode.build_options()).unwrap();
         compare_prefixes(&c,&reference,&[0,2,7,15,20],3);
@@ -112,7 +112,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         Grammar::from_json_schema(r#"{"const":"a"}"#).unwrap()];
     for child in children {
         let description=parent.clone().bind_snapshot("child",child).unwrap();
-        let reference=description.compile(&v).unwrap();
+        let reference=description.compile(&v).unwrap().__into_inner();
         let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)).unwrap();
         for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),
             Constraint::load(actual.save(),&v).unwrap()] {
@@ -124,7 +124,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
     let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;").unwrap()
         .bind_snapshot("leaf",exact).unwrap();
     let description=parent.bind_snapshot("child",middle).unwrap();
-    let reference=description.compile(&v).unwrap();
+    let reference=description.compile(&v).unwrap().__into_inner();
     let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE)).unwrap();
     compare_prefixes(&actual,&reference,&[0,1,3,4,8,33,99],4);
     assert!(!allowed(&actual.start().mask(),4));

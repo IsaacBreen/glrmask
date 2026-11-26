@@ -115,17 +115,17 @@ fn d_is_lr_quotiented_and_matches_a_on_every_supported_frontend() {
     for case in cases() {
         let a = case.grammar.compile_with(&case.vocab, a_options()).unwrap();
         let d = case.grammar.compile_with(&case.vocab, d_options()).unwrap();
-        assert_eq!(a.parser_backend(), ParserBackend::LrTable, "{} A", case.name);
-        assert_eq!(d.parser_backend(), ParserBackend::LrTable, "{} D", case.name);
-        assert!(d.runtime_has_lr_table(), "{} D must keep the LR table", case.name);
-        assert!(!d.runtime_has_template_parser(), "{} D must not install a template parser", case.name);
+        assert_eq!(a.__inner().parser_backend(), ParserBackend::LrTable, "{} A", case.name);
+        assert_eq!(d.__inner().parser_backend(), ParserBackend::LrTable, "{} D", case.name);
+        assert!(d.__inner().runtime_has_lr_table(), "{} D must keep the LR table", case.name);
+        assert!(!d.__inner().runtime_has_template_parser(), "{} D must not install a template parser", case.name);
         compare_exhaustive(&a.start(), &d.start(), 3, case.name);
         assert_same_masks(&a, &d);
 
         let loaded = glrmask::Constraint::load(d.save(), &case.vocab).unwrap();
-        assert_eq!(loaded.parser_backend(), ParserBackend::LrTable, "{} D reload", case.name);
-        assert!(loaded.runtime_has_lr_table(), "{} D reload table", case.name);
-        assert!(!loaded.runtime_has_template_parser(), "{} D reload templates", case.name);
+        assert_eq!(loaded.__inner().parser_backend(), ParserBackend::LrTable, "{} D reload", case.name);
+        assert!(loaded.__inner().runtime_has_lr_table(), "{} D reload table", case.name);
+        assert!(!loaded.__inner().runtime_has_template_parser(), "{} D reload templates", case.name);
         compare_exhaustive(&d.start(), &loaded.start(), 2, case.name);
     }
 }
@@ -166,8 +166,8 @@ fn template_dfas_is_table_free_and_the_default_token_trie_keeps_its_table() {
     let b = grammar
         .compile_with(&vocab, MaskMode::B.compile_options())
         .unwrap();
-    assert_eq!(a.parser_backend(), ParserBackend::LrTable, "A must keep the LR table");
-    assert_eq!(b.parser_backend(), ParserBackend::TemplateDfa, "B must be table-free");
+    assert_eq!(a.__inner().parser_backend(), ParserBackend::LrTable, "A must keep the LR table");
+    assert_eq!(b.__inner().parser_backend(), ParserBackend::TemplateDfa, "B must be table-free");
     assert_same_masks(&a, &b);
 
     // The same two configurations over a module with a bound child.
@@ -188,8 +188,8 @@ fn template_dfas_is_table_free_and_the_default_token_trie_keeps_its_table() {
     let b = host()
         .compile_with(&vocab, MaskMode::B.compile_options())
         .unwrap();
-    assert_eq!(a.parser_backend(), ParserBackend::LrTable, "composed A must keep the LR table");
-    assert_eq!(b.parser_backend(), ParserBackend::TemplateDfa, "composed B must be table-free");
+    assert_eq!(a.__inner().parser_backend(), ParserBackend::LrTable, "composed A must keep the LR table");
+    assert_eq!(b.__inner().parser_backend(), ParserBackend::TemplateDfa, "composed B must be table-free");
     assert_same_masks(&a, &b);
 }
 
@@ -201,7 +201,7 @@ fn mask_strategy_accepts_token_trie_settings_directly() {
     let compiled = grammar
         .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(d))
         .unwrap();
-    assert_eq!(compiled.parser_backend(), ParserBackend::LrTable);
-    assert!(compiled.runtime_is_grammar_quotiented());
+    assert_eq!(compiled.__inner().parser_backend(), ParserBackend::LrTable);
+    assert!(compiled.__inner().runtime_is_grammar_quotiented());
     assert_eq!(InternalMaskStrategy::FAST_COMPILE, InternalMaskStrategy::TokenTrie(TokenTrie::new()));
 }

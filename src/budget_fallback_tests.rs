@@ -18,7 +18,7 @@ use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::build_budget::{TestBudgetLimit, DEFAULT_LIMIT};
-use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -513,14 +513,14 @@ fn auto_decline_with_a_retained_child_keeps_that_child() {
     let mut reference_parent = Module::new(&parent_source);
     reference_parent.bind("child", child.clone()).unwrap();
     let reference = reference_parent
-        .compile_with(&vocab, MaskMode::ParserDwa.compile_options())
+        .compile_inner_with(&vocab, MaskMode::ParserDwa.compile_options())
         .expect("reference ParserDwa compile");
     let mut parent = Module::new(&parent_source);
     parent.bind("child", child.clone()).unwrap();
     let before = static_build_probe::builds(&parent);
     parent.force_parser_dwa_decline();
     let auto = parent
-        .compile_with(&vocab, MaskMode::Auto.compile_options())
+        .compile_inner_with(&vocab, MaskMode::Auto.compile_options())
         .expect("Auto must fall back for the parent only");
     assert_eq!(
         static_build_probe::builds(&parent),

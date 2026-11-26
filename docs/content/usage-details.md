@@ -28,8 +28,7 @@ assert state.is_accepting()
 
 ### Mask strategies
 
-`MaskStrategy` expresses a cost preference: `Auto` (the default), `FastCompile` (prefer less preparation),
-or `FastMasks` (prefer lower cost per mask). The library can select another supported plan on a deterministic strategy decline; these
-preferences do not guarantee a particular engine or speed, and preserve mask semantics.
+`MaskStrategy` expresses a cost preference: `AUTO` (the default: currently `FAST_MASKS`, or whatever the module was precompiled with), `FAST_COMPILE` (prefer faster compiling),
+or `FAST_MASKS` (prefer faster masks). These are preferences, not speed guarantees.
 
 The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.

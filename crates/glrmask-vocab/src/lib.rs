@@ -11,14 +11,9 @@ mod error;
 pub use error::{Error, ErrorKind, SourceSpan};
 
 /// The largest token ID GLRMask accepts: 16,777,215 (2^24 - 1).
-///
-/// Masks and compile-time tables grow with the largest token ID, so larger IDs
-/// are rejected with an error instead of risking a huge allocation.
 pub const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
-/// A set of token IDs.
-///
-/// A `TokenSet` is a set of numbers; IDs above the token-ID limit are rejected when the set is used.
+/// A set of token IDs. IDs above [`MAX_TOKEN_ID`] are rejected when the set is used.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
     ranges: Arc<[(u32, u32)]>,
@@ -38,13 +33,11 @@ impl fmt::Debug for TokenSet {
 }
 
 impl TokenSet {
-    /// Creates a set from `ids`.
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self::from_pairs(ids.into_iter().map(|id| (id, id)))
     }
 
-    /// Creates a set from ranges of IDs, such as `0..10` or `0..=9`. A range
-    /// with no end, such as `10..`, ends at [`MAX_TOKEN_ID`].
+    /// A range with no end, such as `10..`, ends at [`MAX_TOKEN_ID`].
     pub fn from_ranges<R: RangeBounds<u32>>(
         ranges: impl IntoIterator<Item = R>,
     ) -> Self {
@@ -171,7 +164,6 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Creates a vocabulary from `(id, bytes)` pairs, such as a `HashMap<u32, Vec<u8>>` or a `Vec<(u32, &[u8])>`.
     /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above `MAX_TOKEN_ID`.
     ///
     /// # Examples
@@ -385,12 +377,12 @@ impl Vocab {
         }
     }
 
-    /// The bytes of token `id`, or `None` if the vocabulary doesn't contain it.
+    #[doc(hidden)]
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }
 
-    /// Each token ID and its bytes, in ID order.
+    #[doc(hidden)]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()

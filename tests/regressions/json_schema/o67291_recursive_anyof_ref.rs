@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries: Vec<_> = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();

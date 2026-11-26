@@ -9,7 +9,7 @@
 //! cross-commit cache reuse remains enabled in both revisions.
 use glrmask::test_modes::MaskMode;
 use std::{hint::black_box, time::Instant};
-use glrmask::{Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use serde_json::{json, Value};
 
 fn stats(values: &[f64]) -> Value {

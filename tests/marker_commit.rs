@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, MarkerEvent, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, MarkerEvent, TokenSet, Vocab};
 
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn vocab(parts: &[&[u8]]) -> Vocab {

@@ -415,7 +415,7 @@ mod candidate_tests {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"yz".to_vec())]);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
-            .compile(&vocab).unwrap();
+            .compile_inner(&vocab).unwrap();
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()

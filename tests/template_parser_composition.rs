@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use std::collections::BTreeSet;
-use glrmask::{BuildOptions, Constraint, Grammar, ParserBackend, TokenSet, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, ParserBackend, TokenSet, Vocab};
 
 const HOST: &str = r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#;
 
@@ -390,7 +390,7 @@ fn scoped_ignores_match_the_independent_lr_composition() {
     let parent = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS = "~"+; extern grammar child; nt root = "x" child "y";"#).unwrap()
         .prepare(&vocab).unwrap();
     let grammar = Grammar::from_glrm(r#"start root; ignore WS; t WS = "_"+; nt root = "a" "b"?;"#).unwrap();
-    let lr_child = grammar.compile(&vocab).unwrap();
+    let lr_child = grammar.compile(&vocab).unwrap().__into_inner();
     let lr = parent.bind_snapshot("child", &lr_child).unwrap().link_with(glrmask::test_modes::MaskMode::C.build_options()).unwrap();
     let child = grammar.compile_with_build_options(&vocab, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let candidate = parent.bind_snapshot("child", &child).unwrap().link_with(
@@ -496,7 +496,7 @@ fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {
 #[test]
 fn nested_repeated_child_retains_scope_across_token_boundaries_and_reload() {
     let (vocab, tokens) = vocabulary();
-    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap().compile(&vocab).unwrap();
+    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap().compile(&vocab).unwrap().__into_inner();
     let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link().unwrap();
     let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
@@ -541,7 +541,7 @@ fn assert_language(constraint: &Constraint, tokens: &[(u32, Vec<u8>)], words: &[
 #[test]
 fn compiled_child_composition_uses_templates_for_advance_and_masks() {
     let (vocab, tokens) = vocabulary();
-    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#).unwrap().compile(&vocab).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#).unwrap().compile(&vocab).unwrap().__into_inner();
     let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     for optimization in MaskMode::ALL {
         let candidate = bound.link_with(optimization.build_options()
@@ -572,7 +572,7 @@ fn source_bound_composition_uses_template_backend() {
 #[test]
 fn nullable_child_controls_preserve_empty_body_and_parent_suffix() {
     let (vocab, tokens) = vocabulary();
-    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap().compile(&vocab).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap().compile(&vocab).unwrap().__into_inner();
     let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     for optimization in [MaskMode::C, MaskMode::ParserDwa] {
         let candidate = bound.link_with(optimization.build_options()

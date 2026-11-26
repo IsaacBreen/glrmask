@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
     mask.get(id / 32)

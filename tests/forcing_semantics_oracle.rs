@@ -2,7 +2,7 @@
 //! regular-expression engine or grammar normalization decides the expected set.
 use glrmask::test_modes::MaskMode;
 use std::collections::{BTreeSet, VecDeque};
-use glrmask::{Constraint, ConstraintState, Grammar, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, ConstraintState, Grammar, TokenSet, Vocab};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Cell { Byte(u8), Event(u32) }

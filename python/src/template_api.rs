@@ -90,7 +90,7 @@ impl PyParserProgram {
         }
         let vocab = vocab.inner.clone();
         py.detach(|| self.inner.compile_with(&lexer, &vocab, options))
-            .map(constraint).map_err(api_error)
+            .map(glrmask::Constraint::__from_inner).map(constraint).map_err(api_error)
     }
 }
 

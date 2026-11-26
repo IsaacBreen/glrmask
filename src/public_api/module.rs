@@ -58,8 +58,8 @@ impl CompileOptions {
         else { error.is_strategy_decline() }
     }
     fn soft(&self) -> bool { self.internal_mask.is_none() }
-    fn prefers_fast_masks(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FastMasks }
-    fn prefers_fast_compile(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FastCompile }
+    fn prefers_fast_masks(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FAST_MASKS }
+    fn prefers_fast_compile(&self) -> bool { self.soft() && self.retry_mask.is_none() && self.mask_strategy == MaskStrategy::FAST_COMPILE }
     fn retry_with(&self, engine: InternalMaskStrategy) -> Self {
         let mut retry = self.clone();
         retry.retry_mask = Some(engine);
@@ -422,8 +422,7 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind.
+    /// Fails if the extern is undeclared, already bound or the wrong kind.
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
         let next = self.bound(name, value.into())?;
         *self = next;
@@ -628,13 +627,11 @@ impl Module {
         Ok(())
     }
 
-    /// Compiles as much as possible for `vocab` now, even with externs unbound, so
-    /// later compiles are faster.
+    /// Compiles what it can for `vocab` now, even with externs unbound.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.precompile_with(vocab, CompileOptions::default())
     }
 
-    /// Like [`precompile`](Self::precompile), with `options`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
         with_deep_stack(|| {
             let run = |opts: &CompileOptions| -> Result<Module> {
@@ -652,10 +649,10 @@ impl Module {
                 Ok(candidate)
             };
             let result = match run(&options) {
-                Err(error) if options.can_fallback(&error) && (options.prefers_fast_masks() || (options.soft() && options.mask_strategy == MaskStrategy::Auto)) =>
-                    run(&options.clone().mask_strategy(MaskStrategy::FastCompile)),
+                Err(error) if options.can_fallback(&error) && (options.prefers_fast_masks() || (options.soft() && options.mask_strategy == MaskStrategy::AUTO)) =>
+                    run(&options.clone().mask_strategy(MaskStrategy::FAST_COMPILE)),
                 Err(error) if options.can_fallback(&error) && options.prefers_fast_compile() =>
-                    run(&options.clone().mask_strategy(MaskStrategy::FastMasks)),
+                    run(&options.clone().mask_strategy(MaskStrategy::FAST_MASKS)),
                 other => other,
             }?;
             *self = result;
@@ -1025,8 +1022,15 @@ impl Module {
         self.compile_with(vocab, CompileOptions::default())
     }
 
-    /// Like [`compile`](Self::compile), with `options`.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint> {
+        self.compile_inner_with(vocab, options).map(Constraint::from_runtime)
+    }
+
+    pub(crate) fn compile_inner(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
+        self.compile_inner_with(vocab, CompileOptions::default())
+    }
+
+    pub(crate) fn compile_inner_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
         let constraint = with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))?;
         constraint.mask_bit_len();
         Ok(constraint)
@@ -1379,10 +1383,9 @@ impl Module {
         Ok(grammar)
     }
 
-    /// Saves the module as bytes, with its precompiled work but without the
-    /// vocabulary. Bytes saved by one GLRMask version may not load in another.
+    /// Includes precompiled work.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Loads a module saved with [`save`](Self::save).
+    /// Loads what `save()` wrote, in the same GLRMask version.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
     }
@@ -1526,7 +1529,7 @@ mod precompile_boundary_tests {
             .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("precompiled Module must carry a Tokens trigger");
         let compiled = module
-            .compile_with(&vocab, CompileOptions::default())
+            .compile_inner_with(&vocab, CompileOptions::default())
             .expect("compile after precompile");
         let compiled_trigger = tokens(&compiled).expect("compiled Module must carry Tokens");
         assert!(
@@ -1536,7 +1539,7 @@ mod precompile_boundary_tests {
         assert_eq!(prepared_trigger.as_ref(), compiled_trigger.as_ref());
 
         let plain = Module::new(&grammar)
-            .compile_with(&vocab, CompileOptions::default())
+            .compile_inner_with(&vocab, CompileOptions::default())
             .expect("plain compile");
         assert!(tokens(&plain).is_some(), "plain compile must build the default trigger");
 
@@ -1584,7 +1587,7 @@ mod precompile_boundary_tests {
             .expect("ParserDwa preparation must carry a Tokens trigger");
 
         let compiled = module
-            .compile_with(
+            .compile_inner_with(
                 &vocab,
                 CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE),
             )
@@ -1604,7 +1607,7 @@ mod precompile_boundary_tests {
         );
 
         let expected = Module::new(&grammar)
-            .compile_with(&vocab, CompileOptions::default())
+            .compile_inner_with(&vocab, CompileOptions::default())
             .expect("plain ParserDwa compile");
         fn compare(a: &crate::ConstraintState, b: &crate::ConstraintState, depth: usize) {
             assert_eq!(a.mask(), b.mask(), "mask mismatch at depth {depth}");
@@ -1627,8 +1630,8 @@ mod precompile_boundary_tests {
         let source = Grammar::from_ebnf(r#"start ::= "x" | "xy""#).unwrap();
         let mut strong = Module::new(&source);
         let mut merged = Module::new(&source);
-        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FastCompile);
-        let masks = CompileOptions::default().mask_strategy(MaskStrategy::FastMasks);
+        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
+        let masks = CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS);
         strong.precompile_with(&vocab, masks.clone()).unwrap();
         merged.precompile_with(&vocab, MaskMode::C.compile_options()).unwrap();
         let strong_artifact = strong.node.prepared[&Engine::ParserDwa.key()].clone();
@@ -1647,11 +1650,11 @@ mod precompile_boundary_tests {
         assert!(Arc::ptr_eq(&b.node.prepared[&Engine::MergedTokenTrie.key()], &merged_artifact));
         assert_eq!(static_build_probe::builds_for(&strong, Engine::ParserDwa), nstrong);
         assert_eq!(static_build_probe::builds_for(&merged, Engine::MergedTokenTrie), nmerged);
-        let actual = parent.compile_with(&vocab, fast).unwrap();
+        let actual = parent.compile_inner_with(&vocab, fast).unwrap();
         let mut fresh = Module::new(&host);
         fresh.bind("A", Module::new(&source)).unwrap();
         fresh.bind("B", Module::new(&source)).unwrap();
-        let expected = fresh.compile_with(&vocab, masks).unwrap();
+        let expected = fresh.compile_inner_with(&vocab, masks).unwrap();
         same_language(&actual.start(), &expected.start(), 4);
     }
 
@@ -1714,7 +1717,7 @@ mod precompile_boundary_tests {
     fn reference(strategy: MaskMode) -> RuntimeConstraint {
         assembly(false, false)
             .0
-            .compile_with(&vocab(), strategy.compile_options())
+            .compile_inner_with(&vocab(), strategy.compile_options())
             .expect("reference compile")
     }
 
@@ -1725,7 +1728,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
+            .compile_inner_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1740,7 +1743,7 @@ mod precompile_boundary_tests {
         let before = static_build_probe::builds(&dynamic_part);
         let static_before = static_build_probe::builds(&static_part);
         let mixed = module
-            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
+            .compile_inner_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("mixed compile");
         assert_eq!(static_build_probe::builds(&dynamic_part), before, "the non-precompiled part must not be built statically");
         assert_eq!(static_build_probe::builds(&static_part), static_before, "the precompiled part must be reused, not rebuilt");
@@ -1781,7 +1784,7 @@ mod b_shell_tests {
         );
         let before = static_build_probe::builds_for(&loaded, Engine::TokenTrie);
         let compiled = loaded
-            .compile_with(&vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&vocab, MaskMode::A.compile_options())
             .expect("compile an LR request over a B shell");
         assert!(compiled.uses_dynamic_runtime());
         assert_eq!(
@@ -1790,7 +1793,7 @@ mod b_shell_tests {
             "the LR request rebuilt the retained B shell",
         );
         let reference = loaded
-            .compile_with(&vocab, MaskMode::ParserDwa.compile_options())
+            .compile_inner_with(&vocab, MaskMode::ParserDwa.compile_options())
             .expect("ParserDwa reference");
         let mut left = reference.start();
         let mut right = compiled.start();
@@ -1828,7 +1831,7 @@ mod module_precompile_tests {
         assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
 
         let compiled = module
-            .compile_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
+            .compile_inner_with(&vocab, CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
             .expect("TokenTrie compile after a ParserDwa grammar precompile");
         assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
         assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");
@@ -1839,7 +1842,7 @@ mod module_precompile_tests {
         let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
         parent.precompile(&vocab).expect("open parent precompile");
         parent.bind("child", module).expect("bind child");
-        let composed = parent.compile(&vocab).expect("compile composed modules");
+        let composed = parent.compile_inner(&vocab).expect("compile composed modules");
         let mut state = composed.start();
         assert!(state.commit_token(4));
         assert!(state.is_accepting());
@@ -1847,7 +1850,7 @@ mod module_precompile_tests {
         let mut reference_parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
         reference_parent.bind("child", Module::new(&child)).expect("bind reference child");
         reference_parent.precompile(&vocab).expect("precompile reference parent");
-        let reference = reference_parent.compile(&vocab).expect("compile reference");
+        let reference = reference_parent.compile_inner(&vocab).expect("compile reference");
         assert_eq!(composed.start().mask(), reference.start().mask());
         assert_eq!(composed.start().is_accepting(), reference.start().is_accepting());
     }
@@ -1874,7 +1877,7 @@ mod boundary_gate_tests {
         let mut module = Module::new(&Grammar::from_glrm(parent).unwrap());
         module.bind("child", child).expect("bind child");
         module
-            .compile_with(vocab, CompileOptions::default())
+            .compile_inner_with(vocab, CompileOptions::default())
             .expect("compile linked")
     }
 
@@ -2007,7 +2010,7 @@ mod boundary_strategy_tests {
             ).unwrap());
             parent.bind("child", child.clone()).unwrap();
             parent
-                .compile_with(
+                .compile_inner_with(
                     &vocab,
                     CompileOptions::default().internal_boundary_mask_strategy(strategy),
                 )
@@ -2047,7 +2050,7 @@ mod boundary_error_tests {
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))
                 .unwrap();
             parent.force_boundary_dwa_decline();
-            parent.compile_with(
+            parent.compile_inner_with(
                 &vocab,
                 CompileOptions::default().internal_boundary_mask_strategy(strategy),
             )
@@ -2078,7 +2081,7 @@ mod boundary_error_tests {
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))
                 .unwrap();
             parent.force_boundary_dwa_decline();
-            parent.compile_with(
+            parent.compile_inner_with(
                 &vocab,
                 CompileOptions::default().internal_boundary_mask_strategy(strategy),
             )
@@ -2105,11 +2108,11 @@ mod public_preference_tests {
         let source = Grammar::from_lark("start: \"a\"").unwrap();
         let mut module = Module::new(&source);
         module.force_parser_dwa_decline();
-        let preferred = CompileOptions::default().mask_strategy(MaskStrategy::FastMasks);
-        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FastCompile);
-        let expected = module.compile_with(&vocab, fast).unwrap().start().mask();
-        assert_eq!(module.compile_with(&vocab, preferred.clone()).unwrap().start().mask(), expected);
+        let preferred = CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS);
+        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
+        let expected = module.compile_inner_with(&vocab, fast).unwrap().start().mask();
+        assert_eq!(module.compile_inner_with(&vocab, preferred.clone()).unwrap().start().mask(), expected);
         module.precompile_with(&vocab, preferred.clone()).unwrap();
-        assert_eq!(module.compile_with(&vocab, preferred).unwrap().start().mask(), expected);
+        assert_eq!(module.compile_inner_with(&vocab, preferred).unwrap().start().mask(), expected);
     }
 }

@@ -2,7 +2,7 @@
 //! involved in constructing or replaying the parenthesis recognizer.
 use glrmask::test_modes::MaskMode;
 use std::cell::Cell;
-use glrmask::{BuildOptions, Constraint, Grammar, ParserBackend, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
 use glrmask::template_parser::{LexerDefinition, ParserDefinition, ParserProgram, ParserProvider,
     StackDfa, StackLabel, StackState, StackTemplate, StackTransition, TemplateBuildOptions, TerminalPattern};
 
@@ -176,7 +176,7 @@ fn invalid_lexer_or_nonidentity_ignore_never_changes_the_requested_language() {
 fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]).unwrap();
     let grammar=Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#).unwrap();
-    let ordinary=grammar.compile(&v).unwrap();
+    let ordinary=grammar.compile(&v).unwrap().__into_inner();
     let ordinary_bytes=ordinary.save();
     let explicit=grammar.compile_with_build_options(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     for compiled in [&ordinary,&explicit] {
@@ -257,8 +257,8 @@ fn source_and_precompiled_composition_use_native_defaults() {
     let template=bound.compile_with_build_options(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
     let mut state=template.start();assert!(state.commit_bytes(b"xa"));assert!(state.is_accepting());
-    let ordinary=bound.compile(&v).unwrap();
-    let child=child.compile(&v).unwrap();let child_bytes=child.save();
+    let ordinary=bound.compile(&v).unwrap().__into_inner();
+    let child=child.compile(&v).unwrap().__into_inner();let child_bytes=child.save();
     let module=parent.prepare(&v).unwrap().bind_snapshot("child",&child).unwrap();
     let explicit=module.link_with(BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let default=module.link().unwrap();
@@ -403,7 +403,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#).unwrap()
         .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
-    let loaded = glrmask::Constraint::load(compiled.save(), &vocab).unwrap();
+    let loaded = glrmask::ConstraintInner::load(compiled.save(), &vocab).unwrap();
     for constraint in [&compiled,&loaded] {
         assert_eq!(constraint.parser_backend(),glrmask::ParserBackend::TemplateDfa);
         let mut state = constraint.start();
@@ -423,7 +423,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
 #[test]
 fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::__private::{ConstraintExt, parser_backend_report};
-    use glrmask::{Constraint, Grammar, ParserBackend, Vocab};
+    use glrmask::{ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
         (2, b"t".to_vec()), (3, b"rue".to_vec())]).unwrap();
     for mode in [MaskMode::C, MaskMode::ParserDwa] {

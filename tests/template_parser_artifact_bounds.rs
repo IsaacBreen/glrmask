@@ -4,7 +4,7 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackTemplate,
     TemplateBuildOptions, TerminalPattern,
 };
-use glrmask::{Constraint, InternalMaskStrategy, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, InternalMaskStrategy, ParserBackend, Vocab};
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

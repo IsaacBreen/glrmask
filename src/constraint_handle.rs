@@ -1,0 +1,42 @@
+use crate::{ConstraintState, Result, Vocab};
+use crate::runtime::Constraint as RuntimeConstraint;
+use std::borrow::Cow;
+
+/// A compiled grammar, ready to use.
+#[derive(Clone, Debug)]
+pub struct Constraint {
+    inner: RuntimeConstraint,
+}
+
+impl Constraint {
+    pub(crate) fn from_runtime(inner: RuntimeConstraint) -> Self { Self { inner } }
+
+    /// Starts a new sequence.
+    pub fn start(&self) -> ConstraintState { self.inner.start() }
+
+    /// The mask's length in bits: one per token ID, from 0.
+    pub fn mask_bit_len(&self) -> usize { self.inner.mask_bit_len() }
+
+    pub fn save(&self) -> Vec<u8> { self.inner.save() }
+
+    /// Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with.
+    pub fn load<'b>(bytes: impl Into<Cow<'b, [u8]>>, vocab: &Vocab) -> Result<Self> {
+        RuntimeConstraint::load(bytes, vocab).map(Self::from_runtime)
+    }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn __inner(&self) -> &RuntimeConstraint { &self.inner }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn __inner_mut(&mut self) -> &mut RuntimeConstraint { &mut self.inner }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn __into_inner(self) -> RuntimeConstraint { self.inner }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn __from_inner(inner: RuntimeConstraint) -> Self { Self::from_runtime(inner) }
+}

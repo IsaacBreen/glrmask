@@ -1,6 +1,6 @@
 //! Public marker integration gates. The engine reports observations, not captures.
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, PreparedGrammar, Vocab};
 
 fn modes() -> [MaskMode; 6] {
     MaskMode::ALL

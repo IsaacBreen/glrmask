@@ -38,7 +38,13 @@ def test_range_inputs_are_normalized_to_one_set():
     assert glrmask.TokenSet(range(4)) != glrmask.TokenSet(range(5))
 
 
-@pytest.mark.parametrize("ranges", [[range(2, 10, 2)], [(2, 10)]])
+def test_stepped_ranges():
+    assert glrmask.TokenSet.from_ranges([range(0, 10, 3)]) == glrmask.TokenSet([0, 3, 6, 9])
+    assert glrmask.TokenSet.from_ranges([range(9, -1, -3), range(1, 3)]) == glrmask.TokenSet([0, 1, 2, 3, 6, 9])
+    assert glrmask.TokenSet.from_ranges([range(10, 0, 2), range(3, 4, 10**100)]) == glrmask.TokenSet([3])
+
+
+@pytest.mark.parametrize("ranges", [[(2, 10)], [range(-1, 10, 3)], [range(0, 2**24 + 1, 2)]])
 def test_invalid_compact_ranges_are_rejected(ranges):
     with pytest.raises((ValueError, TypeError, OverflowError)):
         glrmask.TokenSet.from_ranges(ranges)

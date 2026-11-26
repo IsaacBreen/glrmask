@@ -4899,9 +4899,6 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Saves the constraint as bytes, without the vocabulary.
-    ///
-    /// Bytes saved by one GLRMask version may not load in another.
     pub fn save(&self) -> Vec<u8> {
         crate::with_deep_stack(|| self.save_artifact())
     }
@@ -5906,7 +5903,7 @@ impl Constraint {
         bytes
     }
 
-    /// `vocab` must be the one it was compiled with.
+    /// Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,

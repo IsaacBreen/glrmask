@@ -4550,7 +4550,7 @@ mod tests {
         let started = Instant::now();
         let compiled = selected10_module(SELECTED10_TOOLS.len(), &vocab)
             .expect("build nested module")
-            .compile(&vocab)
+            .compile_inner(&vocab)
             .expect("nested Module compile");
         eprintln!(
             "SELECTED10_PUBLIC compile_s={:.3} bytes={}",

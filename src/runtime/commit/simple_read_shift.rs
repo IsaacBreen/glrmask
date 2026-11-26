@@ -295,7 +295,7 @@ mod tests {
             LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackTemplate,
             TemplateBuildOptions, TerminalPattern,
         };
-        use crate::{Constraint, InternalMaskStrategy, Vocab};
+        use crate::{runtime::Constraint, InternalMaskStrategy, Vocab};
         let tokens = [
             "a", "b", "aa", "ab", "ba", "bb", "aab", "aba", "aabb", "aaba", "abab", "aaabbb",
         ];
@@ -507,7 +507,7 @@ mod tests {
             LexerDefinition, ParserDefinition, ParserProgram, StackTemplate, TemplateBuildOptions,
             TerminalPattern,
         };
-        use crate::{Constraint, InternalMaskStrategy, Vocab};
+        use crate::{runtime::Constraint, InternalMaskStrategy, Vocab};
 
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let parser = ParserProgram::new(ParserDefinition {

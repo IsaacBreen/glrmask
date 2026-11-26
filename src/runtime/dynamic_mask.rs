@@ -10573,7 +10573,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::{DynamicConstraint, Constraint as Constraint, Grammar, Vocab};
+    use crate::{DynamicConstraint, runtime::Constraint as Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {
@@ -13025,7 +13025,7 @@ nt start = A;
 #[cfg(test)]
 mod epsilon_only_reset_config_tests {
     use super::*;
-    use crate::{Constraint,Grammar,Vocab};
+    use crate::{runtime::Constraint,Grammar,Vocab};
 
     fn fixture()->Constraint {
         let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);

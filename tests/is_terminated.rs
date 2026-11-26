@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{
-    Constraint, ConstraintState, DynamicConstraint, Expr, Grammar, 
+    ConstraintInner as Constraint, ConstraintState, DynamicConstraint, Expr, Grammar,
     Module, TokenSet, Vocab};
 
 const STRATEGIES: [MaskMode; 2] = [MaskMode::ParserDwa, MaskMode::A];
@@ -8,7 +8,7 @@ const STRATEGIES: [MaskMode; 2] = [MaskMode::ParserDwa, MaskMode::A];
 fn compile(grammar: &Grammar, vocab: &Vocab, strategy: MaskMode) -> Constraint {
     grammar
         .compile_with(vocab, strategy.compile_options())
-        .unwrap()
+        .unwrap().__into_inner()
 }
 
 fn with_end_token(body: &Grammar, id: u32) -> Module {
@@ -263,7 +263,7 @@ fn oracle_agrees_with_commit_for_every_prefix() {
             "ignore",
         );
         assert_oracle(
-            &json_root.compile_with(&json_vocab, strategy.compile_options()).unwrap(),
+            &json_root.compile_with(&json_vocab, strategy.compile_options()).unwrap().__into_inner(),
             &json_vocab,
             &[99],
             br#"{"k":0,"k":1}"#,

@@ -1,5 +1,5 @@
 ﻿use std::{collections::BTreeMap, path::Path, time::Instant};
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use glrmask::__private::VocabExt;
 fn hex_to_bytes(s:&str)->Vec<u8>{(0..s.len()).step_by(2).map(|i|u8::from_str_radix(&s[i..i+2],16).unwrap()).collect()}
 fn load_vocab(p:&Path)->Vocab{let r=std::fs::read_to_string(p).unwrap();let e:BTreeMap<u32,String>=serde_json::from_str(&r).unwrap();Vocab::new(e.into_iter().map(|(i,s)|(i,hex_to_bytes(&s))).collect::<Vec<_>>()).unwrap()}

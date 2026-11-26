@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask_json_schema::__private::string::{JsonStringCompatMode, TEST_COMPAT_MODE};
 
 /// Panic-safe RAII pin for the thread-local JSON-string compat mode (the live

@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, ConstraintState, Vocab};
+use glrmask::{ConstraintInner as Constraint, ConstraintState, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 use serde_json::{json, Map, Value};
 

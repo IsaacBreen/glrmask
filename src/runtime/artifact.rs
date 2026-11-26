@@ -10379,12 +10379,15 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// A compiled grammar, ready to use.
+/// Internal runtime handle.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct Constraint {
+pub struct ConstraintInner {
     pub(crate) data: Arc<ConstraintData>,
     pub(crate) cached_mask_bit_len: OnceLock<usize>,
 }
+
+pub(crate) type Constraint = ConstraintInner;
 
 impl Constraint {
     pub(crate) fn from_data(data: ConstraintData) -> Self {
@@ -11606,7 +11609,7 @@ mod immutable_tokenizer_tests {
 #[cfg(test)]
 mod raw_terminal_radius_tests {
     use super::*;
-    use crate::{Constraint, Grammar, Vocab};
+    use crate::{runtime::Constraint, Grammar, Vocab};
 
     /// Exhaustively enumerate the finite test alphabet, independent of the
     /// product/shortest-distance algorithm being checked. No quotient proofs.

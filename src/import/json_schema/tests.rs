@@ -25,7 +25,7 @@ use crate::grammar::ast::{
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm_v1};
 use crate::dump_json_schema_grammar_glrm;
-use crate::{DynamicConstraint, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
+use crate::{DynamicConstraint, runtime::Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
 struct EnvVarGuard {
     key: &'static str,

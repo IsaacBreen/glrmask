@@ -580,12 +580,12 @@ impl ConstraintState {
     }
 
 
-    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
     pub fn forced_bytes(&self) -> Vec<u8> {
         crate::runtime::forced_bytes_for_states(std::slice::from_ref(self))
     }
 
-    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
+    /// Whether the output so far is a complete match.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;

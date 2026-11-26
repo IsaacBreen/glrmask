@@ -18,7 +18,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 #[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyMaskStrategy {
-    /// Let GLRMask choose. The default.
+    /// Currently `FAST_MASKS`, or whatever the module was precompiled with.
     AUTO = 0,
     /// Prefer faster compiling over faster masks.
     FAST_COMPILE = 3,
@@ -32,9 +32,9 @@ impl PyMaskStrategy {
 impl From<PyMaskStrategy> for glrmask::MaskStrategy {
     fn from(value: PyMaskStrategy) -> Self {
         match value {
-            PyMaskStrategy::AUTO => Self::Auto,
-            PyMaskStrategy::FAST_COMPILE => Self::FastCompile,
-            PyMaskStrategy::FAST_MASKS => Self::FastMasks,
+            PyMaskStrategy::AUTO => Self::AUTO,
+            PyMaskStrategy::FAST_COMPILE => Self::FAST_COMPILE,
+            PyMaskStrategy::FAST_MASKS => Self::FAST_MASKS,
         }
     }
 }
@@ -68,7 +68,7 @@ impl TryFrom<glrmask::ParserBackend> for PyParserBackend {
 }
 
 pub(super) fn resolve_mask_strategy(value: Option<&Bound<'_, PyAny>>) -> PyResult<glrmask::MaskStrategy> {
-    let Some(value) = value else { return Ok(glrmask::MaskStrategy::Auto); };
+    let Some(value) = value else { return Ok(glrmask::MaskStrategy::AUTO); };
     if let Ok(strategy) = value.extract::<PyRef<'_, PyMaskStrategy>>() {
         return Ok((*strategy).into());
     }
@@ -82,19 +82,13 @@ pub(super) struct PyTokenSet {
     pub(super) inner: glrmask::TokenSet,
 }
 
-fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
+fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::RangeInclusive<u32>>) -> PyResult<()> {
     let range_type = value.py().import("builtins")?.getattr("range")?;
     if !value.is_instance(&range_type)? {
         return Err(PyTypeError::new_err("TokenSet.from_ranges expects range objects"));
     }
-    let step: i128 = value.getattr("step")?.extract()?;
-    if step != 1 {
-        return Err(super::glrmask_error("invalid_input", "TokenSet.from_ranges requires ranges with step 1"));
-    }
-    let start: i128 = value.getattr("start")?.extract()?;
-    let stop: i128 = value.getattr("stop")?.extract()?;
-    if start >= stop {
-        return Ok(None);
+    if !value.is_truthy()? {
+        return Ok(());
     }
     let convert = |id: i128| match u32::try_from(id) {
         Ok(id) => check_token_id(id),
@@ -103,7 +97,18 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
             glrmask::MAX_TOKEN_ID
         ))),
     };
-    Ok(Some(convert(start)?..=convert(stop - 1)?))
+    // Validate both endpoints before expanding a potentially huge stepped range.
+    let first = convert(value.get_item(0)?.extract()?)?;
+    let last = convert(value.get_item(-1)?.extract()?)?;
+    if value.getattr("step")?.eq(1)? {
+        ranges.push(first..=last);
+    } else {
+        for item in value.try_iter()? {
+            let id = convert(item?.extract()?)?;
+            ranges.push(id..=id);
+        }
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -120,15 +125,14 @@ impl PyTokenSet {
         })
     }
 
-    /// Each range must have step 1.
     #[staticmethod]
     #[pyo3(signature = (ranges, /))]
     fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let ranges = ranges
-            .try_iter()?
-            .map(|item| python_range(&item?))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(Self { inner: glrmask::TokenSet::from_ranges(ranges.into_iter().flatten()) })
+        let mut normalized = Vec::new();
+        for item in ranges.try_iter()? {
+            python_range(&item?, &mut normalized)?;
+        }
+        Ok(Self { inner: glrmask::TokenSet::from_ranges(normalized) })
     }
 
     fn __repr__(&self) -> String {
@@ -173,7 +177,6 @@ impl PyTokenSet {
 #[derive(Clone, Copy)]
 enum SourceKind { Glrm, JsonSchema, Lark }
 
-/// A grammar, parsed from source or built from an Expr.
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
@@ -241,6 +244,7 @@ impl PyGrammar {
         Self::new(source, SourceKind::Lark)
     }
 
+    /// Builds a grammar from an `Expr`.
     #[staticmethod]
     #[pyo3(signature = (expr, /))]
     fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -287,7 +291,7 @@ impl PyGrammar {
         Ok(())
     }
 
-    /// A snapshot; read it again after `bind()`.
+    /// Doesn't update after `bind()`.
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {
         let inner = self.inner.clone();
@@ -342,7 +346,7 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Tooling-only inspection of the stored parser representation.
 #[pyfunction]
 fn parser_backend(constraint: &PyConstraint) -> PyResult<PyParserBackend> {
-    constraint.inner.parser_backend().try_into()
+    constraint.inner.__inner().parser_backend().try_into()
 }
 
 #[pyfunction]
@@ -361,6 +365,7 @@ fn compile_with_backend(
         .parser_backend(glrmask::ParserBackend::TemplateDfa);
     let grammar = grammar.as_rust().map_err(api_error)?;
     py.detach(|| grammar.compile_with_build_options(&vocab.inner, options))
+        .map(glrmask::Constraint::__from_inner)
         .map(constraint)
         .map_err(api_error)
 }

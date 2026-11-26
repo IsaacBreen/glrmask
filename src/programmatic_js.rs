@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, SegmentedBoundaryBackend, compose_constraints_owned_parent_segmented,
 };
-use crate::{Constraint, Error, ErrorExt as _, Vocab};
+use crate::{runtime::Constraint, Error, ErrorExt as _, Vocab};
 
 const JAVASCRIPT_GLRM: &str = include_str!("programmatic_js/javascript.glrm");
 const PARENT_PLACEHOLDER_NAME: &str = "PROGRAMMATIC_TOOL_SUFFIX";

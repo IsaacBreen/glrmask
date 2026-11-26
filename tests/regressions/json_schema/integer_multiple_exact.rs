@@ -1,6 +1,6 @@
 //! General integer divisibility may not silently degrade to a range or wildcard.
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 
 fn allowed(mask: &[u32], id: usize) -> bool {
     mask.get(id / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)

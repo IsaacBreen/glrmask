@@ -238,7 +238,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let module = Module::new(&Grammar::from_lark(lark).unwrap());
             let constraint = module
-                .compile_with(&vocab, mode.compile_options())
+                .compile_inner_with(&vocab, mode.compile_options())
                 .ok()?;
             // Some backends decline lazily during materialization rather than
             // returning a compile error. Those modes are simply not exercised.

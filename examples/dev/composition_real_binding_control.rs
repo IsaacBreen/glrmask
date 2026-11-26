@@ -1,7 +1,7 @@
 //! Binding-only comparison for the saved real JS/ten-schema components.
 //! Preparation is explicitly reported, not silently excluded from raw costs.
 //! Usage: CACHE_DIR [REPEATS=7]
-use glrmask::{Constraint,Vocab};
+use glrmask::{ConstraintInner as Constraint,Vocab};
 use glrmask::__private::ConstraintExt;
 use std::{fs,path::Path,sync::Arc,time::Instant};
 fn main()->Result<(),Box<dyn std::error::Error>> {

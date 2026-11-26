@@ -7,7 +7,7 @@ use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::{collections::BTreeMap, sync::Arc};
-use crate::{Constraint, Error, Result, Vocab};
+use crate::{runtime::Constraint, Error, Result, Vocab};
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::boundary_walk::{BoundaryShardLinkInputs, BoundaryShardWalkPlan};
@@ -487,7 +487,7 @@ mod tests {
             (3,b"xay".to_vec()),(4,b"xa".to_vec()),(5,b"ay".to_vec()),(6,b"xb".to_vec())]);
         for nullable in [false,true] {
             let child=Grammar::from_ebnf(if nullable {r#"start ::= "a" | """#} else {r#"start ::= "a""#}).unwrap()
-                .compile(&vocab).unwrap();
+                .compile_inner(&vocab).unwrap();
             let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("child",&child).unwrap()
                 .link_with(MaskMode::C.build_options()).unwrap();
@@ -581,7 +581,7 @@ mod tests {
     fn exact_caller_domains_distinguish_one_call_from_adjacent_child_calls() {
         let vocab = Vocab::from_entries_unchecked(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
             (2,b"aa".to_vec()),(3,b"xa".to_vec()),(4,b"xaa".to_vec()),(5,b"aaa".to_vec())]);
-        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_inner(&vocab).unwrap();
         for (source, inline, retain) in [
             (r#"start root; extern grammar child; nt root = "x" child;"#, r#"start ::= "x" "a""#, false),
             (r#"start root; extern grammar child; nt root = "x" child child;"#, r#"start ::= "x" "a" "a""#, true),
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn existing_static_component_bodies_are_retained_without_cloning_or_rebuilding() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()), (3, b"xay".to_vec())]);
-        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_inner(&vocab).unwrap();
         let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa)).unwrap();

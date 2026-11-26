@@ -9137,7 +9137,7 @@ impl ConstraintState {
         true
     }
 
-    /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
+    /// If the token isn't allowed, returns `false` and the state ends.
     #[must_use]
     pub fn commit_token(
         &mut self,
@@ -9146,7 +9146,7 @@ impl ConstraintState {
         self.commit_token_raw(token_id).is_ok()
     }
 
-    /// Returns the number of tokens committed. If it is less than `token_ids.len()`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns false). To try tokens without changing this state, commit them on a clone.
+    /// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed.
     #[must_use]
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> usize {
         for (i, &token_id) in token_ids.iter().enumerate() {
@@ -9444,7 +9444,7 @@ impl ConstraintState {
         result
     }
 
-    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// If the bytes aren't allowed, returns `false` and the state ends.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
@@ -9481,7 +9481,7 @@ impl ConstraintState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Constraint as Constraint, DynamicConstraint, Grammar, Vocab};
+    use crate::{runtime::Constraint as Constraint, DynamicConstraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
     type CanonicalCommitState =

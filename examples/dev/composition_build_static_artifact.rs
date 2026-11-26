@@ -1,7 +1,7 @@
 //! Build one current provider-native selected10 static composition artifact.
 //! Usage:
 //!   composition_build_static_artifact <cache-dir> <output-file>
-use glrmask::{Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask::__private::ConstraintExt;
 use std::{fs, path::Path, time::Instant};
 

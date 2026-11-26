@@ -34,22 +34,33 @@ pub(crate) use stack::with_deep_stack;
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
 /// A preference for faster compiling or faster masks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
-pub enum MaskStrategy {
-    /// Let GLRMask choose. The default.
-    #[default]
-    Auto,
-    /// Prefer faster compiling over faster masks.
-    FastCompile,
-    /// Prefer faster masks over faster compiling.
-    FastMasks,
-}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MaskStrategy(MaskPreference);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MaskPreference { Auto, FastCompile, FastMasks }
+
 impl MaskStrategy {
+    /// Currently `FAST_MASKS`, or whatever the module was precompiled with.
+    pub const AUTO: Self = Self(MaskPreference::Auto);
     /// Prefer faster compiling over faster masks.
-    pub const FAST_COMPILE: Self = Self::FastCompile;
-    /// Prefer lower mask cost.
-    pub const FAST_MASKS: Self = Self::FastMasks;
+    pub const FAST_COMPILE: Self = Self(MaskPreference::FastCompile);
+    /// Prefer faster masks over faster compiling.
+    pub const FAST_MASKS: Self = Self(MaskPreference::FastMasks);
+}
+
+impl Default for MaskStrategy {
+    fn default() -> Self { Self::AUTO }
+}
+
+impl std::fmt::Debug for MaskStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            MaskPreference::Auto => "MaskStrategy::AUTO",
+            MaskPreference::FastCompile => "MaskStrategy::FAST_COMPILE",
+            MaskPreference::FastMasks => "MaskStrategy::FAST_MASKS",
+        })
+    }
 }
 
 /// How masks are computed.
@@ -78,9 +89,9 @@ impl InternalMaskStrategy {
 
 impl From<MaskStrategy> for InternalMaskStrategy {
     fn from(value: MaskStrategy) -> Self { match value {
-        MaskStrategy::Auto => Self::Auto,
-        MaskStrategy::FastCompile => Self::FAST_COMPILE,
-        MaskStrategy::FastMasks => Self::ParserDwa,
+        MaskStrategy::AUTO => Self::Auto,
+        MaskStrategy::FAST_COMPILE => Self::FAST_COMPILE,
+        MaskStrategy::FAST_MASKS => Self::ParserDwa,
     } }
 }
 
@@ -251,7 +262,6 @@ impl std::fmt::Debug for Externs<'_> {
 }
 
 impl<'a> Externs<'a> {
-    /// The extern named `name`, if any.
     pub fn get(&self, name: &str) -> Option<Extern> {
         let declared = self.source.declarations()?;
         if self.only_unbound && self.source.bound(name) {
@@ -277,7 +287,6 @@ impl<'a> Externs<'a> {
         self.len() == 0
     }
 
-    /// Unbound names in this view.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
             source: self.source.clone(),
@@ -613,7 +622,7 @@ impl Grammar {
     #[doc(hidden)]
     pub fn compile_with_parser(&self, vocab: &Vocab,
         compiler: &(impl crate::template_parser::ParserCompiler + ?Sized),
-        options: crate::template_parser::TemplateBuildOptions) -> Result<crate::Constraint> {
+        options: crate::template_parser::TemplateBuildOptions) -> Result<RuntimeConstraint> {
         self.prepare_parser_grammar()?.compile_parser(compiler)?.compile_with(vocab, options)
     }
 
@@ -642,7 +651,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Parses GLRM source.
+    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
     pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
         grammar.component()?;
@@ -650,7 +659,7 @@ impl Grammar {
     }
 
 
-    /// Parses Lark source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source.
     pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
         grammar.lark_document()?;
@@ -798,6 +807,7 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
+    /// Builds a grammar from an `Expr`.
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)
@@ -872,8 +882,7 @@ impl Grammar {
         }
     }
 
-    /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind.
+    /// Fails if the extern is undeclared, already bound or the wrong kind.
     pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
         let value = match value.into().0 {
             module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
@@ -891,13 +900,20 @@ impl Grammar {
         Module::new(self).compile(vocab)
     }
 
-    /// Like [`compile`](Self::compile), with `options`.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
         options: CompileOptions,
     ) -> Result<Constraint> {
         Module::new(self).compile_with(vocab, options)
+    }
+
+    pub(crate) fn compile_inner(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
+        Module::new(self).compile_inner(vocab)
+    }
+
+    pub(crate) fn compile_inner_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
+        Module::new(self).compile_inner_with(vocab, options)
     }
 
     #[cfg(any(test, feature = "internal-api"))]
@@ -3502,7 +3518,7 @@ mod tests {
         let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root = \"<\" child \">\";")
             .prepare(&vocab).unwrap();
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
-            .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
+            .compile_inner(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
         let parent = PreparedGrammar::load(parent.save(), &vocab).unwrap();
         let child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         assert!(child.deferred_composition_metadata_blob.is_some());
@@ -3624,7 +3640,7 @@ mod tests {
         ]);
         let mut component = Grammar::glrm(
             r#"glrm 1; start value; nt value = "[" "a"? "]";"#,
-        ).compile(&vocab).unwrap();
+        ).compile_inner(&vocab).unwrap();
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(&mut component, &vocab);
         let expected = crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(&component, &vocab)
             .unwrap().expect("fresh component must carry a checked certificate");
@@ -3654,7 +3670,7 @@ mod tests {
     fn immutable_template_certificate_reuse_invalidates_unchanged_resave_cache() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]);
         let component = Grammar::glrm(r#"glrm 1; start value; nt value = "a";"#)
-            .compile(&vocab).unwrap();
+            .compile_inner(&vocab).unwrap();
         let mut loaded = RuntimeConstraint::load(component.save(), &vocab).unwrap();
         let expected = crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(&loaded, &vocab)
             .unwrap().expect("loaded native component must carry a checked certificate");
@@ -6594,7 +6610,7 @@ mod final_unlinked_optimization_tests {
         .prepare(&vocab)
         .unwrap();
         let child = Grammar::ebnf(r#"start ::= "y""#)
-            .compile(&vocab)
+            .compile_inner(&vocab)
             .unwrap();
 
         let bound = host.bind_snapshot("child", &child).unwrap();
@@ -7270,7 +7286,7 @@ mod tiny_cfg_compile_blowup_tests {
         let grammar = Grammar::from_lark(&source).unwrap();
         let module = Module::new(&grammar);
         module
-            .compile_with(&vocabulary(), strategy.compile_options())
+            .compile_inner_with(&vocabulary(), strategy.compile_options())
             .unwrap()
     }
 
@@ -7337,7 +7353,7 @@ mod module_build_overhead_tests {
             Expr::from(TokenSet::new([0u32])),
         ]), true)
         .expect("root expression")
-        .compile(&vocab)
+        .compile_inner(&vocab)
         .expect("module build");
         assert!(
             matches!(standalone.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_)),
@@ -7368,7 +7384,7 @@ mod module_build_overhead_tests {
                 Expr::from(TokenSet::new([0u32])),
             ]), true)
             .expect("root expression")
-            .compile(&vocab)
+            .compile_inner(&vocab)
             .expect("warmup module build");
         }
 
@@ -7394,7 +7410,7 @@ mod module_build_overhead_tests {
                 Expr::from(TokenSet::new([0u32])),
             ]), true)
             .expect("root expression")
-            .compile(&vocab)
+            .compile_inner(&vocab)
             .expect("module build");
             module_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -7534,13 +7550,13 @@ mod mask_strategy_configuration_tests {
         );
         parent.bind("C", child).unwrap();
         let unmerged = parent
-            .compile_with(&vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&vocab, MaskMode::A.compile_options())
             .expect("unmerged TokenTrie compile");
         let merged = parent
-            .compile_with(&vocab, MaskMode::C.compile_options())
+            .compile_inner_with(&vocab, MaskMode::C.compile_options())
             .expect("merged compile");
         let merged_lr = parent
-            .compile_with(&vocab, MaskMode::D.compile_options())
+            .compile_inner_with(&vocab, MaskMode::D.compile_options())
             .expect("merged LR compile");
         assert!(merged.runtime_is_grammar_quotiented(), "C flattened composition must be quotiented");
         assert!(merged_lr.runtime_is_grammar_quotiented(), "D flattened composition must be quotiented");
@@ -7583,13 +7599,13 @@ mod mask_strategy_configuration_tests {
         let child = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap();
         let parent = composed_module(&child);
         let unmerged = parent
-            .compile_with(&vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&vocab, MaskMode::A.compile_options())
             .expect("unmerged TokenTrie compile");
         let merged = parent
-            .compile_with(&vocab, MaskMode::C.compile_options())
+            .compile_inner_with(&vocab, MaskMode::C.compile_options())
             .expect("merged compile");
         let merged_lr = parent
-            .compile_with(&vocab, MaskMode::D.compile_options())
+            .compile_inner_with(&vocab, MaskMode::D.compile_options())
             .expect("merged LR compile");
         assert!(merged.runtime_is_grammar_quotiented());
         assert!(merged_lr.runtime_is_grammar_quotiented());
@@ -7618,10 +7634,10 @@ mod mask_strategy_configuration_tests {
         );
         top.bind("middle", middle).unwrap();
         let unmerged = top
-            .compile_with(&nested_vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&nested_vocab, MaskMode::A.compile_options())
             .unwrap();
         let merged_lr = top
-            .compile_with(&nested_vocab, MaskMode::D.compile_options())
+            .compile_inner_with(&nested_vocab, MaskMode::D.compile_options())
             .unwrap();
         assert!(merged_lr.runtime_is_grammar_quotiented());
         assert_inputs_match(&merged_lr, &unmerged, &[&[], &[0], &[0, 5], &[4, 0], &[0, 7, 3]]);
@@ -7629,7 +7645,7 @@ mod mask_strategy_configuration_tests {
         // A local C compile still uses its own quotient.
         let local = Grammar::from_ebnf(r#"start ::= "a" "b" | "ab""#)
             .unwrap()
-            .compile_with(&merged_vocab(), MaskMode::C.compile_options())
+            .compile_inner_with(&merged_vocab(), MaskMode::C.compile_options())
             .unwrap();
         assert!(local.dynamic_mask_vocab.is_grammar_quotiented());
     }
@@ -7643,11 +7659,11 @@ mod mask_strategy_configuration_tests {
             .precompile_with(&vocab, MaskMode::ParserDwa.compile_options())
             .unwrap();
         let unmerged = parent
-            .compile_with(&vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&vocab, MaskMode::A.compile_options())
             .unwrap();
         for mode in [MaskMode::C, MaskMode::D] {
             let merged = parent
-                .compile_with(&vocab, mode.compile_options())
+                .compile_inner_with(&vocab, mode.compile_options())
                 .unwrap();
             assert_inputs_match(&merged, &unmerged, &[&[], &[0], &[0, 1], &[0, 3], &[3, 0], &[4, 0]]);
         }
@@ -7676,11 +7692,11 @@ mod mask_strategy_configuration_tests {
             parent
         };
         let unmerged = build()
-            .compile_with(&vocab, MaskMode::A.compile_options())
+            .compile_inner_with(&vocab, MaskMode::A.compile_options())
             .unwrap();
         for mode in [MaskMode::C, MaskMode::D] {
             let merged = build()
-                .compile_with(&vocab, mode.compile_options())
+                .compile_inner_with(&vocab, mode.compile_options())
                 .unwrap();
             assert!(
                 merged.runtime_is_grammar_quotiented(),

@@ -96,7 +96,7 @@ fn compile_options_never_invalidate_retained_work() {
     let root = root.compile_with(
         &v,
         CompileOptions::default()
-            .mask_strategy(MaskStrategy::FastMasks),
+            .mask_strategy(MaskStrategy::FAST_MASKS),
     )
     .unwrap();
     let mut state = root.start();

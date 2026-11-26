@@ -98,7 +98,12 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 pub(crate) use public_api::with_deep_stack;
 
-pub use runtime::{Constraint, ConstraintState};
+pub use runtime::ConstraintState;
+mod constraint_handle;
+pub use constraint_handle::Constraint;
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use runtime::ConstraintInner;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::markers::{MarkerEvent, MarkerId};
@@ -194,7 +199,7 @@ pub(crate) use error::ErrorExt;
 pub(crate) fn compile_grammar_def_json(
     grammar_def_json: &str,
     vocab: &Vocab,
-) -> Result<Constraint> {
+) -> Result<runtime::Constraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
         .map_err(|e| Error::Syntax(format!("invalid GrammarDef JSON: {e}")))?;
     error::catch_internal_invariant(|| {
@@ -354,7 +359,7 @@ pub mod __private {
         PerAdvanceEntry,
     };
 
-    use crate::{Constraint, ConstraintState, DynamicConstraint, Vocab};
+    use crate::{ConstraintInner as Constraint, ConstraintState, DynamicConstraint, Vocab};
 
     pub type Result<T> = std::result::Result<T, Error>;
 

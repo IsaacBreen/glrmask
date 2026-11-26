@@ -4000,7 +4000,7 @@ mod tests {
         crate::grammar::ast::lower(&factored).unwrap()
     }
 
-    fn compile_compressed_static(source: &str, vocab: &Vocab) -> crate::Constraint {
+    fn compile_compressed_static(source: &str, vocab: &Vocab) -> crate::runtime::Constraint {
         crate::compiler::pipeline::compile_owned_with_table_construction(
             compressed_lark_grammar(source),
             vocab,
@@ -4037,7 +4037,7 @@ mod tests {
             t B = 'b';
             nt start = A B;
         "#;
-        let normal = crate::Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let normal = crate::runtime::Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut normal_state = normal.start();
         let mut dynamic_state = dynamic.start();
@@ -7781,7 +7781,7 @@ nt start = A;
         }
         grammar.push_str("r63: \"b\"\n");
 
-        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let constraint = crate::runtime::Constraint::from_lark(&grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
         let dynamic = compile_compressed_dynamic(&grammar, &vocab);
@@ -7810,7 +7810,7 @@ nt start = A;
         assert!(static_state.commit_token(0));
         assert_eq!(static_state.mask(), after_third);
 
-        let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
+        let loaded = crate::runtime::Constraint::load(constraint.save(), &vocab).unwrap();
         assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();
@@ -7826,7 +7826,7 @@ nt start = A;
     #[test]
     fn non_regular_constraint_keeps_static_backend() {
         let vocab = vocab();
-        let constraint = crate::Constraint::from_ebnf(
+        let constraint = crate::runtime::Constraint::from_ebnf(
             "start ::= 'a' start 'b' | ''",
             &vocab,
         )

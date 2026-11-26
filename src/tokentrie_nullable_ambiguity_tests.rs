@@ -21,14 +21,14 @@ fn vocab() -> Vocab {
 fn token_trie() -> crate::runtime::Constraint {
     let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
-        .compile_with(&vocab(), CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
+        .compile_inner_with(&vocab(), CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::FAST_COMPILE))
         .unwrap()
 }
 
 fn mode_constraint(mode: MaskMode) -> crate::runtime::Constraint {
     let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
-        .compile_with(&vocab(), mode.compile_options())
+        .compile_inner_with(&vocab(), mode.compile_options())
         .unwrap()
 }
 

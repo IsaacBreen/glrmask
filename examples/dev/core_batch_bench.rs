@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use std::{collections::BTreeSet, error::Error, hint::black_box, time::Instant};
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use serde_json::{json,Value};
 use glrmask::PreparedGrammar as Prepared;
 const JSON_SOURCE:&str=r#"{"type":"object","properties":{"name":{"type":"string","pattern":"^[a-z]+$"},"events":{"type":"array","items":{"type":"integer","minimum":0,"maximum":99},"maxItems":5},"active":{"type":"boolean"}},"required":["name","events","active"],"additionalProperties":false}"#;

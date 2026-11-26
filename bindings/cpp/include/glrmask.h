@@ -8,7 +8,7 @@
  * any bytes, including NUL and partial UTF-8 sequences.
  *
  * Every handle a function returns is yours: free it with the matching _free
- * function. Handles and memory you pass in are used only during the call. A
+ * function. Pass NULL for default compile options. Handles and memory you pass in are used only during the call. A
  * state keeps its constraint alive, so you may free the constraint first. A
  * clone is independent of the original. Pointers from *_data and
  * glrmask_externs_get stay valid until you free the handle they came from;
@@ -48,11 +48,11 @@ typedef int32_t glrmask_status;
 /// Status values. On failure an output handle is NULL.
 /// New codes may be added in a minor release; treat an unknown non-zero code as a failure.
 enum {
-    GLRMASK_OK=0, ///< Success.
-    GLRMASK_SYNTAX=1, ///< Invalid grammar syntax.
+    GLRMASK_OK=0,
+    GLRMASK_SYNTAX=1,
     GLRMASK_INVALID_INPUT=2, ///< A handle or argument is invalid.
-    GLRMASK_COMPILATION=3, ///< Compilation failed.
-    GLRMASK_RESOURCE_LIMIT=4, ///< A resource limit was exceeded.
+    GLRMASK_COMPILATION=3,
+    GLRMASK_RESOURCE_LIMIT=4,
     GLRMASK_STRATEGY_UNSUPPORTED=5, ///< The chosen strategy does not support the grammar.
     GLRMASK_SERIALIZATION=6, ///< Saved bytes could not be loaded.
     GLRMASK_INTERNAL=7, ///< An internal error; discard the affected handle and please report it.
@@ -61,15 +61,15 @@ enum {
 };
 /// A preference for faster compiling or faster masks.
 enum {
-    GLRMASK_MASK_STRATEGY_AUTO=0,         ///< Let GLRMask choose. The default.
+    GLRMASK_MASK_STRATEGY_AUTO=0,         ///< Currently `GLRMASK_MASK_STRATEGY_FAST_MASKS`, or whatever the module was precompiled with.
     GLRMASK_MASK_STRATEGY_FAST_COMPILE=3, ///< Prefer faster compiling over faster masks.
     GLRMASK_MASK_STRATEGY_FAST_MASKS=4    ///< Prefer faster masks over faster compiling.
 };
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
-    GLRMASK_GLRM=1,         ///< GLRM.
-    GLRMASK_JSON_SCHEMA=2,  ///< JSON Schema.
-    GLRMASK_LARK=3          ///< Lark.
+    GLRMASK_GLRM=1,
+    GLRMASK_JSON_SCHEMA=2,
+    GLRMASK_LARK=3
 };
 /// What an extern can be bound to.
 enum {
@@ -85,32 +85,31 @@ typedef struct glrmask_token_set glrmask_token_set;
 typedef struct glrmask_grammar glrmask_grammar;
 /// A partially compiled grammar.
 typedef struct glrmask_module glrmask_module;
-/// A choice or sequence of grammars, modules, token sets and literals.
+/// A grammar expression.
 typedef struct glrmask_expr glrmask_expr;
 /// A compiled grammar, ready to use.
 typedef struct glrmask_constraint glrmask_constraint;
 /// The state of one generated sequence.
 typedef struct glrmask_state glrmask_state;
-/// A byte buffer.
 typedef struct glrmask_bytes glrmask_bytes;
 /// Externs in name order.
 typedef struct glrmask_externs glrmask_externs;
 
 /// One vocabulary entry: a token ID and its exact bytes.
 typedef struct {
-    uint32_t id;           ///< The token ID.
-    const uint8_t *bytes;  ///< The token's exact bytes.
-    size_t bytes_len;      ///< The number of bytes.
+    uint32_t id;
+    const uint8_t *bytes;
+    size_t bytes_len;
 } glrmask_vocab_entry;
 /** A range of token IDs. `start` is included and `end` is not. */
 typedef struct {
-    uint32_t start; /**< First token ID in the range. */
-    uint32_t end;   /**< One past the last token ID. */
+    uint32_t start;
+    uint32_t end;
 } glrmask_token_range;
 /// Options for compiling a grammar or module. Set `struct_size` to
 /// `sizeof(glrmask_compile_options)`; fields past `struct_size` count as zero.
 typedef struct {
-    size_t struct_size;               ///< Size of this struct in bytes.
+    size_t struct_size;
     uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
     uint32_t reserved[3];             ///< Reserved; must be zero.
 } glrmask_compile_options;
@@ -124,13 +123,12 @@ typedef struct {
 typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
 /// The kinds of expression part: grammar, module, expression, token set.
 enum {
-    GLRMASK_OPERAND_GRAMMAR=0,  ///< A glrmask_grammar handle.
-    GLRMASK_OPERAND_MODULE=1,   ///< A glrmask_module handle.
-    GLRMASK_OPERAND_EXPR=2,     ///< A glrmask_expr handle.
-    GLRMASK_OPERAND_TOKEN_SET=4 ///< A glrmask_token_set handle.
+    GLRMASK_OPERAND_GRAMMAR=0,
+    GLRMASK_OPERAND_MODULE=1,
+    GLRMASK_OPERAND_EXPR=2,
+    GLRMASK_OPERAND_TOKEN_SET=4
 };
 
-/// The C ABI revision.
 GLRMASK_API uint32_t glrmask_abi_version(void);
 /// The GLRMask version, as a static string.
 GLRMASK_API const char *glrmask_version(void);
@@ -140,145 +138,106 @@ GLRMASK_API const char *glrmask_error_message(void);
 GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
 
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,glrmask_vocab** out);
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* vocab,glrmask_vocab** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* vocab);
-/// Creates a token set from `ids`.
 GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t* ids,size_t n,glrmask_token_set** out);
 /// Creates a token set from half-open `ranges`, each including `start` and excluding `end`.
 GLRMASK_API glrmask_status glrmask_token_set_from_ranges(const glrmask_token_range* ranges,size_t n,glrmask_token_set** out);
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_token_set_clone(const glrmask_token_set* token_set,glrmask_token_set** out);
-/// Writes whether both sets contain the same IDs.
 GLRMASK_API glrmask_status glrmask_token_set_equal(const glrmask_token_set* a,const glrmask_token_set* b,uint32_t* out);
-/// Frees the handle.
 GLRMASK_API void glrmask_token_set_free(glrmask_token_set* token_set);
 
-/// Creates a grammar from source text in `format`.
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const char* source,size_t n,glrmask_grammar** out);
 
+/// Builds a grammar from an `Expr`.
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. Bind token externs on a Module.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_grammar* value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. Bind token externs on a Module.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_expr* value);
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* grammar,glrmask_grammar** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar* grammar);
-/// A snapshot; read it again after binding.
+/// Doesn't update after binding.
 GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar* grammar,glrmask_externs** out);
-/// Unbound names at the time of the snapshot.
+/// Doesn't update after binding.
 GLRMASK_API glrmask_status glrmask_grammar_unbound_externs(const glrmask_grammar* grammar,glrmask_externs** out);
-/// Compiles the grammar for `vocab`. Fails if any extern is unbound. `options`
-/// may be NULL for defaults.
+/// Fails if any extern is unbound.
 GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar* grammar,const glrmask_vocab* vocab,const glrmask_compile_options* options,glrmask_constraint** out);
 
-/// Creates a module from a grammar.
 GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar* grammar,glrmask_module** out);
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module* module,glrmask_module** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_module_free(glrmask_module* module);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module* module,const char* name,size_t name_len,const glrmask_grammar* value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module* module,const char* name,size_t name_len,const glrmask_module* value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module* module,const char* name,size_t name_len,const glrmask_expr* value);
-/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
-/// or the value is the wrong kind for it. A token extern takes only a token set.
+/// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module* module,const char* name,size_t name_len,const glrmask_token_set* value);
-/// Compiles as much as possible for `vocab` now, so later compiles are fast.
-/// `options` may be NULL.
+/// Compiles what it can for `vocab` now, even with externs unbound.
 GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options);
-/// Compiles the module for `vocab`, reusing any precompiled work. Fails if any
-/// extern is unbound or the module was precompiled for another vocabulary.
-/// `options` may be NULL.
+/// Reuses any precompiled work, which must be for the same vocabulary. Fails if an extern is unbound.
 GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options,glrmask_constraint** out);
-/// Writes the module's externs, in name order.
+/// Doesn't update after binding.
 GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module* module,glrmask_externs** out);
-/// Writes the module's externs that are not yet bound.
+/// Doesn't update after binding.
 GLRMASK_API glrmask_status glrmask_module_unbound_externs(const glrmask_module* module,glrmask_externs** out);
-/// Saves the module, including precompiled work, as bytes. The vocabulary is not
-/// included.
+/// Includes precompiled work.
 GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module* module,glrmask_bytes** out);
-/// Loads a module saved with `glrmask_module_save`.
+/// Loads what `glrmask_module_save()` wrote, in the same GLRMask version.
 GLRMASK_API glrmask_status glrmask_module_load(const uint8_t* bytes,size_t n,glrmask_module** out);
 
-/// Creates an expression matching any one of `operands`.
+/// Matches any one of `operands`.
 GLRMASK_API glrmask_status glrmask_expr_choice(const glrmask_expr_operand* operands,size_t n,glrmask_expr** out);
-/// Creates an expression matching `operands` one after another.
+/// Matches `operands` in order.
 GLRMASK_API glrmask_status glrmask_expr_sequence(const glrmask_expr_operand* operands,size_t n,glrmask_expr** out);
-/// Creates an expression matching exactly `bytes`.
+/// Matches `bytes` exactly.
 GLRMASK_API glrmask_status glrmask_expr_literal(const uint8_t* bytes,size_t n,glrmask_expr** out);
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_expr_clone(const glrmask_expr* expr,glrmask_expr** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_expr_free(glrmask_expr* expr);
 
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_constraint_clone(const glrmask_constraint* constraint,glrmask_constraint** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_constraint_free(glrmask_constraint* constraint);
 /// Starts a new sequence.
 GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* constraint,glrmask_state** out);
-/// Writes the number of token slots, including gaps, or zero for an empty domain.
-/// The minimum packed buffer contains (N + 31) / 32 words, where N is this value.
+/// The mask's length in bits: one per token ID, from 0.
 GLRMASK_API glrmask_status glrmask_constraint_mask_bit_len(const glrmask_constraint* constraint,size_t* out);
-/// Saves the constraint as bytes, without the vocabulary.
+
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* constraint,glrmask_bytes** out);
-/// Loads a constraint saved with `glrmask_constraint_save`. Fails if `vocab`
-/// isn't the one it was compiled for.
+/// Loads what `glrmask_constraint_save()` wrote, in the same GLRMask version and with the vocab it was compiled with.
 GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n,const glrmask_vocab* vocab,glrmask_constraint** out);
 
-/// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmask_state** out);
-/// Frees the handle.
 GLRMASK_API void glrmask_state_free(glrmask_state* state);
-/// Writes the number of token slots, including gaps, or zero for an empty domain.
-/// The minimum packed buffer contains (N + 31) / 32 words, where N is this value.
+/// The mask's length in bits: one per token ID, from 0.
 GLRMASK_API glrmask_status glrmask_state_mask_bit_len(const glrmask_state* state,size_t* out);
-/// Whether everything committed so far is a complete match. Writes 1 or 0 to
-/// `out`. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
+/// Whether the output so far is a complete match. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state,uint32_t* out);
-/// Writes the tokens allowed next into `out` as a bitmask, setting extra words to
-/// zero. Token `id` is allowed when bit `id % 32` of word `id / 32` is set. Returns
+/// Which tokens may come next: one bit per token ID in `uint32_t` words (bit `i % 32` of word `i / 32`).
+/// Writes the words into `out`. Extra words are set to 0. Returns
 /// `GLRMASK_BUFFER_TOO_SMALL`, writing nothing, if `word_count` is below (N + 31) / 32,
 /// where N is the state mask bit length.
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,uint32_t* out,size_t word_count);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
 /// Commit calls clear the last error on ordinary acceptance or rejection; invalid handles, arguments and internal failures set it.
-/// Commits a token. If it isn't allowed, returns `false` and terminates the
-/// state. Returns false for a NULL state.
+/// If the token isn't allowed, returns `false` and the state ends. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_token(glrmask_state* state,uint32_t id);
-/// Returns the number of tokens committed. If less than n, the token at that index
-/// was not allowed and the state is now terminated. Returns zero for a NULL state.
-/// To try tokens without changing this state, commit them on a clone.
+/// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed. Returns zero for a NULL state.
 GLRMASK_API size_t glrmask_state_commit_tokens(glrmask_state* state,const uint32_t* ids,size_t n);
-/// Commits raw bytes. If they aren't allowed, returns `false` and terminates the
-/// state. Returns false for a NULL state.
+/// If the bytes aren't allowed, returns `false` and the state ends. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n);
-/// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+/// The bytes that must come next, if any. Commit them with `glrmask_state_commit_bytes()`.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);
 
 /// Points `*out_data` at the contents, valid until the buffer is freed.
 GLRMASK_API glrmask_status glrmask_bytes_data(const glrmask_bytes* bytes,const uint8_t** out_data,size_t* out_len);
-/// Frees the handle.
 GLRMASK_API void glrmask_bytes_free(glrmask_bytes* bytes);
 
-/// Writes the number of externs.
 GLRMASK_API glrmask_status glrmask_externs_len(const glrmask_externs* externs,size_t* out);
 /// Copies the extern at `index`; its name stays valid until the view is freed.
 GLRMASK_API glrmask_status glrmask_externs_get(const glrmask_externs* externs,size_t index,glrmask_extern* out);
-/// Frees the handle.
 GLRMASK_API void glrmask_externs_free(glrmask_externs* externs);
 
 #ifdef __cplusplus

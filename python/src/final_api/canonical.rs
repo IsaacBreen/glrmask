@@ -70,7 +70,7 @@ impl From<glrmask::Extern> for PyExtern {
 
 /// A grammar's or module's externs, in name order.
 ///
-/// A read-only mapping from name to `Extern`.
+/// Externs by name, in name order.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug)]
 pub(super) struct PyExterns {
@@ -86,7 +86,6 @@ impl PyExterns {
 
 #[pymethods]
 impl PyExterns {
-    /// Unbound names at the time of the snapshot.
     #[getter]
     fn unbound(&self) -> Self {
         match &self.unbound_entries {
@@ -515,7 +514,7 @@ impl PyModule {
         Ok(super::constraint(constraint))
     }
 
-    /// A snapshot; read it again after `bind()`.
+    /// Doesn't update after `bind()`.
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
         let snapshot = slf.try_borrow()?.snapshot();
@@ -546,13 +545,14 @@ impl PyModule {
         Ok(copy)
     }
 
-    /// Serializes the module with its precompiled work. Other GLRMask versions may not load it.
+    /// Includes precompiled work.
     fn save<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = slf.try_borrow()?.snapshot();
         let bytes = slf.py().detach(move || snapshot.save());
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
+    /// Loads what `save()` wrote, in the same GLRMask version.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

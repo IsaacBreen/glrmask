@@ -2,7 +2,7 @@
 //! Build:  build COMPONENT_CACHE OUTPUT_ARTIFACT
 //! Replay: replay VOCAB_DUMP STATIC_ARTIFACT DYNAMIC_ARTIFACT TRACES OUTPUT [LIMIT]
 //! No construction, validation, hashing or output is included in mask/TBM time.
-use glrmask::{Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask::__private::{ConstraintExt, ConstraintStateExt, BoundaryCpuReport, begin_boundary_cpu_profile, take_boundary_cpu_profile};
 use serde::Deserialize;
 use std::{fs, io::{BufWriter, Write}, path::Path, time::Instant};

@@ -3,7 +3,7 @@
 //! The vocabulary file maps decimal token IDs to hex-encoded bytes.
 //! Timed TBM is fill_mask + commit_token; state setup and token selection are
 //! outside the timer. Each sample starts a fresh state at the same byte prefix.
-use glrmask::{Constraint, DynamicConstraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, DynamicConstraint, Grammar, Vocab};
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 fn read_vocab(path: &str) -> Vocab {

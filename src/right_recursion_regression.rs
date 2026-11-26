@@ -96,7 +96,7 @@ fn minimal_right_recursion_grammar_compiles_and_masks_match_the_language() {
     for strategy in MaskMode::ALL {
         let module = Module::new(&grammar);
         let constraint = module
-            .compile_with(&vocab, strategy.compile_options())
+            .compile_inner_with(&vocab, strategy.compile_options())
             .unwrap();
 
         for word in words() {

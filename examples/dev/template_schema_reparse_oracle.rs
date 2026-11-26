@@ -2,7 +2,7 @@
 //! Usage: template_schema_reparse_oracle SCHEMA_JSON REPARSED_GLRM VOCAB_DUMP OUTPUT_JSON
 use std::{fs, io::Write, path::Path, time::Instant};
 
-use glrmask::{BuildOptions, Constraint, InternalMaskStrategy, ParserBackend, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, InternalMaskStrategy, ParserBackend, Vocab};
 use glrmask::Grammar;
 use glrmask::__private::parser_backend_report;
 use serde_json::json;

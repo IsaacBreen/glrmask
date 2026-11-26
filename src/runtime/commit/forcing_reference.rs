@@ -343,8 +343,8 @@ mod tests {
     #[test]
     fn union_with_accepting_owner_must_not_force_a_continuation() {
         let vocab=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
-        let first=Grammar::from_ebnf("start ::= \"a\"?").unwrap().compile(&vocab).unwrap();
-        let second=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile(&vocab).unwrap();
+        let first=Grammar::from_ebnf("start ::= \"a\"?").unwrap().compile_inner(&vocab).unwrap();
+        let second=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile_inner(&vocab).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
     }
 
@@ -352,8 +352,8 @@ mod tests {
     fn different_owner_spelling_maps_cannot_be_canonicalized_together() {
         let a=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec())]);
         let b=Vocab::from_entries_unchecked(vec![(0,b"b".to_vec())]);
-        let first=Grammar::from_ebnf("start ::= \"a\"").unwrap().compile(&a).unwrap();
-        let second=Grammar::from_ebnf("start ::= \"b\"").unwrap().compile(&b).unwrap();
+        let first=Grammar::from_ebnf("start ::= \"a\"").unwrap().compile_inner(&a).unwrap();
+        let second=Grammar::from_ebnf("start ::= \"b\"").unwrap().compile_inner(&b).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
     }
 

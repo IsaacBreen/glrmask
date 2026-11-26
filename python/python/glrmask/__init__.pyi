@@ -104,10 +104,11 @@ class Grammar:
         ...
     @staticmethod
     def from_expr(expr: Expr, /) -> Grammar:
+        """Builds a grammar from an `Expr`."""
         ...
     @property
     def externs(self) -> Externs:
-        """A snapshot; read it again after `bind()`."""
+        """Doesn't update after `bind()`."""
         ...
     @overload
     def bind(self, name: str, value: Grammar | Expr, /) -> None:
@@ -150,11 +151,10 @@ class Expr:
 @final
 class TokenSet:
     """A set of token IDs."""
-    def __new__(cls, ids: Iterable[int], /) -> TokenSet:
+    def __init__(self, ids: Iterable[int], /) -> None:
         ...
     @staticmethod
     def from_ranges(ranges: Iterable[range], /) -> TokenSet:
-        """Each range must have step 1."""
         ...
     def __repr__(self) -> str:
         ...
@@ -164,7 +164,7 @@ class TokenSet:
 @final
 class Module:
     """A partially compiled grammar."""
-    def __new__(cls, source: Grammar, /) -> Module:
+    def __init__(self, source: Grammar, /) -> None:
         ...
     @overload
     def bind(self, name: str, value: Grammar | Module | Expr | TokenSet, /) -> None:
@@ -176,7 +176,7 @@ class Module:
         ...
     @property
     def externs(self) -> Externs:
-        """A snapshot; read it again after `bind()`."""
+        """Doesn't update after `bind()`."""
         ...
     def precompile(
         self,
@@ -197,10 +197,11 @@ class Module:
     def copy(self) -> Module:
         ...
     def save(self) -> bytes:
-        """Serializes the module with its precompiled work. Other GLRMask versions may not load it."""
+        """Includes precompiled work."""
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
+        """Loads what `save()` wrote, in the same GLRMask version."""
         ...
     def __copy__(self) -> Module:
         ...
@@ -215,43 +216,42 @@ class Constraint:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """One more than the largest token ID."""
+        """The mask's length in bits: one per token ID, from 0."""
         ...
     def save(self) -> bytes:
-        """Serializes the constraint. Other GLRMask versions may not load it."""
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """`vocab` must be the one it was compiled with."""
+        """Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with."""
         ...
 
 @final
 class ConstraintState:
     """The state of one generated sequence."""
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
-        """Which tokens may come next: packed `uint32` bits, or with `dtype=bool` one boolean per token ID."""
+        """Which tokens may come next: one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`), or one boolean per token ID with `dtype=bool`."""
         ...
     def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
-        """Writes the packed mask into `bitmask`, zeroing any extra words. Releases the GIL."""
+        """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
         ...
     @property
     def mask_bit_len(self) -> int:
-        """One more than the largest token ID."""
+        """The mask's length in bits: one per token ID, from 0."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
-        """Returns `False`, and ends the state, if the token isn't allowed."""
+        """If the token isn't allowed, returns `False` and the state ends."""
         ...
     def commit_tokens(self, token_ids: Sequence[int], /) -> int:
-        """Returns how many were committed. Stops at the first token that isn't allowed, which ends the state."""
+        """Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """Returns `False`, and ends the state, if the bytes aren't allowed."""
+        """If the bytes aren't allowed, returns `False` and the state ends."""
         ...
     def forced_bytes(self) -> bytes:
-        """The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing."""
+        """The bytes that must come next, if any. Commit them with `commit_bytes()`."""
         ...
     def is_accepting(self) -> bool:
-        """Whether what's committed is a complete match. If so, allow EOS (don't commit it)."""
+        """Whether the output so far is a complete match."""
         ...
     def is_terminated(self) -> bool:
         """Whether nothing more can be committed."""
@@ -268,7 +268,6 @@ class Externs(Mapping[str, "Extern"]):
     """Externs by name, in name order."""
     @property
     def unbound(self) -> Externs:
-        """Unbound names at the time of the snapshot."""
         ...
     def __getitem__(self, key: str, /) -> Extern:
         ...
@@ -311,7 +310,7 @@ class Extern:
 class MaskStrategy:
     """A preference for faster compiling or faster masks."""
     AUTO: ClassVar[MaskStrategy]
-    """Let GLRMask choose. The default."""
+    """Currently `FAST_MASKS`, or whatever the module was precompiled with."""
     FAST_COMPILE: ClassVar[MaskStrategy]
     """Prefer faster compiling over faster masks."""
     FAST_MASKS: ClassVar[MaskStrategy]

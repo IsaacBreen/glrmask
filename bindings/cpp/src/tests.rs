@@ -146,7 +146,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
     };
     let options = unsafe { root_options((&old as *const OldOptions).cast()) }.unwrap();
     let reference = core::compile_options(
-        g::MaskStrategy::FastCompile,
+        g::MaskStrategy::FAST_COMPILE,
     );
     assert_eq!(options, reference);
 

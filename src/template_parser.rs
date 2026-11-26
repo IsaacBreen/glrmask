@@ -35,7 +35,7 @@ use crate::automata::unweighted_u32::dfa::{DFA, DFAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label};
 use crate::runtime::CommitTemplateDfas;
 use crate::runtime::parser_backend::TemplateParser;
-use crate::{Constraint, Error, Result, Vocab};
+use crate::{runtime::Constraint, Error, Result, Vocab};
 
 const MAX_CERTIFICATE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_AUTOMATON_STATES: usize = 1_000_000;

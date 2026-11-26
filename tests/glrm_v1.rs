@@ -1,6 +1,6 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{
-    Constraint, ConstraintSpec, DynamicConstraint, Grammar, PreparedGrammar,
+    ConstraintInner as Constraint, ConstraintSpec, DynamicConstraint, Grammar, PreparedGrammar,
     Vocab};
 
 // Composition fixtures explicitly materialize the native parser before binding.

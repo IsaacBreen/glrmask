@@ -29,10 +29,6 @@ impl fmt::Display for SourceSpan {
     }
 }
 
-/// A GLRMask error.
-///
-/// [`kind`](Self::kind) says what went wrong in general; the message, shown by
-/// `Display`, says exactly what.
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,
@@ -40,17 +36,13 @@ pub struct Error {
     span: Option<SourceSpan>,
 }
 
-/// The kind of an [`Error`].
-///
-/// More kinds may be added, so a `match` needs a `_` arm.
+/// More kinds may be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The grammar source (GLRM or Lark) or JSON Schema can't be parsed.
     Syntax,
-    /// The caller passed something invalid, such as an unknown or already bound
-    /// extern, a value of the wrong kind, an unbound extern at compile time, a
-    /// duplicate vocabulary ID or a token ID above `MAX_TOKEN_ID`.
+    /// An invalid argument, binding or token ID.
     InvalidInput,
     /// A valid grammar that GLRMask can't compile.
     Compilation,
@@ -65,7 +57,6 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    /// The kind of error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }

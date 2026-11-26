@@ -47,7 +47,7 @@ auto constraint = call.compile(vocab);
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. It changes the grammar or module in
 place; if it fails, nothing changes. Copy a grammar or module first to bind the same one in different ways. `externs()`
-returns a snapshot; read it again after `bind()`. `externs().unbound()` gives the unbound names at the time of that snapshot.
+doesn't update after `bind()`. `externs().unbound()` lists the unbound names.
 
 `Expr::choice`, `Expr::sequence` and `Expr::literal` combine grammars without writing a new one:
 

@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 
 fn vocab(entries: &[&[u8]]) -> Vocab {
     Vocab::new(

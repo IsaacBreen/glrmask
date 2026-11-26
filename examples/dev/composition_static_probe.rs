@@ -4,7 +4,7 @@
 //! The complete mask is checked against a monolithic constraint at every prefix.
 //! Timed states are clones: ConstraintState::clone drops its last-mask cache.
 //! No sampled-token selection, state cloning, replay, or assertions are timed.
-use glrmask::{Constraint, DynamicConstraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, DynamicConstraint, Grammar, Vocab};
 use std::{hint::black_box, time::Instant};
 
 fn vocabulary(depth: usize) -> Vocab {

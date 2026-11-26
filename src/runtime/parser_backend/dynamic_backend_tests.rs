@@ -5,7 +5,7 @@
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
-use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 /// Duplicate byte spellings, sparse IDs, an empty-byte token and a token used
 /// only as an explicit end token exercise the vocabulary surfaces shared by

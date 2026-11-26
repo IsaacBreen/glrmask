@@ -2,7 +2,7 @@
 //! Same source/binary configuration must be used on checkpoint and refactor.
 //! Includes JSON ordinary-path controls, scoped ignores, delayed exclusions,
 //! nullable returns, duplicate byte spellings, special tokens, and persistence.
-use glrmask::{Constraint, ConstraintSpec, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, ConstraintSpec, Grammar, Vocab};
 use std::{hint::black_box, time::Instant};
 
 fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {

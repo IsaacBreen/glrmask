@@ -2046,7 +2046,7 @@ mod tests {
     use crate::automata::lexer::Lexer;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::{Constraint as Constraint, Grammar, Vocab};
+    use crate::{runtime::Constraint as Constraint, Grammar, Vocab};
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
@@ -8521,8 +8521,7 @@ impl ConstraintState {
         returned_profile
     }
 
-    /// Allowed token IDs as a packed bitmask: 32-bit words, bit i%32 of word i//32 is token ID i. Token `id` is allowed when bit
-    /// `id % 32` of word `id / 32` is set.
+    /// Which tokens may come next: one bit per token ID in `u32` words (bit `i % 32` of word `i / 32`).
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
         self.fill_mask(&mut buf);
@@ -8766,7 +8765,7 @@ impl ConstraintState {
         Some(shadow)
     }
 
-    /// Writes the mask into `buf`, zeroing any extra words.
+    /// Like `mask()`, but writes the words into `buf`. Extra words are set to 0.
     ///
     /// # Panics
     ///
@@ -8792,8 +8791,7 @@ impl ConstraintState {
         }
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
-    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    /// The mask's length in bits: one per token ID, from 0.
     pub fn mask_bit_len(&self) -> usize {
         self.constraint.mask_bit_len()
     }

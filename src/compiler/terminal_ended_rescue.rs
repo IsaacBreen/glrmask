@@ -21,7 +21,7 @@ use crate::compiler::glr::terminal_ended::{
 use crate::compiler::grammar::transforms::prepare_terminal_ended_grammar;
 use crate::compiler::pipeline::try_compile_terminal_ended;
 use crate::grammar::flat::{GrammarDef, Terminal};
-use crate::{Constraint, Error, Result, Vocab};
+use crate::{runtime::Constraint, Error, Result, Vocab};
 
 #[cfg(test)]
 thread_local! {

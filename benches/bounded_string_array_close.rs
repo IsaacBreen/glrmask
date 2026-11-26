@@ -9,7 +9,7 @@ use criterion::{
     criterion_group,
     criterion_main,
 };
-use glrmask::{Grammar, Constraint};
+use glrmask::{Grammar, ConstraintInner as Constraint};
 use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 use std::time::Duration;
 

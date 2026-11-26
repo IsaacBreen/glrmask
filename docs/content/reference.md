@@ -38,7 +38,7 @@ print(text.decode())
 ```
 
 Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
-Python `mask_bit_len` (a method in Rust and C++) returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
@@ -62,12 +62,12 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 commits text, such as a prefix you supply. Text never matches a token set. A failed commit ends the state, so to try a
 token without committing to it, copy the state first.
 
-`is_accepting()` says whether the text so far is a complete match. More may still be allowed: `1+2` is complete, but
+`is_accepting()` says whether the output so far is a complete match. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed.
 
 ### Forced bytes
 
-`forced_bytes()` returns the bytes the grammar requires next without changing the state. Tokenize them with your model's tokenizer and commit the tokens. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
+`forced_bytes()` returns the bytes that must come next, if any. Commit them with `commit_bytes()`. If feeding tokens to a model, tokenize the bytes and commit those tokens instead. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
 
 
 ## Composing grammars
@@ -144,7 +144,7 @@ token sets. `Grammar.from_expr` makes a grammar from an expression that contains
 ## Token sets
 
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
-`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. An ID doesn't need to be in the vocabulary.
+`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
 
 Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
 is an error.
@@ -155,14 +155,11 @@ Tokens with no bytes, such as tool-call markers, are special tokens. They never 
 
 `MaskStrategy` expresses a cost preference:
 
-- `Auto`: let the library choose. The default.
-- `FastCompile`: prefer lower compilation cost, even if later masks cost more.
-- `FastMasks`: prefer lower mask cost, even if compilation costs more.
+- `AUTO` (Rust/Python), `Auto` (Node/C++): currently fast masks, or whatever the module was precompiled with. The default.
+- `FAST_COMPILE` (Rust/Python), `FastCompile` (Node/C++): prefer faster compiling over faster masks.
+- `FAST_MASKS` (Rust/Python), `FastMasks` (Node/C++): prefer faster masks over faster compiling.
 
-These are distinct preferences, not concrete engine selections or speed guarantees. If a preferred plan declines
-on applicability or deterministic size grounds, another supported plan may be used. Invalid input, corrupt
-artifacts and operational resource failures are not hidden by fallback. All supported plans preserve mask semantics.
-Retained compatible work may be reused in any mode.
+These are preferences, not speed guarantees. GLRMask may use another strategy; masks have the same semantics.
 
 Pass the preference to `compile` on a Grammar or Module, or to `precompile` on a Module.
 
@@ -184,8 +181,8 @@ an annotation, and `oneOf` requires exactly one match. A schema feature GLRMask 
 has one layout, the one Python's `json.dumps` writes by default: no whitespace outside strings except a space after each
 `,` and `:`, as in `{"a": [1, 2]}`.
 
-**GLRM** is GLRMask's own format. It has terminals (`t`) and nonterminals (`nt`), externs, scoped grammars, and
-regular-expression intersection and subtraction. See [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
+**[GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md)** has terminals (`t`) and nonterminals (`nt`), externs, scoped grammars, and
+regular-expression intersection and subtraction.
 
 ```glrm
 start value

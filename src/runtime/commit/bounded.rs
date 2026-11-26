@@ -817,8 +817,8 @@ mod differential_tests {
     #[test]
     fn bounded_dynamic_owner_union_counts_distinct_original_ids() {
         let v=Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),(9,b"a".to_vec())]);
-        let a=Grammar::from_glrm("start root nt root=\"ab\"").unwrap().compile(&v).unwrap();
-        let b=Grammar::from_glrm("start root nt root=\"ac\"").unwrap().compile(&v).unwrap();
+        let a=Grammar::from_glrm("start root nt root=\"ab\"").unwrap().compile_inner(&v).unwrap();
+        let b=Grammar::from_glrm("start root nt root=\"ac\"").unwrap().compile_inner(&v).unwrap();
         let sa=a.start();let sb=b.start();
         assert_eq!(mask_for_states_at_most(&[sa.clone(),sb.clone()],2).unwrap(),Some(sa.mask()));
         assert!(mask_for_states_at_most(&[sa.clone(),sb.clone()],1).unwrap().is_none());

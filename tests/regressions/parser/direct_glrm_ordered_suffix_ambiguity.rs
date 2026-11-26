@@ -1,4 +1,4 @@
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 fn byte_vocab() -> Vocab {

@@ -10,7 +10,7 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackState, StackTemplate,
     StackTransition, TemplateBuildOptions, TerminalPattern,
 };
-use glrmask::{Constraint, InternalMaskStrategy, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, InternalMaskStrategy, ParserBackend, Vocab};
 use std::collections::{BTreeSet, VecDeque};
 
 fn next(s: &mut u64) -> u64 {

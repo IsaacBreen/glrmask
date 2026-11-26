@@ -66,7 +66,7 @@ use super::artifact::{
     SeedTerminalDenseMasks,
     SparseWeightBufMaskCache,
 };
-pub use super::artifact::Constraint;
+pub(crate) use super::artifact::Constraint;
 pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
 use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
@@ -12616,7 +12616,7 @@ impl Constraint {
         state
     }
 
-    /// One more than the largest token ID.
+    /// The mask's length in bits: one per token ID, from 0.
     pub fn mask_bit_len(&self) -> usize {
         *self.cached_mask_bit_len.get_or_init(|| self.max_original_token_id().map_or(0, |id| id as usize + 1))
     }
@@ -15275,7 +15275,7 @@ WS: /[ \t]+/
         ).unwrap());
         host.bind("child", Grammar::from_ebnf(r#"start ::= "ab""#).unwrap())
             .unwrap();
-        let mut composed = host.compile(&vocab).expect("composed child compile");
+        let mut composed = host.compile_inner(&vocab).expect("composed child compile");
         assert_matches_reference(&mut composed, "composed child");
 
         // The same shape with a token extern bound to a TokenSet: the child leaf
@@ -15285,7 +15285,7 @@ WS: /[ \t]+/
             r#"glrm 1; start root; extern token T; nt root = T;"#,
         ).unwrap());
         host.bind("T", crate::TokenSet::new([1])).unwrap();
-        let mut composed = host.compile(&vocab).expect("composed token-set compile");
+        let mut composed = host.compile_inner(&vocab).expect("composed token-set compile");
         assert_matches_reference(&mut composed, "composed token set");
     }
 }

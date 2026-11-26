@@ -119,7 +119,7 @@ cargo add glrmask
 
 #### Native C++ and Node.js
 
-Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The [C++ guide and C API](https://glrmask.com/api/cpp/) and [JavaScript and TypeScript guide](https://glrmask.com/api/javascript/) cover source builds, platform artifacts, ownership, composition, and the complete supported API. The Node.js addon runs the Rust engine directly; browser WebAssembly is a separate target.
+Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The [C++ guide and C API](https://glrmask.com/api/cpp/) and [JavaScript and TypeScript guide](https://glrmask.com/api/javascript/) cover source builds, platform artifacts, ownership, composition, and the complete supported API. The Node.js addon does not run in browsers.
 
 ### Usage
 
@@ -239,9 +239,8 @@ assert state.is_accepting()
 
 ### Mask strategies
 
-`MaskStrategy` expresses a cost preference: `Auto` (the default), `FastCompile` (prefer less preparation),
-or `FastMasks` (prefer lower cost per mask). The library can select another supported plan on a deterministic strategy decline; these
-preferences do not guarantee a particular engine or speed, and preserve mask semantics.
+`MaskStrategy` expresses a cost preference: `AUTO` (the default: currently `FAST_MASKS`, or whatever the module was precompiled with), `FAST_COMPILE` (prefer faster compiling),
+or `FAST_MASKS` (prefer faster masks). These are preferences, not speed guarantees.
 
 The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.
 

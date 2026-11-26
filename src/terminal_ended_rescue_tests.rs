@@ -22,7 +22,7 @@ use crate::compiler::terminal_ended_rescue::{
 };
 use crate::compiler::grammar::transforms::set_test_epsfree_prepass;
 use crate::import::static_route_recorded;
-use crate::{BuildOptions, Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
+use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
 
 // One single-byte token per terminal used by the witnesses. Keeping the
 // vocabulary small keeps the exact oracle and the TokenTrie comparison focused

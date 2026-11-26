@@ -44,7 +44,7 @@ fn bundled_javascript_accepts_all_curated_examples() {
     let grammar = Grammar::from_glrm(JAVASCRIPT).expect("bundled JavaScript must import publicly");
     let vocab = bytes_vocab();
     let constraint = grammar.compile_with(
-        &vocab, CompileOptions::default().mask_strategy(MaskStrategy::FastMasks)
+        &vocab, CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS)
     ).expect("static JavaScript compilation");
     let examples = [
         ("01_lexical_literals.js", include_bytes!("data/javascript/01_lexical_literals.js").as_slice()),

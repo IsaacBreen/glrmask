@@ -301,7 +301,7 @@ fn precompile_assignments(count: usize) -> Vec<Vec<Precompile>> {
 
 fn compile_reference(spec: &AssemblySpec, strategy: MaskMode, vocab: &Vocab) -> RuntimeConstraint {
     compile_assembly(spec, &[], vocab)
-        .compile_with(vocab, strategy.compile_options())
+        .compile_inner_with(vocab, strategy.compile_options())
         .unwrap_or_else(|error| panic!("{}: {strategy:?} reference compile: {error}", spec.name))
 }
 
@@ -384,7 +384,7 @@ fn mixed_compile_matches_parser_dwa_on_composed_assemblies() {
             let _ = crate::public_api::module::mixed_compile_probe::take();
             let module = compile_assembly(&spec, precompiled, &vocab);
             let candidate = module
-                .compile_with(&vocab, TOKEN_TRIE.compile_options())
+                .compile_inner_with(&vocab, TOKEN_TRIE.compile_options())
                 .unwrap_or_else(|error| {
                     panic!(
                         "{} subset {subset_label}: TokenTrie compile failed: {error}",
@@ -492,7 +492,7 @@ fn precompiled_work_is_reused_across_every_engine_request() {
 
             for mode in compile_modes {
                 let candidate = module
-                    .compile_with(&vocab, mode.compile_options())
+                    .compile_inner_with(&vocab, mode.compile_options())
                     .unwrap_or_else(|error| {
                         panic!(
                             "{} assignment {assignment:?} mode {mode:?}: compile failed: {error}",
@@ -542,7 +542,7 @@ fn json_schema_child_mixed_compile_has_no_fallback() {
 
     let _ = crate::public_api::module::mixed_compile_probe::take();
     let candidate = compile_assembly(&spec, &[0], &vocab)
-        .compile_with(&vocab, TOKEN_TRIE.compile_options())
+        .compile_inner_with(&vocab, TOKEN_TRIE.compile_options())
         .unwrap_or_else(|error| panic!("{}: mixed TokenTrie compile failed: {error}", spec.name));
     let fallbacks = crate::public_api::module::mixed_compile_probe::take();
     assert!(
@@ -612,7 +612,7 @@ fn json_schema_component_matches_static_schema_compiler() {
         let reference = compile_reference(&spec, PARSER_DWA, &vocab);
         let _ = crate::public_api::module::mixed_compile_probe::take();
         let candidate = compile_assembly(&spec, &[0], &vocab)
-            .compile_with(&vocab, TOKEN_TRIE.compile_options())
+            .compile_inner_with(&vocab, TOKEN_TRIE.compile_options())
             .unwrap_or_else(|error| panic!("{name}: mixed TokenTrie compile failed: {error}"));
         let fallbacks = crate::public_api::module::mixed_compile_probe::take();
         assert!(

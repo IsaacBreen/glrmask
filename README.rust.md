@@ -74,7 +74,7 @@ fn model(output: &[u8]) -> Vec<f32> {
 
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/) · [Benchmarks](https://glrmask.com/#benchmarks)
 
-Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The [C++ guide and C API](https://glrmask.com/api/cpp/) and [JavaScript and TypeScript guide](https://glrmask.com/api/javascript/) cover source builds, platform artifacts, ownership, composition, and the complete supported API. The Node.js addon runs the Rust engine directly; browser WebAssembly is a separate target.
+Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The [C++ guide and C API](https://glrmask.com/api/cpp/) and [JavaScript and TypeScript guide](https://glrmask.com/api/javascript/) cover source builds, platform artifacts, ownership, composition, and the complete supported API. The Node.js addon does not run in browsers.
 
 ## License
 

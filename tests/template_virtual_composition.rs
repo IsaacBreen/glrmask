@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{BuildOptions, Constraint, Grammar, ParserBackend, Vocab};
+use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
 
 const URI: &str = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
 
@@ -322,7 +322,7 @@ fn unsupported_general_virtual_projection_fails_without_changing_dynamic_languag
 
 mod product_review {
     use glrmask::test_modes::MaskMode;
-    use glrmask::{BuildOptions, Constraint, Grammar, ParserBackend, Vocab};
+    use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
 
     fn options(mode: MaskMode) -> BuildOptions {
         mode.build_options().parser_backend(ParserBackend::TemplateDfa)

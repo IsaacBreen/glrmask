@@ -4,7 +4,7 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackDfa, StackLabel, StackState,
     StackTemplate, StackTransition, TemplateBuildOptions, TerminalPattern,
 };
-use glrmask::{Constraint, InternalMaskStrategy, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, InternalMaskStrategy, ParserBackend, Vocab};
 
 fn compile_static(p: &ParserProgram, l: &LexerDefinition, v: &Vocab) -> Constraint {
     let c = p

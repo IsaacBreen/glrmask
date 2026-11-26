@@ -662,15 +662,15 @@ impl PyConstraint {
 
 
     fn num_parser_states(&self) -> u32 {
-        self.inner.num_parser_states()
+        self.inner.__inner().num_parser_states()
     }
 
     fn terminal_display_names(&self) -> Vec<String> {
-        self.inner.terminal_display_names().to_vec()
+        self.inner.__inner().terminal_display_names().to_vec()
     }
 
     fn terminal_display_name(&self, terminal_id: u32) -> Option<String> {
-        self.inner
+        self.inner.__inner()
             .terminal_display_name(terminal_id)
             .map(str::to_string)
     }
@@ -678,13 +678,12 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Serializes the constraint. Other GLRMask versions may not load it.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.detach(|| self.inner.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// `vocab` must be the one it was compiled with.
+    /// Loads what `save()` wrote, in the same GLRMask version and with the vocab it was compiled with.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
@@ -705,7 +704,7 @@ impl PyConstraint {
         }
     }
 
-    /// One more than the largest token ID.
+    /// The mask's length in bits: one per token ID, from 0.
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
@@ -804,7 +803,7 @@ impl PyDynamicConstraint {
             for (name, child) in subgrammars {
                 let child = child.borrow(py);
                 builder = builder
-                    .bind_grammar(name, Arc::clone(&child.inner))
+                    .bind_grammar(name, Arc::new(child.inner.__inner().clone()))
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
         }
@@ -993,7 +992,7 @@ impl PyDynamicConstraintState {
         }))
     }
 
-    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
     fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
         PyBytes::new(py, &bytes)
@@ -1042,20 +1041,20 @@ impl PyConstraintState {
         Ok(copy)
     }
 
-    /// One more than the largest token ID.
+    /// The mask's length in bits: one per token ID, from 0.
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
     }
 
 
-    /// Which tokens may come next: packed `uint32` bits, or with `dtype=bool` one boolean per token ID.
+    /// Which tokens may come next: one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`), or one boolean per token ID with `dtype=bool`.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 
-    /// Writes the packed mask into `bitmask`, zeroing any extra words. Releases the GIL.
+    /// Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
@@ -1067,7 +1066,7 @@ impl PyConstraintState {
         })
     }
 
-    /// Returns `False`, and ends the state, if the token isn't allowed.
+    /// If the token isn't allowed, returns `False` and the state ends.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Some(id) = resolve_token_id(token_id)? else {
@@ -1077,7 +1076,7 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Returns how many were committed. Stops at the first token that isn't allowed, which ends the state.
+    /// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
         if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
@@ -1101,19 +1100,19 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)))
     }
 
-    /// Returns `False`, and ends the state, if the bytes aren't allowed.
+    /// If the bytes aren't allowed, returns `False` and the state ends.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
     }
 
-    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
     fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
         PyBytes::new(py, &bytes)
     }
 
-    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
+    /// Whether the output so far is a complete match.
     fn is_accepting(&self) -> bool {
         with_state(&self.inner, |state| state.is_accepting())
     }
@@ -1486,19 +1485,19 @@ fn compose_compiled_subgrammars(
         .into_iter()
         .map(|(name, child)| {
             let child = child.borrow(py);
-            (name, Arc::clone(&child.inner))
+            (name, Arc::new(child.inner.__inner().clone()))
         })
         .collect::<Vec<_>>();
     let shared_children = owned_children
         .iter()
         .map(|(name, child)| (name.as_str(), Arc::clone(child)))
         .collect::<Vec<_>>();
-    let mut parent = parent.inner.as_ref().clone();
+    let mut parent = parent.inner.__inner().clone();
     parent
         .bind_vocab_exact(&vocab.inner)
         .map_err(PyValueError::new_err)?;
     PyConstraint::from_constraint_result(
-        parent.compose_compiled_subgrammars_shared(&shared_children, &vocab.inner),
+        parent.compose_compiled_subgrammars_shared(&shared_children, &vocab.inner).map(glrmask::Constraint::__from_inner),
         vocab,
     )
 }
@@ -1918,7 +1917,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // touches only a zero-length NumPy array and does not build or execute a
     // constraint.
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
-    glrmask::Constraint::warm_ti_pool();
+    glrmask::ConstraintInner::warm_ti_pool();
     final_api::register(m)?;
     m.add("GLRMaskError", m.py().get_type::<GLRMaskError>())?;
     m.add_class::<PyVocab>()?;
@@ -1979,18 +1978,18 @@ fn collect_allocator(force: bool) {
 
 #[pyfunction]
 fn clear_stale_weights() {
-    glrmask::Constraint::clear_stale_weights();
+    glrmask::ConstraintInner::clear_stale_weights();
 }
 
 #[pyfunction]
 fn clear_weight_op_caches() {
-    glrmask::Constraint::clear_weight_op_caches();
+    glrmask::ConstraintInner::clear_weight_op_caches();
 }
 
 #[pyfunction]
 fn clear_weight_caches() {
-    glrmask::Constraint::clear_weight_op_caches();
-    glrmask::Constraint::clear_stale_weights();
+    glrmask::ConstraintInner::clear_weight_op_caches();
+    glrmask::ConstraintInner::clear_stale_weights();
 }
 
 #[pyfunction]
@@ -2024,7 +2023,7 @@ fn prepare_vocab_for_dynamic_compile(vocab: &PyVocab) {
 
 #[pyfunction]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-    let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
+    let constraint = glrmask::ConstraintInner::compile_grammar_def_json(grammar_def_json, &vocab.inner).map(glrmask::Constraint::__from_inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
     Ok(PyConstraint::from_inner(constraint))
@@ -2032,6 +2031,6 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
 
 #[pyfunction]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
-    glrmask::Constraint::dump_json_schema_grammar_glrm(schema_json)
+    glrmask::ConstraintInner::dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }

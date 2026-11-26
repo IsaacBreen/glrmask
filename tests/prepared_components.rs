@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, ExternKind, Grammar, PreparedGrammar, TokenSet, Vocab};
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
@@ -87,7 +87,7 @@ fn loading_a_constraint_for_a_different_vocabulary_explains_the_bytes() {
     let constraint = grammar.compile(&v).unwrap();
     let other = Vocab::new(vec![(0, b"y".to_vec())]).unwrap();
     assert_eq!(
-        Constraint::load(constraint.save(), &other).unwrap_err().to_string(),
+        glrmask::Constraint::load(constraint.save(), &other).unwrap_err().to_string(),
         "cannot load saved bytes: the constraint was saved with a different vocabulary"
     );
 }

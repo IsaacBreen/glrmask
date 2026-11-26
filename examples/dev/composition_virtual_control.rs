@@ -1,7 +1,7 @@
 //! Full-vocabulary recursive epsilon/virtual mask control over saved artifacts.
 //! Usage: composition_virtual_control VOCAB_JSON CACHE_DIR [samples=11]
 //! First run creates the fixtures. Later binaries load the same bytes.
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use std::{collections::BTreeMap, fs, hint::black_box, path::Path, time::Instant};
 
 fn percentile(v: &mut [u64], q: f64) -> f64 {

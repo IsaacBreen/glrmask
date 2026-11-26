@@ -1,7 +1,7 @@
 //! A slice certificate must cover every input atom, not only surviving edges.
 //! These public-API regressions run with ordinary defaults (no environment setup).
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, Grammar, UnlinkedConstraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, UnlinkedConstraint, Vocab};
 
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32)

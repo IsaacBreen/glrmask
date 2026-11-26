@@ -11,7 +11,7 @@ mod prefix_uniform;
 use self::completion_index::{CompletionContext, UntrustedCompletionIndex};
 use self::prefix_observer::{Limits, PrefixObserver, Profile};
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};
-use crate::{Constraint,Vocab};
+use crate::{runtime::Constraint,Vocab};
 use glrmask_terminal_dwa::__private::terminal_dwa::scope::BoundaryAnalysisScope;
 use super::boundary_first_completion::FirstRefinement;
 use std::{sync::Arc,time::Instant};

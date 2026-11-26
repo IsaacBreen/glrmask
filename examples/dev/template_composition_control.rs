@@ -3,7 +3,7 @@
 //! FIXTURE_DIR contains core.bin, dispatch-literal.bin, vocab_dump.bin, traces.json.
 //! All masks are compared in memory; only measurements and hashes are saved.
 use std::{fs, path::Path, io::{BufWriter, Write}, time::Instant};
-use glrmask::{Constraint, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, ParserBackend, Vocab};
 use glrmask::__private::{ConstraintExt, into_template_parser, parser_backend_report};
 use serde::Deserialize;
 

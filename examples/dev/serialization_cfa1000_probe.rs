@@ -1,5 +1,5 @@
 ﻿use std::{collections::BTreeMap, fs::File, io::{BufRead, BufReader, Write}, path::Path, time::Instant};
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use glrmask::__private::VocabExt;
 use serde::Deserialize;
 

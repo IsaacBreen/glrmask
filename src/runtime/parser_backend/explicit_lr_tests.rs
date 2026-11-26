@@ -19,12 +19,12 @@ fn vocab_from(words: &[&str]) -> crate::Vocab {
     )
 }
 
-fn lr(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
+fn lr(vocab: &crate::Vocab, source: &str) -> crate::runtime::Constraint {
     crate::DynamicConstraint::from_ebnf(source, vocab)
         .expect("ordinary Dynamic compile").into_constraint()
 }
 
-fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
+fn native(vocab: &crate::Vocab, source: &str) -> crate::runtime::Constraint {
     Grammar::from_ebnf(source).unwrap()
         .compile_with_build_options(
             vocab,
@@ -33,7 +33,7 @@ fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
         .expect("native template compile")
 }
 
-fn assert_no_template_artifacts(constraint: &crate::Constraint) {
+fn assert_no_template_artifacts(constraint: &crate::runtime::Constraint) {
     assert!(!constraint.has_template_parser(), "LR must not install a template parser");
     assert!(constraint.template_parser.is_none());
     assert!(constraint.template_dfas_by_terminal.is_empty(), "no template DFA inventory may be built");

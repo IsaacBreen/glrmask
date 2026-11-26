@@ -4,7 +4,7 @@
 //! All masks are compared in memory; only measurements and hashes are saved.
 use std::{fs, path::Path, io::{BufWriter, Write}, time::Instant};
 use glrmask::test_modes::MaskMode;
-use glrmask::{Grammar,Constraint,ParserBackend,Vocab};
+use glrmask::{Grammar,ConstraintInner as Constraint,ParserBackend,Vocab};
 use glrmask::__private::parser_backend_report;
 use serde::Deserialize;
 use glrmask_grammar::__private::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};

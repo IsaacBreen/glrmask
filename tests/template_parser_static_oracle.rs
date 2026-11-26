@@ -5,7 +5,7 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackDfa, StackLabel, StackState,
     StackTemplate, StackTransition, TerminalPattern,
 };
-use glrmask::{Constraint, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, ParserBackend, Vocab};
 use std::collections::BTreeSet;
 
 fn lexer(n: usize) -> LexerDefinition {

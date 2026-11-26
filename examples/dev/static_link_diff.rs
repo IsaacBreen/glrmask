@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask::__private::ConstraintExt;
 
 const DEFAULT_CACHE_DIR: &str = "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29";

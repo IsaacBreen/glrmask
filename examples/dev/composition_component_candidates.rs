@@ -1,6 +1,6 @@
 //! Export a reusable outgoing-token upper bound from ONE compiled component.
 //! No link is constructed or even represented by this program's arguments.
-use glrmask::{Constraint,Vocab};
+use glrmask::{ConstraintInner as Constraint,Vocab};
 use glrmask::__private::{ConstraintExt,debug_component_boundary_candidate_ids};
 use std::{fs,path::Path,time::Instant};
 

@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{DynamicConstraint, Grammar, Constraint, Vocab};
+use glrmask::{DynamicConstraint, Grammar, ConstraintInner as Constraint, Vocab};
 
 #[test]
 fn termination_is_caller_policy_after_acceptance() {

@@ -4,7 +4,7 @@
 /// `convert_structural_branches` skipped the base-variant merge.
 /// This dropped the `required` constraint entirely, allowing property-only
 /// variants (e.g. `kaniko` without `image`) that should have been rejected.
-use glrmask::{Constraint as Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 
 fn build_small_vocab() -> Vocab {
     let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();

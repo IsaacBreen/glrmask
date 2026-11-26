@@ -1,6 +1,6 @@
 //! Prepare exactly one reusable component, without receiving a future caller.
 //! Usage: composition_prepare_component <component> <vocab-dump> <output>
-use glrmask::{Constraint, Vocab};
+use glrmask::{ConstraintInner as Constraint, Vocab};
 use glrmask::__private::ConstraintExt;
 use std::{fs, path::Path, time::Instant};
 

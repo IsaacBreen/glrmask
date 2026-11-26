@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use glrmask::__private::{ConstraintStateExt, VocabExt};
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {

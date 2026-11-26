@@ -1,7 +1,7 @@
 //! Original-ID and byte-language forcing regressions. Kept separate from
 //! backend-agreement tests: comparing two identical bugs is not an oracle.
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, Grammar, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, TokenSet, Vocab};
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 
 fn allows(mask: &[u32], id: u32) -> bool {
@@ -327,7 +327,7 @@ fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
     }
 }
 
-fn long_forced_fixture() -> (Constraint, Vocab) {
+fn long_forced_fixture() -> (glrmask::Constraint, Vocab) {
     let vocab = Vocab::new(vec![
         (0, b"first ".to_vec()),
         (1, b"second ".to_vec()),
@@ -357,7 +357,7 @@ fn forced_bytes_long_run_in_chunks() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     let literal = "a".repeat(10_005);
     let grammar = Grammar::from_expr(glrmask::Expr::literal(literal.as_str())).unwrap();
-    let constraint = grammar.compile_with(&vocab, glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::FastCompile)).unwrap();
+    let constraint = grammar.compile_with(&vocab, glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::FAST_COMPILE)).unwrap();
     let mut state = constraint.start();
     let mut collected = Vec::new();
     let mut chunks = 0;
@@ -413,7 +413,7 @@ fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
             let mut root = glrmask::Module::new(&Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END").unwrap());
             root.bind("BODY", body.clone()).unwrap();
             root.bind("END", TokenSet::new(ends.clone())).unwrap();
-            let c = root.compile_with(&vocab, mode.compile_options()).unwrap();
+            let c = root.compile_with(&vocab, mode.compile_options()).unwrap().__into_inner();
             for c in [c.clone(), Constraint::load(c.save(), &vocab).unwrap()] {
                 let forced = checked_force(&c);
                 assert!(expected.starts_with(&forced), "{mode:?}, ends={ends:?}, forced={forced:?}");
@@ -462,13 +462,13 @@ fn caller_eos_equivalence_at_sampled_prefixes() {
     let mut stops = 0;
     let mut seed = 813u64;
     for (label, body) in grammars {
-        for strategy in [MaskStrategy::FastMasks, MaskStrategy::FastCompile] {
+        for strategy in [MaskStrategy::FAST_MASKS, MaskStrategy::FAST_COMPILE] {
             let options=CompileOptions::default().mask_strategy(strategy);
             let b=body.compile_with(&vocab,options.clone()).unwrap();
             for ends in [&[130][..], &[130,160][..]] {
                 let a=with_end(&body,ends).compile_with(&vocab,options.clone()).unwrap();
                 let words=a.mask_bit_len().div_ceil(32).max(b.mask_bit_len().div_ceil(32)).max(6);
-                for (a,b) in [(a.clone(),b.clone()),(Constraint::load(a.save(),&vocab).unwrap(),Constraint::load(b.save(),&vocab).unwrap())] {
+                for (a,b) in [(a.clone(),b.clone()),(glrmask::Constraint::load(a.save(),&vocab).unwrap(),glrmask::Constraint::load(b.save(),&vocab).unwrap())] {
                     for _ in 0..4 {
                         let mut x=a.start();let mut y=b.start();
                         for step in 0..64 {

@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn observer_adapters_preserve_empty_and_mixed_stack_languages() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
-        let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
+        let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_inner(&vocab).unwrap();
         // A valid admission index whose sole predicate accepts the empty word.
         // This isolates adapter semantics from any particular grammar frontend.
         let queries = MarkerQueries { terminals: Box::new([]), ids: vec![7].into(),

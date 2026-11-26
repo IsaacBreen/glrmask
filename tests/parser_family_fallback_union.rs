@@ -1,7 +1,7 @@
 //! Regression for source-local DEFAULT_LABEL semantics in parser-family union.
 //! Adding a vocabulary token cannot invalidate another token's byte language.
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, Grammar, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 const GRAMMAR: &str = include_str!("data/parser_family_fallback/reduced_sql.lark");
 const PREFIX: &[u8] = b"SELECT u.name";

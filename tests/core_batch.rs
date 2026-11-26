@@ -65,7 +65,7 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
         a.bind("VALUE",TokenSet::new([17,29])).unwrap();
         let mut b=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").unwrap().prepare(&v).unwrap();
         b.bind("VALUE",TokenSet::new([17,29])).unwrap();
-        let x=a.compile_with(&v,mode.compile_options()).unwrap();let y=b.link_with(opt).unwrap();
+        let x=a.compile_with(&v,mode.compile_options()).unwrap().__into_inner();let y=b.link_with(opt).unwrap();
         assert_eq!(x.start().mask(),y.start().mask(),"{mode:?}");
         for c in [&x,&y] {
             let mut s=c.start();assert!(!s.commit_bytes(b"x"));

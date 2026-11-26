@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint,Grammar,Module,PreparedGrammar,TokenSet,Vocab};
+use glrmask::{ConstraintInner as Constraint,Grammar,Module,PreparedGrammar,TokenSet,Vocab};
 const MODES: [MaskMode; 6] = MaskMode::ALL;
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || !s.commit_token(id){return false;}}s.is_accepting()}
@@ -19,14 +19,14 @@ fn explicit_module_sets_use_actual_id_domain() {
         for mode in MODES {
             let mut m=Module::new(&lark("start: <|event|>"));
             m.bind("event",TokenSet::new(expected.clone())).unwrap();
-            let c=m.compile_with(&v,mode.compile_options()).unwrap();
+            let c=m.compile_with(&v,mode.compile_options()).unwrap().__into_inner();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{mode:?}");
             for &id in &expected {assert!(accepts(&c,&[id]));}
             let loaded=Constraint::load(c.save(),&v).unwrap();
             assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
-    let c=module_expr(TokenSet::new([7])).unwrap().compile(&v).unwrap();
+    let c=module_expr(TokenSet::new([7])).unwrap().compile(&v).unwrap().__into_inner();
     assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),vec![7]);
 }
 #[test]
@@ -35,7 +35,7 @@ fn empty_event_set_is_not_epsilon() {
     for mode in MODES {
         let mut m=Module::new(&lark("start: <|event|> | \"x\""));
         m.bind("event",TokenSet::new([])).unwrap();
-        let c=m.compile_with(&v,mode.compile_options()).unwrap();
+        let c=m.compile_with(&v,mode.compile_options()).unwrap().__into_inner();
         assert!(!c.start().is_accepting());assert!(accepts(&c,&[0]));assert!(!accepts(&c,&[1]));
     }
 }
@@ -50,7 +50,7 @@ fn named_tokens_are_token_externs_and_preserve_alias_identity() {
     for mode in MODES {
         let mut m=Module::new(&g);
         m.bind("end",TokenSet::new([1,4])).unwrap();
-        let c=m.compile_with(&v,mode.compile_options()).unwrap();
+        let c=m.compile_with(&v,mode.compile_options()).unwrap().__into_inner();
         assert!(!allowed(&c.start().mask(),0));assert!(allowed(&c.start().mask(),1));assert!(allowed(&c.start().mask(),4));
     }
 }

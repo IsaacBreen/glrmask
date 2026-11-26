@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
 
 use criterion::{black_box, BenchmarkId, Criterion};
-use glrmask::{Grammar, Constraint as Constraint, Vocab};
+use glrmask::{Grammar, ConstraintInner as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 
 pub struct BenchCase {

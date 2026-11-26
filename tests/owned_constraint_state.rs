@@ -1,6 +1,6 @@
 #![recursion_limit = "512"]
 
-use glrmask::{Constraint, ConstraintState, Grammar, Module, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, ConstraintState, Grammar, Module, TokenSet, Vocab};
 
 #[test]
 fn public_types_are_send_sync_clone() {

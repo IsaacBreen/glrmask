@@ -3,7 +3,7 @@
 //! bytes for both parser backends. Cache misses do not authorize a token.
 use glrmask::test_modes::MaskMode;
 use glrmask::__private::{assert_packed_final_mask_cache, assert_tokenizer_transition_cache};
-use glrmask::{Constraint, Grammar, ParserBackend, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
 
 fn vocabulary() -> Vocab {
     let mut words = (32u8..=126).map(|b| vec![b]).collect::<Vec<_>>();

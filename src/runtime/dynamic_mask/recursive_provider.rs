@@ -596,7 +596,7 @@ fn with_provider_and_baseline(
 #[cfg(test)]
 mod epsilon_reset_boundary_tests {
     use super::*;
-    use crate::{Constraint, Grammar, Vocab};
+    use crate::{runtime::Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
     fn mask_with_budget(state: &ConstraintState, budget: u8) -> (Vec<u32>, usize) {
@@ -683,7 +683,7 @@ mod epsilon_reset_boundary_tests {
 #[cfg(test)]
 mod closed_admission_support_tests {
     use super::*;
-    use crate::{Constraint, Grammar, Vocab};
+    use crate::{runtime::Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
     fn mask_with_policy(state: &ConstraintState, direct: bool) -> (Vec<u32>, usize) {

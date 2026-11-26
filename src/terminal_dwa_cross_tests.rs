@@ -1,7 +1,7 @@
 mod ti_mre_tests {
     use std::ffi::OsString;
 
-    use crate::{env, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
+    use crate::{env, runtime::Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -240,7 +240,7 @@ nt S = FROM V | SPACE V SPACE CLASS;
 
 
 mod synthetic_state_facade_tests {
-    use crate::{DynamicConstraint, Constraint as Constraint, Vocab};
+    use crate::{DynamicConstraint, runtime::Constraint as Constraint, Vocab};
 
     struct LlGuidanceCompatGuard;
 

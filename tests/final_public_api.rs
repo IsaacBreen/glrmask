@@ -384,8 +384,8 @@ fn focused_5_externs_get_iter_order_len_unbound() {
 fn focused_6_compile_options_never_touch_retained_work() {
     let v = vocab();
     let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    assert_ne!(MaskStrategy::FastCompile, MaskStrategy::FastMasks);
-    assert_ne!(MaskStrategy::Auto, MaskStrategy::FastMasks);
+    assert_ne!(MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS);
+    assert_ne!(MaskStrategy::AUTO, MaskStrategy::FAST_MASKS);
 
     let mut m = m;
     m.precompile(&v).unwrap();
@@ -396,7 +396,7 @@ fn focused_6_compile_options_never_touch_retained_work() {
         .compile_with(
             &v,
             CompileOptions::default()
-                .mask_strategy(MaskStrategy::FastMasks),
+                .mask_strategy(MaskStrategy::FAST_MASKS),
         )
         .unwrap();
     let s = c.start();
@@ -407,7 +407,7 @@ fn focused_6_compile_options_never_touch_retained_work() {
 fn focused_8_static_parts_are_never_downgraded() {
     let v = vocab();
     let mut leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastMasks))
+    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS))
         .unwrap();
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
@@ -415,7 +415,7 @@ fn focused_8_static_parts_are_never_downgraded() {
 
     // TokenTrie requests use the retained static parts instead of downgrading.
     let c = parent
-        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastCompile))
+        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap();
     assert!(allowed(&c.start().mask(), 4), "xay must compose statically");
 }
@@ -426,7 +426,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 1. Auto reuses retained ParserDwa
     let mut m_dwa = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_dwa.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastMasks))
+    m_dwa.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS))
         .unwrap();
     let c_dwa = m_dwa.compile(&v).unwrap();
     let mut s_dwa = c_dwa.start();
@@ -444,7 +444,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
     let mut m_tt = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FastCompile))
+    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE))
         .unwrap();
     // TokenTrie precompilation retains no work, so Auto builds ParserDwa.
     let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
@@ -540,7 +540,7 @@ fn focused_12_module_precompile_retains_work() {
     configured
         .precompile_with(
             &v,
-            CompileOptions::default().mask_strategy(MaskStrategy::FastMasks),
+            CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS),
         )
         .unwrap();
     let plain = Module::new(&child).compile(&v).unwrap();
@@ -664,4 +664,19 @@ fn cached_mask_extent_roundtrips_and_survives_commits() {
         if n > 0 { assert!(s.commit_token(n - 1)); }
         assert_eq!(s.mask_bit_len(), n as usize);
     }
+}
+
+#[test]
+fn mask_strategy_consts_are_structural_patterns() {
+    fn select(s: MaskStrategy) -> u8 {
+        match s {
+            MaskStrategy::FAST_COMPILE => 1,
+            MaskStrategy::FAST_MASKS => 2,
+            _ => 0,
+        }
+    }
+    assert_eq!(select(MaskStrategy::default()), 0);
+    assert_eq!(select(MaskStrategy::FAST_COMPILE), 1);
+    assert_eq!(select(MaskStrategy::FAST_MASKS), 2);
+    assert_eq!(format!("{:?}", MaskStrategy::FAST_COMPILE), "MaskStrategy::FAST_COMPILE");
 }

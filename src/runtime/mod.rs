@@ -45,7 +45,10 @@ pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]
 pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use artifact::BoundaryTriggerDetail;
-pub use constraint::Constraint;
+pub(crate) use constraint::Constraint;
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use artifact::ConstraintInner;
 pub(crate) use constraint::{InternalTokenMaskPrebuild, RuntimeWeightRef, TokenMaskCachePrebuild};
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;

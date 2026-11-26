@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use glrmask::__private::{ConstraintExt, VocabExt};
-use glrmask::{Constraint, Grammar, Vocab, VocabPartition};
+use glrmask::{ConstraintInner as Constraint, Grammar, Vocab, VocabPartition};
 use serde_json::{Value, json};
 
 fn decode_hex(value: &str) -> Vec<u8> {

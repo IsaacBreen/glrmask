@@ -1,5 +1,5 @@
 use glrmask::test_modes::MaskMode;
-use glrmask::{Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{ConstraintInner as Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 
 const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
 const MODES: [MaskMode; 6] = MaskMode::ALL;
@@ -110,7 +110,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
 #[test]
 fn a_bare_integer_binds_one_token_id() {
     let vocab = Vocab::new::<Vec<u8>>(Vec::new()).unwrap();
-    let constraint = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", 5).unwrap().compile(&vocab).unwrap();
+    let constraint = Grammar::from_glrm(ONE).unwrap().bind_snapshot("T", 5).unwrap().compile(&vocab).unwrap().__into_inner();
     let mask = constraint.start().mask();
     assert!(allowed(&mask, 5));
     assert_eq!(mask.iter().map(|word| word.count_ones()).sum::<u32>(), 1);
