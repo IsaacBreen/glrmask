@@ -53,7 +53,20 @@
     "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`. More may be added.",
     "ConstraintState.forced_bytes": "The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.",
     "Grammar.externs": "A snapshot; read it again after `bind()`.",
-    "Module.externs": "A snapshot; read it again after `bind()`."
+    "Module.externs": "A snapshot; read it again after `bind()`.",
+    "ConstraintState.copy": "",
+    "Extern.name": "",
+    "Externs.get": "",
+    "Externs.items": "",
+    "Externs.keys": "",
+    "Externs.values": "",
+    "GLRMaskError": "",
+    "Grammar": "",
+    "Grammar.compile": "",
+    "Grammar.copy": "",
+    "Grammar.from_expr": "",
+    "Module.copy": "",
+    "Module.load": ""
   },
   "python_releases": {
     "0.3": {
@@ -168,5 +181,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "cb9aff02df867668754aa6a4a75572502282be3d8734c17f518a96810070e570"
+  "content_sha256": "d231fffad4147d354dfa4bba73fef560cfe90a82becf4dc9cf4d497d2d3a7195"
 }
