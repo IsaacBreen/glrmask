@@ -17,9 +17,6 @@ use crate::automata::weighted::determinize::{determinize, normalize_direct_singl
 use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize_owned;
-use crate::automata::weighted::minimize_token_deterministic_nwa::{
-    minimize_token_deterministic_nwa_owned, quotient_disjoint_source_nwa_owned,
-};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -57,51 +54,12 @@ fn assert_direct_global_terminal_dwa_merge_equivalence_enabled() -> bool {
     std::env::var_os("GLRMASK_ASSERT_DIRECT_GLOBAL_TERMINAL_DWA_MERGE_EQUIVALENCE").is_some()
 }
 
-fn minimize_token_deterministic_terminal_nwa_enabled() -> bool {
-    std::env::var_os("GLRMASK_EXPERIMENTAL_MINIMIZE_TOKEN_DETERMINISTIC_TERMINAL_NWA").is_some()
-}
-
-fn quotient_token_deterministic_terminal_nwa_by_source_enabled() -> bool {
-    std::env::var_os("GLRMASK_EXPERIMENTAL_QUOTIENT_TOKEN_NWA_BY_SOURCE").is_some()
-}
-
-fn refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() -> bool {
-    std::env::var_os("GLRMASK_EXPERIMENTAL_REFINE_TOKEN_NWA_AFTER_SOURCE_QUOTIENT").is_some()
-}
-
-fn fast_disjoint_terminal_nwa_id_map_enabled() -> bool {
-    std::env::var_os("GLRMASK_EXPERIMENTAL_FAST_DISJOINT_TERMINAL_NWA_ID_MAP").is_some()
-}
-
-fn primary_token_nwa_tsid_source() -> Option<usize> {
-    std::env::var("GLRMASK_EXPERIMENTAL_ORDER_TOKEN_NWA_TSID_BY_SOURCE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-}
-
 fn select_primary_token_nwa_tsid_source(inputs: &[LocalIdMapTerminalDwa]) -> Option<usize> {
-    primary_token_nwa_tsid_source().or_else(|| {
-        inputs
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, input)| input.id_map.num_tsids())
-            .map(|(index, _)| index)
-    })
-}
-
-fn token_nwa_tsid_source_order(source_count: usize) -> Option<Vec<usize>> {
-    let value = std::env::var("GLRMASK_EXPERIMENTAL_TOKEN_NWA_TSID_ORDER").ok()?;
-    let order: Vec<usize> = value
-        .split(',')
-        .map(|part| part.trim().parse::<usize>().ok())
-        .collect::<Option<_>>()?;
-    let mut seen = vec![false; source_count];
-    if order.len() != source_count
-        || order.iter().any(|&source| source >= source_count || std::mem::replace(&mut seen[source], true))
-    {
-        return None;
-    }
-    Some(order)
+    inputs
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, input)| input.id_map.num_tsids())
+        .map(|(index, _)| index)
 }
 
 #[derive(Default)]
@@ -1303,8 +1261,7 @@ pub fn merge_mapped_parser_dwas(
         let direct_by_default = source_states >= 16_384
             && normalize_direct_singletons_enabled(source_states);
         let use_direct = std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARSER_UNION").is_none()
-            && (direct_by_default
-                || std::env::var_os("GLRMASK_EXPERIMENTAL_DIRECT_TWO_PARSER_UNION").is_some());
+            && direct_by_default;
         if use_direct {
             let reference = if std::env::var_os("GLRMASK_VALIDATE_DIRECT_TWO_PARSER_UNION").is_some() {
                 let mut reference_nwa = NWA::new(
@@ -1600,11 +1557,7 @@ fn generic_global_union_determinization(
     determinize(&global_nwa).expect("global terminal NWA reference determinization failed")
 }
 
-fn prune_unreachable_nwa_with_sources(
-    nwa: NWA,
-    state_sources: Vec<Option<usize>>,
-) -> (NWA, Vec<Option<usize>>) {
-    assert_eq!(state_sources.len(), nwa.states().len());
+fn prune_unreachable_nwa(nwa: NWA) -> NWA {
     let mut reachable = vec![false; nwa.states().len()];
     let mut stack = nwa.start_states().to_vec();
     while let Some(state_id) = stack.pop() {
@@ -1622,12 +1575,10 @@ fn prune_unreachable_nwa_with_sources(
 
     let mut old_to_new = vec![u32::MAX; reachable.len()];
     let mut states = Vec::new();
-    let mut sources = Vec::new();
     for (old, &is_reachable) in reachable.iter().enumerate() {
         if is_reachable {
             old_to_new[old] = states.len() as u32;
             states.push(nwa.states()[old].clone());
-            sources.push(state_sources[old]);
         }
     }
     for state in &mut states {
@@ -1645,7 +1596,7 @@ fn prune_unreachable_nwa_with_sources(
         .iter()
         .map(|start| old_to_new[*start as usize])
         .collect();
-    (NWA::from_parts(states, starts), sources)
+    NWA::from_parts(states, starts)
 }
 
 
@@ -1710,7 +1661,7 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
     let (global_id_map, direct_local_to_global_token_maps, precomputed_tsid_maps) =
-        if token_domains_proven_disjoint || fast_disjoint_terminal_nwa_id_map_enabled() {
+        if token_domains_proven_disjoint {
             let (id_map, direct_maps, tsid_maps) = build_unified_global_id_map_disjoint_fast(
                 &id_map_refs,
                 num_tokenizer_states,
@@ -1739,7 +1690,6 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
         global_id_map.num_tsids(),
         global_id_map.max_internal_token_id(),
     );
-    let mut state_sources = Vec::<Option<usize>>::new();
     let mut combined_start: Option<u32> = None;
     let tsid_map_ms = 0.0;
     let mut token_map_ms = 0.0;
@@ -1861,12 +1811,10 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
             to_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
         let started_at = profiling.then(Instant::now);
-        let before_append = global_nwa.num_states() as usize;
         let body = global_nwa.append_with_body(&source_nwa);
         if let Some(started_at) = started_at {
             append_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
-        state_sources.extend(std::iter::repeat_n(Some(input_index), global_nwa.num_states() as usize - before_append));
         debug_assert_eq!(body.start_states.len(), 1);
         let source_start = body.start_states[0];
         let started_at = profiling.then(Instant::now);
@@ -1887,7 +1835,6 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
             assert!(source.epsilons.is_empty(), "source DWA conversion must not create epsilon edges");
         } else {
             combined_start = Some(source_start);
-            state_sources[source_start as usize] = None;
         }
         if let Some(started_at) = started_at {
             fuse_start_ms += started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1895,33 +1842,8 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
     }
     let started_at = profiling.then(Instant::now);
     global_nwa.set_start_states(vec![combined_start.expect("at least one input")]);
-    let (mut global_nwa, state_sources) = prune_unreachable_nwa_with_sources(global_nwa, state_sources);
+    let global_nwa = prune_unreachable_nwa(global_nwa);
     let prune_ms = started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
-    let mut source_quotient_ms = 0.0;
-    let mut refine_ms = 0.0;
-    if quotient_token_deterministic_terminal_nwa_by_source_enabled() {
-        let started_at = profiling.then(Instant::now);
-        global_nwa = quotient_disjoint_source_nwa_owned(global_nwa, &state_sources)
-            .expect("token-deterministic source quotient failed");
-        if let Some(started_at) = started_at {
-            source_quotient_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-        if refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() {
-            let started_at = profiling.then(Instant::now);
-            global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
-                .expect("token-deterministic refinement after source quotient failed");
-            if let Some(started_at) = started_at {
-                refine_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-        }
-    } else if minimize_token_deterministic_terminal_nwa_enabled() {
-        let started_at = profiling.then(Instant::now);
-        global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
-            .expect("token-deterministic terminal NWA minimization failed");
-        if let Some(started_at) = started_at {
-            refine_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-    }
     debug_assert!(global_nwa.is_acyclic());
     debug_assert!(global_nwa.states().iter().all(|state| state.epsilons.is_empty()));
     let remap_and_union_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1948,7 +1870,7 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][token_deterministic_terminal_nwa_merge] inputs={} id_map_ms={:.3} remap_and_union_ms={:.3} tsid_map_ms={:.3} token_map_ms={:.3} clone_ms={:.3} remap_ms={:.3} to_nwa_ms={:.3} append_ms={:.3} fuse_start_ms={:.3} prune_ms={:.3} source_quotient_ms={:.3} refine_ms={:.3} states={} transitions={} total_ms={:.3}",
+            "[glrmask/profile][token_deterministic_terminal_nwa_merge] inputs={} id_map_ms={:.3} remap_and_union_ms={:.3} tsid_map_ms={:.3} token_map_ms={:.3} clone_ms={:.3} remap_ms={:.3} to_nwa_ms={:.3} append_ms={:.3} fuse_start_ms={:.3} prune_ms={:.3} states={} transitions={} total_ms={:.3}",
             inputs.len(),
             id_map_ms,
             remap_and_union_ms,
@@ -1960,8 +1882,6 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
             append_ms,
             fuse_start_ms,
             prune_ms,
-            source_quotient_ms,
-            refine_ms,
             global_nwa.num_states(),
             global_nwa.num_transitions(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -2383,15 +2303,13 @@ fn build_unified_global_id_map_fast(
         state_i2o[class as usize].push(state as u32);
     }
 
-    let source_order = token_nwa_tsid_source_order(inputs.len()).or_else(|| {
-        primary_source
+    let source_order = primary_source
             .filter(|source| *source < inputs.len())
             .map(|primary| {
                 std::iter::once(primary)
                     .chain((0..inputs.len()).filter(move |&source| source != primary))
-                    .collect()
-            })
-    });
+                    .collect::<Vec<_>>()
+            });
     if let Some(source_order) = source_order {
         let mut order: Vec<usize> = (0..class_keys.len()).collect();
         order.sort_unstable_by(|&left, &right| {
