@@ -49,10 +49,15 @@ assert control_module.bind("CONTROL", glrmask.TokenSet([2])) is None
 control_constraint = control_module.compile(llama_vocab)
 assert control_constraint.start().mask().tolist() == [4]
 
-llama_constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(
+# Token IDs depend on the model, so expressions containing them are bound on a Module.
+llama_module = glrmask.Module(glrmask.Grammar.from_glrm(
+    'glrm 1; start start; extern grammar VALUE; nt start = VALUE;'
+))
+llama_module.bind("VALUE", glrmask.Expr.sequence(
     glrmask.Grammar.from_lark('start: "a"'),
     glrmask.TokenSet([3, 5]),
-)).compile(llama_vocab)
+))
+llama_constraint = llama_module.compile(llama_vocab)
 llama_state = llama_constraint.start()
 assert llama_state.mask().tolist() == [1]
 assert llama_state.commit_token(0)
