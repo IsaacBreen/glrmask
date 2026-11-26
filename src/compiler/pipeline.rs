@@ -5714,197 +5714,14 @@ fn compile_prepared_with_profile_and_table_construction(
             },
         );
         let runtime_state_map_lift_started_at = Instant::now();
-        let mut runtime_tokenizer_state_map = match full_to_synthesized_state_map.as_ref() {
+        let runtime_tokenizer_state_map = match full_to_synthesized_state_map.as_ref() {
             Some(certified) => certified
                 .lift_internal_tsid_map(&internal_ids.tokenizer_states)
                 .expect("certified full lexer state map must lift the final synthesized TSID map"),
             None => internal_ids.tokenizer_states.clone(),
         };
-        let mut runtime_internal_tsid_to_states =
+        let runtime_internal_tsid_to_states =
             runtime_tokenizer_state_map.internal_to_originals_vecs();
-        let mut runtime_source_state_offset = None;
-        let mut runtime_product_source_offsets = Vec::<u32>::new();
-        let mut runtime_product_source_states = Vec::<u32>::new();
-        let mut runtime_product_exact_source_states = Vec::<u32>::new();
-        let runtime_full_adaptive = crate::env::var("GLRMASK_RUNTIME_FULL_ADAPTIVE")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            // Exact product states reduce visible lexer-frontier width, but
-            // commit must restore per-source longest-match provenance. Current
-            // corpus measurements show that restoration costs more than the
-            // smaller frontier saves, so retain full runtime determinization as
-            // an explicit experiment rather than a production default.
-            .unwrap_or(false);
-        if runtime_full_adaptive {
-            let source_tokenizer = runtime_tokenizer.as_ref().unwrap_or(&tokenizer);
-            let source_states = source_tokenizer.num_states() as usize;
-            let source_transitions = source_tokenizer.transition_count();
-            let state_limit = crate::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_STATES")
-                .ok()
-                .and_then(|value| value.trim().parse::<usize>().ok())
-                .filter(|&value| value > 0)
-                // Runtime full determinization is optional. Useful products in
-                // the tail-latency cohort are typically hundreds of states;
-                // letting a failed large product grow to 32k states can add
-                // hundreds of milliseconds while producing no runtime
-                // artifact. Keep a bounded default and retain the existing
-                // environment override for deliberate larger experiments.
-                .unwrap_or(8_192)
-                .min(source_states.max(1));
-            let transition_growth_percent = crate::env::var(
-                "GLRMASK_ADAPTIVE_LEXER_MAX_TRANSITION_GROWTH_PERCENT",
-            )
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(600);
-            let transition_limit = source_transitions
-                .saturating_mul(transition_growth_percent)
-                / 100;
-            let determinize_started_at = Instant::now();
-            let profile_runtime_determinization = compile_profile_enabled()
-                || crate::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-            if let Some(candidate) = source_tokenizer
-                .try_full_determinization(state_limit, transition_limit.max(1))
-            {
-                let product_states = candidate.source_subsets.len();
-                let runtime_state_capacity = product_states.saturating_add(source_states);
-                let mut mapped = Vec::with_capacity(runtime_state_capacity);
-                let mut state_tsids =
-                    Vec::<Vec<u32>>::with_capacity(runtime_state_capacity);
-                let mut exact_closure_states = 0usize;
-                let mut singleton_states = 0usize;
-                let mut multi_tsid_states = 0usize;
-                let mut max_distinct_tsids = 0usize;
-                crate::compiler::build_budget::charge(
-                    "runtime_tokenizer_join",
-                    candidate.source_subsets.len() as u64,
-                );
-                let source_subset_memberships = candidate
-                    .source_subsets
-                    .iter()
-                    .map(|subset| subset.len())
-                    .sum::<usize>();
-                let max_source_subset = candidate
-                    .source_subsets
-                    .iter()
-                    .map(|subset| subset.len())
-                    .max()
-                    .unwrap_or(0);
-                for (subset, &exact_source) in candidate
-                    .source_subsets
-                    .iter()
-                    .zip(&candidate.exact_source_states)
-                {
-                    if exact_source != u32::MAX {
-                        let source_state = exact_source;
-                        let tsid = runtime_tokenizer_state_map.original_to_internal
-                            [source_state as usize];
-                        mapped.push(tsid);
-                        state_tsids.push(vec![tsid]);
-                        exact_closure_states += 1;
-                        continue;
-                    }
-
-                    let mut tsids = subset
-                        .iter()
-                        .map(|&source_state| {
-                            runtime_tokenizer_state_map.original_to_internal
-                                [source_state as usize]
-                        })
-                        .collect::<Vec<_>>();
-                    tsids.sort_unstable();
-                    tsids.dedup();
-                    max_distinct_tsids = max_distinct_tsids.max(tsids.len());
-                    if tsids.is_empty() {
-                        mapped.clear();
-                        state_tsids.clear();
-                        break;
-                    }
-                    mapped.push(tsids[0]);
-                    if tsids.len() == 1 {
-                        singleton_states += 1;
-                    } else {
-                        multi_tsid_states += 1;
-                    }
-                    state_tsids.push(tsids);
-                }
-
-                if !mapped.is_empty() {
-                    for source_state in 0..source_states {
-                        let tsid = runtime_tokenizer_state_map.original_to_internal[source_state];
-                        mapped.push(tsid);
-                        state_tsids.push(vec![tsid]);
-                    }
-                }
-
-                if !mapped.is_empty() {
-                    let candidate = match runtime_tokenizer.as_mut() {
-                        Some(source_tokenizer) => source_tokenizer
-                            .finish_full_determinization_with_source_fallback(candidate),
-                        None => tokenizer
-                            .finish_full_determinization_with_source_fallback(candidate),
-                    };
-                    let num_internal_tsids = runtime_tokenizer_state_map.num_internal_ids();
-                    let mut reverse = vec![Vec::<u32>::new(); num_internal_tsids as usize];
-                    for (runtime_state, tsids) in state_tsids.iter().enumerate() {
-                        for &tsid in tsids {
-                            reverse[tsid as usize].push(runtime_state as u32);
-                        }
-                    }
-                    runtime_tokenizer_state_map =
-                        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-                            mapped,
-                            num_internal_tsids,
-                        );
-                    runtime_internal_tsid_to_states = reverse;
-                    runtime_source_state_offset = Some(candidate.source_state_offset);
-                    runtime_product_source_offsets.reserve(product_states + 1);
-                    runtime_product_source_offsets.push(0);
-                    for subset in &candidate.source_subsets {
-                        runtime_product_source_states.extend_from_slice(subset);
-                        runtime_product_source_offsets
-                            .push(runtime_product_source_states.len() as u32);
-                    }
-                    runtime_product_exact_source_states = candidate.exact_source_states.clone();
-                    if profile_runtime_determinization {
-                        eprintln!(
-                            "[glrmask/profile][runtime_full_adaptive] selected=true source_states={} product_states={} runtime_states={} source_transitions={} runtime_transitions={} source_subset_memberships={} max_source_subset={} exact_closure_states={} singleton_states={} multi_tsid_states={} max_distinct_tsids={} elapsed_ms={:.3}",
-                            source_states,
-                            product_states,
-                            candidate.tokenizer.num_states(),
-                            source_transitions,
-                            candidate.tokenizer.transition_count(),
-                            source_subset_memberships,
-                            max_source_subset,
-                            exact_closure_states,
-                            singleton_states,
-                            multi_tsid_states,
-                            max_distinct_tsids,
-                            elapsed_ms(determinize_started_at),
-                        );
-                    }
-                    runtime_tokenizer = Some(candidate.tokenizer);
-                } else if profile_runtime_determinization {
-                    eprintln!(
-                        "[glrmask/profile][runtime_full_adaptive] selected=false reason=empty_tsid_subset source_states={} candidate_states={} elapsed_ms={:.3}",
-                        source_states,
-                        candidate.tokenizer.num_states(),
-                        elapsed_ms(determinize_started_at),
-                    );
-                }
-            } else if profile_runtime_determinization {
-                eprintln!(
-                    "[glrmask/profile][runtime_full_adaptive] selected=false reason=determinization_limit source_states={} state_limit={} transition_limit={} elapsed_ms={:.3}",
-                    source_states,
-                    state_limit,
-                    transition_limit.max(1),
-                    elapsed_ms(determinize_started_at),
-                );
-            }
-        }
         let runtime_state_map_lift_ms = elapsed_ms(runtime_state_map_lift_started_at);
         if compile_profile_enabled() {
             eprintln!(
@@ -6094,23 +5911,10 @@ fn compile_prepared_with_profile_and_table_construction(
             composition_parser_characterizations_by_terminal,
             composition_grammar_summary,
             terminal_live_states: Vec::new(),
-            // Unless optional runtime full-adaptive product states were selected,
-            // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw
-            // runtime tokenizer state has exactly one internal TSID. Runtime
-            // lookup already falls back to `state_to_internal_tsid`; sentinel
-            // `[u32::MAX]` prevents generic finalization from allocating 1.4M
-            // temporary SmallVec rows and rebuilding an equivalent CSR relation.
-            state_internal_tsid_offsets: if runtime_source_state_offset.is_none() {
-                vec![u32::MAX]
-            } else {
-                Vec::new()
-            },
+            // The exact runtime state map is a ManyToOne partition.
+            // The sentinel avoids constructing a redundant singleton CSR.
+            state_internal_tsid_offsets: vec![u32::MAX],
             state_internal_tsids: Vec::new(),
-            runtime_source_state_offset,
-            runtime_product_source_offsets,
-            runtime_product_source_states,
-            runtime_product_exact_source_states,
-            runtime_product_state_by_source_subset: Default::default(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             packed_original_token_to_internal: None,
             deferred_original_token_to_internal: std::sync::OnceLock::new(),

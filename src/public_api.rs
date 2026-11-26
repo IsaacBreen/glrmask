@@ -4776,7 +4776,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_triggers_survive_outer_runtime_lexer_product_multi_source_states() {
+    fn exact_triggers_survive_multiple_source_lexer_states() {
         let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"a".to_vec()),
             (1, b"b".to_vec()),
@@ -4820,34 +4820,12 @@ mod tests {
         )
         .unwrap();
 
-        let explicitly_disabled = crate::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "" | "0" | "false" | "no" | "off"
-                )
-            });
-
         let mut actual = composed.start();
         let mut expected = reference.start();
         for token in [0, 1] {
             assert_eq!(actual.mask(), expected.mask());
             assert!(actual.commit_token(token));
             assert!(expected.commit_token(token));
-        }
-
-        if !explicitly_disabled
-            && let Some(source_offset) = composed.runtime_source_state_offset()
-        {
-            let product_state = *actual.state.keys().next().unwrap();
-            assert!(product_state < source_offset);
-            assert!(
-                composed
-                    .runtime_product_source_states(product_state)
-                    .is_some_and(|sources| sources.len() >= 2),
-                "a selected outer product state must preserve every represented lexer lane",
-            );
         }
 
         let mask = actual.mask();

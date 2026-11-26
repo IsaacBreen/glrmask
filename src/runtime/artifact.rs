@@ -10592,24 +10592,9 @@ pub struct ConstraintData {
     /// epsilon closure has terminal `t` matched or still reachable.
     pub(crate) terminal_live_states: Vec<Vec<u32>>,
     /// Runtime-only CSR view of the exact state -> internal-TSID relation.
-    /// Ordinary tokenizers have one entry per state. A fully determinized
-    /// runtime lexer may represent several old lexer states and therefore
-    /// several independent TSID lanes in one physical state.
+    /// A physical lexer state can have one or several internal TSIDs.
     pub(crate) state_internal_tsid_offsets: Vec<u32>,
     pub(crate) state_internal_tsids: Vec<u32>,
-    /// Final-runtime subset states followed by an exact copy of the source
-    /// tokenizer. `runtime_source_state_offset` is the boundary between the
-    /// two coordinates. Empty metadata means no runtime-only determinization.
-    pub(crate) runtime_source_state_offset: Option<u32>,
-    /// CSR offsets for product-state -> exact source-state subset. There is one
-    /// row per product state and therefore `product_state_count + 1` offsets.
-    pub(crate) runtime_product_source_offsets: Vec<u32>,
-    pub(crate) runtime_product_source_states: Vec<u32>,
-    /// Scalar source representative for product states that are exactly one
-    /// source state's epsilon closure; `u32::MAX` otherwise.
-    pub(crate) runtime_product_exact_source_states: Vec<u32>,
-    /// Runtime-only inverse used to re-coalesce a uniform source frontier.
-    pub(crate) runtime_product_state_by_source_subset: FxHashMap<Box<[u32]>, u32>,
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Runtime-only compact transition view for commit template products.
     pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
@@ -10996,31 +10981,11 @@ pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) terminal_live_states: Vec<Vec<u32>>,
     /// Runtime-only CSR view of the exact state -> internal-TSID relation.
-    /// Ordinary tokenizers have one entry per state. A fully determinized
-    /// runtime lexer may represent several old lexer states and therefore
-    /// several independent TSID lanes in one physical state.
+    /// A physical lexer state can have one or several internal TSIDs.
     #[serde(skip, default)]
     pub(crate) state_internal_tsid_offsets: Vec<u32>,
     #[serde(skip, default)]
     pub(crate) state_internal_tsids: Vec<u32>,
-    /// Final-runtime subset states followed by an exact copy of the source
-    /// tokenizer. `runtime_source_state_offset` is the boundary between the
-    /// two coordinates. Empty metadata means no runtime-only determinization.
-    #[serde(default)]
-    pub(crate) runtime_source_state_offset: Option<u32>,
-    /// CSR offsets for product-state -> exact source-state subset. There is one
-    /// row per product state and therefore `product_state_count + 1` offsets.
-    #[serde(default)]
-    pub(crate) runtime_product_source_offsets: Vec<u32>,
-    #[serde(default)]
-    pub(crate) runtime_product_source_states: Vec<u32>,
-    /// Scalar source representative for product states that are exactly one
-    /// source state's epsilon closure; `u32::MAX` otherwise.
-    #[serde(default)]
-    pub(crate) runtime_product_exact_source_states: Vec<u32>,
-    /// Runtime-only inverse used to re-coalesce a uniform source frontier.
-    #[serde(skip, default)]
-    pub(crate) runtime_product_state_by_source_subset: FxHashMap<Box<[u32]>, u32>,
     #[serde(with = "crate::runtime::parser_backend::wire::core_programs")]
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Runtime-only compact transition view for commit template products.

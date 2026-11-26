@@ -1370,200 +1370,6 @@ fn finish_token_commit(state: &ParserStateMap) -> Result<(), String> {
     }
 }
 
-/// Restore the exact source-tokenizer coordinate before commit.
-///
-/// Invariant: all duplicate parser alternatives under one product key came
-/// from the same source-state subset. The historical flat frontier decides
-/// continuation viability from the union of alternatives sharing a lexer key,
-/// then carries each alternative independently. Reconstruct exactly that
-/// relation: compute one viable source subset from the merged group, and copy
-/// every original alternative across that common subset.
-fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStateMap) {
-    if constraint.uses_compact_segmented_parser_runtime() {
-        // Recursive state keys are already exact disjoint-union leaf tokenizer
-        // states, not product states from the transitional outer tokenizer.
-        return;
-    }
-    let Some(source_offset) = constraint.runtime_source_state_offset() else {
-        return;
-    };
-    if !state.keys().any(|&state| state < source_offset) {
-        return;
-    }
-
-    let debug = crate::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
-    let old = std::mem::take(state).entries;
-    let mut index = 0usize;
-    while index < old.len() {
-        let tokenizer_state = old[index].0;
-        let group_end = old[index..]
-            .partition_point(|(candidate, _)| *candidate == tokenizer_state)
-            + index;
-        let group = &old[index..group_end];
-
-        if tokenizer_state >= source_offset {
-            for (_, gss) in group.iter().cloned() {
-                state.insert_flat_alternative(tokenizer_state, gss);
-            }
-            index = group_end;
-            continue;
-        }
-        // The reset state is still one historical scanner lane whose epsilon
-        // closure happens to be represented deterministically. Other product
-        // states denote a *set of current runtime lanes*. Even when that set is
-        // also one raw state's epsilon closure, replacing the lanes by that raw
-        // state changes per-start-state longest-match behavior.
-        if tokenizer_state == constraint.tokenizer.initial_state()
-            && let Some(source_state) =
-                constraint.runtime_product_exact_source_state(tokenizer_state)
-        {
-            for (_, gss) in group.iter().cloned() {
-                if debug {
-                    eprintln!(
-                        "[glrmask/debug][runtime_product_expand] product={} exact_source={} gss={}",
-                        tokenizer_state,
-                        source_state,
-                        gss.ptr_key(),
-                    );
-                }
-                state.insert_flat_alternative(source_offset + source_state, gss);
-            }
-            index = group_end;
-            continue;
-        }
-
-        debug_assert!(group
-            .iter()
-            .all(|(_, gss)| gss.all_accs_satisfy(|acc| acc.is_empty())));
-        let Some(source_states) =
-            constraint.runtime_product_source_states(tokenizer_state)
-        else {
-            for (_, gss) in group.iter().cloned() {
-                state.insert_flat_alternative(tokenizer_state, gss);
-            }
-            index = group_end;
-            continue;
-        };
-        if debug {
-            eprintln!(
-                "[glrmask/debug][runtime_product_expand] product={} sources={:?} alternatives={}",
-                tokenizer_state,
-                source_states,
-                group.len(),
-            );
-        }
-        for (_, gss) in group {
-            for &source_state in source_states {
-                state.insert_flat_alternative(source_offset + source_state, gss.clone());
-            }
-        }
-        index = group_end;
-    }
-}
-
-/// Re-coalesce source states only when they carry the identical multiset of
-/// parser alternatives.
-///
-/// For source subset `S` and alternatives `G`, the exact relation is then the
-/// Cartesian product `S Ã— G`, which duplicate entries under one product key
-/// represent without loss. Grouping independently by GSS is insufficient:
-/// distinct source groups can transition to the same product state while
-/// carrying different alternative sets, erasing provenance on the next step.
-fn coalesce_uniform_runtime_source_states(
-    constraint: &Constraint,
-    state: &mut ParserStateMap,
-) {
-    if constraint.uses_compact_segmented_parser_runtime() {
-        return;
-    }
-    let Some(source_offset) = constraint.runtime_source_state_offset() else {
-        return;
-    };
-    if !state.keys().any(|&state| state >= source_offset) {
-        return;
-    }
-
-    let debug = crate::env::var_os("GLRMASK_DEBUG_RUNTIME_PRODUCT").is_some();
-    let old = std::mem::take(state).entries;
-
-    // Product states are a boundary-only representation. The whole source
-    // frontier may therefore collapse exactly when every source key carries
-    // the same multiset of existing parser alternatives: the relation is
-    // `S Ã— G`. Keep the representative GSS objects themselves so their
-    // allocation-free in-place capacities and flat decomposition are retained.
-    if old.is_empty() || old.iter().any(|(key, _)| *key < source_offset) {
-        state.entries = old;
-        return;
-    }
-
-    let first_key = old[0].0;
-    let first_end = old.partition_point(|(key, _)| *key == first_key);
-    let representative = &old[..first_end];
-    let mut source_states = vec![first_key - source_offset];
-    let mut eligible = representative
-        .iter()
-        .all(|(_, gss)| gss.all_accs_satisfy(|acc| acc.is_empty()));
-    let mut index = first_end;
-    while eligible && index < old.len() {
-        let key = old[index].0;
-        let end = old[index..].partition_point(|(candidate, _)| *candidate == key) + index;
-        let alternatives = &old[index..end];
-        if alternatives.len() != representative.len()
-            || alternatives
-                .iter()
-                .any(|(_, gss)| !gss.all_accs_satisfy(|acc| acc.is_empty()))
-        {
-            eligible = false;
-            break;
-        }
-        let mut used = [false; INLINE_PARSER_STATE_CAPACITY];
-        for (_, expected) in representative {
-            let Some(match_index) = alternatives
-                .iter()
-                .enumerate()
-                .position(|(candidate_index, (_, candidate))| {
-                    !used[candidate_index]
-                        && (expected.ptr_eq(candidate) || expected == candidate)
-                })
-            else {
-                eligible = false;
-                break;
-            };
-            used[match_index] = true;
-        }
-        if eligible {
-            source_states.push(key - source_offset);
-        }
-        index = end;
-    }
-
-    if eligible
-        && let Some(product_state) =
-            constraint.runtime_product_state_for_source_subset(&source_states)
-    {
-        if debug {
-            eprintln!(
-                "[glrmask/debug][runtime_product_coalesce] sources={:?} product={} alternatives={}",
-                source_states,
-                product_state,
-                first_end,
-            );
-        }
-        for (_, gss) in old.into_iter().take(first_end) {
-            state.insert_flat_alternative(product_state, gss);
-        }
-    } else {
-        if debug {
-            eprintln!(
-                "[glrmask/debug][runtime_product_keep_source] entries={} sources={:?}",
-                old.len(),
-                source_states,
-            );
-        }
-        state.entries = old;
-    }
-}
-
 #[inline]
 fn commit_token_impl(
     constraint: &Constraint,
@@ -1588,8 +1394,6 @@ fn commit_token_impl_observed<O: CommitObserver>(
             "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
         ));
     }
-
-    expand_runtime_product_states(constraint, state);
     let special_paths = has_special
         .then(|| advance_special_token_paths(constraint, state, token_id))
         .flatten();
@@ -1610,7 +1414,6 @@ fn commit_token_impl_observed<O: CommitObserver>(
     merge_special_token_paths(constraint, state, special_paths)?;
     if has_special { observer.frontier(constraint, state, bytes.map_or(0, |b| b.len())); }
     maybe_normalize_lookahead_invariant_reductions(constraint, state);
-    coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
 }
 
@@ -1765,8 +1568,6 @@ fn commit_token_no_fast_path_reference(
             "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
         ));
     }
-
-    expand_runtime_product_states(constraint, state);
     let special_paths = has_special
         .then(|| advance_special_token_paths(constraint, state, token_id))
         .flatten();
@@ -1788,7 +1589,6 @@ fn commit_token_no_fast_path_reference(
         state.clear();
     }
     merge_special_token_paths(constraint, state, special_paths)?;
-    coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
 }
 
@@ -5584,7 +5384,6 @@ fn commit_bytes_impl_profiled(
     advances: Option<&mut Vec<PerAdvanceEntry>>,
     allow_fast_paths: bool,
 ) -> Result<CommitProfile, String> {
-    expand_runtime_product_states(constraint, state);
     let result = commit_bytes_impl_profiled_inner(
         constraint,
         state,
@@ -5595,7 +5394,6 @@ fn commit_bytes_impl_profiled(
     );
     if result.is_ok() {
         maybe_normalize_lookahead_invariant_reductions(constraint, state);
-        coalesce_uniform_runtime_source_states(constraint, state);
     }
     result
 }
@@ -7740,7 +7538,6 @@ fn commit_bytes_impl_observed<O: CommitObserver>(
     bufs: &mut CommitBuffers,
     observer: &mut O,
 ) -> Result<(), String> {
-    expand_runtime_product_states(constraint, state);
     commit_bytes_impl_inner_observed(constraint, state, bytes, bufs, observer)?;
 
     // General symbolic residuals expose a conservative infallible future bit
@@ -7767,7 +7564,6 @@ fn commit_bytes_impl_observed<O: CommitObserver>(
     }
 
     observer.frontier(constraint, state, bytes.len());
-    coalesce_uniform_runtime_source_states(constraint, state);
     Ok(())
 }
 
@@ -9318,7 +9114,6 @@ impl ConstraintState {
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         let result = self.commit_transaction(|this| {
-            expand_runtime_product_states(&constraint, &mut this.state);
             let special = if has_special {
                 advance_special_token_paths_profiled(&constraint, &this.state, token_id, None)
             } else {
@@ -9347,7 +9142,6 @@ impl ConstraintState {
             apply_special_token_advance_profile(&mut profile, &special);
             let special_merge_result =
                 merge_special_token_paths(&constraint, &mut this.state, special.paths);
-            coalesce_uniform_runtime_source_states(&constraint, &mut this.state);
             profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
             special_merge_result
                 .and_then(|()| finish_token_commit(&this.state))
@@ -9390,7 +9184,6 @@ impl ConstraintState {
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         let result = self.commit_transaction(|this| {
-            expand_runtime_product_states(&constraint, &mut this.state);
             let special = if has_special {
                 advance_special_token_paths_profiled(
                     &constraint,
@@ -9425,7 +9218,6 @@ impl ConstraintState {
             apply_special_token_advance_profile(&mut profile, &special);
             let special_merge_result =
                 merge_special_token_paths(&constraint, &mut this.state, special.paths);
-            coalesce_uniform_runtime_source_states(&constraint, &mut this.state);
             profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
             special_merge_result
                 .and_then(|()| finish_token_commit(&this.state))

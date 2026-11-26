@@ -90,7 +90,6 @@ fn bytes_successor(c:&Constraint,source:&ParserStateMap,buffers:&mut CommitBuffe
     }
     if endpoint {
         maybe_normalize_lookahead_invariant_reductions(c,&mut next);
-        coalesce_uniform_runtime_source_states(c,&mut next);
     }
     Ok((!next.is_empty()).then_some(next))
 }
@@ -98,7 +97,7 @@ fn token_successor(c:&Constraint,source:&ParserStateMap,buffers:&mut CommitBuffe
     ->crate::Result<Option<ParserStateMap>> {
     let bytes=token_bytes_for_id(c,id);let special=c.has_special_token_id(id);
     if bytes.is_none() && !special{return Ok(None);}
-    buffers.reset_all();let mut next=source.clone();expand_runtime_product_states(c,&mut next);
+    buffers.reset_all();let mut next=source.clone();
     let event=special.then(||advance_special_token_paths(c,&next,id)).flatten();
     if let Some(bytes)=bytes.filter(|b|!b.is_empty() || !empty_bytes_are_events(c)) {
         match commit_bytes_impl(c,&mut next,bytes,buffers) {
@@ -108,7 +107,6 @@ fn token_successor(c:&Constraint,source:&ParserStateMap,buffers:&mut CommitBuffe
     } else {next.clear();}
     merge_special_token_paths(c,&mut next,event).map_err(state_error)?;
     maybe_normalize_lookahead_invariant_reductions(c,&mut next);
-    coalesce_uniform_runtime_source_states(c,&mut next);
     Ok((!next.is_empty()).then_some(next))
 }
 
@@ -397,12 +395,11 @@ fn probe_owner(view:View<'_>,w:&mut Witnesses,scratch:Option<&mut CommitBuffers>
         for &id in c.end_tokens.iter(){if !w.admit(id)?{return Ok(false);}}
     }
     if !c.special_token_terminals.is_empty() {
-        let mut expanded=view.state.clone();expand_runtime_product_states(c,&mut expanded);
         for special in &c.special_token_terminals {
             if c.is_late_grammar_placeholder_terminal(special.terminal_id){continue;}
             let count=u64::from(special.token_id_end)-u64::from(special.token_id)+1;
             if count==c.end_tokens.iter().filter(|&&id|special.contains(id)).count() as u64 {continue;}
-            if advance_special_terminal_paths(c,&expanded,special.terminal_id).is_some_and(|gss|!gss.is_empty()) {
+            if advance_special_terminal_paths(c,view.state,special.terminal_id).is_some_and(|gss|!gss.is_empty()) {
                 for id in special.token_id..=special.token_id_end {
                     if ordinary_id(view,id) && !w.admit(id)? {return Ok(false);}
                 }

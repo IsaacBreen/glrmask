@@ -4,7 +4,7 @@
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
-use super::{advance_special_terminal_paths, commit_bytes_impl, expand_runtime_product_states};
+use super::{advance_special_terminal_paths, commit_bytes_impl};
 use crate::automata::lexer::Lexer;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{frontier_is_accepting, CommitBuffers, ConstraintState, ParserStateMap};
@@ -149,9 +149,6 @@ fn byte_prefix_with_bounds(
     let mut scratch = constraints.iter().map(|c| CommitBuffers::for_constraint(c)).collect::<Vec<_>>();
     let mut prefix = Vec::new();
     while prefix.len() < max_bytes {
-        for (&constraint, state) in constraints.iter().zip(&mut frontier) {
-            expand_runtime_product_states(constraint, state);
-        }
         if constraints.iter().zip(&frontier).any(|(&c, s)| frontier_is_accepting(c, s, false)) { break; }
         if !matches!(event_possible(&constraints, &frontier, budget), Ok(false)) { break; }
         let candidates = if physical_bounds { byte_candidates(&constraints, &frontier) } else { [true; 256] };
@@ -285,8 +282,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
             continue;
         }
         let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
-        let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
-        for (&c, s) in constraints.iter().zip(&mut frontiers) { expand_runtime_product_states(c, s); }
+        let frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
         let event = match event_possible(&constraints, &frontiers, &mut budget) {
             Ok(event) => event,
             Err(()) => break,
@@ -312,8 +308,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
                 if output.len() >= MAX_FORCED_TOKENS { return output; }
                 // The full ID successor, not a byte-shadow cursor, owns the next proof.
                 let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
-                let mut next = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
-                for (&c, s) in constraints.iter().zip(&mut next) { expand_runtime_product_states(c, s); }
+                let next = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
                 if !matches!(event_possible(&constraints, &next, &mut budget), Ok(false)) { return output; }
                 (current_masks, current_mask) = masks(states, dynamic);
             }

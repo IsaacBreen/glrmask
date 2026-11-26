@@ -1460,12 +1460,9 @@ impl Constraint {
     }
 
     /// Whether the stored internal-TSID inverse is redundant with the scalar
-    /// state -> TSID map. Runtime-product tokenizers can have several TSID
-    /// lanes per physical state and therefore must retain their explicit
-    /// inverse/relation metadata.
+    /// state -> TSID map. A many-valued relation must retain its explicit inverse.
     pub(crate) fn can_defer_internal_tsid_inverse(&self) -> bool {
-        if self.runtime_source_state_offset.is_some()
-            || self.state_to_internal_tsid.len() != self.tokenizer.num_states() as usize
+        if self.state_to_internal_tsid.len() != self.tokenizer.num_states() as usize
             || self.state_to_internal_tsid.contains(&u32::MAX)
         {
             return false;
@@ -1883,13 +1880,6 @@ impl Constraint {
         self.deferred_internal_tsid_to_states = OnceLock::new();
         self.state_internal_tsid_offsets = state_internal_tsid_offsets;
         self.state_internal_tsids = state_internal_tsids;
-        // The rebuilt tokenizer is a direct union of exact leaf states, not a
-        // runtime subset/product expansion of the old outer tokenizer.
-        self.runtime_source_state_offset = None;
-        self.runtime_product_source_offsets.clear();
-        self.runtime_product_source_states.clear();
-        self.runtime_product_exact_source_states.clear();
-        self.runtime_product_state_by_source_subset.clear();
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.terminal_live_states = self.compute_terminal_live_states();
         self.tokenizer_fast_transitions = Self::compute_tokenizer_fast_transitions_for(&self.tokenizer);
@@ -10024,8 +10014,7 @@ impl Constraint {
             == [u32::MAX]
             && self.state_internal_tsids.is_empty()
             && self.state_to_internal_tsid.len() == state_count;
-        let deferred_singleton_state_relation_ready = self.runtime_source_state_offset.is_none()
-            && self.state_internal_tsid_offsets.is_empty()
+        let deferred_singleton_state_relation_ready = self.state_internal_tsid_offsets.is_empty()
             && self.state_internal_tsids.is_empty()
             && self.state_to_internal_tsid.len() == state_count
             && self.state_to_internal_tsid.iter().all(|&tsid| tsid != u32::MAX);
@@ -10039,7 +10028,6 @@ impl Constraint {
         if !state_relation_ready {
             self.rebuild_state_internal_tsid_relation();
         }
-        self.rebuild_runtime_product_state_lookup();
         let state_relation_ms = state_relation_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let fast_template_started_at = profile.then(std::time::Instant::now);
@@ -12376,37 +12364,6 @@ impl Constraint {
             self.state_internal_tsids.extend_from_slice(&tsids);
             let offset = self.state_internal_tsids.len() as u32;
             self.state_internal_tsid_offsets.push(offset);
-        }
-    }
-
-    fn rebuild_runtime_product_state_lookup(&mut self) {
-        self.runtime_product_state_by_source_subset.clear();
-        let Some(source_offset) = self.runtime_source_state_offset else {
-            return;
-        };
-        let product_states = source_offset as usize;
-        if self.runtime_product_source_offsets.len() != product_states + 1
-            || self.runtime_product_exact_source_states.len() != product_states
-        {
-            self.runtime_source_state_offset = None;
-            self.runtime_product_source_offsets.clear();
-            self.runtime_product_source_states.clear();
-            self.runtime_product_exact_source_states.clear();
-            return;
-        }
-
-        self.runtime_product_state_by_source_subset
-            .reserve(product_states);
-        for product_state in 0..product_states {
-            let start = self.runtime_product_source_offsets[product_state] as usize;
-            let end = self.runtime_product_source_offsets[product_state + 1] as usize;
-            let Some(states) = self.runtime_product_source_states.get(start..end).map(|s| s.to_vec()) else {
-                self.runtime_product_state_by_source_subset.clear();
-                self.runtime_source_state_offset = None;
-                return;
-            };
-            self.runtime_product_state_by_source_subset
-                .insert(states.into(), product_state as u32);
         }
     }
 

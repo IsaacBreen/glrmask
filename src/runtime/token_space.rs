@@ -103,44 +103,8 @@ impl Constraint {
 		)
 	}
 
-	pub(crate) fn runtime_source_state_offset(&self) -> Option<u32> {
-		self.runtime_source_state_offset
-	}
-
-	/// Scanner reset coordinate used while committing one model token.
-	/// Hybrid runtime determinization is a boundary-only compression: commit
-	/// itself must reset into the appended historical tokenizer, never into the
-	/// provenance-free product start state.
 	pub(crate) fn runtime_commit_initial_state(&self) -> u32 {
-		let product_initial = self.tokenizer.initial_state();
-		self.runtime_source_state_offset
-			.and_then(|offset| {
-				self.runtime_product_exact_source_state(product_initial)
-					.map(|source| offset + source)
-			})
-			.unwrap_or(product_initial)
-	}
-
-	pub(crate) fn runtime_product_source_states(&self, product_state: u32) -> Option<&[u32]> {
-		let source_offset = self.runtime_source_state_offset?;
-		if product_state >= source_offset {
-			return None;
-		}
-		let state = product_state as usize;
-		let start = *self.runtime_product_source_offsets.get(state)? as usize;
-		let end = *self.runtime_product_source_offsets.get(state + 1)? as usize;
-		self.runtime_product_source_states.get(start..end)
-	}
-
-	pub(crate) fn runtime_product_exact_source_state(&self, product_state: u32) -> Option<u32> {
-		let source_state = *self
-			.runtime_product_exact_source_states
-			.get(product_state as usize)?;
-		(source_state != u32::MAX).then_some(source_state)
-	}
-
-	pub(crate) fn runtime_product_state_for_source_subset(&self, states: &[u32]) -> Option<u32> {
-		self.runtime_product_state_by_source_subset.get(states).copied()
+		self.tokenizer.initial_state()
 	}
 
 	pub(crate) fn possible_matches_for_state(

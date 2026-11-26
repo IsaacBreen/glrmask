@@ -92,8 +92,6 @@ use crate::Vocab;
 use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
 
 mod structural_sharing;
-mod runtime_lexer_product;
-use runtime_lexer_product::maybe_install_runtime_lexer_product;
 use structural_sharing::{
     StructuralSharingReport, composition_terminal_classes, contextually_share_composed_states,
     quotient_composed_table_structurally, structural_nonterminal_classes,
@@ -8827,11 +8825,6 @@ fn build_composed_constraint_unfinalized(
         terminal_live_states,
         state_internal_tsid_offsets,
         state_internal_tsids,
-        runtime_source_state_offset: None,
-        runtime_product_source_offsets: Vec::new(),
-        runtime_product_source_states: Vec::new(),
-        runtime_product_exact_source_states: Vec::new(),
-        runtime_product_state_by_source_subset: FxHashMap::default(),
         template_dfas_by_terminal,
         fast_template_dfas_by_terminal: Vec::new(),
             template_parser: None,

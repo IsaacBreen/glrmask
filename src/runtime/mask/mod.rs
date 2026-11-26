@@ -4147,16 +4147,6 @@ impl ConstraintState {
 
         if global_state == self.constraint.runtime_commit_initial_state() {
             locals.push(component_reset);
-        } else if let Some(source_offset) = self.constraint.runtime_source_state_offset() {
-            if global_state >= source_offset {
-                add_source_union_state(global_state - source_offset);
-            } else if let Some(source_states) =
-                self.constraint.runtime_product_source_states(global_state)
-            {
-                for &source_state in source_states {
-                    add_source_union_state(source_state);
-                }
-            }
         } else {
             add_source_union_state(global_state);
         }
