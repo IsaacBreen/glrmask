@@ -436,7 +436,6 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// Borrowed until the next `bind()`.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),

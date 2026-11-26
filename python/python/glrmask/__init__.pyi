@@ -75,9 +75,9 @@ __all__: list[str] = [
     "Module",
     "Constraint",
     "ConstraintState",
+    "MaskStrategy",
     "Externs",
     "Extern",
-    "MaskStrategy",
     "GLRMaskError",
     "__version__",
 ]
@@ -108,7 +108,6 @@ class Grammar:
         ...
     @property
     def externs(self) -> Externs:
-        """Doesn't update after `bind()`."""
         ...
     @overload
     def bind(self, name: str, value: Grammar | Expr, /) -> None:
@@ -166,6 +165,9 @@ class Module:
     """A partially compiled grammar."""
     def __init__(self, source: Grammar, /) -> None:
         ...
+    @property
+    def externs(self) -> Externs:
+        ...
     @overload
     def bind(self, name: str, value: Grammar | Module | Expr | TokenSet, /) -> None:
         """Binds externs by name. If one fails, none are bound."""
@@ -173,10 +175,6 @@ class Module:
     @overload
     def bind(self, **bindings: Grammar | Module | Expr | TokenSet) -> None:
         """Binds externs by name. If one fails, none are bound."""
-        ...
-    @property
-    def externs(self) -> Externs:
-        """Doesn't update after `bind()`."""
         ...
     def precompile(
         self,
@@ -194,14 +192,14 @@ class Module:
     ) -> Constraint:
         """Reuses any precompiled work, which must be for the same vocabulary."""
         ...
-    def copy(self) -> Module:
-        ...
     def save(self) -> bytes:
         """Includes precompiled work."""
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
         """Loads what `save()` wrote, in the same GLRMask version."""
+        ...
+    def copy(self) -> Module:
         ...
     def __copy__(self) -> Module:
         ...
@@ -264,8 +262,18 @@ class ConstraintState:
         ...
 
 @final
+class MaskStrategy:
+    """A preference for faster compiling or faster masks."""
+    AUTO: ClassVar[MaskStrategy]
+    """Currently `FAST_MASKS`, or whatever the module was precompiled with."""
+    FAST_COMPILE: ClassVar[MaskStrategy]
+    """Prefer faster compiling over faster masks."""
+    FAST_MASKS: ClassVar[MaskStrategy]
+    """Prefer faster masks over faster compiling."""
+
+@final
 class Externs(Mapping[str, "Extern"]):
-    """Externs by name, in name order."""
+    """A read-only mapping of extern names to `Extern`."""
     @property
     def unbound(self) -> Externs:
         ...
@@ -305,16 +313,6 @@ class Extern:
         ...
     def __eq__(self, other: object, /) -> bool:
         ...
-
-@final
-class MaskStrategy:
-    """A preference for faster compiling or faster masks."""
-    AUTO: ClassVar[MaskStrategy]
-    """Currently `FAST_MASKS`, or whatever the module was precompiled with."""
-    FAST_COMPILE: ClassVar[MaskStrategy]
-    """Prefer faster compiling over faster masks."""
-    FAST_MASKS: ClassVar[MaskStrategy]
-    """Prefer faster masks over faster compiling."""
 
 class GLRMaskError(ValueError):
     kind: str

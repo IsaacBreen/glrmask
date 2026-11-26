@@ -213,20 +213,13 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
 public:
     /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
-    /// Parses a JSON Schema given as JSON text.
-    static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
     /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source.
     static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
+    /// Parses a JSON Schema given as JSON text.
+    static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
 
     /// Builds a grammar from an `Expr`.
     static Grammar from_expr(const Expr& value);
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
-    void bind(std::string_view name, const Grammar& value) {
-        detail::check(glrmask_grammar_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
-    }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
-    void bind(std::string_view name, const Expr& value);
-    /// Doesn't update after `bind()`.
     Externs externs() const {
         glrmask_externs* p_all = nullptr;
         detail::check(glrmask_grammar_externs(native_handle(), &p_all));
@@ -238,6 +231,12 @@ public:
 
         return Externs(std::move(all_items), std::move(unbound_items));
     }
+    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    void bind(std::string_view name, const Grammar& value) {
+        detail::check(glrmask_grammar_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
+    }
+    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    void bind(std::string_view name, const Expr& value);
     /// Fails if any extern is unbound.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
@@ -303,6 +302,17 @@ public:
 
     explicit Module(const Grammar& grammar) : Base(create(grammar)) {}
 
+    Externs externs() const {
+        glrmask_externs* p_all = nullptr;
+        detail::check(glrmask_module_externs(native_handle(), &p_all));
+        auto all_items = detail::take_externs(p_all);
+
+        glrmask_externs* p_unbound = nullptr;
+        detail::check(glrmask_module_unbound_externs(native_handle(), &p_unbound));
+        auto unbound_items = detail::take_externs(p_unbound);
+
+        return Externs(std::move(all_items), std::move(unbound_items));
+    }
     /// Fails if the extern is undeclared, already bound or the wrong kind.
     void bind(std::string_view name, const Module& value) {
         detail::check(glrmask_module_bind_module(native_handle(), name.data(), name.size(), value.native_handle()));
@@ -328,18 +338,6 @@ public:
     /// Reuses any precompiled work, which must be for the same vocabulary.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 
-    /// Doesn't update after `bind()`.
-    Externs externs() const {
-        glrmask_externs* p_all = nullptr;
-        detail::check(glrmask_module_externs(native_handle(), &p_all));
-        auto all_items = detail::take_externs(p_all);
-
-        glrmask_externs* p_unbound = nullptr;
-        detail::check(glrmask_module_unbound_externs(native_handle(), &p_unbound));
-        auto unbound_items = detail::take_externs(p_unbound);
-
-        return Externs(std::move(all_items), std::move(unbound_items));
-    }
 
     /// Includes precompiled work.
     Bytes save() const {
@@ -381,20 +379,16 @@ class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, 
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
 public:
-    /// The mask's length in bits: one per token ID, from 0.
-    std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
+    /// Which tokens may come next: one bit per token ID in `uint32_t` words (bit `i % 32` of word `i / 32`).
+    std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
     /// Like `mask()`, but writes the words into `output`. Extra words are set to 0.
     ///
     /// Throws `Error` if `word_count` is less than `(mask_bit_len() + 31) / 32`.
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
     /// Like `mask()`, but writes the words into `output`. Extra words are set to 0.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
-    /// Whether the output so far is a complete match.
-    bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
-    /// Which tokens may come next: one bit per token ID in `uint32_t` words (bit `i % 32` of word `i / 32`).
-    std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
-    /// Whether nothing more can be committed.
-    bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
+    /// The mask's length in bits: one per token ID, from 0.
+    std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// If the token isn't allowed, returns `false` and the state ends.
     [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
     /// Commits tokens in order until one isn't allowed, which ends the state. Returns how many were committed.
@@ -409,6 +403,10 @@ public:
     [[nodiscard]] bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
     /// The bytes that must come next, if any. Commit them with `commit_bytes()`.
     Bytes forced_bytes() const { glrmask_bytes* p = nullptr; detail::check(glrmask_state_forced_bytes(native_handle(), &p)); return detail::take_bytes(p); }
+    /// Whether the output so far is a complete match.
+    bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
+    /// Whether nothing more can be committed.
+    bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
 };
 
 inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& options) const {

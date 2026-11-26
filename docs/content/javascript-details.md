@@ -50,7 +50,7 @@ const constraint = await call.compile(vocab);
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
 at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
-same one in different ways. `externs` doesn't update after `bind()`. `externs.unbound` lists the unbound names.
+same one in different ways. `externs.unbound` lists the unbound names.
 
 `Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
 

@@ -291,7 +291,6 @@ impl PyGrammar {
         Ok(())
     }
 
-    /// Doesn't update after `bind()`.
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {
         let inner = self.inner.clone();

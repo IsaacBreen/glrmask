@@ -70,7 +70,7 @@ impl From<glrmask::Extern> for PyExtern {
 
 /// A grammar's or module's externs, in name order.
 ///
-/// Externs by name, in name order.
+/// A read-only mapping of extern names to `Extern`.
 #[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug)]
 pub(super) struct PyExterns {
@@ -514,7 +514,6 @@ impl PyModule {
         Ok(super::constraint(constraint))
     }
 
-    /// Doesn't update after `bind()`.
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
         let snapshot = slf.try_borrow()?.snapshot();
