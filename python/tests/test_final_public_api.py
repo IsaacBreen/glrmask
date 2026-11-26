@@ -336,7 +336,7 @@ def test_fill_mask_dtype_and_layout():
     readonly = signed.copy()
     readonly.flags.writeable = False
     for array in (np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.int32), signed[::2], readonly):
-        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D int32 NumPy array"):
+        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D int32 or uint32 NumPy array"):
             state.fill_mask(array)
 
 

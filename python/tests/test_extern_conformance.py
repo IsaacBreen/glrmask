@@ -29,7 +29,7 @@ def verify(constraint, prefix, allowed, accepting, forced, *, conservative=False
     state = at_prefix()
     assert state.is_accepting() == accepting
     fresh = state.mask().copy()
-    assert set(fresh.nonzero()[0]) == set(allowed)
+    assert set(unpack_mask(fresh, state.mask_bit_len()).nonzero()[0]) == set(allowed)
     assert (state.mask() == fresh).all()
     assert (at_prefix().mask() == fresh).all()
     for token in VOCAB:
