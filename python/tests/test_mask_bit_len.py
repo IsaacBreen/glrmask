@@ -57,12 +57,12 @@ def test_threaded_fill_mask_matches_sequential():
     states = [s.copy() for s in states]
     barrier = Barrier(len(states))
     def fill(i):
-        dtype = np.int32 if i % 2 else np.uint32
-        out = np.zeros((c.mask_bit_len()+31)//32+2, dtype=dtype)
+        # Odd threads fill an int32 buffer through a zero-copy uint32 view.
+        out = np.zeros((c.mask_bit_len()+31)//32+2, dtype=np.int32 if i % 2 else np.uint32)
         barrier.wait(timeout=30)
         for _ in range(5):
             s = states[i]
-            s.fill_mask(out)
+            s.fill_mask(out.view(np.uint32))
             np.testing.assert_array_equal(out[:-2].view(np.uint32), expected[i])
             assert not np.any(out[-2:])
         return out
