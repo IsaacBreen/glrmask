@@ -239,8 +239,8 @@ assert state.is_accepting()
 
 ### Mask strategies
 
-`MaskStrategy` controls how the constraint is compiled: `AUTO` (the default; currently `FAST_MASKS`), `FAST_COMPILE` (faster compiling, slower masks),
-or `FAST_MASKS` (faster masks, slower compiling). These are preferences, not speed guarantees.
+`MaskStrategy` controls how the constraint is compiled: `AUTO` (the default; currently `FAST_MASKS`), `FAST_COMPILE` (faster compilation, slower masks),
+or `FAST_MASKS` (faster masks, slower compilation). These are preferences, not speed guarantees.
 
 The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.
 

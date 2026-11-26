@@ -25,7 +25,6 @@ impl PyExtern {
         &self.name
     }
 
-    /// `"grammar"` or `"token"`.
     #[getter]
     fn kind(&self) -> &str {
         &self.kind

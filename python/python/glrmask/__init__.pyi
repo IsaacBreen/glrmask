@@ -225,7 +225,7 @@ class Constraint:
 @final
 class ConstraintState:
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
-        """Which tokens are allowed next. By default, one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`); with `dtype=bool`, one boolean per token ID."""
+        """Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead."""
         ...
     def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
         """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
@@ -235,19 +235,19 @@ class ConstraintState:
         """The mask's length in bits (the largest token ID plus one)."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
-        """Advances the state by one token. If it isn't allowed, returns `False` and the state ends."""
+        """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""
         ...
     def commit_tokens(self, token_ids: Sequence[int], /) -> int:
-        """Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed."""
+        """Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """Advances the state by these bytes. If they aren't allowed, returns `False` and the state ends."""
+        """Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state."""
         ...
     def forced_bytes(self) -> bytes:
-        """The bytes that every allowed continuation starts with."""
+        """The bytes that must come next."""
         ...
     def is_accepting(self) -> bool:
-        """Whether the output so far is a complete match."""
+        """Whether the output so far could end here."""
         ...
     def is_terminated(self) -> bool:
         """Whether nothing more can be committed."""
@@ -265,9 +265,9 @@ class MaskStrategy:
     AUTO: ClassVar[MaskStrategy]
     """The default; currently `FAST_MASKS`."""
     FAST_COMPILE: ClassVar[MaskStrategy]
-    """Faster compiling, slower masks."""
+    """Faster compilation, slower masks."""
     FAST_MASKS: ClassVar[MaskStrategy]
-    """Faster masks, slower compiling."""
+    """Faster masks, slower compilation."""
 
 @final
 class Externs(Mapping[str, "Extern"]):
@@ -305,7 +305,6 @@ class Extern:
         ...
     @property
     def kind(self) -> Literal["token", "grammar"]:
-        """`"grammar"` or `"token"`."""
         ...
     def __repr__(self) -> str:
         ...
@@ -314,4 +313,4 @@ class Extern:
 
 class GLRMaskError(ValueError):
     kind: str
-    """Currently one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`."""
+    """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`."""

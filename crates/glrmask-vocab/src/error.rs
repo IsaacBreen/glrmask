@@ -56,7 +56,7 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    /// Currently one of `ErrorKind::Syntax`, `ErrorKind::InvalidInput`, `ErrorKind::Compilation`, `ErrorKind::ResourceLimit`, `ErrorKind::StrategyUnsupported`, `ErrorKind::Serialization`, or `ErrorKind::Internal`.
+    /// One of `ErrorKind::Syntax`, `ErrorKind::InvalidInput`, `ErrorKind::Compilation`, `ErrorKind::ResourceLimit`, `ErrorKind::StrategyUnsupported`, `ErrorKind::Serialization`, or `ErrorKind::Internal`.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }

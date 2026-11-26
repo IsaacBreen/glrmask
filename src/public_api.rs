@@ -43,9 +43,9 @@ enum MaskPreference { Auto, FastCompile, FastMasks }
 impl MaskStrategy {
     /// The default; currently `FAST_MASKS`.
     pub const AUTO: Self = Self(MaskPreference::Auto);
-    /// Faster compiling, slower masks.
+    /// Faster compilation, slower masks.
     pub const FAST_COMPILE: Self = Self(MaskPreference::FastCompile);
-    /// Faster masks, slower compiling.
+    /// Faster masks, slower compilation.
     pub const FAST_MASKS: Self = Self(MaskPreference::FastMasks);
 }
 
@@ -211,7 +211,6 @@ impl Extern {
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// `ExternKind::Grammar` or `ExternKind::Token`.
     pub fn kind(&self) -> ExternKind {
         self.kind
     }

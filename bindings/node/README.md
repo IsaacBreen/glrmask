@@ -138,8 +138,8 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 | `MaskStrategy` | Value | Preference |
 | --- | --- | --- |
 | `Auto` | `'auto'` | The default; currently `FastMasks`. |
-| `FastCompile` | `'fast-compile'` | Faster compiling, slower masks. |
-| `FastMasks` | `'fast-masks'` | Faster masks, slower compiling. |
+| `FastCompile` | `'fast-compile'` | Faster compilation, slower masks. |
+| `FastMasks` | `'fast-masks'` | Faster masks, slower compilation. |
 
 These are preferences, not speed guarantees.
 See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
@@ -153,15 +153,15 @@ state.fillMask(mask);
 const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 ```
 
-A mask indicates which tokens are allowed next, one bit per token ID: token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set.
+A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`.
 `fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-`commitToken` and `commitBytes` advance the state by a token or bytes and return whether the input was allowed. `commitTokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. A failed commit ends the state, so
+`commitToken` and `commitBytes` advance the state by a token or bytes and return whether the input was allowed. `commitTokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. A failed commit terminates the state, so
 `clone()` it first to try a token without committing to it. Commit special tokens and token sets with `commitToken`;
 bytes never match them.
 
-`isAccepting()` says whether the input so far is a complete match, and `isTerminated()` whether nothing more can be
-committed. `forcedBytes()` returns the bytes that every allowed continuation starts with. Tokenize and commit them yourself; exact token-set items are not included.
+`isAccepting()` says whether the output so far could end here, and `isTerminated()` whether nothing more can be
+committed. `forcedBytes()` returns the bytes that must come next. Tokenize and commit them yourself; exact token-set items are not included.
 
 [examples/generate.mjs](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/examples/generate.mjs) is a
 complete generation loop.
@@ -193,7 +193,7 @@ load saved bytes from untrusted sources.
 ## Errors
 
 Arguments of the wrong type throw `TypeError`, and token IDs out of range throw `RangeError`. Everything else throws a
-`GLRMaskError`, whose `code` is currently one of:
+`GLRMaskError`, whose `code` is one of:
 
 | Code | |
 | --- | --- |

@@ -20,9 +20,9 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 pub(super) enum PyMaskStrategy {
     /// The default; currently `FAST_MASKS`.
     AUTO = 0,
-    /// Faster compiling, slower masks.
+    /// Faster compilation, slower masks.
     FAST_COMPILE = 3,
-    /// Faster masks, slower compiling.
+    /// Faster masks, slower compilation.
     FAST_MASKS = 4,
 }
 #[pymethods]

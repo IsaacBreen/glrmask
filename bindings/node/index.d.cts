@@ -154,21 +154,21 @@ export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;
 
-  /** Which tokens are allowed next. One bit per token ID in `Uint32Array` words (bit `i % 32` of word `Math.floor(i / 32)`). */
+  /** Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`. */
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Extra words are set to 0. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
   /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
-  /** Advances the state by one token. If it isn't allowed, returns `false` and the state ends. */
+  /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;
-  /** Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed. */
+  /** Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed. */
   commitTokens(ids: Iterable<number> | Uint32Array): number;
-  /** Advances the state by these bytes. If they aren't allowed, returns `false` and the state ends. */
+  /** Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. */
   commitBytes(bytes: Uint8Array): boolean;
-  /** The bytes that every allowed continuation starts with. */
+  /** The bytes that must come next. */
   forcedBytes(): Uint8Array;
-  /** Whether the output so far is a complete match. */
+  /** Whether the output so far could end here. */
   isAccepting(): boolean;
   /** Whether nothing more can be committed. */
   isTerminated(): boolean;
@@ -182,9 +182,9 @@ export declare class ConstraintState implements Disposable {
 export declare const MaskStrategy: Readonly<{
   /** The default; currently `FastMasks`. */
   Auto: 'auto';
-  /** Faster compiling, slower masks. */
+  /** Faster compilation, slower masks. */
   FastCompile: 'fast-compile';
-  /** Faster masks, slower compiling. */
+  /** Faster masks, slower compilation. */
   FastMasks: 'fast-masks';
 }>;
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
@@ -197,14 +197,13 @@ export interface Externs extends ReadonlyMap<string, Extern> {
 /** A named placeholder in a grammar. */
 export interface Extern {
   readonly name: string;
-  /** `"grammar"` or `"token"`. */
   readonly kind: 'token' | 'grammar' | (string & {});
 }
 
 export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
 export type ErrorCode = KnownErrorCode | (string & {});
 export declare class GLRMaskError extends Error {
-  /** Currently one of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`. */
+  /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`. */
   readonly code: ErrorCode;
   constructor(code: ErrorCode, message: string, options?: ErrorOptions);
 }

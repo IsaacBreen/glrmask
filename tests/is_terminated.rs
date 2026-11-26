@@ -364,3 +364,25 @@ fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::M
     module.bind("VALUE", value)?;
     Ok(module)
 }
+
+#[test]
+fn rejected_commits_terminate_live_state() {
+    use glrmask::{CompileOptions, MaskStrategy};
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"z".to_vec())]).unwrap();
+    let grammar = Grammar::from_lark(r#"start: "a" "b""#).unwrap();
+    for strategy in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        let c = grammar.compile_with(&vocab, CompileOptions::default().mask_strategy(strategy)).unwrap();
+        for rejection in 0..3 {
+            let mut s = c.start();
+            assert!(!s.is_terminated());
+            match rejection {
+                0 => assert!(!s.commit_token(2)),
+                1 => assert_eq!(s.commit_tokens(&[0, 2, 1]), 1),
+                _ => assert!(!s.commit_bytes(b"az")),
+            }
+            assert!(s.is_terminated());
+            assert!(!s.is_accepting());
+            assert!(!s.commit_token(1));
+        }
+    }
+}

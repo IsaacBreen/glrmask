@@ -286,3 +286,20 @@ test('forced byte query stops at choices, acceptance and exact events',()=>{
   assert.equal(s.forcedBytes().length,0);
   assert.equal(s.commitForcedTokens,undefined);
 });
+
+
+test('rejected commits terminate live states for every strategy',()=>{
+  for(const {options} of strategies) {
+    const c=simple().compileSync(vocab(),options);
+    for(const [reject,expected] of [[s=>s.commitToken(65),false],
+                                   [s=>s.commitTokens([0,65,1]),1],
+                                   [s=>s.commitBytes(b('az')),false]]) {
+      const s=c.start();
+      assert.equal(s.isTerminated(),false);
+      assert.equal(reject(s),expected);
+      assert.equal(s.isTerminated(),true);
+      assert.equal(s.isAccepting(),false);
+      assert.equal(s.commitToken(1),false);
+    }
+  }
+});

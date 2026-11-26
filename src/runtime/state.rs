@@ -579,12 +579,12 @@ impl ConstraintState {
     }
 
 
-    /// The bytes that every allowed continuation starts with.
+    /// The bytes that must come next.
     pub fn forced_bytes(&self) -> Vec<u8> {
         crate::runtime::forced_bytes_for_states(std::slice::from_ref(self))
     }
 
-    /// Whether the output so far is a complete match.
+    /// Whether the output so far could end here.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;

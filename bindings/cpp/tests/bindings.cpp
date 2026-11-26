@@ -276,6 +276,11 @@ void commit_contract() {
         auto list = c.start();
         CHECK(list.commit_tokens(std::vector<TokenId>{0, 0}) == 1);
         CHECK(!list.is_accepting()); CHECK(list.is_terminated());
+        auto bytes = c.start();
+        CHECK(!bytes.is_terminated());
+        CHECK(!bytes.commit_bytes("az"));
+        CHECK(bytes.is_terminated()); CHECK(!bytes.is_accepting());
+        CHECK(!bytes.commit_token(1));
         auto closed = c.start();
         closed.dispose();
         throws([&]{ (void)closed.commit_token(0); }, GLRMASK_CLOSED);

@@ -43,3 +43,20 @@ def test_empty_commit_on_failed_state_returns_false():
     assert failed.is_terminated()
     assert not failed.is_accepting()
 
+
+
+def test_rejected_commits_terminate_live_state():
+    vocab = glrmask.Vocab({0: b"a", 1: b"b", 2: b"z"})
+    grammar = glrmask.Grammar.from_lark('start: "a" "b"')
+    for strategy in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE,
+                     glrmask.MaskStrategy.FAST_MASKS):
+        constraint = grammar.compile(vocab, mask_strategy=strategy)
+        for reject, expected in ((lambda s: s.commit_token(2), False),
+                                 (lambda s: s.commit_tokens([0, 2, 1]), 1),
+                                 (lambda s: s.commit_bytes(b"az"), False)):
+            state = constraint.start()
+            assert not state.is_terminated()
+            assert reject(state) == expected
+            assert state.is_terminated()
+            assert not state.is_accepting()
+            assert not state.commit_token(1)

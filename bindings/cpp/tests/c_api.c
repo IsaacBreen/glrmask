@@ -55,7 +55,21 @@ int main(void) {
             CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
             CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==0);
             glrmask_bytes_free(forced);
-            glrmask_state_free(probe);glrmask_constraint_free(constraint);constraint=NULL;
+            glrmask_state_free(probe);
+            for(size_t rejection=0;rejection<3;rejection++){
+                uint32_t terminated=0,accepting=0;
+                const uint32_t ids[]={1,0};
+                CHECK(glrmask_constraint_start(constraint,&probe)==GLRMASK_OK);
+                CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==0);
+                if(rejection==0){CHECK(!glrmask_state_commit_token(probe,1));}
+                else if(rejection==1){CHECK(glrmask_state_commit_tokens(probe,ids,2)==0);}
+                else{CHECK(!glrmask_state_commit_bytes(probe,(const uint8_t*)"z",1));}
+                CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==1);
+                CHECK(glrmask_state_is_accepting(probe,&accepting)==GLRMASK_OK && accepting==0);
+                CHECK(!glrmask_state_commit_token(probe,0));
+                glrmask_state_free(probe);
+            }
+            glrmask_constraint_free(constraint);constraint=NULL;
         }
     }
     {

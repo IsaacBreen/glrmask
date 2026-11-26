@@ -44,20 +44,20 @@
     "Constraint.save": "",
     "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.",
     "ConstraintState": "",
-    "ConstraintState.mask": "Which tokens are allowed next. By default, one bit per token ID in `uint32` words (bit `i % 32` of word `i // 32`); with `dtype=bool`, one boolean per token ID.",
+    "ConstraintState.mask": "Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL.",
     "ConstraintState.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
-    "ConstraintState.commit_token": "Advances the state by one token. If it isn't allowed, returns `False` and the state ends.",
-    "ConstraintState.commit_tokens": "Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed.",
-    "ConstraintState.commit_bytes": "Advances the state by these bytes. If they aren't allowed, returns `False` and the state ends.",
-    "ConstraintState.forced_bytes": "The bytes that every allowed continuation starts with.",
-    "ConstraintState.is_accepting": "Whether the output so far is a complete match.",
+    "ConstraintState.commit_token": "Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.",
+    "ConstraintState.commit_tokens": "Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed.",
+    "ConstraintState.commit_bytes": "Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.",
+    "ConstraintState.forced_bytes": "The bytes that must come next.",
+    "ConstraintState.is_accepting": "Whether the output so far could end here.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
     "ConstraintState.copy": "",
     "MaskStrategy": "Controls how the constraint is compiled.",
     "MaskStrategy.AUTO": "The default; currently `FAST_MASKS`.",
-    "MaskStrategy.FAST_COMPILE": "Faster compiling, slower masks.",
-    "MaskStrategy.FAST_MASKS": "Faster masks, slower compiling.",
+    "MaskStrategy.FAST_COMPILE": "Faster compilation, slower masks.",
+    "MaskStrategy.FAST_MASKS": "Faster masks, slower compilation.",
     "Externs": "A read-only mapping of extern names to `Extern`.",
     "Externs.unbound": "",
     "Externs.get": "",
@@ -66,9 +66,9 @@
     "Externs.items": "",
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "",
-    "Extern.kind": "`\"grammar\"` or `\"token\"`.",
+    "Extern.kind": "",
     "GLRMaskError": "",
-    "GLRMaskError.kind": "Currently one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`."
+    "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`."
   },
   "python_releases": {
     "0.3": {
@@ -174,8 +174,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "3886b6a95bc9ea3fac49f13f03444f99fcbabc8447e070e6b7e1243c759e347a",
-    "bindings/node/README.md": "f35852939ce53e03dfa1a9b5f8eec3013ed8d099a3b6a14763c068a28af6d95b",
+    "bindings/cpp/README.md": "ed74ff152fe1b53a666cc30bfd837fa52f49bc5380140761c24f7ba5f31efad4",
+    "bindings/node/README.md": "fbbb2f02fafce164af4e04542122d4a169a22994b2c9270bf7bbf506726163d2",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -183,5 +183,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "3c6ed56a05724cb57d411e812ef79dd05e6b1d6d76b20930e7344c3025b42418"
+  "content_sha256": "80ac6818867004a2fb305891ae7f2e1266ebcd0bf31e50ff8d13dc7ed058da87"
 }

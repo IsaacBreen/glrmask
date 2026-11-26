@@ -62,8 +62,8 @@ enum {
 /// Controls how the constraint is compiled.
 enum {
     GLRMASK_MASK_STRATEGY_AUTO=0,         ///< The default; currently `GLRMASK_MASK_STRATEGY_FAST_MASKS`.
-    GLRMASK_MASK_STRATEGY_FAST_COMPILE=3, ///< Faster compiling, slower masks.
-    GLRMASK_MASK_STRATEGY_FAST_MASKS=4    ///< Faster masks, slower compiling.
+    GLRMASK_MASK_STRATEGY_FAST_COMPILE=3, ///< Faster compilation, slower masks.
+    GLRMASK_MASK_STRATEGY_FAST_MASKS=4    ///< Faster masks, slower compilation.
 };
 /// Grammar source formats for `glrmask_grammar_from_source`.
 enum {
@@ -205,9 +205,9 @@ GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmas
 GLRMASK_API void glrmask_state_free(glrmask_state* state);
 /// The mask's length in bits (the largest token ID plus one).
 GLRMASK_API glrmask_status glrmask_state_mask_bit_len(const glrmask_state* state,size_t* out);
-/// Whether the output so far is a complete match. Writes 1 or 0 to `out`.
+/// Whether the output so far could end here. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state,uint32_t* out);
-/// Which tokens are allowed next. One bit per token ID in `uint32_t` words (bit `i % 32` of word `i / 32`).
+/// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`.
 /// Writes the words into `out`. Extra words are set to 0. Returns
 /// `GLRMASK_BUFFER_TOO_SMALL`, writing nothing, if `word_count` is below (N + 31) / 32,
 /// where N is the state mask bit length.
@@ -215,13 +215,13 @@ GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,ui
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
 /// Commit calls clear the last error on ordinary acceptance or rejection; invalid handles, arguments and internal failures set it.
-/// Advances the state by one token. If it isn't allowed, returns `false` and the state ends. Returns false for a NULL state.
+/// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_token(glrmask_state* state,uint32_t id);
-/// Advances the state by each token in order, stopping at the first one that isn't allowed (which ends the state). Returns how many were committed. Returns zero for a NULL state.
+/// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed. Returns zero for a NULL state.
 GLRMASK_API size_t glrmask_state_commit_tokens(glrmask_state* state,const uint32_t* ids,size_t n);
-/// Advances the state by these bytes. If they aren't allowed, returns `false` and the state ends. Returns false for a NULL state.
+/// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n);
-/// The bytes that every allowed continuation starts with.
+/// The bytes that must come next.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);
 
 /// Points `*out_data` at the contents, valid until the buffer is freed.
