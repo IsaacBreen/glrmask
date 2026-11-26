@@ -5476,7 +5476,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
             }
         }
-        let mut tokenizer = Arc::try_unwrap(tokenizer)
+        let tokenizer = Arc::try_unwrap(tokenizer)
             .unwrap_or_else(|_| panic!("tokenizer references outlived compile DAG"));
         let analyzed_grammar = Arc::try_unwrap(analyzed_grammar)
             .unwrap_or_else(|_| panic!("analyzed grammar references outlived compile DAG"));

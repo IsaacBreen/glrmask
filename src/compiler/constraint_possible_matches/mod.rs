@@ -22,7 +22,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis:
     FlatDfa, FlatDfaState, TokenizerView,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
-    classify_vocab_char_type, VocabPartitionDfa,
+    VocabPartitionDfa,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaFamilies;
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;

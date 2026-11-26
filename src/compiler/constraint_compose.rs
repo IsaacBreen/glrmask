@@ -17,7 +17,7 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::lexer::ast::Expr;
 use crate::automata::weighted_u32::determinize::determinize;
 use crate::automata::weighted_u32::minimize::{minimize_owned, reverse_hashcons_owned};
@@ -36,10 +36,7 @@ use crate::compiler::stages::equiv_types::{
 };
 use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::vocab_tokens_with_adjacent_pairs;
-use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::{
-    SharedBooleanParserDomains,
-    build_boolean_terminal_bundle_nwa,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table,
@@ -76,7 +73,6 @@ use crate::compiler::glr::table::{
     Action,
     ComposedTable,
     ControlEliminationReport,
-    SubgrammarTableInput,
 };
 use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
@@ -89,14 +85,11 @@ use crate::runtime::{
     CompositionGrammarSummary, Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
 };
 use crate::Vocab;
-use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
+use super::{macro_parallelism_disabled, report_macro_item_timings};
 
 mod structural_sharing;
-use structural_sharing::{
-    StructuralSharingReport, composition_terminal_classes, contextually_share_composed_states,
-    quotient_composed_table_structurally, structural_nonterminal_classes,
-    structural_sharing_enabled,
-};
+#[cfg(test)]
+use structural_sharing::{composition_terminal_classes, quotient_composed_table_structurally, structural_nonterminal_classes};
 
 #[inline]
 pub(crate) fn compose_profile_enabled() -> bool {
