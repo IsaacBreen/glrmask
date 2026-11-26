@@ -141,7 +141,7 @@ def language_payload():
                'guide_url': REPO + '/blob/main/GUIDE.md',
                'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
                'python_releases': json.loads((CONTENT / 'python-api-releases.json').read_text()),
-               'native_guides': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+               'native_guides': {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
                                  for path in sorted([ROOT / 'bindings/cpp/README.md', ROOT / 'bindings/node/README.md',
                                                      *CONTENT.glob('releases/*/cpp.md'), *CONTENT.glob('releases/*/javascript.md')])},
                'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
