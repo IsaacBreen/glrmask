@@ -156,9 +156,6 @@ pub(crate) struct ParserDwaComponent<'a> {
     pub(crate) tokenizer_state_offset: u32,
     /// Global terminal offset of this component in the composed table.
     pub(crate) terminal_offset: u32,
-    /// Composed execution table used to scope a standalone global-ignore
-    /// identity to parser tops where that terminal is actually `Skip`.
-    pub(crate) composed_table: Option<&'a crate::compiler::glr::table::GLRTable>,
 }
 
 const NO_PARSER_DOMAIN_LABEL: i32 = i32::MAX;
@@ -197,28 +194,9 @@ struct ParserDefaultDomainPlan {
     /// Composed parser state -> synthetic fallback label. The sentinel means
     /// that state has no component-local wildcard domain.
     parser_state_labels: Vec<i32>,
-    /// One optional exact wildcard domain per component. Component zero is the
-    /// parent and is deliberately never assigned a domain.
+    /// One optional exact wildcard domain per component, including the parent.
     component_domains: Vec<Option<ParserDefaultDomain>>,
     predicted_saved_edges: usize,
-}
-
-fn symbolic_child_defaults_env_override() -> Option<bool> {
-    crate::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULTS")
-        .ok()
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no" | "off"
-            )
-        })
-}
-
-fn symbolic_child_default_min_saved_edges() -> usize {
-    crate::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULT_MIN_SAVED_EDGES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(4_096)
 }
 
 /// Build an exact quotient of the positive parser-state input alphabet for
@@ -237,20 +215,6 @@ fn symbolic_child_default_min_saved_edges() -> usize {
 fn build_parser_default_domain_plan(
     components: &[ParserDwaComponent<'_>],
     num_parser_states: u32,
-) -> ParserDefaultDomainPlan {
-    build_parser_default_domain_plan_with_policy(
-        components,
-        num_parser_states,
-        symbolic_child_defaults_env_override(),
-        crate::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some(),
-    )
-}
-
-fn build_parser_default_domain_plan_with_policy(
-    components: &[ParserDwaComponent<'_>],
-    num_parser_states: u32,
-    force: Option<bool>,
-    force_parent_defaults: bool,
 ) -> ParserDefaultDomainPlan {
     let n = num_parser_states as usize;
     let mut preimage_count = vec![0u32; n];
@@ -296,7 +260,7 @@ fn build_parser_default_domain_plan_with_policy(
         }
     }
 
-    let min_saved = symbolic_child_default_min_saved_edges();
+    const MIN_SAVED_EDGES: usize = 4_096;
     let mut component_predicted = vec![0usize; components.len()];
     for component_index in 0..components.len() {
         let component = components[component_index];
@@ -327,18 +291,9 @@ fn build_parser_default_domain_plan_with_policy(
     // unambiguous domain as one additional label is purely a graph-size win:
     // it replaces concrete DEFAULT expansion without adding lookup depth.
     // Keep parent-only/small compositions on the historical zero-overhead
-    // path unless explicitly forced.
-    let child_feature_selected = match force {
-        Some(false) => false,
-        Some(true) => true,
-        None => component_predicted
-            .iter()
-            .skip(1)
-            .any(|&predicted| predicted >= min_saved),
-    };
-    let symbolic_parent_defaults = force_parent_defaults || child_feature_selected;
-    let first_domain_component = usize::from(!symbolic_parent_defaults);
-    let required_domain_labels = (first_domain_component..components.len())
+    // path.
+    let child_feature_selected = component_predicted.iter().skip(1).any(|&n| n >= MIN_SAVED_EDGES);
+    let required_domain_labels = (0..components.len())
         .map(|component_index| {
             let component = components[component_index];
             let mut nested = BTreeSet::<i32>::new();
@@ -370,12 +325,12 @@ fn build_parser_default_domain_plan_with_policy(
     let mut parser_state_labels = vec![NO_PARSER_DOMAIN_LABEL; n];
     let mut predicted_saved_edges = 0usize;
 
-    let feature_selected = labels_fit && (child_feature_selected || force_parent_defaults);
+    let feature_selected = labels_fit && child_feature_selected;
     if feature_selected {
         // Once one child amortizes the table-sized runtime map, every further
         // exact child domain is a marginal win: one synthetic label replaces a
         // positive number of concrete edges without increasing lookup depth.
-        for component_index in first_domain_component..components.len() {
+        for component_index in 0..components.len() {
             let predicted = component_predicted[component_index];
             if predicted == 0 {
                 continue;
@@ -2157,28 +2112,7 @@ fn component_parser_nwa(
         ));
     }
 
-    let prepared_source;
-    let source = if crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_HASHCONS_PREP").is_some()
-        && constraint.parser_dwa.num_states() >= 10_000
-    {
-        let started_at = Instant::now();
-        let before_states = constraint.parser_dwa.num_states();
-        let before_transitions = constraint.parser_dwa.num_transitions();
-        prepared_source = reverse_hashcons_owned(constraint.parser_dwa.clone());
-        if compose_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_component_hashcons_prep] before_states={} before_transitions={} after_states={} after_transitions={} ms={:.3}",
-                before_states,
-                before_transitions,
-                prepared_source.num_states(),
-                prepared_source.num_transitions(),
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        &prepared_source
-    } else {
-        &constraint.parser_dwa
-    };
+    let source = &constraint.parser_dwa;
     let mut nwa = NWA::new(0, 0);
     for _ in source.states() {
         nwa.add_state();
@@ -2201,9 +2135,7 @@ fn component_parser_nwa(
     }
 
     let top_accept = materialized_top_acceptance(constraint);
-    if crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
-        && !top_accept.is_empty()
-    {
+    if !top_accept.is_empty() {
         let start = nwa.add_state();
         let final_state = nwa.add_state();
         nwa.set_final_weight(final_state, Weight::all());
@@ -2219,47 +2151,6 @@ fn component_parser_nwa(
             )?;
         }
         nwa.start_states_mut().push(start);
-    }
-    if crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none()
-        && crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
-        && let (Some(table), Some(local_ignore)) =
-            (component.composed_table, constraint.ignore_terminal)
-        && let Some(ignore_possible) = constraint.possible_matches.get(&local_ignore)
-        && let Some(parser_empty) = constraint
-            .parser_dwa
-            .states()
-            .get(constraint.parser_dwa.start_state() as usize)
-            .and_then(|state| state.final_weight.as_ref())
-    {
-        let identity_weight = parser_empty.intersection(ignore_possible);
-        let global_ignore = component.terminal_offset + local_ignore;
-        let identity_states = table
-            .action
-            .iter()
-            .enumerate()
-            .filter_map(|(state, row)| {
-                let action = row.get(&global_ignore)?;
-                let stack_neutral = matches!(action, Action::Skip | Action::Shift(_, true))
-                    || matches!(action, Action::ReplaceShifts(_))
-                    || matches!(action, Action::StackShifts(shifts) if shifts.iter().all(|shift| shift.pop == 1 && shift.pushes.len() == 1))
-                    || matches!(action, Action::Split { shift: Some((_, true)), reduces, accept: false } if reduces.is_empty());
-                stack_neutral.then_some(state as u32)
-            })
-            .collect::<Vec<_>>();
-        if !identity_states.is_empty() && !identity_weight.is_empty() {
-            let start = nwa.add_state();
-            let final_state = nwa.add_state();
-            nwa.set_final_weight(final_state, Weight::all());
-            for state in identity_states {
-                nwa.add_transition(
-                    start,
-                    encode_positive_label(state),
-                    final_state,
-                    identity_weight.clone(),
-                );
-            }
-            nwa.start_states_mut().push(start);
-        }
     }
     if compose_profile_enabled() {
         let stored_domain_counts = constraint
@@ -6431,10 +6322,8 @@ fn discover_boundary_token_paths(
     // whose LR state owns the composed stack top is also authoritative for its
     // scoped identity/ignore language.  Do not synthesize contextual B starts
     // merely because such a terminal was state-dependent in the composed
-    // table: those are component-local paths, not boundary crossings.  Keep the
-    // experiment flag as an opt-in for older/non-authoritative callers.
-    let use_component_scoped_identity = prefer_cross_interface_only
-        || crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some();
+    // table: those are component-local paths, not boundary crossings.
+    let use_component_scoped_identity = prefer_cross_interface_only;
     let boundary_context_states = if use_component_scoped_identity {
         FxHashSet::default()
     } else {
@@ -6467,8 +6356,7 @@ fn discover_boundary_token_paths(
     let allow_suffix_seed = !ignore_terminals.is_empty();
     let cross_interface_only = use_prefilter
         && ignore_terminals.is_empty()
-        && (prefer_cross_interface_only
-            || crate::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some());
+        && prefer_cross_interface_only;
     // In the exact cross-interface factor, seed-only tokens are component-local
     // language and are deliberately excluded from boundary repair. Avoid the
     // full-vocabulary seed-DFA scan whose result would be discarded below.
@@ -10323,8 +10211,6 @@ impl<'a> DeferredComponentParserUnionView<'a> {
             || constraints.len() != tokenizer_state_offsets.len()
             || constraints.len() != terminal_offsets.len()
             || constraints.len() != default_domains.len()
-            || (crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
-                && crate::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none())
         {
             return None;
         }
@@ -10361,7 +10247,6 @@ impl<'a> DeferredComponentParserUnionView<'a> {
                     parser_state_relation: relation.as_ref(),
                     tokenizer_state_offset: component.tokenizer_state_offset,
                     terminal_offset: component.terminal_offset,
-                    composed_table: None,
                 };
                 let mut automaton =
                     component_parser_nwa(&parser_component, component.default_domain.as_ref())?;
@@ -11211,7 +11096,7 @@ pub(super) fn prepared_leaf_possible_matches(
     let started=Instant::now();
     let components=leaves.iter().zip(tokenizer_offsets).zip(terminal_offsets)
         .map(|((&constraint,&tokenizer_state_offset),&terminal_offset)|ParserDwaComponent {
-            constraint,parser_state_relation:&[],tokenizer_state_offset,terminal_offset,composed_table:None,
+            constraint,parser_state_relation:&[],tokenizer_state_offset,terminal_offset,
         }).collect::<Vec<_>>();
     let mut original_tokens=vocab.entries_map().keys().copied().collect::<Vec<_>>();
     original_tokens.sort_unstable();
@@ -13056,21 +12941,6 @@ fn factor_one_terminal_seed_relations(
         (local < components.get(component)?.tokenizer.num_terminals()).then_some(component)
     };
 
-    let scoped_ignore_shadow_is_separately_supplied = |terminal: u32| -> bool {
-        if crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_SHADOW_REUSE").is_none()
-            || crate::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_none()
-        {
-            return false;
-        }
-        let Some(component_index) = owner_for_terminal(terminal) else {
-            return false;
-        };
-        let Some(ignore) = components[component_index].ignore_terminal else {
-            return false;
-        };
-        terminal_offsets[component_index] + ignore == terminal
-    };
-
     let support_shadowed_at_component_start =
         |terminal: u32, raw_state: u32, original_token: u32| -> Option<bool> {
             let component_index = owner_for_terminal(terminal)?;
@@ -13122,7 +12992,6 @@ fn factor_one_terminal_seed_relations(
     let mut promoted_shadow_cells = 0usize;
     let mut promoted_shadow_tokens = BTreeSet::<u32>::new();
     let mut promoted_shadow_by_terminal = BTreeMap::<u32, BTreeSet<u32>>::new();
-    let mut reused_scoped_ignore_shadow_cells = 0usize;
     let mut dropped_cells = 0usize;
     let mut delta_cells = 0usize;
     let mut conservative_cells = 0usize;
@@ -13149,10 +13018,6 @@ fn factor_one_terminal_seed_relations(
                 }
                 match support_shadowed_at_component_start(terminal, state, token) {
                     Some(true) => {
-                        if scoped_ignore_shadow_is_separately_supplied(terminal) {
-                            reused_scoped_ignore_shadow_cells += 1;
-                            continue;
-                        }
                         promoted_shadow_cells += 1;
                         promoted_shadow_tokens.insert(token);
                         promoted_shadow_by_terminal.entry(terminal).or_default().insert(token);
@@ -13181,12 +13046,11 @@ fn factor_one_terminal_seed_relations(
 
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_factor_one_terminal] rows={} promoted_shadow_cells={} promoted_shadow_tokens={} promoted_shadow_by_terminal={:?} reused_scoped_ignore_shadow_cells={} delta_cells={} dropped_cells={} conservative_cells={}",
+            "[glrmask/profile][constraint_boundary_factor_one_terminal] rows={} promoted_shadow_cells={} promoted_shadow_tokens={} promoted_shadow_by_terminal={:?} delta_cells={} dropped_cells={} conservative_cells={}",
             factored.len(),
             promoted_shadow_cells,
             promoted_shadow_tokens.len(),
             promoted_shadow_by_terminal.iter().map(|(&terminal, tokens)| (terminal, tokens.len())).collect::<Vec<_>>(),
-            reused_scoped_ignore_shadow_cells,
             delta_cells,
             dropped_cells,
             conservative_cells,
@@ -20059,7 +19923,6 @@ pub(crate) fn compose_constraints(
             parser_state_relation: &composed_table.state_relations[index],
             tokenizer_state_offset: expected_tokenizer_state_offsets[index],
             terminal_offset: composed_table.terminal_offsets[index],
-            composed_table: Some(&composed_table.table),
         })
         .collect::<Vec<_>>();
     if compose_profile_enabled() {
@@ -21352,7 +21215,6 @@ fn compose_constraints_owned_parent_legacy_impl(
             parser_state_relation: &composed_table.state_relations[index],
             tokenizer_state_offset: expected_tokenizer_state_offsets[index],
             terminal_offset: composed_table.terminal_offsets[index],
-            composed_table: Some(&composed_table.table),
         })
         .collect::<Vec<_>>();
     if compose_profile_enabled() {
@@ -22904,7 +22766,6 @@ fn compose_constraints_owned_parent_legacy_impl(
                 parser_state_relation: &composed_table.state_relations[index],
                 tokenizer_state_offset: expected_tokenizer_state_offsets[index],
                 terminal_offset: composed_table.terminal_offsets[index],
-                composed_table: Some(&composed_table.table),
             })
             .collect::<Vec<_>>();
         let work = if let Some(view) = DeferredComponentParserUnionView::new(
@@ -24887,14 +24748,12 @@ table: &child_table,
                 parser_state_relation: &composed_table.state_relations[0],
                 tokenizer_state_offset: tokenizer_offsets[0],
                 terminal_offset: 0,
-                composed_table: None,
             },
             ParserDwaComponent {
                 constraint: &child,
                 parser_state_relation: &composed_table.state_relations[1],
                 tokenizer_state_offset: tokenizer_offsets[1],
                 terminal_offset: 0,
-                composed_table: None,
             },
         ];
         let default_domains = build_parser_default_domain_plan(
@@ -35023,14 +34882,12 @@ table: &dispatch.table,
                     parser_state_relation: &composed_table.state_relations[0],
                     tokenizer_state_offset: tokenizer_offsets[0],
                     terminal_offset: composed_table.terminal_offsets[0],
-                    composed_table: Some(&composed_table.table),
                 },
                 ParserDwaComponent {
                     constraint: &dispatch,
                     parser_state_relation: &composed_table.state_relations[1],
                     tokenizer_state_offset: tokenizer_offsets[1],
                     terminal_offset: composed_table.terminal_offsets[1],
-                    composed_table: Some(&composed_table.table),
                 },
             ];
             let oracle_default_domains = build_parser_default_domain_plan(
