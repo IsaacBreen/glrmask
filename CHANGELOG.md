@@ -2,43 +2,50 @@
 
 ## 1.0.0 (unreleased)
 
-- Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module. C and C++ no longer expose a direct Grammar token-set binding.
-- Lark numeric token atoms, lists, complements and wildcards are rejected; use named token externs bound on a Module.
+### API surface
+
+- Expressions and bindings accept tokens only as a `TokenSet`. Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
+- Rust: `Grammar::bind` takes a `GrammarBinding`, which cannot be a `Module`. Binding a module into a grammar is now a compile error, not a runtime error.
+- Vocab has one constructor from IDs to bytes. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result`; duplicate IDs or IDs above the maximum return `InvalidInput` instead of panicking. Python uses `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
+- Token IDs range from 0 to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). Larger IDs in vocabularies, token sets or bindings return an error instead of risking a failed allocation that aborts the process. Rust open-ended TokenSet ranges such as `5..` end at `MAX_TOKEN_ID`.
+- Rust: `ConstraintState` owns its constraint, has no lifetime parameter and can be stored or moved freely. `ExternKind` is re-exported from the public grammar crate.
+- `commit_tokens` returns the number of tokens committed before the first failure, not a Boolean. Committing a token ID never raises or throws; an ID absent from the vocabulary or otherwise invalid makes the commit return false.
+
+### Masks
+
+- `MaskStrategy` and `BoundaryMaskStrategy` expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine and backend settings are internal only.
+- Rename `mask_len` to `mask_bit_len` (Node: `maskBitLength`). It returns token slots instead of packed words, including zero for an empty domain. Rust adds `ConstraintState::mask_bit_len` to match the other bindings.
+- Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
+
+### Python
+
+- `mask(*, dtype=np.uint32)` returns packed uint32 words by default or a Boolean array with `dtype=bool`. `fill_mask` accepts packed int32 and uint32 arrays and releases the GIL during computation. Use distinct states and nonoverlapping output buffers for concurrent calls.
+- Strategies, token sets and externs are hashable. Externs keys, values and items are mapping views.
+
+### Errors
+
+- `ErrorKind` has no payloads. New kinds `Syntax`, `InvalidInput` and `Internal` replace `GrammarParse` and `InternalInvariant` and move caller mistakes from `Compilation` to `InvalidInput`. `kind()` returns it by value. Public `From` implementations for internal error types are removed.
+- Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. Caught Rust panics are reported as Internal in C and Node.
+
+### Grammar languages
+
+- Lark rejects numeric token atoms, lists, complements and wildcards. Use named token externs bound on a Module.
+- GLRM reserves `as`, `fn`, `let`, `mod`, `pub`, `macro` and `include`. Extra semicolons are allowed.
+- GLRM no longer has a legacy dialect. Grammars using `::=` are now errors. `@token(...)` and `@tokens(...)` are removed; declare `extern token NAME;` and bind it in code instead. `@mark(id)`, still accepted in 0.5.0 despite its release notes, is now an error.
+
+### C ABI and C++
+
+- C ABI revision 6 rejects the old hard-selector codes and reserves the former tuning fields. C and C++ no longer expose direct Grammar token-set binding.
+- C single-token and byte commits return `bool`, batch commits return a count, and `GLRMASK_REJECTED` is removed.
+- C status codes are 0 (OK), 1 (Syntax), 2 (InvalidInput), 3 (Compilation), 4 (ResourceLimit), 5 (StrategyUnsupported), 6 (Serialization), 7 (Internal), 8 (BufferTooSmall) and 9 (Closed).
+
+### Stability policy
 
 From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.
 
-### Changes
+### Sub-crates
 
-- The grammar, vocabulary, lexer, GLR, JSON Schema, terminal-DWA, parser-DWA and DWA-merge sub-crates are at 0.4.0; supporting crates retain their own versions.
-
-- MaskStrategy and BoundaryMaskStrategy expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine/backend settings are internal only. C ABI revision 6 rejects the old hard-selector codes and reserves the former tuning fields.
-
-- Rename mask_len to mask_bit_len (Node: maskBitLength), returning the number of token slots instead of packed words, including zero for an empty domain. Python `mask(*, dtype=np.uint32)` returns packed uint32 words by default, or a Boolean array with `dtype=bool`. `fill_mask` accepts int32 and uint32 packed buffers. C ABI revision 6.
-
-
-- Expressions and `bind` take tokens only as a `TokenSet`.
-
-- Python: `fill_mask` accepts `int32` and `uint32` arrays and releases the GIL during computation; use distinct states and nonoverlapping output buffers for concurrent calls. Strategies, token sets and externs are hashable.
-
-- GLRM reserves `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. Extra semicolons are allowed.
-
-- Rust: `Grammar::bind` takes a `GrammarBinding`, which can't be a `Module`, so binding a module into a grammar is a compile error instead of a runtime error.
-
-- Python: Externs keys, values and items are mapping views. Rust: ExternKind is re-exported from the public grammar crate.
-
-- `commit_tokens` returns the number of tokens committed before the first failure, instead of a Boolean.
-
-- GLRM no longer has a legacy dialect. A grammar using `::=` used to be read in that dialect and is now an error. `@token(...)` and `@tokens(...)` are gone too; declare `extern token NAME;` and bind it in code instead.
-- Committing a token ID never raises or throws. An ID that isn't in the vocabulary, or isn't a valid token ID at all, makes the commit return false.
-- In C, single-token and byte commits return `bool`, batch commits return a count, and `GLRMASK_REJECTED` is gone.
-- Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
-- 0.5.0 still accepted `@mark(id)` in GLRM, although its release notes said markers were removed. It is now an error.
-- Rust: `ConstraintState::mask_bit_len` is new, matching the other bindings.
-- Vocab: one constructor from `{id: bytes}`. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result` (duplicate ID or ID above the maximum: `InvalidInput`), instead of panicking. Python: `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
-- Rust: `ConstraintState` now owns its constraint, so it has no lifetime parameter and can be stored or moved freely.
-- Token IDs go up to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). A larger ID in a vocabulary, token set or binding is an error. Before, an ID near 2^32 could abort the whole process with a failed allocation. A Rust `TokenSet` range with no end, such as `5..`, now ends at `MAX_TOKEN_ID`.
-
-- Errors: `ErrorKind` has no payloads and new kinds (`Syntax`, `InvalidInput`, `Internal` replace `GrammarParse`, `InternalInvariant`; caller mistakes moved from `Compilation` to `InvalidInput`); `kind()` returns it by value; the public `From` impls for internal error types are gone. Python raises `glrmask.GLRMaskError` (a `ValueError`) with `.kind`. Node's `GLRMaskError` has `.code` and a plain message. C status codes are 0 (OK), 1 (Syntax), 2 (InvalidInput), 3 (Compilation), 4 (ResourceLimit), 5 (StrategyUnsupported), 6 (Serialization), 7 (Internal), 8 (BufferTooSmall), and 9 (Closed). Caught Rust panics are reported as Internal in C and Node.
+- The grammar, vocabulary, lexer, GLR, JSON Schema, terminal-DWA, parser-DWA and DWA-merge sub-crates are at 0.4.0. Supporting crates retain their own versions.
 
 ## 0.5.0
 
