@@ -231,3 +231,22 @@ def test_externs_are_snapshots():
         owner.bind("child", source())
         assert "child" in before.unbound
         assert "child" not in owner.externs.unbound
+
+def test_stronger_preparation_survives_fast_compile():
+    v = vocab()
+    child = g.Module(source())
+    child.precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
+    before = child.save()
+    child.precompile(v, mask_strategy=g.MaskStrategy.FAST_COMPILE)
+    assert child.save() == before
+    parent = g.Module(g.Grammar.from_glrm(HOST))
+    parent.bind("child", child)
+    actual = parent.compile(v, mask_strategy=g.MaskStrategy.FAST_COMPILE)
+    fresh = g.Module(g.Grammar.from_glrm(HOST))
+    fresh.bind("child", source())
+    expected = fresh.compile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
+    for ids in [[], [0], [0, 1], [0, 1, 3], [4]]:
+        a, b = actual.start(), expected.start()
+        assert a.commit_tokens(ids) == b.commit_tokens(ids) == len(ids)
+        assert list(a.mask()) == list(b.mask())
+        assert a.is_accepting() == b.is_accepting()

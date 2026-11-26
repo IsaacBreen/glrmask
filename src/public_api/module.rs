@@ -273,6 +273,31 @@ fn best_retained(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Optio
     }
 }
 
+/// Compare reusable preparations by the same strength ordering as best_retained.
+fn preparation_strength(engine: Engine) -> u8 {
+    match engine {
+        Engine::Auto => 0,
+        Engine::TokenTrie => 1,
+        Engine::MergedTokenTrie => 2,
+        Engine::ParserDwa => 3,
+    }
+}
+
+/// Source-local work is shared between occurrences. Lark preparations with
+/// bound exact-token slots also contain the resolved bindings, so do not
+/// share them between distinct module snapshots.
+fn local_preparation_key(module: &Module) -> (usize, usize) {
+    let source = Arc::as_ptr(&module.node.source.parsed_component) as usize;
+    let instance = if matches!(module.node.source.source, GrammarSource::Lark(_))
+        && module.node.bindings.values().any(|value| matches!(value, BoundValue::TokenSet(_)))
+    {
+        Arc::as_ptr(&module.node) as usize
+    } else {
+        0
+    };
+    (source, instance)
+}
+
 /// How one node is compiled by the current call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NodePlan {
@@ -691,56 +716,68 @@ impl Module {
         let plan_of = |m: &Module| plan_node(requested, &m.node.prepared, any_retained, options.parser_backend());
         let backend_of = |plan: NodePlan| token_trie_backend(plan.backend);
 
-        // Keyed by source identity: every node has exactly one plan.
-        let mut locals: HashMap<usize, (Engine, Arc<dyn RetainedPreparation>)> = HashMap::new();
+        // A source can occur in several module snapshots with different retained
+        // engines. Reuse the strongest compatible local work; a weaker
+        // occurrence must not hide it or suppress a requested upgrade.
+        let mut locals: HashMap<(usize, usize), (Engine, Arc<dyn RetainedPreparation>)> = HashMap::new();
 
         for m in &modules {
-            let plan = plan_of(m);
-            // A pure LR TokenTrie precompile retains nothing, merged or not.
-            if retains_nothing(plan) {
-                continue;
-            }
-            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
-            if let Some(p) = m.node.prepared.get(&plan.engine.key()) {
-                // `boundary_trigger` records the requested detail; the trigger
-                // itself is built lazily in `materialize`.
-                if p.prepared().boundary_trigger >= target_b {
-                    locals.insert(source, (plan.engine, p.clone()));
-                }
+            let Some(engine) = best_retained(&m.node.prepared) else { continue; };
+            let p = &m.node.prepared[&engine.key()];
+            let source = local_preparation_key(m);
+            if p.prepared().boundary_trigger >= target_b
+                && locals.get(&source).is_none_or(|(old, _)| preparation_strength(engine) > preparation_strength(*old))
+            {
+                locals.insert(source, (engine, p.clone()));
             }
         }
 
-        let mut seen = std::collections::HashSet::new();
-        let jobs: Vec<&Module> = modules.iter().filter(|m| {
+        // Keep source traversal order and build at most one missing strongest
+        // preparation per compatible source.
+        let mut job_indices = HashMap::<(usize, usize), usize>::new();
+        let mut jobs: Vec<(&Module, NodePlan)> = Vec::new();
+        for m in &modules {
             let plan = plan_of(m);
-            if retains_nothing(plan) {
-                return false;
+            if retains_nothing(plan) { continue; }
+            let source = local_preparation_key(m);
+            if locals.get(&source).is_some_and(|(engine, _)| preparation_strength(*engine) >= preparation_strength(plan.engine)) {
+                continue;
             }
-            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
-            !locals.contains_key(&source) && seen.insert(source)
-        }).collect();
+            if let Some(&index) = job_indices.get(&source) {
+                if preparation_strength(plan.engine) > preparation_strength(jobs[index].1.engine) {
+                    jobs[index] = (m, plan);
+                }
+            } else {
+                job_indices.insert(source, jobs.len());
+                jobs.push((m, plan));
+            }
+        }
 
-        let results = jobs.par_iter().map(|m| {
+        let results = jobs.par_iter().map(|&(m, plan)| {
             #[cfg(test)]
             let _probe = preparation_probe::enter(m);
-            let plan = plan_of(m);
-            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
-            let built = match m.prepare_local_for(vocab, plan.engine, target_b, build_boundary, backend_of(plan)) {
-                Ok(p) => (plan.engine, p),
+            let source = local_preparation_key(m);
+            let (engine, prepared) = match m.prepare_local_for(vocab, plan.engine, target_b, build_boundary, backend_of(plan)) {
+                Ok(p) => (plan.engine, retain_local(p)),
                 Err(error) if (requested == Engine::Auto || options.prefers_fast_masks())
                     && plan.engine == Engine::ParserDwa
                     && any_retained
                     && options.can_fallback(&error) =>
                 {
-                    // Auto may fall back per part, but only when the graph keeps
-                    // retained work that a whole-composition retry would discard.
-                    let fallback = NodePlan { engine: Engine::TokenTrie, backend: ParserBackend::TemplateDfa };
-                    let p = m.prepare_local_for(vocab, fallback.engine, target_b, build_boundary, backend_of(fallback))?;
-                    (fallback.engine, p)
+                    // If an attempted upgrade declines, retain the best
+                    // existing compatible preparation instead of rebuilding
+                    // a weaker trie shell.
+                    if let Some((engine, p)) = locals.get(&source) {
+                        (*engine, p.clone())
+                    } else {
+                        let fallback = NodePlan { engine: Engine::TokenTrie, backend: ParserBackend::TemplateDfa };
+                        let p = m.prepare_local_for(vocab, fallback.engine, target_b, build_boundary, backend_of(fallback))?;
+                        (fallback.engine, retain_local(p))
+                    }
                 }
                 Err(error) => return Err(error),
             };
-            Ok((source, built.0, retain_local(built.1)))
+            Ok((source, engine, prepared))
         }).collect::<Result<Vec<_>>>()?;
 
         for (source, engine, prepared) in results {
@@ -752,10 +789,12 @@ impl Module {
             let mut next = m.clone();
             let mut c = m.certificate()?.as_ref().clone();
             c.target(vocab)?;
-            let source = Arc::as_ptr(&m.node.source.parsed_component) as usize;
+            let source = local_preparation_key(&m);
             let node = Arc::make_mut(&mut next.node);
             if let Some((engine, prepared)) = locals.get(&source) {
-                node.prepared.insert(engine.key(), prepared.clone());
+                if node.prepared.get(&engine.key()).is_none_or(|old| old.prepared().boundary_trigger < target_b) {
+                    node.prepared.insert(engine.key(), prepared.clone());
+                }
             }
             node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
             for (name, value) in &m.node.bindings {
@@ -1054,7 +1093,7 @@ impl Module {
             );
             return Ok(result);
         }
-        let te_first = experiment.terminal_ended_rescue
+        let te_first = !any_retained && experiment.terminal_ended_rescue
             && experiment.terminal_ended_first
             && self.node.bindings.is_empty()
             && matches!(
@@ -1112,7 +1151,7 @@ impl Module {
                     // the original flattened source, restricted to plain single
                     // modules. Without the switch, the typed decline is returned
                     // unchanged.
-                    if experiment.terminal_ended_rescue
+                    if !any_retained && experiment.terminal_ended_rescue
                         && self.node.bindings.is_empty()
                         && !te_first
                     {
@@ -1578,6 +1617,60 @@ mod precompile_boundary_tests {
             }
         }
         compare(&compiled.start(), &expected.start(), 3);
+    }
+
+    #[test]
+    fn strongest_compatible_shared_source_preparation_is_reused() {
+        let vocab = vocab();
+        let source = Grammar::from_ebnf(r#"start ::= "x" | "xy""#).unwrap();
+        let mut strong = Module::new(&source);
+        let mut merged = Module::new(&source);
+        let fast = CompileOptions::default().mask_strategy(MaskStrategy::FastCompile);
+        let masks = CompileOptions::default().mask_strategy(MaskStrategy::FastMasks);
+        strong.precompile_with(&vocab, masks.clone()).unwrap();
+        merged.precompile_with(&vocab, MaskMode::C.compile_options()).unwrap();
+        let strong_artifact = strong.node.prepared[&Engine::ParserDwa.key()].clone();
+        let merged_artifact = merged.node.prepared[&Engine::MergedTokenTrie.key()].clone();
+        let nstrong = static_build_probe::builds_for(&strong, Engine::ParserDwa);
+        let nmerged = static_build_probe::builds_for(&merged, Engine::MergedTokenTrie);
+        let host = Grammar::from_glrm("extern grammar A extern grammar B start s nt s = A B").unwrap();
+        let mut parent = Module::new(&host);
+        parent.bind("A", strong.clone()).unwrap();
+        parent.bind("B", merged.clone()).unwrap();
+        parent.precompile_with(&vocab, fast.clone()).unwrap();
+        let BoundValue::Module(a) = parent.node.bindings.get("A").unwrap() else { panic!("A"); };
+        let BoundValue::Module(b) = parent.node.bindings.get("B").unwrap() else { panic!("B"); };
+        assert!(Arc::ptr_eq(&a.node.prepared[&Engine::ParserDwa.key()], &strong_artifact));
+        assert!(Arc::ptr_eq(&b.node.prepared[&Engine::ParserDwa.key()], &strong_artifact));
+        assert!(Arc::ptr_eq(&b.node.prepared[&Engine::MergedTokenTrie.key()], &merged_artifact));
+        assert_eq!(static_build_probe::builds_for(&strong, Engine::ParserDwa), nstrong);
+        assert_eq!(static_build_probe::builds_for(&merged, Engine::MergedTokenTrie), nmerged);
+        let actual = parent.compile_with(&vocab, fast).unwrap();
+        let mut fresh = Module::new(&host);
+        fresh.bind("A", Module::new(&source)).unwrap();
+        fresh.bind("B", Module::new(&source)).unwrap();
+        let expected = fresh.compile_with(&vocab, masks).unwrap();
+        same_language(&actual.start(), &expected.start(), 4);
+    }
+
+    #[test]
+    fn shared_weak_preparation_does_not_suppress_requested_upgrade() {
+        let vocab = vocab();
+        let source = Grammar::from_ebnf(r#"start ::= "x" | "xy""#).unwrap();
+        let mut child = Module::new(&source);
+        child.precompile_with(&vocab, MaskMode::C.compile_options()).unwrap();
+        let artifact = child.node.prepared[&Engine::MergedTokenTrie.key()].clone();
+        let host = Grammar::from_glrm("extern grammar A extern grammar B start s nt s = A B").unwrap();
+        let mut parent = Module::new(&host);
+        parent.bind("A", child.clone()).unwrap();
+        parent.bind("B", Module::new(&source)).unwrap();
+        let before = static_build_probe::builds_for(&child, Engine::ParserDwa);
+        parent.precompile_with(&vocab, CompileOptions::default()).unwrap();
+        let BoundValue::Module(a) = parent.node.bindings.get("A").unwrap() else { panic!("A"); };
+        let BoundValue::Module(b) = parent.node.bindings.get("B").unwrap() else { panic!("B"); };
+        assert!(Arc::ptr_eq(&a.node.prepared[&Engine::MergedTokenTrie.key()], &artifact));
+        assert!(Arc::ptr_eq(&a.node.prepared[&Engine::ParserDwa.key()], &b.node.prepared[&Engine::ParserDwa.key()]));
+        assert_eq!(static_build_probe::builds_for(&child, Engine::ParserDwa), before + 1);
     }
 
     fn same_language(a: &crate::ConstraintState, b: &crate::ConstraintState, depth: usize) {
