@@ -30,13 +30,9 @@ pub(crate) mod pm_profile;
 pub(crate) use glrmask_lexer::__private::possible_matches;
 pub mod stages;
 pub(crate) mod build_budget;
-pub(crate) mod terminal_ended_rescue;
 
 pub(crate) use compile::compile_owned;
 
-#[cfg(test)]
-#[path = "terminal_ended_characterization_tests.rs"]
-mod terminal_ended_characterization_tests;
 
 pub(crate) fn macro_parallelism_disabled() -> bool {
     crate::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")

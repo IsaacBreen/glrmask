@@ -1,52 +1,26 @@
-//! Phase-2 terminal-ended rescue coverage.
-//!
-//! Every mask expectation is computed by the exact prefix-viability oracle: a
-//! CYK-style fixpoint over `(nonterminal, from, to)` intersected with the
-//! prefix DFA. Bounded word enumeration is never used to decide masks.
-//!
-//! The same oracle and token vocabulary are used to compare a rescued template
-//! constraint against the exact TokenTrie compilation of the original source.
-//! A rescue that declines is surfaced as the original typed strategy decline,
-//! never as a silent TokenTrie recompile.
+//! Exact mask and typed-decline coverage for the ordinary template pipeline and epsilon-free prepass.
 use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::Instant;
 
 use crate::compiler::build_budget::TestBudgetLimit;
-use crate::compiler::terminal_ended_rescue::{
-    reset_test_rescue_entries, set_test_terminal_ended_first, set_test_terminal_ended_rescue,
-    test_rescue_entries,
-};
 use crate::compiler::grammar::transforms::set_test_epsfree_prepass;
-use crate::import::static_route_recorded;
-use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, ParserBackend, Vocab};
+use crate::{runtime::Constraint, Grammar, ParserBackend, Vocab};
 
 // One single-byte token per terminal used by the witnesses. Keeping the
 // vocabulary small keeps the exact oracle and the TokenTrie comparison focused
 // on the grammar's mask language rather than tokenizer cross-products.
-/// The rescue cases all drive the shared Rayon pools. Running them
+/// These cases all drive the shared Rayon pools. Running them
 /// concurrently oversubscribes the machine and turns a ~20 s sequential suite
 /// into minutes of contention, so the module serializes its own tests.
-static RESCUE_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    RESCUE_TEST_SERIAL
+    TEST_SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The rescue is opt-in. Rescue tests enable it on their own thread; no test
-/// may depend on the process environment.
-fn enable_test_rescue() {
-    set_test_terminal_ended_rescue(Some(true));
-}
-
-fn disable_test_rescue() {
-    set_test_terminal_ended_rescue(Some(false));
-    set_test_terminal_ended_first(None);
 }
 
 const TOKEN_BYTES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
@@ -364,376 +338,14 @@ fn check_matches_token_trie(rescued: &Constraint, reference: &Constraint, case: 
     assert!(checked > 0);
 }
 
-fn check_rescued(case: &Case, label: &str) {
-    // This helper's contract is that the legacy attempt declines and the
-    // rescue publishes. Keep the old 10,000,000-unit default explicit; the
-    // production default is now sized for the real SQL/Go benchmarks.
-    enable_test_rescue();
-    let _limit = TestBudgetLimit::set(10_000_000);
-    let reference = compile(case, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let started = Instant::now();
-        let rescued = compile(case, strategy);
-        eprintln!(
-            "[terminal-ended-rescue] {label} strategy={strategy:?} compile_ms={:.1} backend={:?}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            rescued.parser_backend(),
-        );
-        assert_eq!(
-            rescued.parser_backend(),
-            ParserBackend::TemplateDfa,
-            "{label} {strategy:?} did not take the terminal-ended rescue",
-        );
-        check_matches_token_trie(&rescued, &reference, case);
-        check_exact_oracle(&rescued, case);
-    }
-}
-
-const V2_494: &[(usize, &[isize])] = &[
-    (0, &[-3]),
-    (0, &[2, 1, -2]),
-    (0, &[1]),
-    (1, &[-3]),
-    (1, &[2]),
-    (1, &[1, 2]),
-    (2, &[-3]),
-    (2, &[-1, 0]),
-    (2, &[-2, 1]),
-];
-
-const V2_267: &[(usize, &[isize])] = &[
-    (2, &[-1]),
-    (2, &[-3, 1]),
-    (2, &[0, 0, 2]),
-    (2, &[]),
-    (0, &[-1]),
-    (0, &[-2]),
-    (0, &[-3, 1]),
-    (1, &[-1]),
-    (1, &[-3, 2]),
-    (1, &[-3]),
-    (1, &[-1, 1, 2]),
-    (3, &[-2]),
-    (3, &[2, 0, -1]),
-    (3, &[0, 1, 1]),
-    (3, &[]),
-];
-
-const V2_1654: &[(usize, &[isize])] = &[
-    (0, &[-2]),
-    (0, &[1, 0]),
-    (0, &[-3, 0]),
-    (0, &[2]),
-    (1, &[-3]),
-    (1, &[-2, 2]),
-    (1, &[0, 0]),
-    (2, &[-2]),
-    (2, &[]),
-    (2, &[2, -3, 0]),
-    (2, &[-3, 1, -3]),
-];
-
-const SEED_2530_MINIMISED: &str = "start: n3\nn0: \"c\" | n3 |\nn1: \"a\" |\nn2: | n0 n1 n2\nn3: \"b\" n2 n0 | n2 \"b\"\n";
-const SEED_2530_FULL: &str = "start: n3\nn0: \"c\" | n3 |  |\nn1: \"a\" |  | \"b\" \"b\" \"c\" | \"c\" \"c\"\nn2: \"a\" |  | n0 n1 n2\nn3: \"c\" | \"b\" n2 n0 | n0 \"a\" n0 | n2 \"b\" n0\n";
-const SEED_360_MINIMISED: &str = "start: n2\nn0: \"b\" |  | n1 \"c\" n2\nn1: n1 n0 n0 | n1 n1 |\nn2: n2 n0 \"a\" | n0 n1\n";
-const SEED_360_FULL: &str = "start: n2\nn0: \"b\" |  | n1 \"c\" n2 |\nn1: \"a\" | n1 n0 n0 | n1 n1 |\nn2: \"b\" |  | n2 n0 \"a\" | n0 n1\n";
-
 fn seed_cfg(rules: &[(usize, &[isize])], start: usize, bound: usize) -> Case {
     case(start, bound, rules)
 }
 
-/// The grammar source for the 2530/360 seeds already includes empty
-/// alternatives in a shape the generic Lark emitter would reorder. Parse the
-/// canonical text directly instead.
-fn compile_source(source: &str, strategy: MaskMode) -> Constraint {
-    Grammar::from_lark(source).unwrap()
-        .compile_with_build_options(&vocab(), strategy.build_options())
-        .unwrap_or_else(|error| panic!("{strategy:?} compile failed for {source:?}: {error}"))
-}
-
-fn check_source_case(case: &Case, source: &str, label: &str) {
-    // As `check_rescued`: the legacy attempt must decline under the old
-    // 10,000,000-unit default so the rescue is what publishes.
-    enable_test_rescue();
-    let _limit = TestBudgetLimit::set(10_000_000);
-    let reference = compile_source(source, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let started = Instant::now();
-        let rescued = compile_source(source, strategy);
-        eprintln!(
-            "[terminal-ended-rescue] {label} strategy={strategy:?} compile_ms={:.1} backend={:?}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            rescued.parser_backend(),
-        );
-        assert_eq!(
-            rescued.parser_backend(),
-            ParserBackend::TemplateDfa,
-            "{label} {strategy:?} did not take the terminal-ended rescue",
-        );
-        check_matches_token_trie(&rescued, &reference, case);
-        check_exact_oracle(&rescued, case);
-    }
-}
-
-/// Embedded phase-1 fuzz witnesses. Terminal values are `-(id + 1)`.
-fn witness_rules(seed: u32) -> (usize, Vec<(usize, Vec<isize>)>) {
-    let (start, raw): (usize, Vec<(usize, Vec<isize>)>) = match seed {
-        385 => (
-            0,
-            vec![
-                (0, vec![-2]),
-                (1, vec![-1]),
-                (0, vec![1, -1, -1]),
-                (0, vec![1]),
-                (0, vec![0, -1, 1]),
-                (1, vec![0, 0, 1]),
-                (1, vec![]),
-                (1, vec![-1, 0]),
-            ],
-        ),
-        315 => (
-            0,
-            vec![
-                (0, vec![-3]),
-                (1, vec![-1]),
-                (2, vec![-1]),
-                (3, vec![-2]),
-                (0, vec![0, 3]),
-                (0, vec![1]),
-                (1, vec![0, 2, 2]),
-                (2, vec![]),
-                (2, vec![-1, -1]),
-                (2, vec![-1]),
-                (3, vec![]),
-                (3, vec![3, 1, 1]),
-                (3, vec![-3, 3]),
-            ],
-        ),
-        218 => (
-            2,
-            vec![
-                (0, vec![-2]),
-                (1, vec![-2]),
-                (2, vec![-3]),
-                (0, vec![-3, 1]),
-                (0, vec![-2, 2, 1]),
-                (1, vec![-3, 0, 1]),
-                (1, vec![]),
-                (2, vec![]),
-                (2, vec![-1, -3, 1]),
-                (2, vec![0, 1]),
-            ],
-        ),
-        2633 => (
-            2,
-            vec![
-                (0, vec![-2]),
-                (1, vec![-3]),
-                (2, vec![-1]),
-                (3, vec![-1]),
-                (0, vec![3, 3]),
-                (1, vec![2, 2]),
-                (1, vec![1, 2, 1]),
-                (1, vec![]),
-                (2, vec![-2]),
-                (2, vec![3]),
-                (2, vec![0, -2, 3]),
-                (3, vec![0, 1]),
-                (3, vec![3]),
-                (3, vec![1, -3, 1]),
-            ],
-        ),
-        other => panic!("no embedded witness for seed {other}"),
-    };
-    (start, raw)
-}
-
 #[test]
-fn reduction_cycle_seeds_take_the_rescue_and_match_the_exact_oracle() {
+fn ordinary_template_grammar_matches_exact_oracle() {
     let _serial = serial();
-    check_rescued(
-        &case(0, 3, V2_494),
-        "V2_494",
-    );
-    check_rescued(
-        &case(0, 3, V2_1654),
-        "V2_1654",
-    );
-
-    let seed_2530_minimised = seed_cfg(
-        &[
-            (0, &[4]),
-            (1, &[-3]),
-            (1, &[4]),
-            (1, &[]),
-            (2, &[-1]),
-            (2, &[]),
-            (3, &[]),
-            (3, &[1, 2, 3]),
-            (4, &[-2, 3, 1]),
-            (4, &[3, -2]),
-        ],
-        0,
-        4,
-    );
-    check_source_case(&seed_2530_minimised, SEED_2530_MINIMISED, "seed_2530_minimised");
-
-    let seed_360_minimised = seed_cfg(
-        &[
-            (0, &[3]),
-            (1, &[-2]),
-            (1, &[]),
-            (1, &[2, -3, 3]),
-            (2, &[2, 1, 1]),
-            (2, &[2, 2]),
-            (2, &[]),
-            (3, &[3, 1, -1]),
-            (3, &[1, 2]),
-        ],
-        0,
-        4,
-    );
-    check_source_case(&seed_360_minimised, SEED_360_MINIMISED, "seed_360_minimised");
-}
-
-#[test]
-fn full_reduction_cycle_seeds_take_the_rescue_and_match_the_exact_oracle() {
-    let _serial = serial();
-    let seed_2530_full = seed_cfg(
-        &[
-            (0, &[4]),
-            (1, &[-3]),
-            (1, &[4]),
-            (1, &[]),
-            (2, &[-1]),
-            (2, &[]),
-            (2, &[-2, -2, -3]),
-            (2, &[-3, -3]),
-            (3, &[-1]),
-            (3, &[]),
-            (3, &[1, 2, 3]),
-            (4, &[-3]),
-            (4, &[-2, 3, 1]),
-            (4, &[1, -1, 1]),
-            (4, &[3, -2, 1]),
-        ],
-        0,
-        4,
-    );
-    check_source_case(&seed_2530_full, SEED_2530_FULL, "seed_2530_full");
-
-    let seed_360_full = seed_cfg(
-        &[
-            (0, &[3]),
-            (1, &[-2]),
-            (1, &[]),
-            (1, &[2, -3, 3]),
-            (2, &[-1]),
-            (2, &[2, 1, 1]),
-            (2, &[2, 2]),
-            (2, &[]),
-            (3, &[-2]),
-            (3, &[]),
-            (3, &[3, 1, -1]),
-            (3, &[1, 2]),
-        ],
-        0,
-        4,
-    );
-    check_source_case(&seed_360_full, SEED_360_FULL, "seed_360_full");
-}
-
-fn check_witness(seed: u32) {
-    let (start, rules) = witness_rules(seed);
-    let case = Case {
-        start,
-        bound: 3,
-        rules,
-    };
-    check_rescued(&case, &format!("witness_{seed}"));
-}
-
-// Split per witness so the (much larger) 2633 rescue build overlaps the other
-// witnesses under libtest's normal parallel schedule.
-#[test]
-fn phase1_witness_315_takes_the_rescue_and_matches_the_exact_oracle() {
-    let _serial = serial();
-    check_witness(315);
-}
-
-#[test]
-fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
-    let _serial = serial();
-    check_witness(218);
-}
-
-/// The rescued 2633 template costs more than the old 10,000,000-unit template
-/// budget (template_specialization alone charges ~8.4M units), so under an
-/// explicit small budget the rescue declines and returns the original typed
-/// decline instead of recompiling with TokenTrie. Timing is diagnostic only.
-/// The production default is now sized for real SQL/Go benchmarks,
-/// so the old limit is set explicitly here.
-#[test]
-fn phase1_witness_2633_rescue_returns_typed_budget_decline() {
-    let _serial = serial();
-    enable_test_rescue();
-    let _limit = TestBudgetLimit::set(10_000_000);
-    let (start, rules) = witness_rules(2633);
-    let case = Case {
-        start,
-        bound: 3,
-        rules,
-    };
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let started = Instant::now();
-        let error = expect_strategy_decline(
-            try_compile(&case, strategy),
-            &format!("witness_2633 {strategy:?}"),
-        );
-        eprintln!(
-            "[terminal-ended-rescue] witness_2633 strategy={strategy:?} decline_ms={:.1} error={error}",
-            started.elapsed().as_secs_f64() * 1000.0,
-        );
-        assert_eq!(error.kind(), crate::ErrorKind::ResourceLimit);
-        assert!(error.message().ends_with(" build budget exhausted"));
-    }
-}
-
-#[test]
-fn phase1_witness_385_takes_the_rescue_and_matches_the_exact_oracle() {
-    let _serial = serial();
-    check_witness(385);
-}
-
-#[test]
-fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
-    let _serial = serial();
-    enable_test_rescue();
-    // The legacy attempt is supposed to decline; keep the old 10,000,000-unit
-    // default explicit now that the production default is larger.
-    let _limit = TestBudgetLimit::set(10_000_000);
-    let case = case(2, 4, V2_267);
-    let reference = compile(&case, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let started = Instant::now();
-        let compiled = compile(&case, strategy);
-        eprintln!(
-            "[terminal-ended-rescue] V2_267 strategy={strategy:?} compile_ms={:.1} backend={:?}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            compiled.parser_backend(),
-        );
-        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
-        check_matches_token_trie(&compiled, &reference, &case);
-        check_exact_oracle(&compiled, &case);
-    }
-}
-
-#[test]
-fn legacy_template_grammar_does_not_enter_the_rescue() {
-    let _serial = serial();
-    disable_test_rescue();
     let case = case(0, 3, &[(0, &[-1]), (0, &[-2, -1])]);
-    reset_test_rescue_entries();
     let reference = compile(&case, MaskMode::A);
     for strategy in [MaskMode::C, MaskMode::ParserDwa] {
         let compiled = compile(&case, strategy);
@@ -745,43 +357,12 @@ fn legacy_template_grammar_does_not_enter_the_rescue() {
         check_matches_token_trie(&compiled, &reference, &case);
         check_exact_oracle(&compiled, &case);
     }
-    assert_eq!(
-        test_rescue_entries(),
-        0,
-        "a grammar the legacy template path already compiles entered the rescue route",
-    );
 }
 
-#[test]
-fn nullable_right_recursive_start_is_preserved_by_the_rescue() {
-    let _serial = serial();
-    enable_test_rescue();
-    // start -> a | epsilon ; a -> "a" a | "a"
-    let case = case(0, 4, &[(0, &[1]), (0, &[]), (1, &[-1, 1]), (1, &[-1])]);
-    let reference = compile(&case, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let rescued = compile(&case, strategy);
-        assert_eq!(
-            rescued.parser_backend(),
-            ParserBackend::TemplateDfa,
-            "{strategy:?} did not take the terminal-ended rescue",
-        );
-        assert!(
-            rescued.start().is_accepting(),
-            "{strategy:?} lost source start nullability",
-        );
-        check_matches_token_trie(&rescued, &reference, &case);
-        check_exact_oracle(&rescued, &case);
-    }
-}
-
-/// Under a budget of 1 unit even grammar normalization declines, so both
-/// template strategies must attempt the rescue and then return their original
-/// typed decline. Neither may recompile with TokenTrie.
+/// Under a budget of one unit, explicit template strategies return a typed decline.
 #[test]
 fn tiny_budget_returns_typed_decline() {
     let _serial = serial();
-    enable_test_rescue();
     let case = case(
         0,
         4,
@@ -799,263 +380,29 @@ fn tiny_budget_returns_typed_decline() {
         ],
     );
     for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        reset_test_rescue_entries();
-        eprintln!("[tiny-budget] compiling {strategy:?} under limit=1");
-        let error = {
+        {
             let _limit = TestBudgetLimit::set(1);
             expect_strategy_decline(
                 try_compile(&case, strategy),
                 &format!("tiny_budget {strategy:?}"),
-            )
-        };
-        eprintln!(
-            "[tiny-budget] {strategy:?} declined rescue_entries={} error={error}",
-            test_rescue_entries(),
-        );
-        assert!(
-            test_rescue_entries() > 0,
-            "{strategy:?} did not attempt the rescue before returning its decline",
-        );
+            );
+        }
     }
 }
 
-/// The rescue is opt-in. A grammar that previously published through it must
-/// return the normal route's typed decline when the switch is unset.
 #[test]
-fn rescue_disabled_returns_the_normal_typed_decline() {
+fn difficult_grammar_returns_normal_typed_decline() {
     let _serial = serial();
-    disable_test_rescue();
     let case = case(0, 3, &[(0, &[-1]), (1, &[-3]), (2, &[-3]), (0, &[-1, -3, 1]), (0, &[1]), (1, &[2, 1]), (1, &[-1]), (1, &[1, 1, 2]), (2, &[2, 1, -2]), (2, &[0, 2]), (2, &[-1, -3])]);
-    // Under the old 10,000,000-unit budget the normal attempt declines and the
-    // rescue used to publish for this witness.
     let _limit = TestBudgetLimit::set(10_000_000);
-    reset_test_rescue_entries();
-    let error = expect_strategy_decline(
-        try_compile(&case, MaskMode::ParserDwa),
-        "rescue_disabled",
-    );
-    assert!(
-        error.is_strategy_decline(),
-        "expected the normal typed decline, got: {error}",
-    );
-    assert_eq!(
-        test_rescue_entries(),
-        0,
-        "the terminal-ended rescue ran while the opt-in switch was unset",
-    );
+    expect_strategy_decline(try_compile(&case, MaskMode::ParserDwa), "normal decline");
 }
-
-/// Fuzz pass-A cases on 605da7551 that exhausted memory in grammar
-/// normalization or ParserDwa construction before the budget could decline.
-/// Each must publish exact masks under the explicit work budget in both template
-/// strategies through the rescue; a rescue decline is returned as the original
-/// typed strategy error.
-fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[isize])]) {
-    // These pass-A witnesses are calibrated against the old 10,000,000-unit
-    // default: they must decline the legacy attempt quickly and publish via
-    // the rescue. Keep that explicit now that the production default is sized
-    // for the real SQL/Go benchmarks.
-    enable_test_rescue();
-    let _limit = TestBudgetLimit::set(10_000_000);
-    let case = case(start, bound, rules);
-    let reference = compile(&case, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
-        let started = Instant::now();
-        let compiled = compile(&case, strategy);
-        eprintln!(
-            "[terminal-ended-rescue] {label} strategy={strategy:?} compile_ms={:.1} backend={:?}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            compiled.parser_backend(),
-        );
-        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
-        // Keep elapsed time in the log, not as a correctness assertion: the
-        // structural work budget is independent of CPU contention.
-        check_matches_token_trie(&compiled, &reference, &case);
-        check_exact_oracle(&compiled, &case);
-    }
-}
-
-#[test]
-fn fuzz_605_seed_581_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_581", 0, 3, &[(0, &[-3]), (1, &[-1]), (0, &[1]), (1, &[0]), (1, &[1, -3, 1]), (1, &[1, -2, 0])]);
-}
-
-#[test]
-fn fuzz_605_seed_780_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_780", 1, 4, &[(0, &[-2]), (1, &[-3]), (0, &[]), (0, &[0, -2, 1]), (0, &[1, -3, 0]), (1, &[1, 1]), (1, &[0, -1]), (1, &[-3, -2, 0])]);
-}
-
-#[test]
-fn fuzz_605_seed_3293_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_3293", 1, 3, &[(0, &[-2]), (1, &[-2]), (2, &[-1]), (0, &[0, 2]), (1, &[]), (1, &[]), (2, &[0, 2]), (2, &[]), (2, &[2])]);
-}
-
-#[test]
-fn fuzz_605_seed_336_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_336", 1, 3, &[(0, &[-3]), (1, &[-1]), (2, &[-1]), (0, &[-3]), (0, &[2, 2, 1]), (0, &[-2, 0, 0]), (1, &[2, -3, -1]), (1, &[-1]), (1, &[0, 2, 0]), (2, &[-2, 1, 1]), (2, &[])]);
-}
-
-#[test]
-fn fuzz_605_seed_594_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_594", 0, 3, &[(0, &[-1]), (1, &[-3]), (2, &[-3]), (0, &[-1, -3, 1]), (0, &[1]), (1, &[2, 1]), (1, &[-1]), (1, &[1, 1, 2]), (2, &[2, 1, -2]), (2, &[0, 2]), (2, &[-1, -3])]);
-}
-
-#[test]
-fn fuzz_605_seed_830_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_605_830", 2, 4, &[(0, &[-2]), (1, &[-3]), (2, &[-1]), (3, &[-1]), (0, &[0, 0, -2]), (0, &[-1]), (0, &[]), (1, &[2]), (2, &[]), (2, &[3, 1, 2]), (2, &[]), (3, &[-1, 3, 3]), (3, &[-2]), (3, &[-3, -3, 1])]);
-}
-
-/// Template determinization produced ~11M transitions uncharged, and the
-/// ParserDwa build after it exhausted memory.
-#[test]
-fn fuzz_e86d_seed_4754_publishes_exact_masks_within_budget() {
-    let _serial = serial();
-    check_fuzz_case("fuzz_e86d_4754", 0, 3, &[(0, &[-2]), (1, &[-3]), (2, &[-1]), (3, &[-2]), (0, &[-2, 2]), (0, &[-2]), (0, &[]), (1, &[3, 1, 1]), (1, &[-2, 2, 3]), (1, &[]), (2, &[0]), (2, &[]), (2, &[3, -3]), (3, &[2, 0, 3]), (3, &[2])]);
-}
-
-// ---------------------------------------------------------------------------
-// Stage 1: one shared static lowering; JSON Schema and resolve_lark features
-// are no longer refused. EXPERIMENT: terminal-ended-first.
-// ---------------------------------------------------------------------------
-
-const JSON_TOKENS: [&[u8]; 3] = [b"\"", b"a", b"b"];
-
-fn json_vocab() -> Vocab {
-    Vocab::from_entries_unchecked(
-        JSON_TOKENS
-            .iter()
-            .enumerate()
-            .map(|(id, bytes)| (id as u32, bytes.to_vec()))
-            .collect(),
-    )
-}
-
-fn compile_with_te_first(
-    grammar: Grammar,
-    vocab: &Vocab,
-    strategy: MaskMode,
-) -> crate::Result<Constraint> {
-    set_test_terminal_ended_rescue(Some(true));
-    set_test_terminal_ended_first(Some(true));
-    let result =
-        grammar.compile_with_build_options(vocab, strategy.build_options());
-    set_test_terminal_ended_first(None);
-    set_test_terminal_ended_rescue(None);
-    result
-}
-
-#[test]
-fn terminal_ended_first_json_schema_matches_the_exact_oracle() {
-    let _serial = serial();
-    // `const` makes the language exactly the JSON string `"a"`; the extra
-    // token `b` must remain masked at every prefix.
-    const SCHEMA: &str = r#"{"type":"string","const":"a"}"#;
-    let case = case(0, 3, &[(0, &[-1, -2, -1])]);
-    reset_test_rescue_entries();
-    let constraint = compile_with_te_first(
-        Grammar::from_json_schema(SCHEMA).unwrap(),
-        &json_vocab(),
-        MaskMode::ParserDwa,
-    )
-    .unwrap_or_else(|error| panic!("TE-first JSON Schema compile failed: {error}"));
-    assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
-    assert!(
-        test_rescue_entries() > 0,
-        "the JSON Schema compile did not enter the rescue"
-    );
-    check_exact_oracle_with_tokens(&constraint, &case, &JSON_TOKENS);
-}
-
-#[test]
-fn terminal_ended_first_lark_matches_the_exact_oracle() {
-    let _serial = serial();
-    // Portable Lark source lowers through Grammar::resolve_lark.
-    // The language is exactly "ab"; named token slots require binding and
-    // are outside the plain-single-grammar rescue scope.
-    let case = case(0, 2, &[(0, &[-1, -2])]);
-    reset_test_rescue_entries();
-    let constraint = compile_with_te_first(
-        Grammar::from_lark("start: \"a\" \"b\"").unwrap(),
-        &vocab(),
-        MaskMode::ParserDwa,
-    )
-    .unwrap_or_else(|error| panic!("TE-first Lark compile failed: {error}"));
-    assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
-    assert!(
-        test_rescue_entries() > 0,
-        "the Lark compile did not enter the rescue"
-    );
-    check_exact_oracle(&constraint, &case);
-}
-
-/// The rescue lowering is the same `GrammarDef` the ordinary static route
-/// compiles, for every frontend.
-#[test]
-fn rescue_lowering_equals_the_normal_static_route() {
-    let _serial = serial();
-    set_test_terminal_ended_first(None);
-    let v = vocab();
-    let json = json_vocab();
-    let cases: Vec<(&str, Grammar, &Vocab)> = vec![
-        (
-            "ebnf",
-            Grammar::from_ebnf("start ::= \"a\" \"b\"").unwrap(),
-            &v,
-        ),
-        (
-            "lark",
-            Grammar::from_lark("start: \"a\" \"b\"").unwrap(),
-            &v,
-        ),
-        (
-            "glrm",
-            Grammar::from_glrm("start root nt root=\"a\" \"b\"").unwrap(),
-            &v,
-        ),
-        (
-            "json_schema",
-            Grammar::from_json_schema(r#"{"type":"string","const":"a"}"#).unwrap(),
-            &json,
-        ),
-    ];
-    for (label, grammar, target) in cases {
-        // Compute the rescue input first, then run the normal route. The
-        // process-global capture may also contain inputs from concurrent
-        // tests, so membership (not position) is the assertion.
-        let rescued = grammar
-            .lower_static_template_input(target)
-            .unwrap_or_else(|error| panic!("{label} rescue lowering failed: {error}"));
-        grammar
-            .compile_with_build_options(
-                target,
-                BuildOptions::default().optimization(InternalMaskStrategy::ParserDwa),
-            )
-            .unwrap_or_else(|error| panic!("{label} normal compile failed: {error}"));
-        assert!(
-            static_route_recorded(&rescued),
-            "{label}: the normal static route did not record the rescue's GrammarDef",
-        );
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// Epsilon-free prepass experiment: exactness and pathological-case coverage.
-// ---------------------------------------------------------------------------
-
 /// Compile one already-declining witness with the prepass forced on. Returns
 /// true when the normal route now compiles, false when it still returns its
 /// typed decline.
 fn check_prepass_case(case: &Case, label: &str, budget: u64) -> bool {
     let _limit = TestBudgetLimit::set(budget);
     set_test_epsfree_prepass(Some(true));
-    set_test_terminal_ended_rescue(Some(false));
     let result = try_compile(case, MaskMode::ParserDwa);
     let compiled = match result {
         Ok(constraint) => {
@@ -1075,7 +422,6 @@ fn check_prepass_case(case: &Case, label: &str, budget: u64) -> bool {
         }
     };
     set_test_epsfree_prepass(None);
-    set_test_terminal_ended_rescue(None);
     compiled
 }
 

@@ -1414,27 +1414,6 @@ pub(crate) fn prepare_grammar_for_vocab_partition(grammar: GrammarDef) -> Gramma
     prepared
 }
 
-/// Install a terminal-ended rewrite into the original grammar.
-///
-/// This is the preparation policy for the opt-in phase-2 template rescue. The
-/// terminal-ended construction already produces an epsilon-free, fully
-/// productive grammar, so only the safe structural passes run here:
-/// reachability pruning and terminal compaction. In particular it must not run
-/// the RR/HLR normalization fixed point, single-use inlining, reduction-length
-/// bounding, or the recursion-boundedness check: terminal-ended output
-/// deliberately contains indirect left recursion that GLR handles.
-pub(crate) fn prepare_terminal_ended_grammar(
-    source: GrammarDef,
-    prepared: crate::compiler::glr::terminal_ended::PreparedGrammar,
-) -> GrammarDef {
-    let mut grammar = source;
-    grammar.rules = prepared.rules;
-    grammar.start = prepared.start;
-    grammar.rules = prune_unreachable_rules(&grammar.rules, grammar.start);
-    compact_unused_terminals(&mut grammar);
-    grammar
-}
-
 fn prune_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
     let max_nonterminal = rules
         .iter()

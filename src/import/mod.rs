@@ -240,8 +240,7 @@ pub(crate) fn lower_factored_named_grammar(
 }
 
 /// Factor/transform/lower one already-parsed named grammar. This is the exact
-/// pre-normalization `GrammarDef` step shared by the ordinary static template
-/// route and its terminal-ended rescue.
+/// pre-normalization step for the ordinary static template route.
 pub(crate) fn lower_static_named_grammar(
     named: ast::NamedGrammar,
     end_token_ids: &[u32],
@@ -249,79 +248,6 @@ pub(crate) fn lower_static_named_grammar(
     let mut factored = factor_named_grammar(named);
     append_end_token_choice(&mut factored, end_token_ids);
     ast::lower(&factored).map_err(crate::error::from_grammar)
-}
-
-/// The static template route's EBNF input, before normalization.
-pub(crate) fn lower_static_ebnf(source: &str) -> crate::Result<GrammarDef> {
-    lower_factored_named_grammar(source, parse_ebnf_to_named, None, &[])
-}
-
-/// The static template route's raw Lark input, before normalization. Callers
-/// that own a [`Grammar`](crate::Grammar) must resolve Lark first so events,
-/// imports and schemas use the same component path as the normal route.
-pub(crate) fn lower_static_lark(source: &str) -> crate::Result<GrammarDef> {
-    lower_factored_named_grammar(source, parse_lark_to_named, None, &[])
-}
-
-/// The static template route's JSON Schema input, before normalization.
-pub(crate) fn lower_static_json_schema(source: &str) -> crate::Result<GrammarDef> {
-    with_large_import_stack(source.len(), || {
-        crate::compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
-            lower_factored_named_grammar(
-                source,
-                parse_json_schema_to_named,
-                Some(prepare_json_schema_named),
-                &[],
-            )
-        })
-    })
-}
-
-/// The static template route's GLRM/Constructed component input, before
-/// normalization. With no external slots this is the same `lower_shell` call
-/// `compile_component_shell_using` makes.
-pub(crate) fn lower_static_component(
-    component: &crate::grammar::glrm::ParsedComponent,
-    vocab: &crate::Vocab,
-) -> crate::Result<ast::NamedGrammar> {
-    Ok(component_shell_named(component, vocab, &[])?.grammar)
-}
-
-#[cfg(test)]
-fn static_template_input_records() -> &'static std::sync::Mutex<Vec<GrammarDef>> {
-    static RECORDS: std::sync::OnceLock<std::sync::Mutex<Vec<GrammarDef>>> =
-        std::sync::OnceLock::new();
-    RECORDS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-/// Test-only capture of every static template route's pre-normalization
-/// `GrammarDef`. Compilation may run on a compile-pool thread, so this is
-/// process-global rather than thread-local; the list is bounded and tests only
-/// assert membership, which concurrent writers cannot invalidate.
-#[cfg(test)]
-fn record_static_template_input(grammar: &GrammarDef) {
-    const MAX_RECORDS: usize = 256;
-    let mut records = static_template_input_records()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if records.len() >= MAX_RECORDS {
-        records.remove(0);
-    }
-    records.push(grammar.clone());
-}
-
-/// Whether the ordinary static route lowered this exact input during this test
-/// process. Comparison uses the serialized form because `GrammarDef` does not
-/// implement `PartialEq`.
-#[cfg(test)]
-pub(crate) fn static_route_recorded(grammar: &GrammarDef) -> bool {
-    let expected = serde_json::to_value(grammar).ok();
-    let records = static_template_input_records()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    records.iter().any(|recorded| {
-        serde_json::to_value(recorded).ok() == expected
-    })
 }
 
 fn lower_json_schema_for_vocab_partition(source: &str) -> crate::Result<GrammarDef> {
@@ -378,8 +304,6 @@ fn compile_from_source(
     let parse_started_at = std::time::Instant::now();
     let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
     let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;
-    #[cfg(test)]
-    record_static_template_input(&grammar);
     if compile_profile_enabled() || compile_top_profile_enabled() {
         let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {
             compile_owned_profiled_with_table_construction(
@@ -412,8 +336,6 @@ pub(crate) fn compile_from_named_grammar(
     let import_started_at = std::time::Instant::now();
     let grammar = lower_static_named_grammar(named, end_token_ids)?;
     let import_ms = import_started_at.elapsed().as_secs_f64() * 1000.0;
-    #[cfg(test)]
-    record_static_template_input(&grammar);
 
     if compile_profile_enabled() || compile_top_profile_enabled() {
         let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {

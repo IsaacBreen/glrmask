@@ -4786,19 +4786,6 @@ fn launch_classify_dag_if_ready<'scope>(
     });
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparedGrammarPolicy {
-    /// The ordinary static pipeline: full grammar normal form and the
-    /// recursion-boundedness precondition required by terminal
-    /// characterization.
-    Ordinary,
-    /// A grammar already rewritten into terminal-ended normal form. It
-    /// deliberately retains indirect left recursion, so only the dynamic
-    /// table-build precondition applies, and the built table must satisfy the
-    /// ordinary-goto-target reduction certificate.
-    TerminalEnded,
-}
-
 fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
@@ -4809,7 +4796,6 @@ fn compile_prepared_with_profile(
         GlrTableConstruction::ExperimentalCoreMerged,
         None,
         None,
-        PreparedGrammarPolicy::Ordinary,
     )
 }
 
@@ -4819,7 +4805,6 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
     protected_shift_terminals: Option<Arc<Vec<u32>>>,
-    policy: PreparedGrammarPolicy,
 ) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     // Synthetic lexer planning may certify a smaller exact tokenizer against
     // the vocabulary. Install the cross-crate certifier before planning on
@@ -5357,14 +5342,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     None => AnalyzedGrammar::from_grammar_def(prepared_grammar_ref),
                 });
                 let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
-                let precondition = match policy {
-                    PreparedGrammarPolicy::Ordinary => {
-                        analyzed_grammar.check_table_build_normal_form()
-                    }
-                    PreparedGrammarPolicy::TerminalEnded => {
-                        analyzed_grammar.check_dynamic_table_build_normal_form()
-                    }
-                };
+                let precondition = analyzed_grammar.check_table_build_normal_form();
                 if let Err(message) = precondition {
                     *table_build_error_ref
                         .lock()
@@ -5378,38 +5356,12 @@ fn compile_prepared_with_profile_and_table_construction(
                 let glr_analyzed_grammar = Arc::clone(&analyzed_grammar);
                 let analysis_started_for_glr = analysis_started_for_analysis;
                 let compile_started_for_glr = compile_started_for_analysis;
-                let table_policy = policy;
                 macro_scope_spawn(scope, move |scope| {
                     let table_started_at = Instant::now();
-                    let mut table = GLRTable::build_with_default_construction(
+                    let table = GLRTable::build_with_default_construction(
                         &glr_analyzed_grammar,
                         table_construction,
                     );
-                    if table_policy == PreparedGrammarPolicy::TerminalEnded {
-                        // A terminal-ended table must have no ordinary reduction
-                        // on any nonterminal-goto target. The default core-merging
-                        // construction is checked first; one Lalr retry is the
-                        // only permitted fallback before declining the rescue.
-                        if let Err(first) = table.certify_no_ordinary_goto_target_reduces() {
-                            let lalr = GLRTable::build_with_default_construction(
-                                &glr_analyzed_grammar,
-                                GlrTableConstruction::Lalr,
-                            );
-                            match lalr.certify_no_ordinary_goto_target_reduces() {
-                                Ok(()) => table = lalr,
-                                Err(second) => {
-                                    *table_build_error_ref
-                                        .lock()
-                                        .expect("table-build error slot poisoned") =
-                                        Some(crate::Error::StrategyUnsupported(format!(
-                                            "terminal-ended goto-target certificate failed: \
-                                             {first}; Lalr retry: {second}"
-                                        )));
-                                    return;
-                                }
-                            }
-                        }
-                    }
                     let table = Arc::new(table);
                     let glr_table_ms = elapsed_ms(table_started_at);
                     if crate::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
@@ -7440,7 +7392,6 @@ pub(crate) fn try_compile_owned_with_table_construction_and_protected_shift_term
         default_table_construction,
         None,
         Some(Arc::new(protected_shift_terminals)),
-        PreparedGrammarPolicy::Ordinary,
     )?;
     constraint.set_composition_start_nullable(start_nullable);
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
@@ -7470,34 +7421,9 @@ pub(crate) fn try_compile_prepared_with_table_construction(
         default_table_construction,
         None,
         None,
-        PreparedGrammarPolicy::Ordinary,
     )?
     .0;
     constraint.set_composition_start_nullable(start_nullable);
-    Ok(constraint)
-}
-
-/// Compile an already-terminal-ended grammar with the template pipeline.
-///
-/// This bypasses ordinary grammar preparation entirely: the caller owns the
-/// terminal-ended rewrite and only safe structural passes may have run since.
-/// Source nullability is preserved out of band because the rewrite deliberately
-/// omits the empty production.
-pub(crate) fn try_compile_terminal_ended(
-    prepared_grammar: GrammarDef,
-    vocab: &Vocab,
-    source_start_nullable: bool,
-) -> crate::Result<Constraint> {
-    let mut constraint = compile_prepared_with_profile_and_table_construction(
-        prepared_grammar,
-        vocab,
-        GlrTableConstruction::ExperimentalCoreMerged,
-        None,
-        None,
-        PreparedGrammarPolicy::TerminalEnded,
-    )?
-    .0;
-    constraint.set_composition_start_nullable(source_start_nullable);
     Ok(constraint)
 }
 
@@ -7515,7 +7441,6 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
         GlrTableConstruction::ExperimentalCoreMerged,
         Some(adaptive),
         None,
-        PreparedGrammarPolicy::Ordinary,
     )
     .expect("adaptive compile must not decline")
     .0;
@@ -7551,7 +7476,6 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         default_table_construction,
         None,
         None,
-        PreparedGrammarPolicy::Ordinary,
     )?;
     constraint.set_composition_start_nullable(start_nullable);
     profile.prepare_ms = prepare_ms;

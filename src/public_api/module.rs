@@ -1062,8 +1062,6 @@ impl Module {
         // The whole-composition flatten path is only valid when the request is
         // a TokenTrie request and no part owns precompiled machinery.
         let whole = requested.is_token_trie() && !any_retained;
-        // EXPERIMENT: one route report per top-level Module compile.
-        let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         if whole {
             let result = self.flatten_source()?.compile_requested_token_trie(
                     vocab, BoundaryTriggerDetail::TokenSet,
@@ -1075,156 +1073,72 @@ impl Module {
                 }
                 other => other?,
             };
-            crate::compiler::terminal_ended_rescue::report_route(
-                experiment.report_route,
-                crate::compiler::terminal_ended_rescue::Route::Normal,
-                requested,
-                experiment,
-                &crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried,
-            );
             return Ok(result);
         }
-        let te_first = !any_retained && experiment.terminal_ended_rescue
-            && experiment.terminal_ended_first
-            && self.node.bindings.is_empty()
-            && matches!(
-                requested,
-                Engine::ParserDwa | Engine::MergedTokenTrie | Engine::Auto
-            );
-        let mut route = crate::compiler::terminal_ended_rescue::Route::Normal;
-        let mut outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried;
-        let result = (|| -> Result<RuntimeConstraint> {
-            let try_rescue = || -> Result<RuntimeConstraint> {
-                let grammar = self.flatten_source()?;
-                let source = grammar.rescue_source_grammar(vocab)?;
-                let mut constraint =
-                    crate::compiler::terminal_ended_rescue::rescue(&source, vocab)?;
-                apply_final_boundary_trigger(&mut constraint, target_boundary())?;
-                constraint.with_end_tokens(end_tokens)
-            };
-            if te_first {
-                match try_rescue() {
-                    Ok(constraint) => {
-                        route = crate::compiler::terminal_ended_rescue::Route::TerminalEnded;
-                        outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::Ok;
+        let build = || {
+            let mut prepared = self.clone();
+            let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+            let end_tokens = end_tokens.to_vec();
+            let compile_options = options.clone();
+            budget.install(move || {
+                crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
+                    prepared.precompile_for_compile(vocab, &compile_options)?;
+                    let constraint = prepared.materialize(
+                        vocab,
+                        &mut HashMap::new(),
+                        compile_options.selected_boundary(),
+                    )?;
+                    ensure_runnable_constraint(&constraint)?;
+                    constraint.with_end_tokens(&end_tokens)
+                })
+            })
+        };
+        let attempt = build();
+        match attempt {
+            Ok(constraint) => Ok(constraint),
+            Err(error) if options.can_fallback(&error) => {
+                if crate::compiler::compile::compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][template_decline] strategy={requested:?} stage={} reason={error}",
+                        error.decline_stage(),
+                    );
+                }
+                // Public Auto/FastMasks may fall back; strict internal
+                // selectors retain their original behavior. With retained
+                // work the per-part fallback above already kept it; the
+                // whole-composition retry is only allowed when nothing is
+                // retained.
+                if (requested == Engine::Auto || options.prefers_fast_masks()) && !any_retained && options.can_fallback(&error) {
+                    // The fallback is exactly an explicit TokenTrie request
+                    // with the same switches.
+                    if let Ok(grammar) = self.flatten_source() {
+                        let constraint = grammar
+                            .compile_requested_token_trie(
+                                vocab,
+                                BoundaryTriggerDetail::TokenSet,
+                                options.parser_backend(),
+                                options.merge_equivalent_tokens(),
+                            )?
+                            .with_end_tokens(end_tokens)?;
                         return Ok(constraint);
                     }
-                    Err(rescue_error) => {
-                        outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::Declined(
-                            rescue_error.to_string(),
-                        );
-                    }
                 }
-            }
-            let build = || {
-                let mut prepared = self.clone();
-                let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
-                let end_tokens = end_tokens.to_vec();
-                let compile_options = options.clone();
-                budget.install(move || {
-                    crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
-                        prepared.precompile_for_compile(vocab, &compile_options)?;
-                        let constraint = prepared.materialize(
-                            vocab,
-                            &mut HashMap::new(),
-                            compile_options.selected_boundary(),
-                        )?;
-                        ensure_runnable_constraint(&constraint)?;
-                        constraint.with_end_tokens(&end_tokens)
-                    })
-                })
-            };
-            let attempt = build();
-            match attempt {
-                Ok(constraint) => Ok(constraint),
-                Err(error) if options.can_fallback(&error) => {
-                    // Opt-in experiment: one terminal-ended rescue attempt from
-                    // the original flattened source, restricted to plain single
-                    // modules. Without the switch, the typed decline is returned
-                    // unchanged.
-                    if !any_retained && experiment.terminal_ended_rescue
-                        && self.node.bindings.is_empty()
-                        && !te_first
-                    {
-                        match try_rescue() {
-                            Ok(constraint) => {
-                                if crate::compiler::compile::compile_profile_enabled() {
-                                    eprintln!(
-                                        "[glrmask/profile][terminal_ended_rescue] strategy={requested:?} outcome=ok",
-                                    );
-                                }
-                                route =
-                                    crate::compiler::terminal_ended_rescue::Route::TerminalEnded;
-                                outcome =
-                                    crate::compiler::terminal_ended_rescue::RescueOutcome::Ok;
-                                return Ok(constraint);
-                            }
-                            Err(rescue_error) => {
-                                if crate::compiler::compile::compile_profile_enabled() {
-                                    eprintln!(
-                                        "[glrmask/profile][terminal_ended_rescue] strategy={requested:?} outcome=declined reason={rescue_error}",
-                                    );
-                                }
-                                outcome =
-                                    crate::compiler::terminal_ended_rescue::RescueOutcome::Declined(
-                                        rescue_error.to_string(),
-                                    );
-                            }
-                        }
-                    }
-                    if crate::compiler::compile::compile_profile_enabled() {
-                        eprintln!(
-                            "[glrmask/profile][template_decline] strategy={requested:?} stage={} reason={error}",
-                            error.decline_stage(),
-                        );
-                    }
-                    // Public Auto/FastMasks may fall back; strict internal
-                    // selectors retain their original behavior. With retained
-                    // work the per-part fallback above already kept it; the
-                    // whole-composition retry is only allowed when nothing is
-                    // retained.
-                    if (requested == Engine::Auto || options.prefers_fast_masks()) && !any_retained && options.can_fallback(&error) {
-                        // The fallback is exactly an explicit TokenTrie request
-                        // with the same switches.
-                        if let Ok(grammar) = self.flatten_source() {
-                            let constraint = grammar
-                                .compile_requested_token_trie(
-                                    vocab,
-                                    BoundaryTriggerDetail::TokenSet,
-                                    options.parser_backend(),
-                                    options.merge_equivalent_tokens(),
-                                )?
-                                .with_end_tokens(end_tokens)?;
-                            route =
-                                crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
-                            return Ok(constraint);
-                        }
-                    }
-                    // Budget unwinds during parallel preparation can reach this outer
-                    // handler instead of the per-node fallback. Retry with a fresh
-                    // budget and a trie preference without discarding retained work.
-                    if options.soft() && any_retained
-                        && (requested == Engine::Auto || options.prefers_fast_masks()) {
-                        return self.compile_with_on_stack(
-                            vocab, options.retry_with(InternalMaskStrategy::FAST_COMPILE), end_tokens);
-                    }
-                    if options.prefers_fast_compile() {
-                        return self.compile_with_on_stack(
-                            vocab, options.retry_with(InternalMaskStrategy::ParserDwa), end_tokens);
-                    }
-                    Err(error)
+                // Budget unwinds during parallel preparation can reach this outer
+                // handler instead of the per-node fallback. Retry with a fresh
+                // budget and a trie preference without discarding retained work.
+                if options.soft() && any_retained
+                    && (requested == Engine::Auto || options.prefers_fast_masks()) {
+                    return self.compile_with_on_stack(
+                        vocab, options.retry_with(InternalMaskStrategy::FAST_COMPILE), end_tokens);
                 }
-                Err(error) => Err(error),
+                if options.prefers_fast_compile() {
+                    return self.compile_with_on_stack(
+                        vocab, options.retry_with(InternalMaskStrategy::ParserDwa), end_tokens);
+                }
+                Err(error)
             }
-        })();
-        crate::compiler::terminal_ended_rescue::report_route(
-            experiment.report_route,
-            route,
-            requested,
-            experiment,
-            &outcome,
-        );
-        result
+            Err(error) => Err(error),
+        }
     }
 
     fn materialize(
