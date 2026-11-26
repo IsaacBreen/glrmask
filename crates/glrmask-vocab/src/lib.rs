@@ -96,7 +96,7 @@ impl TokenSet {
 
 use range_set_blaze::RangeSetBlaze;
 
-/// A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.
+/// A vocabulary: the bytes of each token ID.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     compiler_cache: Arc<VocabCompilerCache>,

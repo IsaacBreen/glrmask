@@ -1,6 +1,6 @@
 GLRMask has four core types:
 
-- `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Grammar`: a grammar.
+- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
 - `Constraint`: a grammar compiled for a vocabulary, ready to use.
 - `ConstraintState`: the state of one generated sequence.

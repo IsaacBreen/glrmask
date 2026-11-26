@@ -4,7 +4,7 @@
 
 GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
 
 [Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
@@ -125,8 +125,8 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Grammar`: a grammar.
+- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
 - `Constraint`: a grammar compiled for a vocabulary, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
@@ -135,13 +135,22 @@ GLRMask has four core types:
 ```python
 import glrmask
 
+grammar = glrmask.Grammar.from_lark('''
+    start: "hello" " " "world"
+''')
+
+# A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
 vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
-grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
+
 constraint = grammar.compile(vocab)
 state = constraint.start()
-for token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:
-    assert state.mask().tolist() == expected
-    assert state.commit_token(token_id)
+
+# Each mask says which tokens may come next. Apply it to the logits before sampling.
+assert state.mask(dtype=bool).tolist() == [True, False, False]  # only "hello"
+assert state.commit_token(0)
+assert state.mask(dtype=bool).tolist() == [False, True, False]  # only " "
+assert state.commit_token(1)
+assert state.commit_token(2)
 assert state.is_accepting()
 ```
 
@@ -151,16 +160,24 @@ assert state.is_accepting()
 use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
+    let grammar = Grammar::from_lark(r#"
+        start: "hello" " " "world"
+    "#)?;
+
+    // A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
     let vocab = Vocab::new([
         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
     ])?;
-    let grammar = Grammar::from_lark(r#"start: "hello" " " "world""#)?;
+
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
-    for token_id in 0..3 {
-        assert_eq!(state.mask()[0], 1 << token_id);
-        assert!(state.commit_token(token_id));
-    }
+
+    // Each mask says which tokens may come next: bit `id` is set if token `id` is allowed.
+    assert_eq!(state.mask(), [0b001]); // only "hello"
+    assert!(state.commit_token(0));
+    assert_eq!(state.mask(), [0b010]); // only " "
+    assert!(state.commit_token(1));
+    assert!(state.commit_token(2));
     assert!(state.is_accepting());
     Ok(())
 }

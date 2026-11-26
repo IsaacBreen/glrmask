@@ -23,11 +23,12 @@ def test_mask_domain(n):
             s.mask(dtype=dtype)
     with pytest.raises(TypeError):
         s.mask(size=n)
-    for dtype in [np.uint32, np.int32]:
-        for length in [w,w+2]:
-            buf = np.full(length, -1 if dtype is np.int32 else 0xffffffff, dtype=dtype)
-            s.fill_mask(buf)
-            assert np.array_equal(buf[:w].view(np.uint32), p) and not np.any(buf[w:])
+    for length in [w,w+2]:
+        buf = np.full(length, 0xffffffff, dtype=np.uint32)
+        s.fill_mask(buf)
+        assert np.array_equal(buf[:w], p) and not np.any(buf[w:])
+    with pytest.raises(TypeError):
+        s.fill_mask(np.zeros(w + 1, dtype=np.int32))
     with pytest.raises(TypeError):
         s.fill_mask(dense)
     if w:

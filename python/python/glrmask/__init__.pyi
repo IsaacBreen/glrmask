@@ -1,6 +1,6 @@
 """GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
 
 ## Installation
 
@@ -12,8 +12,8 @@ python -m pip install glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Grammar`: a grammar.
+- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
 - `Constraint`: a grammar compiled for a vocabulary, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
@@ -22,13 +22,22 @@ GLRMask has four core types:
 ```python
 import glrmask
 
+grammar = glrmask.Grammar.from_lark('''
+    start: "hello" " " "world"
+''')
+
+# A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
 vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
-grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
+
 constraint = grammar.compile(vocab)
 state = constraint.start()
-for token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:
-    assert state.mask().tolist() == expected
-    assert state.commit_token(token_id)
+
+# Each mask says which tokens may come next. Apply it to the logits before sampling.
+assert state.mask(dtype=bool).tolist() == [True, False, False]  # only "hello"
+assert state.commit_token(0)
+assert state.mask(dtype=bool).tolist() == [False, True, False]  # only " "
+assert state.commit_token(1)
+assert state.commit_token(2)
 assert state.is_accepting()
 ```
 
@@ -67,14 +76,14 @@ __all__: list[str] = [
 
 @final
 class Vocab:
-    """A model's tokens and their bytes, from an`{id: bytes}`mapping. A token ID it doesn't contain never matches text, but a token set can still allow it."""
+    """A vocabulary: the bytes of each token ID."""
     def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
-        """Creates a vocabulary from an`{id: bytes}`mapping."""
+        """Creates a vocabulary from an `{id: bytes}` mapping."""
         ...
 
 @final
 class Grammar:
-    """A grammar, parsed from source or built from an `Expr`."""
+    """A grammar."""
     @staticmethod
     def from_glrm(source: str, /) -> Grammar:
         """Creates a grammar from GLRM source."""
@@ -85,11 +94,11 @@ class Grammar:
         ...
     @staticmethod
     def from_json_schema(schema: Any, /) -> Grammar:
-        """Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict."""
+        """Creates a grammar from a JSON Schema, as JSON text or a dict."""
         ...
     @staticmethod
-    def from_expr(expr: Expr | Grammar, /) -> Grammar:
-        """Creates a grammar from a portable expression (no Module or TokenSet, even nested)."""
+    def from_expr(expr: Expr, /) -> Grammar:
+        """Creates a grammar from an expression."""
         ...
     @property
     def externs(self) -> Externs:
@@ -97,16 +106,16 @@ class Grammar:
         ...
     @overload
     def bind(self, name: str, value: Grammar | Expr, /) -> None:
-        """Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
+        """Binds the extern `name` to `value`. `bind(a=x, b=y)` binds several at once; if one fails, none is bound.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
     def bind(self, **bindings: Grammar | Expr) -> None:
-        """Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
+        """Binds the extern `name` to `value`. `bind(a=x, b=y)` binds several at once; if one fails, none is bound.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     def compile(
@@ -116,9 +125,9 @@ class Grammar:
         mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Constraint:
-        """Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
+        """Compiles the grammar for `vocab`.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        Raises `GLRMaskError` if an extern is unbound. See `MaskStrategy` for the keyword arguments.
         """
         ...
     def precompile(
@@ -128,13 +137,13 @@ class Grammar:
         mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Module:
-        """Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
+        """Compiles what it can for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        See `MaskStrategy` for the keyword arguments.
         """
         ...
     def copy(self) -> Grammar:
-        """A copy of the grammar. Binding the copy does not change the original."""
+        """A copy of the grammar."""
         ...
     def __copy__(self) -> Grammar:
         """Same as `copy()`."""
@@ -184,22 +193,22 @@ class TokenSet:
 
 @final
 class Module:
-    """A grammar you can compose with others and partly compile before its externs are bound."""
+    """A grammar that can be compiled before its externs are bound. Binding them later only links the compiled parts, so the final compile is fast."""
     def __new__(cls, source: Grammar, /) -> Module:
         """Creates a module from a grammar."""
         ...
     @overload
     def bind(self, name: str, value: Grammar | Module | Expr | TokenSet, /) -> None:
-        """Binds the extern `name` to `value`.
+        """Binds the extern `name` to `value`. `bind(a=x, b=y)` binds several at once; if one fails, none is bound.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @overload
     def bind(self, **bindings: Grammar | Module | Expr | TokenSet) -> None:
-        """Binds the extern `name` to `value`.
+        """Binds the extern `name` to `value`. `bind(a=x, b=y)` binds several at once; if one fails, none is bound.
 
-        `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+        Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
         """
         ...
     @property
@@ -213,9 +222,9 @@ class Module:
         mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> None:
-        """Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
+        """Compiles what it can for `vocab` now, even with externs unbound, so later compiles are faster.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        See `MaskStrategy` for the keyword arguments.
         """
         ...
     def compile(
@@ -225,16 +234,16 @@ class Module:
         mask_strategy: MaskStrategy | None = None,
         boundary_mask_strategy: BoundaryMaskStrategy | None = None,
     ) -> Constraint:
-        """Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
+        """Compiles the module for `vocab`, reusing any precompiled work.
 
-        The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
+        Raises `GLRMaskError` if an extern is unbound or the module was precompiled for another vocabulary. See `MaskStrategy` for the keyword arguments.
         """
         ...
     def copy(self) -> Module:
-        """A copy of the module. Binding the copy does not change the original."""
+        """A copy of the module."""
         ...
     def save(self) -> bytes:
-        """Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another."""
+        """The module as bytes, with its precompiled work but not the vocabulary. May not load in another GLRMask version."""
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
@@ -249,18 +258,15 @@ class Module:
 
 @final
 class Constraint:
-    """A grammar compiled for a vocabulary. Call `start()` for each sequence you generate."""
+    """A grammar compiled for a vocabulary, ready to use. Call `start()` for each sequence you generate."""
     def start(self) -> ConstraintState:
         """A new state with nothing committed."""
         ...
     def mask_bit_len(self) -> int:
-        """Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words."""
+        """The number of bits in the mask: one more than the largest token ID in the vocabulary or a bound token set."""
         ...
     def save(self) -> bytes:
-        """Saves the constraint as bytes, without the vocabulary.
-
-        Bytes saved by one GLRMask version may not load in another.
-        """
+        """The constraint as bytes, without the vocabulary. May not load in another GLRMask version."""
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
@@ -269,25 +275,24 @@ class Constraint:
 
 @final
 class ConstraintState:
-    """A constraint's state during generation."""
+    """The state of one generated sequence."""
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
-        """Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID. For signed packed words, use mask().view(np.int32) without copying. To pad to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool)."""
+        """The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len()` long."""
         ...
-    def fill_mask(self, bitmask: NDArray[np.int32] | NDArray[np.uint32], /) -> None:
-        """Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
+        """Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len() + 31) // 32` words. Extra words are zeroed.
 
-        Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
-        Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
+        Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
         """
         ...
     def mask_bit_len(self) -> int:
-        """Number of token slots: one plus the largest token ID in the mask domain, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (mask_bit_len() + 31) // 32 words."""
+        """The number of bits in the mask: one more than the largest token ID in the vocabulary or a bound token set."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
         """Commits a token. If it isn't allowed, returns `False` and terminates the state."""
         ...
     def commit_tokens(self, token_ids: Sequence[int], /) -> int:
-        """Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy."""
+        """Commits tokens in order and returns how many were committed. If that's fewer than `len(token_ids)`, the next token wasn't allowed and the state is terminated."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
         """Commits raw bytes. If they aren't allowed, returns `False` and terminates the state."""
@@ -296,7 +301,7 @@ class ConstraintState:
         """Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens."""
         ...
     def is_accepting(self) -> bool:
-        """Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS."""
+        """Whether what's committed so far is a complete match. When true, allow EOS in your sampler; don't commit it."""
         ...
     def is_terminated(self) -> bool:
         """Whether nothing more can be committed."""
@@ -313,10 +318,7 @@ class ConstraintState:
 
 @final
 class Externs(Mapping[str, "Extern"]):
-    """A grammar's or module's externs, in declaration order.
-
-    A read-only mapping from name to `Extern`.
-    """
+    """A read-only mapping from extern name to `Extern`, in declaration order."""
     @property
     def unbound(self) -> Externs:
         """The externs not yet bound."""
@@ -372,7 +374,7 @@ class Extern:
 
 @final
 class MaskStrategy:
-    """Cost preferences, not engine selections or performance guarantees."""
+    """A preference for faster compiling or faster masks."""
     AUTO: ClassVar[MaskStrategy]
     """Let the library choose. The default."""
     FAST_COMPILE: ClassVar[MaskStrategy]
@@ -382,7 +384,7 @@ class MaskStrategy:
 
 @final
 class BoundaryMaskStrategy:
-    """Cost preferences for masks at grammar boundaries."""
+    """The same preference, for masks where one grammar meets another at an extern."""
     AUTO: ClassVar[BoundaryMaskStrategy]
     """Let the library choose. The default."""
     FAST_COMPILE: ClassVar[BoundaryMaskStrategy]
@@ -391,6 +393,6 @@ class BoundaryMaskStrategy:
     """Prefer lower boundary mask cost."""
 
 class GLRMaskError(ValueError):
-    """Raised when GLRMask can't do what was asked. Wrong argument types still raise `TypeError`, and a missing `Externs` key raises `KeyError`, as usual in Python."""
+    """Raised when GLRMask can't do what was asked."""
     kind: str
     """What went wrong: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. New kinds may be added in a minor release."""

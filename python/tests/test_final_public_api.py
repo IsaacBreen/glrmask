@@ -100,8 +100,8 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     c = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     s = c.start()
     with pytest.raises(ValueError):
-        s.fill_mask(np.zeros(1, dtype=np.int32))
-    words = np.full(7, -1, dtype=np.int32)
+        s.fill_mask(np.zeros(1, dtype=np.uint32))
+    words = np.full(7, 0xffffffff, dtype=np.uint32)
     s.fill_mask(words)
     assert words[-2:].tolist() == [0, 0]
     assert not s.is_accepting() and not (not s.mask().any())
@@ -331,12 +331,12 @@ def test_fill_mask_dtype_and_layout():
     words = np.zeros(4, dtype=np.uint32)
     state.fill_mask(words)
     signed = np.zeros(4, dtype=np.int32)
-    state.fill_mask(signed)
+    state.fill_mask(signed.view(np.uint32))  # int32 buffers (e.g. torch bitmasks) go through a zero-copy view
     assert np.array_equal(words, signed.view(np.uint32))
-    readonly = signed.copy()
+    readonly = words.copy()
     readonly.flags.writeable = False
-    for array in (np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.int32), signed[::2], readonly):
-        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D int32 or uint32 NumPy array"):
+    for array in (signed, np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.uint32), words[::2], readonly):
+        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D uint32 NumPy array"):
             state.fill_mask(array)
 
 

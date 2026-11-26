@@ -514,7 +514,7 @@ impl CommitBuffers {
     }
 }
 
-/// A constraint's state during generation.
+/// The state of one generated sequence.
 pub struct ConstraintState {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,

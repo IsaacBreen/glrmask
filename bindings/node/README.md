@@ -4,7 +4,7 @@
 
 GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
 
 [Website](https://glrmask.com) · [GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
@@ -22,8 +22,8 @@ The package provides CommonJS, ESM and TypeScript entry points.
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Grammar`: a grammar.
+- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
 - `Constraint`: a grammar compiled for a vocabulary, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 

@@ -19,7 +19,7 @@
 
 ### Python
 
-- `mask(*, dtype=np.uint32)` returns packed uint32 words by default or a Boolean array with `dtype=bool`. `fill_mask` accepts packed int32 and uint32 arrays and releases the GIL during computation. Use distinct states and nonoverlapping output buffers for concurrent calls.
+- `mask(*, dtype=np.uint32)` returns packed uint32 words by default or a Boolean array with `dtype=bool`. `fill_mask` accepts packed uint32 arrays (view an int32 buffer as uint32) and releases the GIL during computation. Use distinct states and nonoverlapping output buffers for concurrent calls.
 - Strategies, token sets and externs are hashable. Externs keys, values and items are mapping views.
 
 ### Errors

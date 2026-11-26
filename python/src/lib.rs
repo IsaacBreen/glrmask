@@ -188,7 +188,7 @@ fn with_mask_buffer(
     required: usize,
     fill: impl FnOnce(&mut [u32]),
 ) -> PyResult<()> {
-    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D int32 or uint32 NumPy array");
+    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D uint32 NumPy array");
     let checked = |len| {
         if len < required {
             Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")))
@@ -196,13 +196,7 @@ fn with_mask_buffer(
             Ok(())
         }
     };
-    if let Ok(array) = bitmask.cast::<PyArray1<i32>>() {
-        let mut array = array.try_readwrite().map_err(|_| invalid())?;
-        let slice = array.as_slice_mut().map_err(|_| invalid())?;
-        checked(slice.len())?;
-        // i32 and u32 have the same size, alignment, and bit representation.
-        fill(unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast::<u32>(), slice.len()) });
-    } else if let Ok(array) = bitmask.cast::<PyArray1<u32>>() {
+    if let Ok(array) = bitmask.cast::<PyArray1<u32>>() {
         let mut array = array.try_readwrite().map_err(|_| invalid())?;
         let slice = array.as_slice_mut().map_err(|_| invalid())?;
         checked(slice.len())?;
@@ -975,10 +969,9 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len() + 31) // 32` words. Extra words are zeroed.
     ///
-    /// Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
-    /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
+    /// Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
@@ -1017,8 +1010,7 @@ impl PyDynamicConstraintState {
         with_state(&self.inner, |state| state.is_terminated())
     }
 
-    /// Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID.
-    /// For signed packed words, use mask().view(np.int32) without copying. To pad a Boolean mask to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool).
+    /// The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len()` long.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
@@ -1059,17 +1051,15 @@ impl PyConstraintState {
     }
 
 
-    /// Allowed token IDs as packed uint32 words or exactly mask_bit_len() booleans indexed by token ID.
-    /// For signed packed words, use mask().view(np.int32) without copying. To pad a Boolean mask to a wider logits width L, use m = np.zeros(L, bool); m[:self.mask_bit_len()] = self.mask(dtype=bool).
+    /// The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len()` long.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 
-    /// Writes the mask into `bitmask`, zeroing any extra words. `bitmask` must be a contiguous, writable 1-D `int32` or `uint32` array of at least `(self.mask_bit_len() + 31) // 32` words. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len() + 31) // 32` words. Extra words are zeroed.
     ///
-    /// Releases the GIL while computing. Use a different state and nonoverlapping output buffer per thread; do not access, resize or mutate the output (including aliases) until this call returns.
-    /// Token `id` is allowed when bit `id % 32` of word `id // 32` is set.
+    /// Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);

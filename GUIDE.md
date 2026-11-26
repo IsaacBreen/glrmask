@@ -2,7 +2,7 @@
 
 GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).
 
 [Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
@@ -121,8 +121,8 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Grammar`: a grammar.
+- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
 - `Constraint`: a grammar compiled for a vocabulary, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
@@ -131,13 +131,22 @@ GLRMask has four core types:
 ```python
 import glrmask
 
+grammar = glrmask.Grammar.from_lark('''
+    start: "hello" " " "world"
+''')
+
+# A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
 vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
-grammar = glrmask.Grammar.from_lark('start: "hello" " " "world"')
+
 constraint = grammar.compile(vocab)
 state = constraint.start()
-for token_id, expected in [(0, [1]), (1, [2]), (2, [4])]:
-    assert state.mask().tolist() == expected
-    assert state.commit_token(token_id)
+
+# Each mask says which tokens may come next. Apply it to the logits before sampling.
+assert state.mask(dtype=bool).tolist() == [True, False, False]  # only "hello"
+assert state.commit_token(0)
+assert state.mask(dtype=bool).tolist() == [False, True, False]  # only " "
+assert state.commit_token(1)
+assert state.commit_token(2)
 assert state.is_accepting()
 ```
 
@@ -147,16 +156,24 @@ assert state.is_accepting()
 use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
+    let grammar = Grammar::from_lark(r#"
+        start: "hello" " " "world"
+    "#)?;
+
+    // A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
     let vocab = Vocab::new([
         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
     ])?;
-    let grammar = Grammar::from_lark(r#"start: "hello" " " "world""#)?;
+
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
-    for token_id in 0..3 {
-        assert_eq!(state.mask()[0], 1 << token_id);
-        assert!(state.commit_token(token_id));
-    }
+
+    // Each mask says which tokens may come next: bit `id` is set if token `id` is allowed.
+    assert_eq!(state.mask(), [0b001]); // only "hello"
+    assert!(state.commit_token(0));
+    assert_eq!(state.mask(), [0b010]); // only " "
+    assert!(state.commit_token(1));
+    assert!(state.commit_token(2));
     assert!(state.is_accepting());
     Ok(())
 }
@@ -208,7 +225,7 @@ Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` 
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
 To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
 For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
-1-D NumPy int32 or uint32 arrays (not bool); surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
+1-D NumPy uint32 arrays; for an int32 buffer, pass `buf.view(np.uint32)`; surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
 
 For PyTorch serving with V equal to the logits width (at least every state mask bit length):
 
@@ -216,7 +233,7 @@ For PyTorch serving with V equal to the logits width (at least every state mask 
 # CPU staging buffer, with each row reused for one sequence.
 bitmask = torch.empty((len(states), (V + 31) // 32), dtype=torch.int32, pin_memory=True)
 for i, state in enumerate(states):
-    state.fill_mask(bitmask[i].numpy())  # zero-copy NumPy view of CPU row
+    state.fill_mask(bitmask[i].numpy().view(np.uint32))  # zero-copy view of the CPU row
 mask_on_device = bitmask.to(device, non_blocking=True)
 # Apply mask_on_device with your packed-mask kernel. Do not reuse the CPU
 # buffer until the asynchronous transfer completes.
@@ -238,7 +255,7 @@ See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing
 
 A grammar can declare externs: named slots that you bind later.
 
-- `extern grammar NAME` takes a portable grammar or expression on a Grammar; on a Module it can also take a module or token set.
+- `extern grammar NAME` takes a grammar or expression; on a `Module` it can also take a module or token set.
 - `extern token NAME` can be declared on a Grammar but must be filled on a Module with a token set. It matches exactly one of those tokens, never their text.
 
 ```python
@@ -276,7 +293,7 @@ and `externs().unbound()`).
 
 ### Modules
 
-A `Grammar` holds portable source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
+A `Grammar` holds source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
 even with externs unbound, and `compile` reuses that work. Use modules when the same parts appear in many grammars. Tool
 calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 

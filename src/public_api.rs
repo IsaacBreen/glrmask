@@ -33,18 +33,16 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// How to trade compilation cost against the cost of computing masks.
-/// These are preferences, not engine selections or performance guarantees.
-/// A preferred plan may decline; another supported plan can be used.
+/// A preference for faster compiling or faster masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
     /// Let the library choose. The default.
     #[default]
     Auto,
-    /// Prefer lower preparation cost, even if later masks cost more.
+    /// Prefer faster compiling over faster masks.
     FastCompile,
-    /// Prefer lower mask cost, even if preparation costs more.
+    /// Prefer faster masks over faster compiling.
     FastMasks,
 }
 impl MaskStrategy {
@@ -54,9 +52,7 @@ impl MaskStrategy {
     pub const FAST_MASKS: Self = Self::FastMasks;
 }
 
-/// How to trade preparation cost against mask cost at grammar boundaries.
-/// These preferences apply only where boundary work is needed; they do not
-/// guarantee a particular engine or performance.
+/// The same preference, for masks where one grammar meets another at an extern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
@@ -566,7 +562,7 @@ fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// A grammar, parsed from source or built from an [`Expr`].
+/// A grammar.
 #[derive(Debug, Clone)]
 pub struct Grammar {
     source: GrammarSource,
@@ -810,7 +806,7 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Creates a grammar from a portable expression (no Module or TokenSet, even nested).
+    /// Creates a grammar from an expression.
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)
@@ -886,8 +882,7 @@ impl Grammar {
     }
 
     /// Binds the extern `name` to `value`. Fails if `name` is undeclared or already
-    /// bound, or `value` is the wrong kind. A grammar accepts only portable grammars
-    /// and expressions. Bind token sets and modules using [`Module::bind`].
+    /// bound, or `value` is the wrong kind.
     pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
         let value = match value.into().0 {
             module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),

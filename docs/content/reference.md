@@ -44,7 +44,7 @@ Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` 
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
 To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
 For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
-1-D NumPy int32 or uint32 arrays (not bool); surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
+1-D NumPy uint32 arrays; for an int32 buffer, pass `buf.view(np.uint32)`; surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
 
 For PyTorch serving with V equal to the logits width (at least every state mask bit length):
 
@@ -52,7 +52,7 @@ For PyTorch serving with V equal to the logits width (at least every state mask 
 # CPU staging buffer, with each row reused for one sequence.
 bitmask = torch.empty((len(states), (V + 31) // 32), dtype=torch.int32, pin_memory=True)
 for i, state in enumerate(states):
-    state.fill_mask(bitmask[i].numpy())  # zero-copy NumPy view of CPU row
+    state.fill_mask(bitmask[i].numpy().view(np.uint32))  # zero-copy view of the CPU row
 mask_on_device = bitmask.to(device, non_blocking=True)
 # Apply mask_on_device with your packed-mask kernel. Do not reuse the CPU
 # buffer until the asynchronous transfer completes.
@@ -74,7 +74,7 @@ See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing
 
 A grammar can declare externs: named slots that you bind later.
 
-- `extern grammar NAME` takes a portable grammar or expression on a Grammar; on a Module it can also take a module or token set.
+- `extern grammar NAME` takes a grammar or expression; on a `Module` it can also take a module or token set.
 - `extern token NAME` can be declared on a Grammar but must be filled on a Module with a token set. It matches exactly one of those tokens, never their text.
 
 ```python
@@ -112,7 +112,7 @@ and `externs().unbound()`).
 
 ### Modules
 
-A `Grammar` holds portable source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
+A `Grammar` holds source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
 even with externs unbound, and `compile` reuses that work. Use modules when the same parts appear in many grammars. Tool
 calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 

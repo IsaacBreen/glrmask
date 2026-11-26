@@ -134,8 +134,7 @@ impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Exp
 impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
 impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingKind::TokenSet(t.clone())) } }
 
-/// A value that can be bound to an extern of a `Grammar`: a portable grammar or expression.
-/// Token sets are rejected with InvalidInput; bind them on a Module instead.
+/// A value that can be bound to an extern of a `Grammar`: a grammar or expression.
 ///
 /// A module cannot be bound to a grammar:
 ///
@@ -168,7 +167,7 @@ pub(crate) enum BoundValue {
     TokenSet(TokenSet),
 }
 
-/// A grammar you can compose with others and partly compile before its externs are bound.
+/// A grammar that can be compiled before its externs are bound. Binding them later only links the compiled parts, so the final compile is fast.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) node: Arc<Node>,

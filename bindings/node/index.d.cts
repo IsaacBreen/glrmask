@@ -58,7 +58,7 @@ export interface Externs extends ReadonlyMap<string, Extern> {
   readonly unbound: Externs;
 }
 
-/** A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it. */
+/** A vocabulary: the bytes of each token ID. */
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
   /** Creates a vocabulary from `[id, bytes]` entries. */
@@ -98,7 +98,7 @@ export interface CompileOptions {
   boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
-/** A grammar, parsed from source or built from an `Expr`. */
+/** A grammar. */
 export declare class Grammar implements Disposable {
   private constructor();
   private readonly __grammarBrand: void;
@@ -112,7 +112,7 @@ export declare class Grammar implements Disposable {
   readonly externs: Externs;
   /** A copy of the grammar. Binding the copy does not change the original. */
   clone(): Grammar;
-  /** Creates a grammar from a portable expression (no Module or TokenSet, even nested). */
+  /** Creates a grammar from an expression. */
   static fromExpr(expr: Expr | Grammar): Grammar;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
   bind(name: string, value: GrammarBindValue): void;
@@ -164,7 +164,7 @@ export declare class Expr implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A grammar you can compose with others and partly compile before its externs are bound. */
+/** A grammar that can be compiled before its externs are bound. Binding them later only links the compiled parts, so the final compile is fast. */
 export declare class Module implements Disposable {
   private readonly __moduleBrand: void;
   /** Creates a module from `grammar`. */
@@ -231,7 +231,7 @@ export declare class Constraint implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A constraint's state during generation. */
+/** The state of one generated sequence. */
 export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;

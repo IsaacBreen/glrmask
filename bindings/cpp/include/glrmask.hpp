@@ -223,7 +223,7 @@ private:
     }
 };
 
-/// A model's tokens and their bytes. A token ID it doesn't contain never matches text, but a token set can still allow it.
+/// A vocabulary: the bytes of each token ID.
 class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone> {
     using Base = detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone>;
     static glrmask_vocab* create(const std::vector<VocabEntry>& entries) {
@@ -237,7 +237,7 @@ public:
     explicit Vocab(const std::vector<VocabEntry>& entries) : Base(create(entries)) {}
 };
 
-/// A grammar, parsed from source or built from an `Expr`.
+/// A grammar.
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
@@ -251,13 +251,13 @@ public:
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
     /// Creates a grammar from Lark source.
     static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
-    /// Creates a grammar from a portable expression (no modules or token sets).
+    /// Creates a grammar from an expression.
     static Grammar from_expr(const Expr& value);
     /// Binds the extern `name` to a grammar.
     void bind(std::string_view name, const Grammar& value) {
         detail::check(glrmask_grammar_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Binds the extern `name` to a portable expression.
+    /// Binds the extern `name` to an expression.
     void bind(std::string_view name, const Expr& value);
     /// The grammar's externs, in declaration order.
     Externs externs() const {

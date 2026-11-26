@@ -164,9 +164,9 @@ def test_packed_numpy_fill_mask_agrees_with_allocating_mask():
     v = vocab()
     c = _bound_snapshot(glrmask.Module(glrmask.Grammar.from_glrm(MARK)), "MARK", glrmask.TokenSet([7, 63, 127])).compile(v)
     state = c.start()
-    words = np.full(6, -1, dtype=np.int32)
+    words = np.full(6, 0xffffffff, dtype=np.uint32)
     state.fill_mask(words)
-    actual = words.view(np.uint32)
+    actual = words
     assert actual.tolist() == [1 << 7, 1 << 31, 0, 1 << 31, 0, 0]
     packed = state.mask()
     assert packed.dtype == np.uint32 and len(packed) == (c.mask_bit_len() + 31) // 32 == (state.mask_bit_len() + 31) // 32

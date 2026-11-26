@@ -83,11 +83,11 @@ enum {
     GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar, module, expression or token set.
 };
 
-/// A model's tokens and their bytes.
+/// A vocabulary: the bytes of each token ID.
 typedef struct glrmask_vocab glrmask_vocab;
 /// A set of token IDs.
 typedef struct glrmask_token_set glrmask_token_set;
-/// A grammar, parsed from source or built from an expression.
+/// A grammar.
 typedef struct glrmask_grammar glrmask_grammar;
 /// A grammar you can compose with others and partly compile before its externs are bound.
 typedef struct glrmask_module glrmask_module;
@@ -167,7 +167,7 @@ GLRMASK_API void glrmask_token_set_free(glrmask_token_set* token_set);
 
 /// Creates a grammar from source text in `format`.
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const char* source,size_t n,glrmask_grammar** out);
-/// Creates a grammar from a portable expression (no modules or token sets, even nested).
+/// Creates a grammar from an expression.
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
 /// or the value is the wrong kind for it. Bind token externs on a Module.
