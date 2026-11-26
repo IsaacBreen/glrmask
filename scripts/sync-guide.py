@@ -139,8 +139,8 @@ def language_payload():
                'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
                'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
                'guide_url': REPO + '/blob/main/GUIDE.md',
-               'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
-               'python_releases': json.loads((CONTENT / 'python-api-releases.json').read_text()),
+               'python_symbols': json.loads((CONTENT / 'python-api.json').read_text(encoding="utf-8")),
+               'python_releases': json.loads((CONTENT / 'python-api-releases.json').read_text(encoding="utf-8")),
                'native_guides': {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
                                  for path in sorted([ROOT / 'bindings/cpp/README.md', ROOT / 'bindings/node/README.md',
                                                      *CONTENT.glob('releases/*/cpp.md'), *CONTENT.glob('releases/*/javascript.md')])},
@@ -150,7 +150,7 @@ def language_payload():
 
 
 def rust_module_intro():
-    source = (ROOT/'src/lib.rs').read_text()
+    source = (ROOT/'src/lib.rs').read_text(encoding="utf-8")
     start = source.index('//!')
     end = source.index('#![deny(warnings)]')
     prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation', MSRV),
@@ -161,7 +161,7 @@ def rust_module_intro():
 
 
 def python_module_source(path):
-    source = path.read_text()
+    source = path.read_text(encoding="utf-8")
     first = ast.parse(source).body[0]
     assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
     prose = '\n\n'.join([read('introduction'), install('python', '## Installation'),
@@ -171,7 +171,7 @@ def python_module_source(path):
 
 
 def check_python_symbol_docs():
-    symbols = json.loads((CONTENT / 'python-api.json').read_text())
+    symbols = json.loads((CONTENT / 'python-api.json').read_text(encoding="utf-8"))
     for file, prefix in [('__init__.pyi', '')]:
         seen = set()
         def visit(nodes, scope):
@@ -184,7 +184,7 @@ def check_python_symbol_docs():
                         seen.add(key)
                     if isinstance(node, ast.ClassDef):
                         visit(node.body, key + '.')
-        visit(ast.parse((ROOT / 'python/python/glrmask' / file).read_text()).body, prefix)
+        visit(ast.parse((ROOT / 'python/python/glrmask' / file).read_text(encoding="utf-8")).body, prefix)
 
 
 def outputs():

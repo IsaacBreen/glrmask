@@ -167,12 +167,12 @@ def render_png(source, path, spec):
 
 
 def check_website(data,js,root):
-    assert data['tail']==json.loads((root/'src/data/glrmask-canonical-tail-20261014.json').read_text())
-    actual=json.loads((root/'src/data/glrmask-canonical-20261014.json').read_text())
+    assert data['tail']==json.loads((root/'src/data/glrmask-canonical-tail-20261014.json').read_text(encoding="utf-8"))
+    actual=json.loads((root/'src/data/glrmask-canonical-20261014.json').read_text(encoding="utf-8"))
     for mode,row in data['modes'].items():
         assert row['statistics_ns']=={metric:value['interpolated'] for metric,value in actual['modes'][mode]['statistics']['current'].items()}
         assert row['outcomes']==actual['modes'][mode]['outcomes']['current']
-    assert js['tail']==json.loads((root/'src/data/glrmask-javascript-native-20261014.json').read_text())['tail']
+    assert js['tail']==json.loads((root/'src/data/glrmask-javascript-native-20261014.json').read_text(encoding="utf-8"))['tail']
 
 
 def main():
