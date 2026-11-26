@@ -31,7 +31,7 @@ use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
-use crate::runtime::{dynamic_mask_vocab_layout_class, DynamicMaskTrie, DynamicMaskVocab};
+use crate::runtime::{DynamicMaskTrie, DynamicMaskVocab};
 use crate::runtime::{
     dynamic_mask_llg_master_layout_class,
     dynamic_mask_llg_master_safe_chars, DYNAMIC_MASK_LLG_MASTER_CACHE_ID,
@@ -3181,43 +3181,9 @@ fn prepared_runtime_dynamic_vocab(
     artifacts: &OrderedVocabTrieArtifacts,
 ) -> &Arc<DynamicMaskVocab> {
     artifacts.runtime_dynamic_vocab.get_or_init(|| {
-        // The global ordered-vocabulary trie is the production runtime layout.
-        // It avoids artificial root partitions that make the full vocabulary
-        // walk revisit equivalent prefix structure. Keep the older partitioned
-        // layout only as a diagnostic escape hatch for regression comparison.
-        if crate::env::var_os("GLRMASK_LEGACY_PARTITIONED_DYNAMIC_MASK_TRIE").is_none() {
-            let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
-                artifacts.trie.as_ref(),
-            ));
-            return Arc::new(DynamicMaskVocab::from_materialized_ordered(
-                runtime_trie,
-                Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
-            ));
-        }
-        // Runtime trie layout refines the compiler's broad character-type
-        // classes by the two properties that most often contaminate a large
-        // otherwise-uniform continuation subtree: an optional leading ASCII
-        // space and the presence of non-ASCII bytes. This is only physical
-        // layout; token IDs and lexer/grammar semantics are untouched.
-        let mut entries = artifacts
-            .ordered_vocab
-            .ordered_token_bytes
-            .iter()
-            .enumerate()
-            .map(|(token_id, bytes)| {
-                let layout_class =
-                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(bytes), bytes);
-                (layout_class, token_id, bytes.as_slice())
-            })
-            .collect::<Vec<_>>();
-        entries.sort_unstable_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.2.cmp(right.2))
-                .then_with(|| left.1.cmp(&right.1))
-        });
-        let runtime_trie = DynamicMaskTrie::from_partitioned_token_refs(&entries);
-        let runtime_trie = Arc::new(runtime_trie);
+        let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
+            artifacts.trie.as_ref(),
+        ));
         Arc::new(DynamicMaskVocab::from_materialized_ordered(
             runtime_trie,
             Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),

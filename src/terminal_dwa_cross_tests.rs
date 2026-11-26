@@ -165,7 +165,6 @@ nt S = A | B | C;
             ]);
 
         let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
         let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
         let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
@@ -198,7 +197,6 @@ nt S = QUOTE IDENT;
             ]);
 
         let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
         let _disable_ti =
             EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
