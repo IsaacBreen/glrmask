@@ -791,10 +791,10 @@ impl Module {
             c.target(vocab)?;
             let source = local_preparation_key(&m);
             let node = Arc::make_mut(&mut next.node);
-            if let Some((engine, prepared)) = locals.get(&source) {
-                if node.prepared.get(&engine.key()).is_none_or(|old| old.prepared().boundary_trigger < target_b) {
-                    node.prepared.insert(engine.key(), prepared.clone());
-                }
+            if let Some((engine, prepared)) = locals.get(&source)
+                && node.prepared.get(&engine.key()).is_none_or(|old| old.prepared().boundary_trigger < target_b)
+            {
+                node.prepared.insert(engine.key(), prepared.clone());
             }
             node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
             for (name, value) in &m.node.bindings {

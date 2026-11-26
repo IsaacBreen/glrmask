@@ -9448,7 +9448,7 @@ impl ConstraintState {
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
-            return !(self.is_terminated() && !self.is_accepting());
+            return !self.is_terminated() || self.is_accepting();
         }
         self.commit_bytes_raw(bytes).is_ok()
     }
