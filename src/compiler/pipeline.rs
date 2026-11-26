@@ -16,14 +16,7 @@ use crate::automata::lexer::compile::{
     build_exact_partitioned_runtime_tokenizer,
     build_virtual_unit_repeat_tokenizer,
     build_regex,
-    build_regex_partitioned,
-    build_regex_partitioned_with_adaptive,
-    build_regex_partitioned_with_adaptive_and_residual_isolation,
-    build_regex_partitioned_with_profile_labels,
-    build_regex_partitioned_with_profile_labels_and_adaptive,
-    build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation,
-    build_regex_partitioned_with_profile_labels_and_residual_isolation,
-    build_regex_partitioned_with_residual_isolation,
+    build_regex_partitioned_with_options,
     build_regex_with_profile_labels,
     compile_terminal_expr_dfa,
     compile_terminal_expression_pair_with_structural_map,
@@ -130,19 +123,6 @@ where
         body(scope);
     } else {
         scope.spawn(body);
-    }
-}
-
-fn lexer_adaptive_enabled() -> bool {
-    if crate::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some() {
-        env_flag_enabled("GLRMASK_LEXER_ADAPTIVE")
-    } else {
-        // A depth override is itself an explicit request for adaptive lexer
-        // construction. With neither variable present, keep the exact
-        // partition union: current corpus measurements show it is both faster
-        // to build and lower-tail at runtime than the historical depth-one
-        // hybrid.
-        crate::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some()
     }
 }
 
@@ -835,7 +815,6 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         Some(&terminal_labels),
         &partition_ids,
         Some(&residual_isolation_classes),
-        None,
         false,
     )
 }
@@ -1195,7 +1174,6 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
                         Some(&terminal_labels),
                         &partition_ids,
                         Some(&residual_isolation_classes),
-                        None,
                         retain_exclusion_coordinates,
                         false,
                     )
@@ -1210,7 +1188,6 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
                     Some(&terminal_labels),
                     &partition_ids,
                     Some(&residual_isolation_classes),
-                    None,
                     retain_exclusion_coordinates,
                     false,
                 ),
@@ -1277,7 +1254,6 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
         Some(&terminal_labels),
         &partition_ids,
         Some(&residual_isolation_classes),
-        None,
         retain_exclusion_coordinates,
         false,
     );
@@ -1471,7 +1447,6 @@ fn build_vocab_partition_direct_mask_tokenizer(
         Some(&terminal_labels),
         &partition_ids,
         Some(&residual_isolation_classes),
-        None,
         true,
     );
     tokenizer.isolate_start_state_and_drain_nullable_terminals();
@@ -1673,9 +1648,7 @@ fn build_dynamic_tokenizer(
 ) -> crate::Result<Tokenizer> {
     const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
 
-    let explicit_policy = crate::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
-        || crate::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some()
-        || crate::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some();
+    let explicit_policy = crate::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some();
     // O1 dynamic default: isolate complex terminals so one regex/Boolean
     // language does not poison a large cross-terminal product. Source literal
     // families keep prefix sharing only when they are wide enough for that
@@ -1784,7 +1757,6 @@ fn build_dynamic_tokenizer(
             Some(&labels),
             &partition_ids,
             Some(&residual_isolation_classes),
-            Some(false),
             use_direct,
         ))
     } else {
@@ -1809,7 +1781,6 @@ fn build_dynamic_tokenizer(
             Some(&labels),
             &partition_ids,
             Some(&residual_isolation_classes),
-            None,
             false,
         ))
     }
@@ -1990,7 +1961,6 @@ fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
 pub(crate) fn build_tokenizer_with_partition_options(
     grammar: &GrammarDef,
     singleton_all_terminals: bool,
-    adaptive: bool,
 ) -> Tokenizer {
     let exprs = grammar
         .terminals
@@ -2011,7 +1981,6 @@ pub(crate) fn build_tokenizer_with_partition_options(
         Some(&labels),
         &partition_ids,
         Some(&residual_isolation_classes),
-        Some(adaptive),
         false,
     )
 }
@@ -2302,7 +2271,7 @@ mod lexer_partition_plan_tests {
         )
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
-            prepare_structural_tokenizer_pair(&grammar, &plan, &vocab, Some(false), true)
+            prepare_structural_tokenizer_pair(&grammar, &plan, &vocab, true)
                 .expect("nullable structural pair");
         let full = full.finish();
 
@@ -2383,23 +2352,6 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned(
         profile_labels,
         partition_ids,
         None,
-        None,
-        false,
-    )
-}
-
-pub(crate) fn build_tokenizer_from_exprs_partitioned_with_adaptive(
-    exprs: &[Expr],
-    profile_labels: Option<&[String]>,
-    partition_ids: &[u32],
-    adaptive: bool,
-) -> Tokenizer {
-    build_tokenizer_from_exprs_partitioned_impl(
-        exprs,
-        profile_labels,
-        partition_ids,
-        None,
-        Some(adaptive),
         false,
     )
 }
@@ -2409,7 +2361,6 @@ fn build_tokenizer_from_exprs_partitioned_impl(
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
     residual_isolation_classes: Option<&[Option<u32>]>,
-    adaptive_override: Option<bool>,
     prefer_product_trace_terminal_residuals: bool,
 ) -> Tokenizer {
     build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
@@ -2417,7 +2368,6 @@ fn build_tokenizer_from_exprs_partitioned_impl(
         profile_labels,
         partition_ids,
         residual_isolation_classes,
-        adaptive_override,
         prefer_product_trace_terminal_residuals,
         true,
     )
@@ -2428,7 +2378,6 @@ fn build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
     residual_isolation_classes: Option<&[Option<u32>]>,
-    adaptive_override: Option<bool>,
     prefer_product_trace_terminal_residuals: bool,
     collapse_traced_duplicate_coordinates: bool,
 ) -> Tokenizer {
@@ -2539,7 +2488,6 @@ fn build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
             partition_ids,
             residual_isolation_classes,
             Arc::from(exprs.to_vec()),
-            adaptive_override,
             collapse_traced_duplicate_coordinates,
         )
     {
@@ -2559,57 +2507,12 @@ fn build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
         }
         return tokenizer;
     }
-    let regex = match (
-        adaptive_override,
+    let regex = build_regex_partitioned_with_options(
+        exprs,
         profile_labels,
+        partition_ids,
         residual_isolation_classes,
-    ) {
-        (Some(adaptive), Some(labels), Some(classes)) => {
-            build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
-                exprs,
-                labels,
-                partition_ids,
-                classes,
-                adaptive,
-            )
-        }
-        (Some(adaptive), None, Some(classes)) => {
-            build_regex_partitioned_with_adaptive_and_residual_isolation(
-                exprs,
-                partition_ids,
-                classes,
-                adaptive,
-            )
-        }
-        (Some(adaptive), Some(labels), None) => {
-            build_regex_partitioned_with_profile_labels_and_adaptive(
-                exprs,
-                labels,
-                partition_ids,
-                adaptive,
-            )
-        }
-        (Some(adaptive), None, None) => {
-            build_regex_partitioned_with_adaptive(exprs, partition_ids, adaptive)
-        }
-        (None, Some(labels), Some(classes)) => {
-            build_regex_partitioned_with_profile_labels_and_residual_isolation(
-                exprs,
-                labels,
-                partition_ids,
-                classes,
-            )
-        }
-        (None, None, Some(classes)) => build_regex_partitioned_with_residual_isolation(
-            exprs,
-            partition_ids,
-            classes,
-        ),
-        (None, Some(labels), None) => {
-            build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
-        }
-        (None, None, None) => build_regex_partitioned(exprs, partition_ids),
-    };
+    );
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={}",
@@ -2942,7 +2845,6 @@ fn build_tokenizer_from_planned_expressions(
     grammar: &GrammarDef,
     plan: &SyntheticTokenizerPlan,
     expressions: &[Expr],
-    adaptive_override: Option<bool>,
 ) -> Tokenizer {
     let expressions = expressions
         .iter()
@@ -2960,18 +2862,7 @@ fn build_tokenizer_from_planned_expressions(
         Some(&labels),
         &plan.partition_ids,
         Some(&plan.residual_isolation_classes),
-        adaptive_override,
         false,
-    )
-}
-
-fn build_ordinary_compile_tokenizer(
-    grammar: &GrammarDef,
-    adaptive_override: Option<bool>,
-) -> Tokenizer {
-    adaptive_override.map_or_else(
-        || build_tokenizer(grammar),
-        |adaptive| build_tokenizer_with_partition_options(grammar, false, adaptive),
     )
 }
 
@@ -2995,7 +2886,6 @@ fn build_vocab_partition_ordinary_compile_tokenizer(grammar: &GrammarDef) -> Tok
         Some(&labels),
         &partition_ids,
         Some(&residual_isolation_classes),
-        None,
         true,
     )
 }
@@ -3056,7 +2946,6 @@ fn prepare_structural_tokenizer_pair(
     grammar: &GrammarDef,
     plan: &SyntheticTokenizerPlan,
     vocab: &Vocab,
-    adaptive_override: Option<bool>,
     vocabulary_token_quotient: bool,
 ) -> Option<(
     Tokenizer,
@@ -3129,8 +3018,6 @@ fn prepare_structural_tokenizer_pair(
                 .enumerate()
                 .map(|(index, _)| grammar.terminal_display_name(index as u32))
                 .collect::<Vec<_>>();
-            let adaptive = adaptive_override
-                .unwrap_or_else(lexer_adaptive_enabled);
             let pair = if vocabulary_token_quotient {
                 prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
                     &full_expressions,
@@ -3138,7 +3025,6 @@ fn prepare_structural_tokenizer_pair(
                     Some(&labels),
                     &plan.partition_ids,
                     &plan.residual_isolation_classes,
-                    adaptive,
                     vocab,
                     plan.repeat_horizons.as_ref(),
                     max_token_len,
@@ -3151,7 +3037,6 @@ fn prepare_structural_tokenizer_pair(
                     Some(&labels),
                     &plan.partition_ids,
                     &plan.residual_isolation_classes,
-                    adaptive,
                     vocab,
                     plan.repeat_horizons.as_ref(),
                     max_token_len,
@@ -3236,14 +3121,13 @@ pub(crate) fn build_vocab_partition_compile_context(
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 ),
-                adaptive: lexer_adaptive_enabled(),
                 global_max_token_len: vocab.max_token_byte_len(),
             },
         )
     });
 
     let select_pair = |plan: &SyntheticTokenizerPlan| {
-        prepare_structural_tokenizer_pair(grammar, plan, vocab, None, true).and_then(
+        prepare_structural_tokenizer_pair(grammar, plan, vocab, true).and_then(
             |(synthesized, full, certified)| {
                 structural_state_reduction_is_profitable(
                     full.num_states(),
@@ -4795,7 +4679,6 @@ fn compile_prepared_with_profile(
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
         None,
-        None,
     )
 }
 
@@ -4803,7 +4686,6 @@ fn compile_prepared_with_profile_and_table_construction(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
-    lexer_adaptive_override: Option<bool>,
     protected_shift_terminals: Option<Arc<Vec<u32>>>,
 ) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     // Synthetic lexer planning may certify a smaller exact tokenizer against
@@ -4843,8 +4725,6 @@ fn compile_prepared_with_profile_and_table_construction(
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 ),
-                adaptive: lexer_adaptive_override
-                    .unwrap_or_else(lexer_adaptive_enabled),
                 global_max_token_len: vocab.max_token_byte_len(),
             },
         )
@@ -4907,7 +4787,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                 prepared_grammar_ref,
                                 plan,
                                 vocab,
-                                lexer_adaptive_override,
                                 vocabulary_token_quotient,
                             )
                             .and_then(|(synthesized, full, certified)| {
@@ -4929,10 +4808,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             (synthesized, Some(full), Some(certified), 0.0, true)
                         } else {
                             (
-                                build_ordinary_compile_tokenizer(
-                                    prepared_grammar_ref,
-                                    lexer_adaptive_override,
-                                ),
+                                build_tokenizer(prepared_grammar_ref),
                                 None,
                                 None,
                                 0.0,
@@ -4940,10 +4816,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             )
                         }
                     } else {
-                        let tokenizer = build_ordinary_compile_tokenizer(
-                            prepared_grammar_ref,
-                            lexer_adaptive_override,
-                        );
+                        let tokenizer = build_tokenizer(prepared_grammar_ref);
                         (tokenizer, None, None, 0.0, false)
                     }
                 };
@@ -6681,7 +6554,7 @@ fn build_dynamic_tokenizer_lane(
         .then(|| plan_synthetic_tokenizer(grammar, vocab))
         .flatten()
         .and_then(|plan| {
-            prepare_structural_tokenizer_pair(grammar, &plan, vocab, Some(false), true)
+            prepare_structural_tokenizer_pair(grammar, &plan, vocab, true)
         });
     let has_virtual_runtime = virtual_tokenizer.is_some();
     let (mut tokenizer, mask_tokenizer_quotient) =
@@ -7071,7 +6944,6 @@ fn compile_dynamic_owned_impl(
                     &prepared_grammar,
                     plan,
                     vocab,
-                    Some(false),
                     true,
                 )
             });
@@ -7390,7 +7262,6 @@ pub(crate) fn try_compile_owned_with_table_construction_and_protected_shift_term
         prepared_grammar,
         vocab,
         default_table_construction,
-        None,
         Some(Arc::new(protected_shift_terminals)),
     )?;
     constraint.set_composition_start_nullable(start_nullable);
@@ -7420,7 +7291,6 @@ pub(crate) fn try_compile_prepared_with_table_construction(
         vocab,
         default_table_construction,
         None,
-        None,
     )?
     .0;
     constraint.set_composition_start_nullable(start_nullable);
@@ -7428,10 +7298,9 @@ pub(crate) fn try_compile_prepared_with_table_construction(
 }
 
 #[cfg(test)]
-pub(crate) fn compile_owned_with_lexer_adaptive(
+pub(crate) fn compile_owned_partitioned_for_test(
     grammar: GrammarDef,
     vocab: &Vocab,
-    adaptive: bool,
 ) -> Constraint {
     let start_nullable = grammar.start_is_nullable();
     let prepared_grammar = prepare_grammar(grammar);
@@ -7439,10 +7308,9 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
         prepared_grammar,
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
-        Some(adaptive),
         None,
     )
-    .expect("adaptive compile must not decline")
+    .expect("partitioned compile must not decline")
     .0;
     constraint.set_composition_start_nullable(start_nullable);
     constraint
@@ -7474,7 +7342,6 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
-        None,
         None,
     )?;
     constraint.set_composition_start_nullable(start_nullable);

@@ -165,7 +165,6 @@ nt s = A | B | C;
     let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &lowered,
         false,
-        false,
     );
     assert!(tokenizer.has_epsilon_transitions());
     assert_eq!(

@@ -1903,7 +1903,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::compile::{
         build_regex,
-        build_regex_partitioned_with_adaptive,
+        build_regex_partitioned,
     };
     use crate::automata::regex::Expr;
 
@@ -1949,7 +1949,7 @@ mod tests {
                 max: Some(5),
             },
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1])
             .into_tokenizer(2, Some(Arc::from(expressions.into_boxed_slice())));
         let components = tokenizer
             .disjoint_dispatch_components()

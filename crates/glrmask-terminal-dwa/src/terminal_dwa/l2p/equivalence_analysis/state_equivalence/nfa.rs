@@ -4152,18 +4152,16 @@ mod tests {
     #[test]
     fn active_filtered_powerset_drops_inactive_members_before_refinement() {
         use crate::automata::lexer::ast::Expr;
-        use crate::automata::lexer::compile::build_regex_partitioned_with_adaptive;
+        use crate::automata::lexer::compile::build_regex_partitioned;
 
         let expressions = vec![
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"xq".to_vec()),
             Expr::U8Seq(b"yrr".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &[0, 1, 2],
-            false,
-        )
+            &[0, 1, 2])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
@@ -4191,18 +4189,16 @@ mod tests {
     #[test]
     fn token_bounded_topology_materialization_drops_inactive_members() {
         use crate::automata::lexer::ast::Expr;
-        use crate::automata::lexer::compile::build_regex_partitioned_with_adaptive;
+        use crate::automata::lexer::compile::build_regex_partitioned;
 
         let expressions = vec![
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"xq".to_vec()),
             Expr::U8Seq(b"yrr".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &[0, 1, 2],
-            false,
-        )
+            &[0, 1, 2])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),

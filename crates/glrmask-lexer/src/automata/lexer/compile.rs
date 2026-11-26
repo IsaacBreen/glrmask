@@ -5505,119 +5505,24 @@ pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]
 /// sharing a partition may be jointly determinized; terminals in different
 /// partitions can never cause a cross-partition subset/product blow-up.
 pub fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
-    build_regex_partitioned_with_adaptive(exprs, partitions, adaptive_lexer_enabled())
+    build_regex_partitioned_with_options(exprs, None, partitions, None)
 }
 
-pub fn build_regex_partitioned_with_residual_isolation(
+pub fn build_regex_partitioned_with_options(
     exprs: &[Expr],
+    visible_labels: Option<&[String]>,
     partitions: &[u32],
-    residual_isolation_classes: &[Option<u32>],
-) -> Regex {
-    build_regex_partitioned_with_adaptive_and_residual_isolation(
-        exprs,
-        partitions,
-        residual_isolation_classes,
-        adaptive_lexer_enabled(),
-    )
-}
-
-pub fn build_regex_partitioned_with_adaptive(
-    exprs: &[Expr],
-    partitions: &[u32],
-    adaptive: bool,
+    residual_isolation_classes: Option<&[Option<u32>]>,
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(exprs, None, partitions, None, adaptive),
+        dfa: compile_terminal_partitions(exprs, visible_labels, partitions, residual_isolation_classes),
     }
 }
-
-pub fn build_regex_partitioned_with_adaptive_and_residual_isolation(
-    exprs: &[Expr],
-    partitions: &[u32],
-    residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
-) -> Regex {
-    Regex {
-        dfa: compile_terminal_partitions(
-            exprs,
-            None,
-            partitions,
-            Some(residual_isolation_classes),
-            adaptive,
-        ),
-    }
-}
-
-pub fn build_regex_partitioned_with_profile_labels(
-    exprs: &[Expr],
-    visible_labels: &[String],
-    partitions: &[u32],
-) -> Regex {
-    build_regex_partitioned_with_profile_labels_and_adaptive(
-        exprs,
-        visible_labels,
-        partitions,
-        adaptive_lexer_enabled(),
-    )
-}
-
-
-pub fn build_regex_partitioned_with_profile_labels_and_residual_isolation(
-    exprs: &[Expr],
-    visible_labels: &[String],
-    partitions: &[u32],
-    residual_isolation_classes: &[Option<u32>],
-) -> Regex {
-    build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
-        exprs,
-        visible_labels,
-        partitions,
-        residual_isolation_classes,
-        adaptive_lexer_enabled(),
-    )
-}
-
-pub fn build_regex_partitioned_with_profile_labels_and_adaptive(
-    exprs: &[Expr],
-    visible_labels: &[String],
-    partitions: &[u32],
-    adaptive: bool,
-) -> Regex {
-    Regex {
-        dfa: compile_terminal_partitions(
-            exprs,
-            Some(visible_labels),
-            partitions,
-            None,
-            adaptive,
-        ),
-    }
-}
-pub fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
-    exprs: &[Expr],
-    visible_labels: &[String],
-    partitions: &[u32],
-    residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
-) -> Regex {
-    Regex {
-        dfa: compile_terminal_partitions(
-            exprs,
-            Some(visible_labels),
-            partitions,
-            Some(residual_isolation_classes),
-            adaptive,
-        ),
-    }
-}
-
 /// Compile-time tokenizer construction from already-compiled single-terminal
 /// DFAs. Besides the exact tokenizer, retain for every raw
 /// tokenizer state the product coordinates `(terminal, terminal_dfa_state)`.
 ///
-/// This deliberately bypasses adaptive component determinization: the retained
-/// coordinate is the point of this path, and adaptive products would need to
-/// carry the same trace explicitly rather than reconstructing it afterward.
+/// Preserve the exact terminal DFA coordinates.
 pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
     exprs: &[Expr],
     partitions: &[u32],
@@ -5810,16 +5715,9 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
     partitions: &[u32],
     residual_isolation_classes: Option<&[Option<u32>]>,
     retained_exprs: Arc<[Expr]>,
-    adaptive: Option<bool>,
     collapse_traced_duplicate_coordinates: bool,
 ) -> Option<Tokenizer> {
     if exprs.len() != partitions.len() || exprs.len() != retained_exprs.len() || exprs.is_empty() {
-        return None;
-    }
-    if adaptive.unwrap_or_else(adaptive_lexer_enabled) {
-        // Cross-partition adaptive products need their own trace composition.
-        // The default lexer path is non-adaptive; fail closed for explicit
-        // adaptive diagnostics rather than silently changing that topology.
         return None;
     }
     if let Some(labels) = visible_labels
@@ -6473,92 +6371,6 @@ pub fn build_exact_partitioned_runtime_tokenizer(
     )
 }
 
-fn env_flag(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            other => panic!(
-                "invalid {name}={other:?}; expected one of 1/0, true/false, yes/no, or on/off"
-            ),
-        },
-        Err(_) => default,
-    }
-}
-
-fn adaptive_lexer_enabled() -> bool {
-    match std::env::var("GLRMASK_LEXER_ADAPTIVE") {
-        Ok(_) => env_flag("GLRMASK_LEXER_ADAPTIVE", false),
-        // Keep the long-standing depth override useful as a one-variable
-        // diagnostic opt-in even though adaptive determinization is no longer
-        // enabled by default.
-        Err(_) => std::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some(),
-    }
-}
-
-fn adaptive_lexer_state_limit() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_STATES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(32_768)
-}
-
-fn adaptive_lexer_max_depth() -> Option<usize> {
-    let Ok(value) = std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH") else {
-        return Some(1);
-    };
-    let value = value.trim();
-    if matches!(value.to_ascii_lowercase().as_str(), "full" | "unbounded") {
-        return None;
-    }
-    Some(value.parse::<usize>().unwrap_or_else(|_| {
-        panic!(
-            "invalid GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH={value:?}; expected a byte depth or full"
-        )
-    }))
-}
-
-/// Extra product-prefix states permitted for a bounded adaptive lexer.
-///
-/// A bounded product retains exact copies of the independently compiled
-/// component DFAs after its cutoff, so percentage growth relative to those
-/// components is the wrong resource model.  At depth one the prefix can add at
-/// most one state per byte (plus the shared root already present in the
-/// untouched epsilon union), making 256 a tight representation-independent
-/// default overhead cap. Deeper explicit experiments can raise this budget.
-fn adaptive_lexer_bounded_overhead_states() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_BOUNDED_OVERHEAD_STATES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(256)
-}
-
-fn adaptive_lexer_growth_percent() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_GROWTH_PERCENT")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(100)
-}
-
-fn adaptive_lexer_transition_growth_percent() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRANSITION_GROWTH_PERCENT")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(600)
-}
-
-fn adaptive_transition_growth_is_acceptable(
-    input_transitions: usize,
-    output_transitions: usize,
-    growth_percent: usize,
-) -> bool {
-    output_transitions.saturating_mul(100)
-        <= input_transitions.saturating_mul(growth_percent)
-}
-
 fn compile_terminal_ids(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -6950,525 +6762,6 @@ fn compile_partition_components(
     components
 }
 
-fn lexer_component_product_metadata(
-    components: &[LexerComponent],
-    group_offsets: &[usize],
-    state_tuple: &ProductStateTuple,
-    total_groups: usize,
-) -> (BitSet, BitSet) {
-    let mut finalizers = BitSet::new(total_groups);
-    let mut futures = BitSet::new(total_groups);
-
-    for &(component_id, component_state) in state_tuple {
-        let component_index = component_id as usize;
-        let component = &components[component_index].dfa;
-        let offset = group_offsets[component_index];
-        for group in component.finalizers(component_state).iter() {
-            finalizers.set(offset + group);
-        }
-        for group in component
-            .possible_future_group_ids(component_state)
-            .iter()
-        {
-            futures.set(offset + group);
-        }
-    }
-
-    (finalizers, futures)
-}
-
-fn compute_lexer_component_equivalence_classes(
-    components: &[LexerComponent],
-) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let mut partitions = vec![U8Set::all()];
-    let mut seen_sets = FxHashSet::default();
-
-    for component in components {
-        for state in component.dfa.states() {
-            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
-            for (byte, &target) in state.transitions.iter() {
-                bytes_by_target
-                    .entry(target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
-                    .or_insert_with(|| U8Set::single(byte));
-            }
-            for byte_set in bytes_by_target.into_values() {
-                if seen_sets.insert(byte_set) {
-                    partitions = refine_u8_partitions(partitions, byte_set);
-                }
-            }
-        }
-    }
-
-    let mut class_map = vec![0u8; 256];
-    let mut class_members = vec![Vec::new(); partitions.len()];
-    for (class_id, partition) in partitions.iter().enumerate() {
-        for byte in partition.iter() {
-            class_map[byte as usize] = class_id as u8;
-            class_members[class_id].push(byte);
-        }
-    }
-    (class_map, class_members)
-}
-
-/// Attempt one exact prefix determinization of the final union of independently
-/// compiled lexer partitions. The sparse product tuple contains only component
-/// states still live after the consumed bytes. Product construction stops at
-/// `max_depth` consumed bytes and reconnects each frontier tuple to exact copies
-/// of its live component states with epsilon edges. Thus adaptive
-/// determinization can coalesce a bounded prefix without forcing unrelated
-/// long-running terminals into the product for their entire lifetime.
-///
-/// Construction also stops before allocating the first product state beyond
-/// `state_limit`; callers can then preserve the original epsilon-NFA unchanged.
-/// `None` retains the historical full-product behavior.
-fn try_product_union_components(
-    components: &[LexerComponent],
-    state_limit: usize,
-    transition_limit: usize,
-    max_depth: Option<usize>,
-) -> Option<DFA> {
-    assert!(state_limit > 0, "adaptive lexer state limit must be positive");
-    assert!(transition_limit > 0, "adaptive lexer transition limit must be positive");
-    debug_assert!(components
-        .iter()
-        .all(|component| !component.dfa.has_epsilon_transitions()));
-
-    // A bounded product is not just its determinized prefix: after the cutoff
-    // it appends exact copies of the component DFAs and reconnects frontier
-    // tuples to them.  Account for those copies *before* constructing the
-    // prefix so `state_limit` / `transition_limit` bound the final DFA rather
-    // than only the speculative prefix.  The previous implementation applied
-    // the state cap only to `combined` and then appended every component,
-    // allowing a nominal 100% growth limit to produce a larger lexer.
-    let copied_states = if max_depth.is_some() {
-        components
-            .iter()
-            .map(|component| component.dfa.num_states())
-            .sum::<usize>()
-    } else {
-        0
-    };
-    let copied_transitions = if max_depth.is_some() {
-        components
-            .iter()
-            .map(|component| dfa_transition_count(&component.dfa))
-            .sum::<usize>()
-    } else {
-        0
-    };
-    let product_state_limit = state_limit.checked_sub(copied_states)?;
-    if product_state_limit == 0 {
-        return None;
-    }
-    let product_transition_limit = transition_limit.checked_sub(copied_transitions)?;
-
-    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let setup_started_at = Instant::now();
-    let total_groups = components
-        .iter()
-        .map(|component| component.dfa.num_groups())
-        .sum::<usize>();
-    let mut group_offsets = Vec::with_capacity(components.len());
-    let mut group_offset = 0usize;
-    for component in components {
-        group_offsets.push(group_offset);
-        group_offset += component.dfa.num_groups();
-    }
-    let component_dead_states = components
-        .iter()
-        .map(|component| explicit_dead_sink_state(&component.dfa))
-        .collect::<Vec<_>>();
-    let class_started_at = Instant::now();
-    let (class_map, class_members) = compute_lexer_component_equivalence_classes(components);
-    let class_ms = class_started_at.elapsed().as_secs_f64() * 1000.0;
-    let class_transitions_started_at = Instant::now();
-    let component_class_transitions = components
-        .iter()
-        .map(|component| build_product_class_transitions_for_dfa(&component.dfa, &class_map))
-        .collect::<Vec<_>>();
-    let class_transitions_ms = class_transitions_started_at.elapsed().as_secs_f64() * 1000.0;
-    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let num_classes = class_members.len();
-
-    let mut combined = DFA::new(1);
-    combined.ensure_group_capacity(total_groups);
-    for (component_index, component) in components.iter().enumerate() {
-        let offset = group_offsets[component_index];
-        for local_group in 0..component.dfa.num_groups() {
-            combined.set_group_u8set(
-                (offset + local_group) as u32,
-                *component.dfa.group_id_to_u8set(local_group as u32),
-            );
-        }
-    }
-
-    let mut start = ProductStateTuple::with_capacity(components.len());
-    for component_id in 0..components.len() {
-        start.push((component_id as u32, 0));
-    }
-    let (finalizers, futures) =
-        lexer_component_product_metadata(components, &group_offsets, &start, total_groups);
-    combined.overwrite_state_metadata(0, finalizers, futures);
-
-    #[derive(Clone, PartialEq, Eq, Hash)]
-    enum ProductStateKey {
-        Full(ProductStateTuple),
-        Bounded(usize, ProductStateTuple),
-    }
-    let state_key = |depth: usize, tuple: ProductStateTuple| match max_depth {
-        Some(_) => ProductStateKey::Bounded(depth, tuple),
-        None => ProductStateKey::Full(tuple),
-    };
-
-    let mut state_map = FxHashMap::<ProductStateKey, u32>::default();
-    state_map.insert(state_key(0, start.clone()), 0);
-    let mut worklist = VecDeque::from([(0u32, start, 0usize)]);
-    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
-    let mut frontier_states = Vec::<(u32, ProductStateTuple)>::new();
-    let mut class_buffers = (0..num_classes)
-        .map(|_| ProductStateTuple::new())
-        .collect::<Vec<_>>();
-    let mut class_active = vec![false; num_classes];
-    let mut used_classes = Vec::<usize>::new();
-    let mut projected_byte_transitions = 0usize;
-
-    let state_expand_started_at = Instant::now();
-    while let Some((combined_state, state_tuple, depth)) = worklist.pop_front() {
-        if max_depth.is_some_and(|max_depth| depth >= max_depth) {
-            frontier_states.push((combined_state, state_tuple));
-            continue;
-        }
-        for &(component_id, component_state) in &state_tuple {
-            let component_index = component_id as usize;
-            for &(class_id, target) in
-                &component_class_transitions[component_index][component_state as usize]
-            {
-                let class_index = class_id as usize;
-                if !class_active[class_index] {
-                    class_active[class_index] = true;
-                    used_classes.push(class_index);
-                }
-                if component_dead_states[component_index] == Some(target) {
-                    continue;
-                }
-                class_buffers[class_index].push((component_id, target));
-            }
-        }
-
-        let mut transitions = Vec::with_capacity(used_classes.len());
-        for &class_index in &used_classes {
-            projected_byte_transitions = projected_byte_transitions
-                .saturating_add(class_members[class_index].len());
-            if projected_byte_transitions > product_transition_limit {
-                return None;
-            }
-            let next_tuple = &class_buffers[class_index];
-            let next_depth = depth + 1;
-            let next_key = state_key(next_depth, next_tuple.clone());
-            let target = if let Some(&existing) = state_map.get(&next_key) {
-                existing
-            } else {
-                if combined.num_states() >= product_state_limit {
-                    return None;
-                }
-                let new_state = combined.add_state();
-                let (finalizers, futures) = lexer_component_product_metadata(
-                    components,
-                    &group_offsets,
-                    next_tuple,
-                    total_groups,
-                );
-                combined.overwrite_state_metadata(new_state, finalizers, futures);
-                state_map.insert(next_key, new_state);
-                pending_class_transitions.push(Vec::new());
-                worklist.push_back((new_state, next_tuple.clone(), next_depth));
-                new_state
-            };
-            transitions.push((class_index as u8, target));
-            class_buffers[class_index].clear();
-            class_active[class_index] = false;
-        }
-        used_classes.clear();
-        pending_class_transitions[combined_state as usize] = transitions;
-    }
-    let state_expand_ms = state_expand_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let byte_expand_started_at = Instant::now();
-    let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
-        pending_class_transitions
-            .into_par_iter()
-            .map(|class_transitions| {
-                let byte_capacity = class_transitions
-                    .iter()
-                    .map(|(class_id, _)| class_members[*class_id as usize].len())
-                    .sum::<usize>();
-                const DENSE_BYTE_EXPANSION_THRESHOLD: usize = 96;
-                let transitions = if byte_capacity >= DENSE_BYTE_EXPANSION_THRESHOLD {
-                    let mut target_by_byte = [u32::MAX; 256];
-                    for (class_id, target) in class_transitions {
-                        for &byte in &class_members[class_id as usize] {
-                            target_by_byte[byte as usize] = target;
-                        }
-                    }
-                    target_by_byte
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(byte, target)| {
-                            (target != u32::MAX).then_some((byte as u8, target))
-                        })
-                        .collect()
-                } else {
-                    let mut transitions = Vec::with_capacity(byte_capacity);
-                    for (class_id, target) in class_transitions {
-                        for &byte in &class_members[class_id as usize] {
-                            transitions.push((byte, target));
-                        }
-                    }
-                    if transitions.len() > 1 {
-                        transitions.sort_unstable_by_key(|entry| entry.0);
-                    }
-                    transitions
-                };
-                crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
-            })
-            .collect();
-    for (state, transitions) in combined.states_mut().iter_mut().zip(expanded_transitions) {
-        state.transitions = transitions;
-    }
-
-    if max_depth.is_some() {
-        // Append one exact copy of every independently compiled component. A
-        // product frontier can then resume from the precise component states in
-        // its sparse tuple instead of continuing cross-component
-        // determinization.
-        let mut component_offsets = Vec::with_capacity(components.len());
-        for (component_index, component) in components.iter().enumerate() {
-            let component_offset = combined.num_states() as u32;
-            component_offsets.push(component_offset);
-            for _ in 0..component.dfa.num_states() {
-                combined.add_state();
-            }
-
-            let group_offset = group_offsets[component_index];
-            for (state_index, state) in component.dfa.states().iter().enumerate() {
-                let mapped_state = component_offset + state_index as u32;
-                combined.set_transitions_from_sorted_entries(
-                    mapped_state,
-                    state
-                        .transitions
-                        .iter()
-                        .map(|(byte, &target)| (byte, component_offset + target))
-                        .collect(),
-                );
-                for &target in &state.epsilon_transitions {
-                    combined.add_epsilon_transition(mapped_state, component_offset + target);
-                }
-
-                let mut finalizers = BitSet::new(total_groups);
-                let mut futures = BitSet::new(total_groups);
-                for local_group in state.finalizers.iter() {
-                    finalizers.set(group_offset + local_group);
-                }
-                for local_group in component
-                    .dfa
-                    .possible_future_group_ids(state_index as u32)
-                    .iter()
-                {
-                    futures.set(group_offset + local_group);
-                }
-                combined.overwrite_state_metadata(mapped_state, finalizers, futures);
-            }
-        }
-
-        for (frontier_state, state_tuple) in frontier_states {
-            // The frontier is an epsilon branching state, like the root of the
-            // ordinary partition union. Its exact component children carry
-            // acceptance. Duplicating finalizers on the branch state creates a
-            // second accepting path for the same terminal and is observably
-            // different to the original epsilon-NFA for downstream state-set
-            // analyses. Strict futures may remain cached on the branch state,
-            // just as they are on the ordinary epsilon-union root.
-            let futures = combined.possible_future_group_ids(frontier_state).clone();
-            combined.overwrite_state_metadata(
-                frontier_state,
-                BitSet::new(total_groups),
-                futures,
-            );
-            for (component_id, component_state) in state_tuple {
-                combined.add_epsilon_transition(
-                    frontier_state,
-                    component_offsets[component_id as usize] + component_state,
-                );
-            }
-        }
-
-        debug_assert!(combined.num_states() <= state_limit);
-        debug_assert!(dfa_transition_count(&combined) <= transition_limit);
-    }
-    let byte_expand_ms = byte_expand_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    if profile {
-        eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_product states={} classes={} max_depth={:?} setup_ms={:.3} class_ms={:.3} class_transitions_ms={:.3} state_expand_ms={:.3} byte_expand_ms={:.3}",
-            combined.num_states(),
-            num_classes,
-            max_depth,
-            setup_ms,
-            class_ms,
-            class_transitions_ms,
-            state_expand_ms,
-            byte_expand_ms,
-        );
-    }
-
-    Some(combined)
-}
-
-fn adaptively_determinize_components(
-    inputs: Vec<LexerComponent>,
-    state_limit: usize,
-) -> Vec<LexerComponent> {
-    adaptively_determinize_components_with_limits(
-        inputs,
-        state_limit,
-        adaptive_lexer_growth_percent(),
-        adaptive_lexer_transition_growth_percent(),
-        adaptive_lexer_max_depth(),
-    )
-}
-
-fn adaptively_determinize_components_with_limits(
-    inputs: Vec<LexerComponent>,
-    state_limit: usize,
-    growth_percent: usize,
-    transition_growth_percent: usize,
-    max_depth: Option<usize>,
-) -> Vec<LexerComponent> {
-    if inputs.iter().any(|component| component.protected_residual) {
-        let mut protected = Vec::new();
-        let mut ordinary = Vec::new();
-        for component in inputs {
-            if component.protected_residual {
-                protected.push(component);
-            } else {
-                ordinary.push(component);
-            }
-        }
-
-        let mut output = if ordinary.len() >= 2 {
-            adaptively_determinize_components_with_limits(
-                ordinary,
-                state_limit,
-                growth_percent,
-                transition_growth_percent,
-                max_depth,
-            )
-        } else {
-            ordinary
-        };
-        output.append(&mut protected);
-        output.sort_unstable_by_key(|component| {
-            component.terminal_ids.first().copied().unwrap_or(usize::MAX)
-        });
-        return output;
-    }
-
-    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let started_at = Instant::now();
-    let input_states = inputs.iter().map(|batch| batch.dfa.num_states()).sum::<usize>();
-    let input_transitions = inputs
-        .iter()
-        .map(|batch| dfa_transition_count(&batch.dfa))
-        .sum::<usize>();
-    let input_batches = inputs.len();
-    let terminals = inputs
-        .iter()
-        .map(|batch| batch.terminal_ids.len())
-        .sum::<usize>();
-
-    // Compare against the representation we would actually return if adaptive
-    // determinization is rejected: the disjoint component DFAs plus their one
-    // epsilon-union root.  Using only `input_states` made a 100% growth cap one
-    // state stricter for full products while, paradoxically, bounded products
-    // could exceed it after appending their component copies.
-    let baseline_states = input_states.saturating_add(usize::from(input_batches > 1));
-    let percentage_growth_limit = baseline_states
-        .saturating_mul(growth_percent)
-        .saturating_add(99)
-        / 100;
-    let effective_state_limit = match max_depth {
-        None => state_limit.min(percentage_growth_limit).max(1),
-        Some(_) => state_limit
-            .min(
-                baseline_states.saturating_add(adaptive_lexer_bounded_overhead_states()),
-            )
-            .max(1),
-    };
-    let transition_limit = input_transitions
-        .saturating_mul(transition_growth_percent)
-        / 100;
-    let attempt_started_at = Instant::now();
-    let candidate = try_product_union_components(
-        &inputs,
-        effective_state_limit,
-        transition_limit.max(1),
-        max_depth,
-    );
-    let attempt_ms = attempt_started_at.elapsed().as_secs_f64() * 1000.0;
-    let candidate_transitions = candidate.as_ref().map(dfa_transition_count);
-    let accepted = candidate.as_ref().is_some_and(|dfa| {
-        dfa.num_states() <= effective_state_limit
-            && adaptive_transition_growth_is_acceptable(
-                input_transitions,
-                dfa_transition_count(dfa),
-                transition_growth_percent,
-            )
-    });
-    let terminal_ids = inputs
-        .iter()
-        .flat_map(|component| component.terminal_ids.iter().copied())
-        .collect::<Vec<_>>();
-    let output_states = candidate.as_ref().map_or(input_states, DFA::num_states);
-    let output_transitions = candidate_transitions.unwrap_or(input_transitions);
-
-    if profile {
-        eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} baseline_states={} output_states={} input_transitions={} output_transitions={} accepted={} max_states={} effective_state_limit={} max_depth={:?} bounded_overhead_states={} max_growth_percent={} max_transition_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
-            input_batches,
-            terminals,
-            if accepted { 1 } else { input_batches },
-            input_states,
-            baseline_states,
-            output_states,
-            input_transitions,
-            output_transitions,
-            accepted,
-            state_limit,
-            effective_state_limit,
-            max_depth,
-            adaptive_lexer_bounded_overhead_states(),
-            growth_percent,
-            transition_growth_percent,
-            attempt_ms,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-
-    match candidate {
-        Some(dfa) if accepted => vec![LexerComponent {
-            terminal_ids,
-            dfa,
-            protected_residual: false,
-        }],
-        _ => inputs,
-    }
-}
-
 fn remap_component_groups(
     component: &DFA,
     terminal_ids: &[usize],
@@ -7518,7 +6811,6 @@ fn compile_terminal_partitions(
     visible_labels: Option<&[String]>,
     partitions: &[u32],
     residual_isolation_classes: Option<&[Option<u32>]>,
-    adaptive: bool,
 ) -> DFA {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOKENIZER_TOP").is_some();
@@ -7543,24 +6835,15 @@ fn compile_terminal_partitions(
         return compile_with_plan(build_exclusion_compile_plan_with_labels(exprs, visible_labels));
     }
 
-    // Every partition is compiled exactly as declared, independently of the
-    // adaptive policy. Adaptive determinization is a second, generic step over
-    // the disjoint deterministic components of the combined epsilon-NFA.
+    // Compile each declared partition independently.
     let partition_compile_started_at = Instant::now();
-    let mut components = compile_partition_components(
+    let components = compile_partition_components(
         exprs,
         visible_labels,
         partitions,
         residual_isolation_classes,
     );
     let partition_compile_ms = partition_compile_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let adaptive_started_at = Instant::now();
-    if adaptive {
-        components =
-            adaptively_determinize_components(components, adaptive_lexer_state_limit());
-    }
-    let adaptive_ms = adaptive_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if let [component] = components.as_slice() {
         return remap_component_groups(&component.dfa, &component.terminal_ids, exprs.len());
@@ -7589,11 +6872,10 @@ fn compile_terminal_partitions(
     let futures_ms = futures_started_at.elapsed().as_secs_f64() * 1000.0;
     if profile {
         eprintln!(
-            "[glrmask/profile][tokenizer] partitioned_build terminals={} partitions={} partition_compile_ms={:.3} adaptive_ms={:.3} combine_ms={:.3} futures_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] partitioned_build terminals={} partitions={} partition_compile_ms={:.3} combine_ms={:.3} futures_ms={:.3} total_ms={:.3}",
             exprs.len(),
             num_partitions,
             partition_compile_ms,
-            adaptive_ms,
             combine_ms,
             futures_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -8368,16 +7650,13 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
 /// pairs while compiling every unchanged partition only once. The returned
 /// state map is structural: the global epsilon root maps to the global root,
 /// unchanged components map identically, and protected components use their
-/// certified local product maps. Adaptive prefix determinization remains
-/// available for the ordinary components but never crosses a protected
-/// residual coordinate.
+/// certified local product maps.
 fn prepare_partitioned_expression_pair_with_proof(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
@@ -8581,11 +7860,6 @@ fn prepare_partitioned_expression_pair_with_proof(
         }
     }
 
-    let ordinary = if adaptive && ordinary.len() >= 2 {
-        adaptively_determinize_components(ordinary, adaptive_lexer_state_limit())
-    } else {
-        ordinary
-    };
     let mut pairs = ordinary
         .into_iter()
         .map(|component| {
@@ -8628,7 +7902,6 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
     visible_labels: Option<&[String]>,
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
@@ -8640,7 +7913,6 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
         visible_labels,
         partitions,
         residual_isolation_classes,
-        adaptive,
         vocab,
         repeat_horizons,
         max_token_len,
@@ -8655,7 +7927,6 @@ pub fn prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
     visible_labels: Option<&[String]>,
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
@@ -8667,7 +7938,6 @@ pub fn prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
         visible_labels,
         partitions,
         residual_isolation_classes,
-        adaptive,
         vocab,
         repeat_horizons,
         max_token_len,
@@ -8682,7 +7952,6 @@ pub fn compile_partitioned_expression_pair_with_structural_map(
     visible_labels: Option<&[String]>,
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
@@ -8694,7 +7963,6 @@ pub fn compile_partitioned_expression_pair_with_structural_map(
         visible_labels,
         partitions,
         residual_isolation_classes,
-        adaptive,
         vocab,
         repeat_horizons,
         max_token_len,
@@ -11727,54 +10995,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                     Some(repeat_horizons),
                 )
             };
-            let unsafe_override_horizon = std::env::var(
-                "GLRMASK_UNSAFE_STRUCTURAL_MAP_HORIZON",
-            )
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&horizon| horizon < max_token_len);
-            let override_layered_mapping = if used_identical_mapping
-                || used_homomorphism_mapping
-                || layered_mapping.is_some()
-                || dominance_mapping.is_some()
-            {
-                None
-            } else {
-                unsafe_override_horizon.and_then(|horizon| {
-                    direct_bounded_suffix_state_map(
-                        full_expr,
-                        synthesized_expr,
-                        &full,
-                        &synthesized,
-                        horizon,
-                        relevant_bytes,
-                        None,
-                        None,
-                    )
-                })
-            };
-            let override_dominance_mapping = if used_identical_mapping
-                || used_homomorphism_mapping
-                || layered_mapping.is_some()
-                || dominance_mapping.is_some()
-                || override_layered_mapping.is_some()
-            {
-                None
-            } else {
-                unsafe_override_horizon.and_then(|horizon| {
-                    zero_min_repeat_suffix_state_map(
-                        full_expr,
-                        synthesized_expr,
-                        &full,
-                        &synthesized,
-                        full_component.zero_min_repeat_suffix_trace(),
-                        synthesized_component.zero_min_repeat_suffix_trace(),
-                        horizon,
-                        None,
-                        None,
-                    )
-                })
-            };
             let structural_component_vocab_map_enabled = std::env::var("GLRMASK_DISABLE_STRUCTURAL_COMPONENT_VOCABULARY_MAP")
                 .ok()
                 .is_none_or(|value| {
@@ -11785,8 +11005,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 || used_homomorphism_mapping
                 || layered_mapping.is_some()
                 || dominance_mapping.is_some()
-                || override_layered_mapping.is_some()
-                || override_dominance_mapping.is_some()
                 || !structural_component_vocab_map_enabled
             {
                 None
@@ -11817,8 +11035,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             };
             let used_layered_mapping = layered_mapping.is_some();
             let used_dominance_mapping = dominance_mapping.is_some();
-            let used_override_layered_mapping = override_layered_mapping.is_some();
-            let used_override_dominance_mapping = override_dominance_mapping.is_some();
             let used_vocabulary_mapping = vocabulary_mapping.is_some();
             let mapping = if let Some(mapping) = identical_mapping {
                 Some(ProductComponentStateMap::Fixed(mapping))
@@ -11827,10 +11043,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             } else if let Some(mapping) = layered_mapping {
                 Some(ProductComponentStateMap::Layered(mapping))
             } else if let Some(mapping) = dominance_mapping {
-                Some(ProductComponentStateMap::Dominance(mapping))
-            } else if let Some(mapping) = override_layered_mapping {
-                Some(ProductComponentStateMap::Layered(mapping))
-            } else if let Some(mapping) = override_dominance_mapping {
                 Some(ProductComponentStateMap::Dominance(mapping))
             } else if let Some(mapping) = vocabulary_mapping {
                 Some(ProductComponentStateMap::Vocabulary(mapping))
@@ -11866,10 +11078,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                         "layered_bounded_suffix"
                     } else if used_dominance_mapping {
                         "zero_min_repeat_suffix_dominance"
-                    } else if used_override_layered_mapping {
-                        "UNSAFE_layered_bounded_suffix_override"
-                    } else if used_override_dominance_mapping {
-                        "UNSAFE_zero_min_repeat_suffix_dominance_override"
                     } else if used_vocabulary_mapping {
                         "bounded_component_vocabulary_exact"
                     } else {
@@ -15501,8 +14709,7 @@ mod tests {
         build_regex,
         build_regex_local_small_product,
         build_regex_monolithic,
-        build_regex_partitioned_with_adaptive,
-        try_product_union_components,
+        build_regex_partitioned,
     };
     use super::{compile_product_component_dfa, compile_product_component_dfa_direct};
     use super::{factor_regex_expr, factor_regex_expr_with_shared_cache};
@@ -16614,12 +15821,7 @@ mod tests {
         let residual_classes = [None, None, None];
 
         let baseline_regex =
-            super::build_regex_partitioned_with_adaptive_and_residual_isolation(
-                &expressions,
-                &partitions,
-                &residual_classes,
-                false,
-            );
+            super::build_regex_partitioned_with_options(&expressions, None, &partitions, Some(&residual_classes));
         let mut baseline = baseline_regex.into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.clone().into_boxed_slice())),
@@ -16892,7 +16094,7 @@ mod tests {
 
     fn tokenizer_from_partitioned_exprs(exprs: &[Expr]) -> Tokenizer {
         let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
-        build_regex_partitioned_with_adaptive(exprs, &partitions, false).into_tokenizer(
+        build_regex_partitioned(exprs, &partitions).into_tokenizer(
             exprs.len() as u32,
             Some(Arc::from(exprs.to_vec().into_boxed_slice())),
         )
@@ -16947,11 +16149,9 @@ mod tests {
         let inputs = enumerate_inputs(b"abc ", 5);
 
         for partitions in partitionings {
-            let partitioned = build_regex_partitioned_with_adaptive(
+            let partitioned = build_regex_partitioned(
                 &exprs,
-                &partitions,
-                false,
-            )
+                &partitions)
             .into_tokenizer(
                 exprs.len() as u32,
                 Some(Arc::from(exprs.clone().into_boxed_slice())),
@@ -16990,44 +16190,22 @@ mod tests {
                         .collect::<Vec<_>>(),
                     _ => vec![0; expr_count],
                 };
-                let partitioned = build_regex_partitioned_with_adaptive(
+                let partitioned = build_regex_partitioned(
                     &exprs,
-                    &partitions,
-                    false,
-                )
+                    &partitions)
                 .into_tokenizer(
                     exprs.len() as u32,
                     Some(Arc::from(exprs.clone().into_boxed_slice())),
                 );
-                let adaptive = build_regex_partitioned_with_adaptive(
-                    &exprs,
-                    &partitions,
-                    true,
-                )
-                .into_tokenizer(
-                    exprs.len() as u32,
-                    Some(Arc::from(exprs.clone().into_boxed_slice())),
-                );
-
                 for prefix in &prefixes {
                     assert_eq!(
                         tokenizer_observation(&partitioned, prefix),
                         tokenizer_observation(&monolithic, prefix),
                         "top-level mismatch case={case} partitions={partitions:?} prefix={prefix:?} exprs={exprs:?}",
                     );
-                    assert_eq!(
-                        tokenizer_observation(&adaptive, prefix),
-                        tokenizer_observation(&monolithic, prefix),
-                        "adaptive top-level mismatch case={case} partitions={partitions:?} prefix={prefix:?} exprs={exprs:?}",
-                    );
-
                     let partitioned_roots = partitioned.execute_from_state_end_only(
                         prefix,
                         partitioned.initial_state(),
-                    );
-                    let adaptive_roots = adaptive.execute_from_state_end_only(
-                        prefix,
-                        adaptive.initial_state(),
                     );
                     let monolithic_roots = monolithic.execute_from_state_end_only(
                         prefix,
@@ -17046,19 +16224,6 @@ mod tests {
                                 suffix,
                             ),
                             "residual mismatch case={case} partitions={partitions:?} prefix={prefix:?} suffix={suffix:?} exprs={exprs:?}",
-                        );
-                        assert_eq!(
-                            execute_state_set_observation(
-                                &adaptive,
-                                &adaptive_roots,
-                                suffix,
-                            ),
-                            execute_state_set_observation(
-                                &monolithic,
-                                &monolithic_roots,
-                                suffix,
-                            ),
-                            "adaptive residual mismatch case={case} partitions={partitions:?} prefix={prefix:?} suffix={suffix:?} exprs={exprs:?}",
                         );
                     }
                 }
@@ -18226,7 +17391,6 @@ mod tests {
             &partitions,
             None,
             retained,
-            Some(false),
             true,
         )
         .expect("empty complex terminal should not force product-trace fallback");
@@ -18284,7 +17448,6 @@ mod tests {
             &partitions,
             None,
             Arc::from(exprs.clone().into_boxed_slice()),
-            Some(false),
             false,
         )
         .expect("finite exclusion should retain product-trace coordinates");
@@ -19157,7 +18320,7 @@ mod tests {
                 max: None,
             },
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1])
             .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
@@ -19182,11 +18345,9 @@ mod tests {
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"z".to_vec()),
         ];
-        let regex = super::build_regex_partitioned_with_adaptive(
+        let regex = super::build_regex_partitioned(
             &expressions,
-            &[7, 7, 9],
-            false,
-        );
+            &[7, 7, 9]);
         assert_eq!(
             regex.dfa.states()[0].epsilon_transitions.len(),
             2,
@@ -19199,40 +18360,6 @@ mod tests {
         let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
         assert!(result.matches.iter().any(|matched| matched.id == 0));
         assert!(!result.end_state.is_empty());
-    }
-
-    #[test]
-    fn protected_residual_components_survive_adaptive_determinization() {
-        let expressions = vec![
-            Expr::U8Seq(b"same".to_vec()),
-            Expr::U8Seq(b"same".to_vec()),
-            Expr::U8Seq(b"ordinary-a".to_vec()),
-            Expr::U8Seq(b"ordinary-b".to_vec()),
-        ];
-        let isolation = [Some(100), Some(101), None, None];
-        let components = super::compile_partition_components(
-            &expressions,
-            None,
-            &[0, 1, 2, 3],
-            Some(&isolation),
-        );
-
-        let output = super::adaptively_determinize_components_with_limits(
-            components,
-            32_768,
-            1_000,
-            1_000,
-            Some(1),
-        );
-
-        for protected_terminal in [0usize, 1] {
-            let component = output
-                .iter()
-                .find(|component| component.terminal_ids.contains(&protected_terminal))
-                .expect("protected terminal must remain present");
-            assert!(component.protected_residual);
-            assert_eq!(component.terminal_ids, vec![protected_terminal]);
-        }
     }
 
     #[test]
@@ -19249,16 +18376,11 @@ mod tests {
                 max: Some(4),
             },
         ];
-        let regex = super::build_regex_partitioned_with_adaptive_and_residual_isolation(
-            &expressions,
-            &[0, 1],
-            &[Some(200), Some(201)],
-            true,
-        );
+        let regex = super::build_regex_partitioned_with_options(&expressions, None, &[0, 1], Some(&[Some(200), Some(201)]));
         assert_eq!(
             regex.dfa.states()[0].epsilon_transitions.len(),
             2,
-            "protected coordinates must not collapse into one adaptive product",
+            "protected coordinates must remain in separate partitions",
         );
         let tokenizer = regex.into_tokenizer(
             expressions.len() as u32,
@@ -19351,11 +18473,9 @@ mod tests {
             },
             Expr::Epsilon,
         ];
-        let regex = build_regex_partitioned_with_adaptive(
+        let regex = build_regex_partitioned(
             &expressions,
-            &[7, 7, 9, 11],
-            false,
-        );
+            &[7, 7, 9, 11]);
         let exact = regex.dfa;
         let mut recomputed = exact.clone();
         recomputed.recompute_possible_futures();
@@ -19364,260 +18484,6 @@ mod tests {
             exact, recomputed,
             "transported component futures and epsilon-root union must match the generic fixpoint",
         );
-    }
-
-    #[test]
-    fn bounded_product_trial_stops_before_cross_pattern_blowup() {
-        let expressions = vec![
-            parse_regex(r"\w+_(\w_)?\d+", false),
-            parse_regex(r"(\w|-){12}", false),
-        ];
-        let components =
-            super::compile_partition_components(&expressions, None, &[0, 1], None);
-        assert!(
-            try_product_union_components(&components, 32, usize::MAX, None).is_none(),
-            "the bounded trial unexpectedly completed within 32 product states",
-        );
-    }
-
-    #[test]
-    fn adaptive_transition_growth_limit_is_inclusive() {
-        assert!(super::adaptive_transition_growth_is_acceptable(100, 600, 600));
-        assert!(!super::adaptive_transition_growth_is_acceptable(100, 601, 600));
-    }
-
-    #[test]
-    fn adaptive_transition_growth_rejection_keeps_partition_components() {
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"ab".to_vec()),
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
-                min: 1,
-                max: None,
-            },
-        ];
-        let components =
-            super::compile_partition_components(&expressions, None, &[0, 1, 2], None);
-        let original_terminal_ids = components
-            .iter()
-            .map(|component| component.terminal_ids.clone())
-            .collect::<Vec<_>>();
-
-        let retained = super::adaptively_determinize_components_with_limits(
-            components,
-            32_768,
-            100,
-            1,
-            None,
-        );
-
-        assert_eq!(retained.len(), original_terminal_ids.len());
-        assert_eq!(
-            retained
-                .iter()
-                .map(|component| component.terminal_ids.clone())
-                .collect::<Vec<_>>(),
-            original_terminal_ids,
-        );
-    }
-
-    #[test]
-    fn bounded_adaptive_product_accounts_for_copied_component_states() {
-        let expressions = vec![
-            Expr::U8Seq(b"abcd".to_vec()),
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
-                min: 1,
-                max: Some(8),
-            },
-        ];
-        let components =
-            super::compile_partition_components(&expressions, None, &[0, 1], None);
-        let untouched_states = 1usize
-            + components
-                .iter()
-                .map(|component| component.dfa.num_states())
-                .sum::<usize>();
-
-        assert!(
-            try_product_union_components(
-                &components,
-                untouched_states,
-                usize::MAX,
-                Some(1),
-            )
-            .is_none(),
-            "a depth-one prefix plus copied suffix DFAs must not fit inside the untouched-union state count",
-        );
-
-        let expanded = try_product_union_components(
-            &components,
-            untouched_states.saturating_mul(2),
-            usize::MAX,
-            Some(1),
-        )
-        .expect("the bounded product should fit once explicit growth is allowed");
-        assert!(
-            expanded.num_states() > untouched_states,
-            "this fixture should expose the bounded prefix + copied-component overhead",
-        );
-    }
-
-    #[test]
-    fn adaptive_bounded_depth_uses_additive_prefix_budget() {
-        let expressions = vec![
-            Expr::U8Seq(b"abc".to_vec()),
-            Expr::U8Seq(b"abd".to_vec()),
-        ];
-        let components =
-            super::compile_partition_components(&expressions, None, &[0, 1], None);
-        let untouched_states = 1usize
-            + components
-                .iter()
-                .map(|component| component.dfa.num_states())
-                .sum::<usize>();
-
-        let bounded = super::adaptively_determinize_components_with_limits(
-            super::compile_partition_components(&expressions, None, &[0, 1], None),
-            32_768,
-            100,
-            600,
-            Some(1),
-        );
-        assert_eq!(
-            bounded.len(),
-            1,
-            "bounded depth should use its explicit additive prefix-state budget rather than the full-product percentage budget",
-        );
-        assert!(
-            bounded[0].dfa.num_states()
-                <= untouched_states + super::adaptive_lexer_bounded_overhead_states(),
-        );
-
-        let full = super::adaptively_determinize_components_with_limits(
-            components,
-            32_768,
-            100,
-            600,
-            None,
-        );
-        let [combined] = full.as_slice() else {
-            panic!("full mode should accept the compressing exact product");
-        };
-        assert!(
-            combined.dfa.num_states() < untouched_states,
-            "the exact product should be smaller than the untouched epsilon union for this shared-prefix fixture",
-        );
-        assert!(
-            !combined.dfa.has_epsilon_transitions(),
-            "the accepted exact product should remain deterministic",
-        );
-    }
-
-    #[test]
-    fn adaptive_policy_does_not_change_per_partition_compilation() {
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"ab".to_vec()),
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
-                min: 1,
-                max: None,
-            },
-            Expr::U8Seq(b"c".to_vec()),
-        ];
-        let partitions = [7, 7, 9, 11];
-        let components =
-            super::compile_partition_components(&expressions, None, &partitions, None);
-        let expected_terminal_ids = [vec![0, 1], vec![2], vec![3]];
-
-        assert_eq!(components.len(), expected_terminal_ids.len());
-        for (component, expected_ids) in components.iter().zip(expected_terminal_ids) {
-            assert_eq!(component.terminal_ids, expected_ids);
-            let expected = super::compile_terminal_ids(&expressions, None, &expected_ids);
-            assert_eq!(component.dfa, expected);
-        }
-    }
-
-    #[test]
-    fn adaptive_prefix_depth_preserves_partitioned_semantics() {
-        let expressions = vec![
-            Expr::U8Seq(b"abcd".to_vec()),
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
-                min: 1,
-                max: Some(8),
-            },
-        ];
-        let baseline = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
-            .into_tokenizer(
-                expressions.len() as u32,
-                Some(Arc::from(expressions.clone().into_boxed_slice())),
-            );
-        let components =
-            super::compile_partition_components(&expressions, None, &[0, 1], None);
-        let prefix_dfa = try_product_union_components(&components, 32_768, usize::MAX, Some(1))
-            .expect("depth-one adaptive product should fit");
-        assert!(prefix_dfa.states()[0].epsilon_transitions.is_empty());
-        assert!(
-            prefix_dfa.states()[0]
-                .transitions
-                .iter()
-                .any(|(_, &target)| !prefix_dfa.states()[target as usize].epsilon_transitions.is_empty()),
-            "the depth-one product should resume exact component states at its frontier",
-        );
-        let adaptive = super::Regex { dfa: prefix_dfa }.into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-
-        for input in enumerate_inputs(b"abcdx", 8) {
-            assert_eq!(
-                tokenizer_observation(&adaptive, &input),
-                tokenizer_observation(&baseline, &input),
-                "depth-one adaptive prefix differed for input {input:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn adaptive_final_nfa_determinization_preserves_partitioned_semantics() {
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"ab".to_vec()),
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
-                min: 1,
-                max: None,
-            },
-        ];
-        let singleton = build_regex_partitioned_with_adaptive(
-            &expressions,
-            &[0, 1, 2],
-            false,
-        )
-        .into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.clone().into_boxed_slice())),
-        );
-        let adaptive = build_regex_partitioned_with_adaptive(
-            &expressions,
-            &[0, 1, 2],
-            true,
-        )
-        .into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-
-        for input in enumerate_inputs(b"ab", 4) {
-            assert_eq!(
-                tokenizer_observation(&adaptive, &input),
-                tokenizer_observation(&singleton, &input),
-                "adaptive partitioning differed for input {input:?}",
-            );
-        }
     }
 
     #[test]
@@ -19951,7 +18817,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_final_representation_matches_monolithic_for_ignore_and_repeated_terminals() {
+    fn partitioned_representation_matches_monolithic_for_ignore_and_repeated_terminals() {
         let expressions = vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(b" ".to_vec())),
@@ -19970,11 +18836,9 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.clone().into_boxed_slice())),
         );
-        let adaptive = build_regex_partitioned_with_adaptive(
+        let partitioned = build_regex_partitioned(
             &expressions,
-            &[0, 1, 2, 3],
-            true,
-        )
+            &[0, 1, 2, 3])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
@@ -19982,9 +18846,9 @@ mod tests {
 
         for input in enumerate_inputs(b" abc", 6) {
             assert_eq!(
-                tokenizer_observation(&adaptive, &input),
+                tokenizer_observation(&partitioned, &input),
                 tokenizer_observation(&monolithic, &input),
-                "adaptive tokenizer differed for input {input:?}",
+                "partitioned tokenizer differed for input {input:?}",
             );
         }
     }
@@ -19995,11 +18859,9 @@ mod tests {
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"ab".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &[0, 1],
-            false,
-        )
+            &[0, 1])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),

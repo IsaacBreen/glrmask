@@ -4276,7 +4276,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
-    use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned_with_adaptive;
+    use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use std::collections::BTreeSet;
@@ -4412,11 +4412,10 @@ mod tests {
                 max: None,
             },
         ];
-        let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+        let tokenizer = build_tokenizer_from_exprs_partitioned(
             &expressions,
             None,
             &[0, 1, 2, 2],
-            false,
         );
         assert!(tokenizer.has_deterministic_dispatch());
         assert!(pm_vocab_equiv_supported(&tokenizer));
@@ -4493,11 +4492,10 @@ mod tests {
                 expressions.push(expression);
                 partitions.push(rng.gen_range(0..3));
             }
-            let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+            let tokenizer = build_tokenizer_from_exprs_partitioned(
                 &expressions,
                 None,
                 &partitions,
-                false,
             );
             assert_demanded_pm_matches_direct(
                 &tokenizer,
@@ -4509,11 +4507,10 @@ mod tests {
 
     #[test]
     fn no_delayed_terminals_produces_complete_empty_possible_matches() {
-        let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+        let tokenizer = build_tokenizer_from_exprs_partitioned(
             &[Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())],
             None,
             &[0, 1],
-            false,
         );
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let demand = delayed_terminal_demand(&tokenizer);
@@ -4662,11 +4659,10 @@ mod tests {
             expressions.push(Expr::U8Seq(vec![terminal as u8]));
             partitions.push(terminal % 3);
         }
-        let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+        let tokenizer = build_tokenizer_from_exprs_partitioned(
             &expressions,
             None,
             &partitions,
-            false,
         );
         assert!(tokenizer.has_epsilon_transitions());
 

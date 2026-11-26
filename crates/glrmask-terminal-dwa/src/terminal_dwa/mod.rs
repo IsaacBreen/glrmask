@@ -110,7 +110,6 @@ pub struct PartitionLocalSynthesisPlan {
     pub residual_isolation_classes: Arc<[Option<u32>]>,
     pub protected_terminal_ids: Arc<[u32]>,
     pub labels: Arc<[String]>,
-    pub adaptive: bool,
     pub global_max_token_len: usize,
 }
 
@@ -784,7 +783,6 @@ fn build_partition_local_tokenizer(
         Some(&plan.labels),
         &plan.partition_ids,
         &plan.residual_isolation_classes,
-        plan.adaptive,
         vocab,
         &VocabularyRepeatHorizonCache::new(),
         max_token_len,

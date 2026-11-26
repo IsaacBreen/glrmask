@@ -6454,7 +6454,6 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
     let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &lowered,
         false,
-        true,
     );
     assert!(tokenizer.num_states() > 0);
 
@@ -6465,7 +6464,6 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
     let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &reparsed_lowered,
         false,
-        true,
     );
     assert_eq!(
         tokenizer.initial_epsilon_branch_count(),
@@ -6488,7 +6486,6 @@ fn format_annotation_recognized_and_unknown_names_reuse_plain_string_partitions(
 #[test]
 fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_partitions() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _depth = EnvVarGuard::set("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH", "full");
     let schema = json!({
         "type": "object",
         "properties": {
@@ -6508,7 +6505,6 @@ fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_par
     let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &prepared,
         false,
-        true,
     );
     assert_eq!(
         tokenizer.initial_epsilon_branch_count(),
@@ -6556,7 +6552,6 @@ fn dump_pathological_nested_repeat_prepared_terminal() {
 #[test]
 fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_determinization() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _depth = EnvVarGuard::set("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH", "full");
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../benches/data/o9838_problem_schema.json"
     ))
@@ -6569,7 +6564,6 @@ fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_d
     let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &prepared,
         false,
-        true,
     );
 
     assert!(

@@ -11426,10 +11426,9 @@ nt start = item item? item?;
         )
         .unwrap();
         let grammar = crate::grammar::ast::lower(&grammar).unwrap();
-        let constraint = crate::compiler::pipeline::compile_owned_with_lexer_adaptive(
+        let constraint = crate::compiler::pipeline::compile_owned_partitioned_for_test(
             grammar,
             &vocab,
-            false,
         );
         assert!(constraint.tokenizer_has_epsilon_transitions);
 
@@ -11538,10 +11537,9 @@ nt start = item item? item?;
         )
         .unwrap();
         let grammar = crate::grammar::ast::lower(&grammar).unwrap();
-        let constraint = crate::compiler::pipeline::compile_owned_with_lexer_adaptive(
+        let constraint = crate::compiler::pipeline::compile_owned_partitioned_for_test(
             grammar,
             &vocab,
-            false,
         );
 
         let mut state = constraint.start();

@@ -12285,7 +12285,7 @@ mod tests {
     use crate::automata::weighted::dwa::DwaTransitionMap;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::{
-        build_regex_monolithic as build_regex, build_regex_partitioned_with_adaptive,
+        build_regex_monolithic as build_regex, build_regex_partitioned,
     };
 
     fn tokenizer(expressions: Vec<Expr>) -> Tokenizer {
@@ -12720,7 +12720,7 @@ mod tests {
         let monolithic = tokenizer(expressions.clone());
         let terminal_count = expressions.len() as u32;
         let partitioned =
-            build_regex_partitioned_with_adaptive(&expressions, &[0, 1, 2], false)
+            build_regex_partitioned(&expressions, &[0, 1, 2])
                 .into_tokenizer(
                     terminal_count,
                     Some(Arc::from(expressions.into_boxed_slice())),
@@ -13197,7 +13197,7 @@ mod tests {
             Expr::U8Seq(b"other".to_vec()),
         ];
         let terminal_count = expressions.len() as u32;
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1, 2], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1, 2])
             .into_tokenizer(
                 terminal_count,
                 Some(Arc::from(expressions.into_boxed_slice())),

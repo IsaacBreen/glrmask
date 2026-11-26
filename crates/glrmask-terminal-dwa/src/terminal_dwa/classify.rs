@@ -7039,7 +7039,7 @@ mod tests {
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::{
         build_regex,
-        build_regex_partitioned_with_adaptive,
+        build_regex_partitioned,
     };
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
@@ -7202,7 +7202,7 @@ mod tests {
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"b".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1])
             .into_tokenizer(
                 expressions.len() as u32,
                 Some(Arc::from(expressions.into_boxed_slice())),
@@ -7229,7 +7229,7 @@ mod tests {
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"cd".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1])
             .into_tokenizer(
                 expressions.len() as u32,
                 Some(Arc::from(expressions.into_boxed_slice())),
@@ -7383,11 +7383,9 @@ mod tests {
             Expr::Choice(vec![Expr::U8Seq(b"xy".to_vec()), Expr::U8Seq(b"z".to_vec())]),
         ];
         let num_terminals = expressions.len();
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &[0, 1, 2, 3],
-            false,
-        )
+            &[0, 1, 2, 3])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
@@ -7435,11 +7433,9 @@ mod tests {
             Expr::Seq(vec![Expr::U8Seq(b"x".to_vec()), Expr::U8Seq(b"y".to_vec())]),
         ];
         let num_terminals = expressions.len();
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &[0, 1, 2, 3],
-            false,
-        )
+            &[0, 1, 2, 3])
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
@@ -7480,7 +7476,7 @@ mod tests {
     #[test]
     fn finite_literal_classification_propagates_later_token_boundaries() {
         let expressions = vec![Expr::U8Seq(b"+".to_vec()), Expr::U8Seq(b"a".to_vec())];
-        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1])
             .into_tokenizer(
                 expressions.len() as u32,
                 Some(Arc::from(expressions.into_boxed_slice())),
@@ -7521,11 +7517,9 @@ mod tests {
             .map(|terminal| Expr::U8Seq(format!("t{terminal:02}").into_bytes()))
             .collect::<Vec<_>>();
         let partitions = (0..expressions.len() as u32).collect::<Vec<_>>();
-        let tokenizer = build_regex_partitioned_with_adaptive(
+        let tokenizer = build_regex_partitioned(
             &expressions,
-            &partitions,
-            false,
-        )
+            &partitions)
         .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),

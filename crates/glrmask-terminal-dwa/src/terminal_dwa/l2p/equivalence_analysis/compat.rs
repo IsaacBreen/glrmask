@@ -281,11 +281,9 @@ pub fn compute_active_terminal_language_byte_classes(
         return Some([0u8; 256]);
     }
     let partitions = (0..active_exprs.len() as u32).collect::<Vec<_>>();
-    let regex = crate::automata::lexer::compile::build_regex_partitioned_with_adaptive(
+    let regex = crate::automata::lexer::compile::build_regex_partitioned(
         &active_exprs,
-        &partitions,
-        false,
-    );
+        &partitions);
     let terminal_count = active_exprs.len() as u32;
     let active_tokenizer = regex.into_tokenizer(
         terminal_count,
