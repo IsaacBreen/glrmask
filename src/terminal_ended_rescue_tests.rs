@@ -669,13 +669,12 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
 
 /// The rescued 2633 template costs more than the old 10,000,000-unit template
 /// budget (template_specialization alone charges ~8.4M units), so under an
-/// explicit small budget the rescue declines within ~2 s and the public
-/// boundary returns the original typed decline. This pins the decline and
-/// bounds the time spent before it is returned instead of recompiling with
-/// TokenTrie. The production default is now sized for real SQL/Go benchmarks,
+/// explicit small budget the rescue declines and returns the original typed
+/// decline instead of recompiling with TokenTrie. Timing is diagnostic only.
+/// The production default is now sized for real SQL/Go benchmarks,
 /// so the old limit is set explicitly here.
 #[test]
-fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
+fn phase1_witness_2633_rescue_returns_typed_budget_decline() {
     let _serial = serial();
     enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
@@ -695,11 +694,8 @@ fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
             "[terminal-ended-rescue] witness_2633 strategy={strategy:?} decline_ms={:.1} error={error}",
             started.elapsed().as_secs_f64() * 1000.0,
         );
-        assert!(
-            started.elapsed().as_secs_f64() < 10.0,
-            "witness_2633 {strategy:?} took {:?} before returning its decline",
-            started.elapsed(),
-        );
+        assert_eq!(error.kind(), crate::ErrorKind::ResourceLimit);
+        assert!(error.message().ends_with(" build budget exhausted"));
     }
 }
 
@@ -851,7 +847,7 @@ fn rescue_disabled_returns_the_normal_typed_decline() {
 
 /// Fuzz pass-A cases on 605da7551 that exhausted memory in grammar
 /// normalization or ParserDwa construction before the budget could decline.
-/// Each must publish exact masks within the time bound under both template
+/// Each must publish exact masks under the explicit work budget in both template
 /// strategies through the rescue; a rescue decline is returned as the original
 /// typed strategy error.
 fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[isize])]) {
@@ -871,11 +867,9 @@ fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[i
             started.elapsed().as_secs_f64() * 1000.0,
             compiled.parser_backend(),
         );
-        assert!(
-            started.elapsed().as_secs_f64() < 10.0,
-            "{label} {strategy:?} took {:?} before publishing",
-            started.elapsed(),
-        );
+        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
+        // Keep elapsed time in the log, not as a correctness assertion: the
+        // structural work budget is independent of CPU contention.
         check_matches_token_trie(&compiled, &reference, &case);
         check_exact_oracle(&compiled, &case);
     }
