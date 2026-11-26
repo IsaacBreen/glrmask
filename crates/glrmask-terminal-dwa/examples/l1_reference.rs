@@ -57,7 +57,7 @@ fn check(tokenizer: &Tokenizer, vocab: &Vocab, active: &[bool]) {
             let ends = tokenizer.execute_from_state_end_only(bytes, raw_state);
             for (terminal, &enabled) in active.iter().enumerate() {
                 let expected = enabled
-                    && ends.clone().into_iter().any(|end| {
+                    && ends.iter().copied().any(|end| {
                         tokenizer
                             .matched_terminals_iter(end)
                             .any(|id| id as usize == terminal)
@@ -69,6 +69,7 @@ fn check(tokenizer: &Tokenizer, vocab: &Vocab, active: &[bool]) {
                 let actual = result.as_ref().is_some_and(|artifact| {
                     let tsid =
                         artifact.id_map.tokenizer_states.original_to_internal[raw_state as usize];
+                    assert_ne!(tsid, u32::MAX, "unscoped L1 omitted a tokenizer state");
                     let token = artifact
                         .id_map
                         .internal_token_for_original(original_token)
