@@ -2,7 +2,7 @@
 
 ## 1.0.0 (unreleased)
 
-- Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
+- Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module. C and C++ no longer expose a direct Grammar token-set binding.
 - Lark numeric token atoms, lists, complements and wildcards are rejected; use named token externs bound on a Module.
 
 From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the public API in Rust, Python, Node.js, C or C++, GLRM syntax, or which tokens a mask allows for a given grammar and vocabulary (bug fixes aside). Minor releases may add things, including new error kinds. Not covered: items hidden from the docs (`#[doc(hidden)]`), the `internal-api` feature, anything under a `__private` path, and saved bytes: a Module or Constraint saved by one version may not load in another, so keep the grammar source. A minor release may raise the minimum supported Rust version.

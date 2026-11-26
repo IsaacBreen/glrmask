@@ -175,8 +175,6 @@ GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* grammar
 /// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
 /// or the value is the wrong kind for it. Bind token externs on a Module.
 GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_expr* value);
-/// Rejected with GLRMASK_INVALID_INPUT: token sets belong on a Module.
-GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_token_set* value);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* grammar,glrmask_grammar** out);
 /// Frees the handle.

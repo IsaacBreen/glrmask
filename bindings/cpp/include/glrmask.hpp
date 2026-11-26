@@ -259,10 +259,6 @@ public:
     }
     /// Binds the extern `name` to a portable expression.
     void bind(std::string_view name, const Expr& value);
-    /// Rejected: bind token sets on a Module instead.
-    void bind(std::string_view name, const TokenSet& value) {
-        detail::check(glrmask_grammar_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
-    }
     /// The grammar's externs, in declaration order.
     Externs externs() const {
         glrmask_externs* p_all = nullptr;

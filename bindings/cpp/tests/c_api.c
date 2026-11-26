@@ -120,7 +120,6 @@ int main(void) {
         glrmask_expr_free(nested);
         const uint32_t id=5; glrmask_token_set* tokens=NULL; glrmask_expr* leaf=NULL;
         CHECK(glrmask_token_set_new(&id,1,&tokens)==GLRMASK_OK);
-        CHECK(glrmask_grammar_bind_tokens(parent,"item",4,tokens)==GLRMASK_INVALID_INPUT);
         const glrmask_expr_operand token_operand={GLRMASK_OPERAND_TOKEN_SET,tokens};
         CHECK(glrmask_expr_sequence(&token_operand,1,&leaf)==GLRMASK_OK);
         glrmask_grammar* bad=NULL;

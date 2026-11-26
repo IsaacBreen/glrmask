@@ -100,7 +100,6 @@ void reject_module_expr_in_grammar() {
     auto prepared = source.precompile(v);
     auto host = Grammar::from_glrm("start s extern grammar item nt s = item");
     auto token = TokenSet({5});
-    throws([&]{ host.bind("item",token); }, GLRMASK_INVALID_INPUT);
     for (const auto& expr : {Expr::choice({token,Expr::literal("x")}), Expr::sequence({Expr::literal(""),token}), Expr::sequence({Expr::choice({token,Expr::literal("x")}),Expr::literal("")})}) {
         throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
         throws([&]{ host.bind("item",expr); }, GLRMASK_INVALID_INPUT);
