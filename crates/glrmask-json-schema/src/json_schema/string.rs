@@ -29,7 +29,6 @@ use super::pattern_splitting::{
 };
 
 
-const PROGRAMMATIC_JS_WS_REGEX: &str = r"[ \t\n\r]*";
 fn use_lazy_ordinary_bounded_string(config: &JsonSchemaConfig) -> bool {
     config.lazy_ordinary_bounded_strings
 }
@@ -92,16 +91,6 @@ fn plain_ascii_pattern_char_expr(byte: u8, mode: JsonStringCompatMode, at_start:
     ])
 }
 
-fn is_ascii_js_identifier_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphabetic() || matches!(first, b'_' | b'$')) {
-        return false;
-    }
-    bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
-}
 
 fn encoded_json_key_regex(encoded: &str) -> String {
     // Keep literal property spelling exactly as serde_json emits it.
@@ -1955,7 +1944,7 @@ impl<'a> Lowerer<'a> {
         self.lower_literal_key_colon_with_prefix(b"", key)
     }
 
-    fn lower_literal_key_colon_exact_with_prefix(
+    pub fn lower_literal_key_colon_with_prefix(
         &self,
         prefix: &[u8],
         key: &str,
@@ -1987,55 +1976,6 @@ impl<'a> Lowerer<'a> {
                 encoded_regex
             ))
         }
-    }
-
-    pub fn lower_literal_key_colon_with_prefix(
-        &mut self,
-        prefix: &[u8],
-        key: &str,
-    ) -> GrammarExpr {
-        let exact = self.lower_literal_key_colon_exact_with_prefix(prefix, key);
-        if !self.dynamic_value_enabled() || !is_ascii_js_identifier_name(key) {
-            return exact;
-        }
-
-        // JavaScript object literals permit both quoted and IdentifierName keys
-        // with arbitrary token whitespace around `:` and after a separating
-        // comma. Keep the ordinary JSON spelling as an alternative so this
-        // mode only broadens key syntax.
-        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        let encoded_regex = encoded_json_key_regex(&encoded);
-        let key_regex = regex_escape(key);
-        let (quoted, unquoted) = if prefix == b", " {
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#",{PROGRAMMATIC_JS_WS_REGEX}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#",{PROGRAMMATIC_JS_WS_REGEX}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        } else if prefix.is_empty() {
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#"{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#"{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        } else {
-            let prefix_regex = regex_escape(&String::from_utf8_lossy(prefix));
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#"{prefix_regex}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#"{prefix_regex}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        };
-        choice(vec![exact, quoted, unquoted])
     }
 
     pub fn lower_literal_key_colon_with_prefix_and_suffix(
@@ -2218,7 +2158,7 @@ impl<'a> Lowerer<'a> {
                     exclude: Box::new(choice(
                         global_overlaps
                             .iter()
-                            .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", key))
+                            .map(|key| self.lower_literal_key_colon_with_prefix(b"", key))
                             .collect::<Vec<_>>(),
                     )),
                 }
@@ -2384,7 +2324,7 @@ impl<'a> Lowerer<'a> {
             if local_patterns.is_empty() && self.llguidance_compat_enabled() {
                 let excluded = fixed_keys
                     .iter()
-                    .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", key))
+                    .map(|key| self.lower_literal_key_colon_with_prefix(b"", key))
                     .collect::<Vec<_>>();
                 let expr = GrammarExpr::Exclude {
                     expr: Box::new(seq(vec![
@@ -2623,7 +2563,7 @@ impl<'a> Lowerer<'a> {
             .shared_ap_literal_keys
             .clone()
             .into_iter()
-            .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", &key))
+            .map(|key| self.lower_literal_key_colon_with_prefix(b"", &key))
             .collect::<Vec<_>>();
         for pattern in self.shared_ap_patterns.clone() {
             terminal_excluded.push(self.pattern_key_colon_full_terminal_language(&pattern)?);
@@ -2673,7 +2613,7 @@ impl<'a> Lowerer<'a> {
         for key in self.shared_ap_literal_keys.clone() {
             let literal = self.lower_literal_key_colon(&key);
             excluded.push(literal.clone());
-            terminal_excluded.push(self.lower_literal_key_colon_exact_with_prefix(b"", &key));
+            terminal_excluded.push(self.lower_literal_key_colon_with_prefix(b"", &key));
         }
         for pattern in self.shared_ap_patterns.clone() {
             excluded.extend(self.pattern_key_colon_shared_addback_alternatives(&pattern)?);
@@ -2719,33 +2659,7 @@ impl<'a> Lowerer<'a> {
             return Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE));
         }
 
-        if !self.dynamic_value_enabled() {
-            self.ensure_shared_additional_excluded_terminal()?;
-            self.add_pattern_terminal_rule(
-                JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
-                GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![
-                        r(json_additional_key_string_rule()),
-                        self.key_separator_expr(),
-                    ])),
-                    exclude: Box::new(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)),
-                },
-            );
-            self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
-            self.record_shared_additional_key_provenance()?;
-            return Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE));
-        }
-
-        let mut excluded = self
-            .shared_ap_literal_keys
-            .clone()
-            .into_iter()
-            .map(|key| self.lower_literal_key_colon(&key))
-            .collect::<Vec<_>>();
-        for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(&pattern)?));
-        }
-
+        self.ensure_shared_additional_excluded_terminal()?;
         self.add_pattern_terminal_rule(
             JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
             GrammarExpr::Exclude {
@@ -2753,7 +2667,7 @@ impl<'a> Lowerer<'a> {
                     r(json_additional_key_string_rule()),
                     self.key_separator_expr(),
                 ])),
-                exclude: Box::new(choice(excluded)),
+                exclude: Box::new(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)),
             },
         );
         self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
@@ -2772,7 +2686,7 @@ impl<'a> Lowerer<'a> {
             if self.property_name_matches_pattern_cached(pattern, key)? {
                 pattern_expr = GrammarExpr::Exclude {
                     expr: Box::new(pattern_expr),
-                    exclude: Box::new(self.lower_literal_key_colon_exact_with_prefix(b"", key)),
+                    exclude: Box::new(self.lower_literal_key_colon_with_prefix(b"", key)),
                 };
             }
         }

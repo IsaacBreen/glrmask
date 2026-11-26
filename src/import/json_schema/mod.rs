@@ -3,8 +3,6 @@ pub(crate) use glrmask_json_schema::schema_to_named_grammar_for_dynamic;
 
 pub(crate) use glrmask_json_schema::{
     prepare_named_grammar, prepare_named_grammar_for_dump, schema_to_named_grammar,
-    schema_to_named_grammar_with_dynamic_value_token,
-    schema_to_named_grammar_with_programmatic_value_tokens,
 };
 
 pub(crate) use glrmask_json_schema::__private::prepare_named_grammar_for_lowering;
