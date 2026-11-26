@@ -10,7 +10,6 @@ mod domain;
 mod effects;
 mod coarse;
 mod positive;
-mod template;
 pub(super) mod trim;
 mod compare;
 use crate::compiler::glr::table::GLRTable;
@@ -34,9 +33,6 @@ pub(super) fn build(tables:&[&GLRTable],offsets:&[u32],links:&[ScopedSubgrammarL
 }
 
 impl Certificate {
-    pub(super) fn template_support(&self)->Option<template::TemplateReadSupport>{
-        template::TemplateReadSupport::new(self)
-    }
     pub(super) fn restrict(&self,nwa:&mut NWA)->Result<positive::Stats,String>{
         positive::restrict(nwa,self)
     }
