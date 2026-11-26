@@ -13,6 +13,7 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/native-bindings.yml'
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'bindings/**'
       - 'src/**'
@@ -30,13 +31,13 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: '0'
-  CARGO_BUILD_JOBS: '3'
   CARGO_TARGET_DIR: target/native-ci
   PYTHONUTF8: '1'
   MACOSX_DEPLOYMENT_TARGET: '11.0'
 
 jobs:
   native:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Native / ${{ matrix.tag }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 55
@@ -215,6 +216,7 @@ jobs:
           retention-days: 14
 
   package:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Stage and install thin root plus platform npm packages
     needs: native
     runs-on: ubuntu-22.04
@@ -257,6 +259,7 @@ jobs:
           retention-days: 14
 
   contracts:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Rust public contracts and binding ABI
     runs-on: ubuntu-22.04
     timeout-minutes: 55
@@ -269,6 +272,12 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: full-contracts-release
+          workspaces: . -> target/native-ci
+          cache-bin: 'false'
       - name: Library builds with default features
         run: cargo check --locked -p glrmask
       - name: Public lifecycle regression suites
@@ -292,6 +301,7 @@ jobs:
         run: python scripts/sync-guide.py --check
 
   debug-assertions:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Rust tests (debug assertions)
     runs-on: ubuntu-22.04
     timeout-minutes: 55
@@ -301,7 +311,104 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: full-debug-release
+          workspaces: . -> target/native-ci
+          cache-bin: 'false'
       - name: Library tests with debug assertions
         run: >-
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test --locked --release
           -p glrmask --features internal-api --lib
+
+  fast-native:
+    name: Fast PR native C/C++ and Node (non-release)
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: target/native-pr
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ci-test-native
+          workspaces: . -> target/native-pr
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
+      - name: Install build tools and validate source contracts
+        run: |
+          python -m pip install cmake ninja
+          npm ci --omit=optional --ignore-scripts --prefix bindings/node
+          python bindings/ci/check.py
+      - name: Build non-distributable test libraries
+        run: |
+          cargo build --locked --profile ci-test -p glrmask-c -p glrmask-node
+          npm --prefix bindings/node run build -- --profile ci-test
+      - name: Node tests and TypeScript
+        run: npm --prefix bindings/node run check
+      - name: C/C++ install, consumers and parity
+        run: |
+          python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/ci-test" --work-dir "$RUNNER_TEMP/cpp-validation"
+          node bindings/node/scripts/parity.cjs "$RUNNER_TEMP/cpp-validation/build-static/glrmask_cpp_tests" "$RUNNER_TEMP/native-parity"
+
+  fast-abi:
+    name: Fast PR direct binding ownership and ABI tests
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: target/abi-pr
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ci-test-abi
+          workspaces: . -> target/abi-pr
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
+      - name: Binding ownership and C ABI parity
+        run: |
+          cargo test --locked --profile ci-test -p glrmask-binding-core -p glrmask-c
+
+  fast-debug-assertions:
+    name: Fast PR Rust debug assertions
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: target/debug-pr
+      CARGO_PROFILE_CI_TEST_DEBUG_ASSERTIONS: 'true'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ci-test-debug
+          workspaces: . -> target/debug-pr
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
+      - name: Library tests with debug assertions
+        run: |
+          cargo test --locked --profile ci-test -p glrmask --features internal-api --lib

@@ -61,6 +61,10 @@ on:
       - 'docs/assets/benchmark-tbm-*'
       - '.github/workflows/guide-sync.yml'
 
+concurrency:
+  group: docs-sync-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -69,8 +73,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: docs-dev
+          workspaces: . -> target
+          cache-workspace-crates: 'false'
+          cache-bin: 'false'
       - run: python scripts/sync-benchmarks.py --check
       - run: python scripts/sync-guide.py --check
+      - run: python scripts/sync-native-guides.py --check
       - name: Rust documentation examples
         run: cargo test --doc --locked -p glrmask
       - name: Render Rust API reference

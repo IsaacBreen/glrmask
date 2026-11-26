@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'bindings/**'
+      - 'python/**'
       - 'crates/**'
       - 'tests/**'
       - 'benches/**'
@@ -12,9 +14,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
+      - 'scripts/ci-rust-shard.py'
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'src/**'
+      - 'bindings/**'
+      - 'python/**'
       - 'crates/**'
       - 'tests/**'
       - 'benches/**'
@@ -22,6 +28,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
+      - 'scripts/ci-rust-shard.py'
   workflow_dispatch:
 
 permissions:
@@ -33,7 +40,6 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: '0'
-  CARGO_BUILD_JOBS: '3'
   CARGO_TARGET_DIR: target/rust-ci
   PYTHONUTF8: '1'
   MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -49,6 +55,13 @@ jobs:
         run: |
           rustup toolchain install 1.89.0 --profile minimal
           rustup default 1.89.0
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: msrv-check
+          workspaces: . -> target/rust-ci
+          cache-workspace-crates: 'false'
+          cache-bin: 'false'
       - name: Check library and published helper crates
         run: >-
           cargo check --locked -p glrmask
@@ -58,7 +71,8 @@ jobs:
           -p glrmask-weight -p glrmask-weighted-automata
 
   test:
-    name: Library tests
+    name: Library tests (full tier)
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
@@ -67,8 +81,40 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fasttest-full
+          workspaces: . -> target/rust-ci
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
       - name: Test with internal API
         run: cargo test --locked --profile fasttest -p glrmask -p glrmask-grammar --features internal-api
+
+  fast-tests:
+    name: Fast Rust / ${{ matrix.group }}
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [lib, integration-0, integration-1, integration-2]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ci-test-${{ matrix.group }}
+          workspaces: . -> target/rust-ci
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
+      - name: Run shard
+        run: python3 scripts/ci-rust-shard.py "${{ matrix.group }}"
 
   clippy:
     name: Clippy
@@ -80,6 +126,13 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component clippy
           rustup default 1.99.1
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: clippy-fasttest
+          workspaces: . -> target/rust-ci
+          cache-workspace-crates: 'false'
+          cache-bin: 'false'
       - name: Clippy
         run: cargo clippy --workspace --all-targets --profile fasttest --exclude _glrmask --exclude glrmask-c --exclude glrmask-node --exclude glrmask-binding-core -- -D warnings
 
@@ -87,13 +140,25 @@ jobs:
     name: Examples
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      CI_PROFILE: ${{ (github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')) && 'fasttest' || 'ci-test' }}
     steps:
       - uses: actions/checkout@v6
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: examples-${{ env.CI_PROFILE }}
+          workspaces: . -> target/rust-ci
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
       - name: Generation example
-        run: cargo run --locked --profile fasttest --example generate
+        run: cargo run --locked --profile "$CI_PROFILE" --example generate
       - name: Tool-call example
-        run: cargo run --locked --profile fasttest --example tool_calls
+        run: cargo run --locked --profile "$CI_PROFILE" --example tool_calls
+      - name: Check all internal examples
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+        run: cargo check --locked --profile ci-test -p glrmask --examples --features internal-api
