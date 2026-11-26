@@ -16,7 +16,6 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             let rust_m = g::Module::new(&rust_g);
             let rust_options = core::compile_options(
                 core::mask_strategy(strategy).unwrap(),
-                g::BoundaryMaskStrategy::Auto,
             );
             let rust = rust_m.compile_with(&rust_vocab, rust_options).unwrap();
             let mut reference = rust.start();
@@ -25,8 +24,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             let options = glrmask_compile_options {
                 struct_size: size_of::<glrmask_compile_options>(),
                 mask_strategy: strategy,
-                boundary_mask_strategy: 0,
-                reserved: [0,0],
+                reserved: [0,0,0],
             };
             let (mut constraint, mut state) = (ptr::null_mut(), ptr::null_mut());
             assert_eq!(glrmask_module_compile(module, vocab, &options, &mut constraint), 0);
@@ -89,8 +87,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let parse_options = glrmask_compile_options {
             struct_size: size_of::<glrmask_compile_options>(),
             mask_strategy: 4,
-            boundary_mask_strategy: 0,
-            reserved: [0,0],
+            reserved: [0,0,0],
         };
         assert_eq!(glrmask_module_precompile(prepared, vocab, &parse_options), 0);
 
@@ -135,24 +132,21 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
 
 #[test]
 fn older_shorter_compile_options_default_the_new_switches_to_zero() {
-    // The original ABI struct had only `struct_size`, `mask_strategy` and
-    // `boundary_mask_strategy`. A caller built against it must keep working:
-    // the new fields count as zero because `struct_size` does not cover them.
+    // Missing trailing reserved fields default to zero.
     #[repr(C)]
     struct OldOptions {
         struct_size: usize,
         mask_strategy: u32,
-        boundary_mask_strategy: u32,
+        reserved: u32,
     }
     let old = OldOptions {
         struct_size: size_of::<OldOptions>(),
         mask_strategy: 3,
-        boundary_mask_strategy: 4,
+        reserved: 0,
     };
     let options = unsafe { root_options((&old as *const OldOptions).cast()) }.unwrap();
     let reference = core::compile_options(
         g::MaskStrategy::FastCompile,
-        g::BoundaryMaskStrategy::FastMasks,
     );
     assert_eq!(options, reference);
 
@@ -160,7 +154,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
     let too_short = OldOptions {
         struct_size: size_of::<usize>(),
         mask_strategy: 0,
-        boundary_mask_strategy: 0,
+        reserved: 0,
     };
     assert!(unsafe { root_options((&too_short as *const OldOptions).cast()) }.is_err());
 }

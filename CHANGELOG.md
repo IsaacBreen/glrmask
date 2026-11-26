@@ -13,8 +13,9 @@
 
 ### Masks
 
-- `MaskStrategy` and `BoundaryMaskStrategy` expose three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine and backend settings are internal only.
-- Rename `mask_len` to `mask_bit_len` (Node: `maskBitLength`). It returns token slots instead of packed words, including zero for an empty domain. Rust adds `ConstraintState::mask_bit_len` to match the other bindings.
+- `MaskStrategy` exposes three distinct soft cost preferences: Auto, FastCompile and FastMasks. Concrete engine, backend and boundary settings are internal only.
+- Removed `BoundaryMaskStrategy` and `Grammar.precompile`. Use a Module to precompile. Boundaries use the automatic strategy.
+- Rename `mask_len` to `mask_bit_len` (Node: `maskBitLength`). It returns token slots instead of packed words, including zero for an empty domain. Rust adds `ConstraintState::mask_bit_len` to match the other bindings. In Python, `mask_bit_len` is a read-only property.
 - Starting a state no longer computes its first mask; the first `mask` or `fill_mask` call does.
 
 ### Python
@@ -49,7 +50,7 @@ From 1.0, GLRMask follows semantic versioning. A 1.x release won't break the pub
 
 ## 0.5.0
 
-- `forced_tokens` is replaced by `commit_forced_tokens`, which commits the tokens it returns. Call it on a copy to look without committing.
+- Replaced token forcing with the read-only `forced_bytes` query. The caller tokenizes and commits the result; exact token-set items are left to the caller.
 - `special_token_ids` and `Vocab::with_special_tokens` are removed. A token ID that isn't in the vocabulary never matches text, and a token set can still allow it.
 - In C and C++, token ranges are now `{start, end}` with `end` excluded, as in Rust, Python and Node.js. They used to be `{first, last}` with `last` included.
 - Markers (`@mark(id)`, `marker_events()` and `marker_ids()`) are removed for now. They will return in a later release.

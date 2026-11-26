@@ -55,4 +55,4 @@ def test_mask_size_keyword_is_not_supported():
     state = glrmask.Grammar.from_glrm('start s nt s = "a"').compile(vocab).start()
     with pytest.raises(TypeError):
         state.mask(size=4 * 10**9)
-    assert state.mask().shape == ((state.mask_bit_len()+31)//32,) == (1,)
+    assert state.mask().shape == ((state.mask_bit_len+31)//32,) == (1,)

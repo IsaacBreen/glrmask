@@ -29,23 +29,21 @@ def verify(constraint, prefix, allowed, accepting, forced, *, conservative=False
     state = at_prefix()
     assert state.is_accepting() == accepting
     fresh = state.mask().copy()
-    assert set(unpack_mask(fresh, state.mask_bit_len()).nonzero()[0]) == set(allowed)
+    assert set(unpack_mask(fresh, state.mask_bit_len).nonzero()[0]) == set(allowed)
     assert (state.mask() == fresh).all()
     assert (at_prefix().mask() == fresh).all()
     for token in VOCAB:
         assert state.copy().commit_token(token) == (token in allowed), token
-    branch = state.copy()
-    actual = list(branch.commit_forced_tokens())
+    actual = state.forced_bytes()
+    expected = b"".join(VOCAB[token] for token in __import__("itertools").takewhile(lambda token: token in (0, 1, 2), forced))
     if conservative:
-        # The forcing oracle permits shorter proofs at composition boundaries.
-        assert actual == forced[:len(actual)] and len(actual) <= len(forced)
+        assert expected.startswith(actual)
     else:
-        assert actual == forced
-    for token in actual:
-        assert token_allowed(state.mask(), token)
-        assert state.commit_token(token)
-    assert branch.is_accepting() == state.is_accepting()
-    assert (branch.mask() == state.mask()).all()
+        assert actual == expected
+    assert (state.mask() == fresh).all()
+    assert state.is_accepting() == accepting
+    if actual:
+        assert state.copy().commit_bytes(actual)
 
 
 @pytest.mark.parametrize('kind', ['token', 'grammar'])

@@ -96,7 +96,7 @@ impl TokenSet {
 
 use range_set_blaze::RangeSetBlaze;
 
-/// A vocabulary: the bytes of each token ID.
+/// Each token ID and its bytes.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     compiler_cache: Arc<VocabCompilerCache>,

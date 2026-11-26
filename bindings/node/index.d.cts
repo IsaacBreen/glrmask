@@ -2,27 +2,16 @@
 /** The GLRMask version, for example "1.0.0". */
 export declare const version: string;
 
-/** Cost preferences, not engine selections or performance guarantees. */
+/** A preference for faster compiling or faster masks. */
 export declare const MaskStrategy: Readonly<{
-  /** Let the library choose. The default. */
+  /** Let GLRMask choose. The default. */
   Auto: 'auto';
-  /** Prefer lower preparation cost, even if masks cost more. */
+  /** Prefer faster compiling over faster masks. */
   FastCompile: 'fast-compile';
-  /** Prefer lower mask cost, even if preparation costs more. */
+  /** Prefer faster masks over faster compiling. */
   FastMasks: 'fast-masks';
 }>;
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
-
-/** Cost preferences for masks at grammar boundaries. */
-export declare const BoundaryMaskStrategy: Readonly<{
-  /** Let the library choose. The default. */
-  Auto: 'auto';
-  /** Prefer lower boundary preparation cost. */
-  FastCompile: 'fast-compile';
-  /** Prefer lower boundary mask cost. */
-  FastMasks: 'fast-masks';
-}>;
-export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
 
 /** The kinds of `GLRMaskError`. */
 export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
@@ -58,12 +47,12 @@ export interface Externs extends ReadonlyMap<string, Extern> {
   readonly unbound: Externs;
 }
 
-/** A vocabulary: the bytes of each token ID. */
+/** Each token ID and its bytes. */
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
-  /** Creates a vocabulary from `[id, bytes]` entries. */
+
   constructor(entries: Iterable<readonly [number, Uint8Array]> | Readonly<Record<number, Uint8Array>>);
-  /** A new handle to the same object. */
+
   clone(): Vocab;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -74,7 +63,7 @@ export declare class Vocab implements Disposable {
 /** A set of token IDs. */
 export declare class TokenSet implements Disposable {
   private readonly __tokenSetBrand: void;
-  /** Creates a set from `ids`. */
+
   constructor(ids: Iterable<number>);
   /** Creates a set from `ranges`. */
   static fromRanges(ranges: Iterable<TokenRange>): TokenSet;
@@ -82,7 +71,7 @@ export declare class TokenSet implements Disposable {
   equals(other: unknown): boolean;
   /** The set as ranges, for example `TokenSet[0..=9, 20..=29]`. */
   toString(): string;
-  /** A new handle to the same object. */
+
   clone(): TokenSet;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -94,34 +83,27 @@ export declare class TokenSet implements Disposable {
 export interface CompileOptions {
   /** Cost preference for computing masks. Defaults to `MaskStrategy.Auto`. */
   maskStrategy?: MaskStrategy;
-  /** Cost preference for masks at grammar boundaries. Defaults to `BoundaryMaskStrategy.Auto`. */
-  boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
-/** A grammar. */
 export declare class Grammar implements Disposable {
   private constructor();
   private readonly __grammarBrand: void;
-  /** Creates a grammar from GLRM source. */
+  /** Parses GLRM source. */
   static fromGlrm(source: string): Grammar;
-  /** Creates a grammar from a JSON Schema, given as JSON text or an object. */
+  /** Parses a JSON Schema given as JSON text or an object. */
   static fromJsonSchema(schema: unknown): Grammar;
-  /** Creates a grammar from Lark source. */
+  /** Parses Lark source. */
   static fromLark(source: string): Grammar;
-  /** The grammar's externs. */
+  /** A snapshot; read it again after `bind()`. */
   readonly externs: Externs;
-  /** A copy of the grammar. Binding the copy does not change the original. */
+
   clone(): Grammar;
-  /** Creates a grammar from an expression. */
+
   static fromExpr(expr: Expr | Grammar): Grammar;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
   bind(name: string, value: GrammarBindValue): void;
   /** Binds several externs at once; if one fails, none is bound. */
   bind(bindings: Record<string, GrammarBindValue>): void;
-  /** Like `precompileSync`, but returns a promise and doesn't block the event loop. */
-  precompile(vocab: Vocab, options?: CompileOptions): Promise<Module>;
-  /** Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work. */
-  precompileSync(vocab: Vocab, options?: CompileOptions): Module;
   /** Like `compileSync`, but returns a promise and doesn't block the event loop.
    *
    * Throws if any extern is unbound. */
@@ -156,7 +138,7 @@ export declare class Expr implements Disposable {
   static sequence(...parts: ExprPart[]): Expr;
   /** Matches exactly `value`. A string is UTF-8 encoded. */
   static literal(value: string | Uint8Array): Expr;
-  /** A new handle to the same object. */
+
   clone(): Expr;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -164,14 +146,14 @@ export declare class Expr implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A grammar that can be compiled before its externs are bound. Binding them later only links the compiled parts, so the final compile is fast. */
+/** A partially compiled grammar. */
 export declare class Module implements Disposable {
   private readonly __moduleBrand: void;
-  /** Creates a module from `grammar`. */
+
   constructor(grammar: Grammar);
-  /** The module's externs. */
+  /** A snapshot; read it again after `bind()`. */
   readonly externs: Externs;
-  /** A copy of the module. Binding the copy does not change the original. */
+
   clone(): Module;
   /** Binds the extern `name` to `value`. Throws if `name` is undeclared or already bound, or `value` is the wrong kind. */
   bind(name: string, value: ExprPart): void;
@@ -179,23 +161,23 @@ export declare class Module implements Disposable {
   bind(bindings: Record<string, ExprPart>): void;
   /** Like `precompileSync`, but returns a promise and doesn't block the event loop. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
-  /** Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster. */
+  /** Compiles what it can for `vocab` now, even with externs unbound. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
   /** Like `compileSync`, but returns a promise and doesn't block the event loop.
    *
    * Throws if any extern is unbound or the module was precompiled for another vocabulary. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Compiles the module for `vocab`, reusing any precompiled work. Throws if any extern is unbound or the module was precompiled for another vocabulary. */
+  /** Reuses any precompiled work, which must be for the same vocabulary. */
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Like `saveSync`, but returns a promise and doesn't block the event loop. */
   save(): Promise<Uint8Array>;
-  /** Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another. */
+  /** Serializes the module with its precompiled work. Other GLRMask versions may not load it. */
   saveSync(): Uint8Array;
   /** Like `loadSync`, but returns a promise and doesn't block the event loop.
    *
    * Loads a module saved with `save()` or `saveSync()`. */
   static load(data: Uint8Array): Promise<Module>;
-  /** Loads a module saved with `save()` or `saveSync()`. */
+
   static loadSync(data: Uint8Array): Module;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -203,15 +185,15 @@ export declare class Module implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A grammar compiled for a vocabulary. Call `start()` for each sequence you generate. */
+/** A compiled grammar, ready to use. */
 export declare class Constraint implements Disposable {
   private constructor();
   private readonly __constraintBrand: void;
-  /** Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need Math.ceil(N / 32) words, where N is this value. */
+  /** One more than the largest token ID. */
   readonly maskBitLength: number;
-  /** A new handle to the same object. */
+
   clone(): Constraint;
-  /** A new state with nothing committed. */
+  /** Starts a new sequence. */
   start(): ConstraintState;
   /** Like `saveSync`, but returns a promise and doesn't block the event loop. */
   save(): Promise<Uint8Array>;
@@ -221,9 +203,9 @@ export declare class Constraint implements Disposable {
   saveSync(): Uint8Array;
   /** Like `loadSync`, but returns a promise and doesn't block the event loop.
    *
-   * Loads a constraint saved with `save()` or `saveSync()`. Throws if `vocab` isn't the one it was compiled for. */
+   * `vocab` must be the one it was compiled with. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** Loads a constraint saved with `save()` or `saveSync()`. Throws if `vocab` isn't the one it was compiled for. */
+  /** `vocab` must be the one it was compiled with. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -235,26 +217,26 @@ export declare class Constraint implements Disposable {
 export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;
-  /** Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need Math.ceil(N / 32) words, where N is this value. */
+  /** One more than the largest token ID. */
   readonly maskBitLength: number;
-  /** A copy of the state. */
+
   clone(): ConstraintState;
   /** Allowed token IDs as a packed bitmask. Token `id` is allowed when bit `id % 32` of element `Math.floor(id / 32)` is set. */
   mask(): Uint32Array;
   /** Writes the mask into `output`, zeroing any extra elements. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
-  /** Commits a token. If it isn't allowed, returns `false` and terminates the state. */
+  /** Returns `false`, and ends the state, if the token isn't allowed. */
   commitToken(id: number): boolean;
-  /** Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone. */
+  /** Returns how many were committed. Stops at the first token that isn't allowed, which ends the state. */
   commitTokens(ids: Iterable<number> | Uint32Array): number;
-  /** Commits raw bytes. If they aren't allowed, returns `false` and terminates the state. */
+  /** Returns `false`, and ends the state, if the bytes aren't allowed. */
   commitBytes(bytes: Uint8Array): boolean;
-  /** Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS. */
+  /** Whether what's committed is a complete match. If so, allow EOS (don't commit it). */
   isAccepting(): boolean;
   /** Whether nothing more can be committed. */
   isTerminated(): boolean;
-  /** Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens. */
-  commitForcedTokens(): Uint32Array;
+  /** The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing. */
+  forcedBytes(): Uint8Array;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
   /** Same as `dispose()`, for `using` declarations. */

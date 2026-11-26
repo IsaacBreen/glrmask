@@ -3,7 +3,7 @@ pub(crate) mod boundary_cpu_profile;
 mod artifact;
 mod commit;
 pub(crate) use commit::bounded::mask_for_states_at_most;
-pub(crate) use commit::forcing_reference::force_result as force_for_states_result;
+pub(crate) use commit::forcing_reference::forced_bytes as forced_bytes_for_states;
 #[cfg(any(test,feature="internal-api"))]
 pub(crate) use commit::forcing_reference::{force as force_for_states, force_token_ids as force_ids_for_states};
 mod constraint;

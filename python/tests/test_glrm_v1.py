@@ -89,7 +89,7 @@ def test_empty_event_binding_recognizes_no_output():
             assert state.commit_token(0)
         assert not state.is_accepting()
         assert not unpack_mask(state.mask(), 79).any()
-        assert not state.copy().commit_forced_tokens()
+        assert not state.forced_bytes()
 
 
 def test_glrm_markers_are_rejected_by_the_public_parser():

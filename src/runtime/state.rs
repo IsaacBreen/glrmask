@@ -532,7 +532,7 @@ pub struct ConstraintState {
 }
 
 impl Clone for ConstraintState {
-    /// A copy of the state. It shares the compiled constraint.
+
     fn clone(&self) -> Self {
         ConstraintState {
             terminated: self.terminated,
@@ -580,12 +580,12 @@ impl ConstraintState {
     }
 
 
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
-        super::commit::forcing_reference::force_single(self, None)
+    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    pub fn forced_bytes(&self) -> Vec<u8> {
+        crate::runtime::forced_bytes_for_states(std::slice::from_ref(self))
     }
 
-    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
+    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
@@ -667,6 +667,7 @@ impl ConstraintState {
         super::commit::forcing_reference::force_token_ids(std::slice::from_ref(self),None)
     }
 
+    #[cfg(any(test, feature="internal-api"))]
     pub(super) fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
         if !self.constraint.end_tokens.is_empty() { return self.mask(); }
         if dynamic {

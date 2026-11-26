@@ -54,14 +54,15 @@ def test_child_and_sibling_snapshots_survive_later_edits():
 
     constraint = parent.compile(v)
     state = constraint.start()
-    assert state.copy().commit_forced_tokens() == [17, 29]
-    for token in state.copy().commit_forced_tokens():
+    assert state.forced_bytes() == b""
+    for token in [17, 29]:
+        assert state.forced_bytes() == b""
         assert token_allowed(state.mask(), token)
         assert state.commit_token(token)
     assert state.is_accepting()
     assert not hasattr(state, "forced")
     assert not hasattr(state, "forced_token_ids")
-    assert not hasattr(state, "forced_bytes")
+    assert not hasattr(state, "commit_forced_tokens")
     assert not hasattr(state, "mask_if_at_most"), "bounded query must stay private"
 
 
@@ -90,14 +91,14 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
 def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
     v = vocab()
     state = glrmask.Grammar.from_lark('start: "ab"').compile(v, **mode).start()
-    assert state.copy().commit_forced_tokens() == [2]  # longest spelling of the forced bytes
+    assert state.forced_bytes() == b"ab"
     assert state.commit_token(0)
-    assert state.copy().commit_forced_tokens() == [1]
+    assert state.forced_bytes() == b"b"
     before = state.mask().copy()
-    assert state.copy().commit_forced_tokens() == [1]
+    assert state.forced_bytes() == b"b"
     assert np.array_equal(before, state.mask())
     assert state.commit_token(1)
-    assert state.is_accepting() and state.copy().commit_forced_tokens() == []
+    assert state.is_accepting() and state.forced_bytes() == b""
 
 
 def test_independent_parallel_mutation_keeps_shared_template_open():
@@ -110,7 +111,9 @@ def test_independent_parallel_mutation_keeps_shared_template_open():
         token = 17 if index % 2 == 0 else 29
         request.bind("M", glrmask.TokenSet([token]))
         compiled = request.compile(v)
-        return compiled.start().copy().commit_forced_tokens(), token
+        state = compiled.start()
+        assert state.forced_bytes() == b""
+        return np.flatnonzero(unpack_mask(state.mask())).tolist(), token
 
     with ThreadPoolExecutor(max_workers=8) as workers:
         results = list(workers.map(specialize, range(32)))

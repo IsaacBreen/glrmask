@@ -22,8 +22,10 @@ new api.ConstraintState();
 s[Symbol.dispose](); c.dispose();
 void [range, accepted];
 
-const precompiled: api.Module = g.precompileSync(v, {maskStrategy: api.MaskStrategy.FastMasks});
-const precompiledAsync: Promise<api.Module> = g.precompile(v);
+const precompiled = new api.Module(g); precompiled.precompileSync(v, {maskStrategy: api.MaskStrategy.FastMasks});
+const precompiledAsync: Promise<void> = precompiled.precompile(v);
+// @ts-expect-error Grammar no longer has precompile.
+g.precompile(v);
 void [precompiled, precompiledAsync];
 
 const module = new api.Module(g);
@@ -31,7 +33,7 @@ const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');
 module.precompileSync(v, {maskStrategy: api.MaskStrategy.FastCompile});
 const independent: api.Module = module.clone();
-const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.FastCompile, boundaryMaskStrategy: api.BoundaryMaskStrategy.FastMasks});
+const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.FastCompile});
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');

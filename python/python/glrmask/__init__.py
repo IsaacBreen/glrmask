@@ -12,33 +12,43 @@ python -m pip install glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar.
-- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
-- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `Grammar`
+- `Module`: a partially compiled grammar.
+- `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
 ## Quickstart
 
 ```python
+import numpy as np
 import glrmask
 
-grammar = glrmask.Grammar.from_lark('''
-    start: "hello" " " "world"
-''')
+grammar = glrmask.Grammar.from_json_schema({
+    "type": "object",
+    "properties": {"color": {"enum": ["red", "green", "blue"]}},
+    "required": ["color"],
+    "additionalProperties": False,
+})
 
-# A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
-vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
+# One token per byte, plus EOS. With a real model, build this from its tokenizer.
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
+EOS = 256
 
-constraint = grammar.compile(vocab)
-state = constraint.start()
+state = grammar.compile(vocab).start()
+rng = np.random.default_rng(0)
+output = []
+while True:
+    logits = rng.standard_normal(257)  # stand-in for your model
+    allowed = np.zeros(257, dtype=bool)
+    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
+    allowed[EOS] = state.is_accepting()
+    token = int(np.argmax(np.where(allowed, logits, -np.inf)))
+    if token == EOS:
+        break
+    state.commit_token(token)
+    output.append(token)
 
-# Each mask says which tokens may come next. Apply it to the logits before sampling.
-assert state.mask(dtype=bool).tolist() == [True, False, False]  # only "hello"
-assert state.commit_token(0)
-assert state.mask(dtype=bool).tolist() == [False, True, False]  # only " "
-assert state.commit_token(1)
-assert state.commit_token(2)
-assert state.is_accepting()
+print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
 ## Learn more
@@ -57,7 +67,6 @@ from ._glrmask import (
     Externs,
     TokenSet,
     MaskStrategy,
-    BoundaryMaskStrategy,
     GLRMaskError,
     __version__,
     _internal,
@@ -76,7 +85,6 @@ __all__ = [
     "Externs",
     "TokenSet",
     "MaskStrategy",
-    "BoundaryMaskStrategy",
     "GLRMaskError",
     "__version__",
 ]

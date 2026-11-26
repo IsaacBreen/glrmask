@@ -117,6 +117,8 @@ def main() -> None:
         library=ctypes.CDLL(str(args.library.resolve()))
         for name in symbols:assert getattr(library,name),name
         assert not hasattr(library, "glrmask_grammar_bind_tokens"), "Removed symbol is still exported"
+        assert not hasattr(library, "glrmask_grammar_precompile"), "Removed symbol is still exported"
+        assert not hasattr(library, "glrmask_state_commit_forced_tokens"), "Removed symbol is still exported"
         library.glrmask_abi_version.restype=ctypes.c_uint32
         library.glrmask_version.restype=ctypes.c_char_p
         assert library.glrmask_abi_version()==6

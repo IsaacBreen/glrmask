@@ -121,33 +121,43 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar.
-- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
-- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `Grammar`
+- `Module`: a partially compiled grammar.
+- `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
 ### Python quickstart
 
 ```python
+import numpy as np
 import glrmask
 
-grammar = glrmask.Grammar.from_lark('''
-    start: "hello" " " "world"
-''')
+grammar = glrmask.Grammar.from_json_schema({
+    "type": "object",
+    "properties": {"color": {"enum": ["red", "green", "blue"]}},
+    "required": ["color"],
+    "additionalProperties": False,
+})
 
-# A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
-vocab = glrmask.Vocab({0: b"hello", 1: b" ", 2: b"world"})
+# One token per byte, plus EOS. With a real model, build this from its tokenizer.
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
+EOS = 256
 
-constraint = grammar.compile(vocab)
-state = constraint.start()
+state = grammar.compile(vocab).start()
+rng = np.random.default_rng(0)
+output = []
+while True:
+    logits = rng.standard_normal(257)  # stand-in for your model
+    allowed = np.zeros(257, dtype=bool)
+    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
+    allowed[EOS] = state.is_accepting()
+    token = int(np.argmax(np.where(allowed, logits, -np.inf)))
+    if token == EOS:
+        break
+    state.commit_token(token)
+    output.append(token)
 
-# Each mask says which tokens may come next. Apply it to the logits before sampling.
-assert state.mask(dtype=bool).tolist() == [True, False, False]  # only "hello"
-assert state.commit_token(0)
-assert state.mask(dtype=bool).tolist() == [False, True, False]  # only " "
-assert state.commit_token(1)
-assert state.commit_token(2)
-assert state.is_accepting()
+print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
 ### Rust quickstart
@@ -156,26 +166,42 @@ assert state.is_accepting()
 use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
-    let grammar = Grammar::from_lark(r#"
-        start: "hello" " " "world"
-    "#)?;
+    let grammar = Grammar::from_json_schema(r#"{
+        "type": "object",
+        "properties": {"color": {"enum": ["red", "green", "blue"]}},
+        "required": ["color"],
+        "additionalProperties": false
+    }"#)?;
 
-    // A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
-    let vocab = Vocab::new([
-        (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
-    ])?;
+    // One token per byte, plus EOS. With a real model, build this from its tokenizer.
+    let vocab = Vocab::new((0..256u32).map(|b| (b, vec![b as u8])))?;
+    const EOS: u32 = 256;
 
-    let constraint = grammar.compile(&vocab)?;
-    let mut state = constraint.start();
-
-    // Each mask says which tokens may come next: bit `id` is set if token `id` is allowed.
-    assert_eq!(state.mask(), [0b001]); // only "hello"
-    assert!(state.commit_token(0));
-    assert_eq!(state.mask(), [0b010]); // only " "
-    assert!(state.commit_token(1));
-    assert!(state.commit_token(2));
-    assert!(state.is_accepting());
+    let mut state = grammar.compile(&vocab)?.start();
+    let mut output = Vec::new();
+    loop {
+        let logits = model(&output); // stand-in for your model
+        let mask = state.mask();
+        let allowed = |t: u32| match t {
+            EOS => state.is_accepting(),
+            t => mask[t as usize / 32] >> (t % 32) & 1 == 1,
+        };
+        let token = (0..=EOS)
+            .filter(|&t| allowed(t))
+            .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
+            .unwrap();
+        if token == EOS {
+            break;
+        }
+        state.commit_token(token);
+        output.push(token as u8);
+    }
+    println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
     Ok(())
+}
+
+fn model(output: &[u8]) -> Vec<f32> {
+    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
 }
 ```
 
@@ -206,7 +232,7 @@ text = b""
 while True:
     logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
     allowed = np.zeros(len(logits), dtype=bool)
-    allowed[:state.mask_bit_len()] = state.mask(dtype=bool)
+    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
     allowed[eos] = state.is_accepting()
     assert allowed.any()
     logits[~allowed] = -np.inf
@@ -219,8 +245,8 @@ print(text.decode())
 ```
 
 Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
-`mask_bit_len()` returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
-Allocate `(mask_bit_len() + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
+Python `mask_bit_len` (a method in Rust and C++) returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
+Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
 To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
@@ -246,10 +272,10 @@ token without committing to it, copy the state first.
 `is_accepting()` says whether the text so far is a complete match. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed.
 
-### Forced tokens
+### Forced bytes
 
-`commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing. When the forced text could be tokenized in several ways, it takes the longest token at each step, at most 1,000 tokens per call.
-See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing.md).
+`forced_bytes()` returns the bytes the grammar requires next without changing the state. Tokenize them with your model's tokenizer and commit the tokens. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
+
 
 ## Composing grammars
 
@@ -309,7 +335,6 @@ call.bind(WEATHER_ARGS=weather_args, SEARCH_ARGS=search_args)
 constraint = call.compile(vocab)
 ```
 
-`grammar.precompile(vocab)` is short for creating a module from the grammar and precompiling it.
 
 `module.save()` returns bytes, and `Module.load(data)` restores the module with its bindings and precompiled work. A
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling it with another is an error.
@@ -346,12 +371,10 @@ on applicability or deterministic size grounds, another supported plan may be us
 artifacts and operational resource failures are not hidden by fallback. All supported plans preserve mask semantics.
 Retained compatible work may be reused in any mode.
 
-`BoundaryMaskStrategy` expresses the same three preferences for applicable grammar boundary work, independently
-of overall strategy. Pass the preferences to `compile` and `precompile` on either Grammar or Module.
+Pass the preference to `compile` on a Grammar or Module, or to `precompile` on a Module.
 
 ```python
-constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
-                             boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE)
+constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS)
 ```
 
 ## Errors

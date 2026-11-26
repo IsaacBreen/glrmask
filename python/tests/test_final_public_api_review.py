@@ -39,9 +39,9 @@ def _bound_snapshot(source, name, value):
 
 
 def test_public_types_exist_without_exposing_backend_selection():
-    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "TokenSet", "MaskStrategy", "BoundaryMaskStrategy"]:
+    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "TokenSet", "MaskStrategy"]:
         assert hasattr(glrmask, name), name
-    for strategy in (glrmask.MaskStrategy, glrmask.BoundaryMaskStrategy):
+    for strategy in (glrmask.MaskStrategy,):
         assert len({strategy.AUTO, strategy.FAST_COMPILE, strategy.FAST_MASKS}) == 3
         assert not hasattr(strategy, "PARSER_DWA")
         assert not hasattr(strategy, "TOKEN_TRIE")
@@ -98,7 +98,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         impossible = _module_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, **mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
-        assert state.copy().commit_forced_tokens() == [] and state.copy().commit_forced_tokens() == []
+        assert state.forced_bytes() == b"" and state.forced_bytes() == b""
     assert glrmask.TokenSet([7, 7]) == glrmask.TokenSet([7])
 
 
@@ -169,9 +169,9 @@ def test_packed_numpy_fill_mask_agrees_with_allocating_mask():
     actual = words
     assert actual.tolist() == [1 << 7, 1 << 31, 0, 1 << 31, 0, 0]
     packed = state.mask()
-    assert packed.dtype == np.uint32 and len(packed) == (c.mask_bit_len() + 31) // 32 == (state.mask_bit_len() + 31) // 32
+    assert packed.dtype == np.uint32 and len(packed) == (c.mask_bit_len + 31) // 32 == (state.mask_bit_len + 31) // 32
     assert np.array_equal(packed, actual[:len(packed)])
-    assert np.array_equal(state.mask(dtype=bool), unpack_mask(packed, state.mask_bit_len()))
+    assert np.array_equal(state.mask(dtype=bool), unpack_mask(packed, state.mask_bit_len))
     assert np.flatnonzero(unpack_mask(state.mask())).tolist() == [7, 63, 127]
 
 

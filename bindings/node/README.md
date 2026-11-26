@@ -22,9 +22,9 @@ The package provides CommonJS, ESM and TypeScript entry points.
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar.
-- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
-- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `Grammar`
+- `Module`: a partially compiled grammar.
+- `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
 ## Quickstart
@@ -121,7 +121,7 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 
 ## Mask strategies
 
-`compile` and `precompile` take `{maskStrategy, boundaryMaskStrategy}`.
+`compile` and `precompile` take `{maskStrategy}`.
 
 | `MaskStrategy` | Value | Preference |
 | --- | --- | --- |
@@ -129,7 +129,7 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 | `FastCompile` | `'fast-compile'` | Prefer lower preparation cost. |
 | `FastMasks` | `'fast-masks'` | Prefer lower mask cost. |
 
-`BoundaryMaskStrategy` makes the same independent choice at grammar boundaries. These preferences do not
+These preferences do not
 guarantee a specific implementation or speed; another supported plan may be selected on a deterministic decline.
 See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
@@ -150,7 +150,7 @@ A mask has one bit per token ID: token `id` is allowed when bit `id % 32` of ele
 bytes never match them.
 
 `isAccepting()` says whether the input so far is a complete match, and `isTerminated()` whether nothing more can be
-committed. `commitForcedTokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing.
+committed. `forcedBytes()` returns the grammar-forced bytes without changing the state. Tokenize and commit them yourself; exact token-set items are not included.
 
 [examples/generate.mjs](https://github.com/IsaacBreen/glrmask/blob/main/bindings/node/examples/generate.mjs) is a
 complete generation loop.

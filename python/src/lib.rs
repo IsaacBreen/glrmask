@@ -486,7 +486,7 @@ fn advance_trace_step_to_dict<'py>(
 // PyVocab
 // ---------------------------------------------------------------------------
 
-/// A model's tokens and their bytes, from an `{id: bytes}` mapping. A token ID it doesn't contain never matches text, but a token set can still allow it.
+/// Each token ID and its bytes.
 #[pyclass(name = "Vocab", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
@@ -637,7 +637,7 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// A grammar compiled for a vocabulary. Call `start()` for each sequence you generate.
+/// A compiled grammar, ready to use.
 #[pyclass(name = "Constraint", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -659,17 +659,14 @@ impl PyConstraint {
     }
 
 
-    /// Return the number of GLR parser states.
     fn num_parser_states(&self) -> u32 {
         self.inner.num_parser_states()
     }
 
-    /// Return display names for grammar terminals by terminal id.
     fn terminal_display_names(&self) -> Vec<String> {
         self.inner.terminal_display_names().to_vec()
     }
 
-    /// Return the display name for a grammar terminal id, if present.
     fn terminal_display_name(&self, terminal_id: u32) -> Option<String> {
         self.inner
             .terminal_display_name(terminal_id)
@@ -679,15 +676,13 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Saves the constraint as bytes, without the vocabulary.
-    ///
-    /// Bytes saved by one GLRMask version may not load in another.
+    /// Serializes the constraint. Other GLRMask versions may not load it.
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.detach(|| self.inner.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Loads a constraint saved with `save()`. Raises `GLRMaskError` if `vocab` isn't the one it was compiled for.
+    /// `vocab` must be the one it was compiled with.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
@@ -699,7 +694,7 @@ impl PyConstraint {
         Ok(Self { inner: Arc::new(inner) })
     }
 
-    /// A new state with nothing committed.
+    /// Starts a new sequence.
     fn start(&self) -> PyConstraintState {
         PyConstraintState {
             inner: self.inner.start(),
@@ -708,7 +703,8 @@ impl PyConstraint {
         }
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need ceil(mask_bit_len / 32) 32-bit words.
+    /// One more than the largest token ID.
+    #[getter]
     fn mask_bit_len(&self) -> usize {
         self.inner.mask_bit_len()
     }
@@ -845,6 +841,7 @@ impl PyDynamicConstraint {
         self.inner.save_without_vocab()
     }
 
+    #[getter]
     fn mask_bit_len(&self) -> usize {
         self.inner.mask_bit_len()
     }
@@ -866,6 +863,7 @@ pub struct PyDynamicConstraintState {
 #[pymethods]
 impl PyDynamicConstraintState {
     /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    #[getter]
     fn mask_bit_len(&self) -> usize { self.mask_bit_len }
 
     /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
@@ -969,7 +967,7 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len() + 31) // 32` words. Extra words are zeroed.
+    /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len + 31) // 32` words. Extra words are zeroed.
     ///
     /// Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     #[pyo3(signature = (bitmask, /))]
@@ -993,11 +991,10 @@ impl PyDynamicConstraintState {
         }))
     }
 
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    fn commit_forced_tokens(&mut self, py: Python<'_>) -> Vec<u32> {
-        py.detach(|| {
-            with_state_mut(&mut self.inner, |state| state.commit_forced_tokens())
-        })
+    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
+        PyBytes::new(py, &bytes)
     }
 
     /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
@@ -1010,7 +1007,7 @@ impl PyDynamicConstraintState {
         with_state(&self.inner, |state| state.is_terminated())
     }
 
-    /// The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len()` long.
+    /// The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len` long.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
@@ -1021,7 +1018,7 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// A constraint's state during generation.
+/// The state of one generated sequence.
 #[pyclass(name = "ConstraintState", module = "glrmask")]
 pub struct PyConstraintState {
     inner: glrmask::ConstraintState,
@@ -1031,12 +1028,10 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    /// A copy of the state.
     fn copy(&self) -> Self {
         Self { inner: self.inner.clone(), mask_bit_len: self.mask_bit_len }
     }
 
-    /// Same as `copy()`.
     fn __copy__(&self) -> Self { self.copy() }
 
     fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
@@ -1045,21 +1040,20 @@ impl PyConstraintState {
         Ok(copy)
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need ceil(mask_bit_len / 32) 32-bit words.
+    /// One more than the largest token ID.
+    #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
     }
 
 
-    /// The allowed tokens: packed `uint32` words by default, where token `id` is bit `id % 32` of word `id // 32`. With `dtype=bool`, one boolean per token ID, `mask_bit_len()` long.
+    /// Which tokens may come next: packed `uint32` bits, or with `dtype=bool` one boolean per token ID.
     #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
     fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 
-    /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len() + 31) // 32` words. Extra words are zeroed.
-    ///
-    /// Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// Writes the packed mask into `bitmask`, zeroing any extra words. Releases the GIL.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
@@ -1071,7 +1065,7 @@ impl PyConstraintState {
         })
     }
 
-    /// Commits a token. If it isn't allowed, returns `False` and terminates the state.
+    /// Returns `False`, and ends the state, if the token isn't allowed.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Some(id) = resolve_token_id(token_id)? else {
@@ -1081,7 +1075,7 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.
+    /// Returns how many were committed. Stops at the first token that isn't allowed, which ends the state.
     #[pyo3(signature = (token_ids, /))]
     fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
         if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
@@ -1105,20 +1099,19 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)))
     }
 
-    /// Commits raw bytes. If they aren't allowed, returns `False` and terminates the state.
+    /// Returns `False`, and ends the state, if the bytes aren't allowed.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> bool {
         with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
     }
 
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    fn commit_forced_tokens(&mut self, py: Python<'_>) -> Vec<u32> {
-        py.detach(|| {
-            with_state_mut(&mut self.inner, |state| state.commit_forced_tokens())
-        })
+    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
+        PyBytes::new(py, &bytes)
     }
 
-    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
+    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
     fn is_accepting(&self) -> bool {
         with_state(&self.inner, |state| state.is_accepting())
     }
@@ -1168,8 +1161,6 @@ fn allocation_stats_tuple(
 }
 
 impl PyConstraintState {
-    /// Resolve an ID for a diagnostic commit. An out-of-domain ID rejects the
-    /// state; the already-rejected state then reports a rejected commit.
     fn diagnostic_token_id(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<u32> {
         Ok(match resolve_token_id(token_id)? {
             Some(id) => id,
@@ -1246,7 +1237,6 @@ impl PyConstraintState {
         Ok(allocation_stats_tuple(elapsed_ns, stats))
     }
 
-    /// Like commit_token but returns profiling stats as a dict.
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: &Bound<'_, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let token_id = self.diagnostic_token_id(token_id)?;
         let profile = with_state_mut(&mut self.inner, |state| {
@@ -1328,22 +1318,18 @@ impl PyConstraintState {
         Ok(dict)
     }
 
-    /// Return total parser GSS root count across all tokenizer states.
     fn parser_root_count(&self) -> usize {
         with_state(&self.inner, |state| state.parser_root_count())
     }
 
-    /// Return parser path count (capped at limit).
     fn parser_path_count(&self, limit: usize) -> usize {
         with_state(&self.inner, |state| state.parser_path_count(limit))
     }
 
-    /// Return all flattened parser stacks for debugging.
     fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
         with_state(&self.inner, |state| state.debug_parser_stacks())
     }
 
-    /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
     fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: &Bound<'_, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let token_id = self.diagnostic_token_id(token_id)?;
         let (advances, final_stacks, commit_profile) = with_state_mut(&mut self.inner, |state| {
@@ -1951,7 +1937,6 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "Externs",
             "TokenSet",
             "MaskStrategy",
-            "BoundaryMaskStrategy",
             "Vocab",
             "Constraint",
             "ConstraintState",

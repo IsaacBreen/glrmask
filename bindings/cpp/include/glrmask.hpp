@@ -21,18 +21,11 @@ using TokenRange = glrmask_token_range;
 /// A byte buffer.
 using Bytes = std::vector<std::uint8_t>;
 
-/// Cost preferences, not engine selections or performance guarantees.
+/// A preference for faster compiling or faster masks.
 enum class MaskStrategy : std::uint32_t {
     Auto = GLRMASK_MASK_STRATEGY_AUTO,
     FastCompile = GLRMASK_MASK_STRATEGY_FAST_COMPILE,
     FastMasks = GLRMASK_MASK_STRATEGY_FAST_MASKS
-};
-
-/// Cost preferences for masks at grammar boundaries.
-enum class BoundaryMaskStrategy : std::uint32_t {
-    Auto = GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO,
-    FastCompile = GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE,
-    FastMasks = GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS
 };
 
 /// What an extern can be bound to.
@@ -118,14 +111,11 @@ public:
 struct CompileOptions {
     /// How masks are computed. Defaults to `MaskStrategy::Auto`.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
-    /// How masks are computed at grammar boundaries. Defaults to `BoundaryMaskStrategy::Auto`.
-    BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
     /// The equivalent C struct.
     glrmask_compile_options native() const noexcept {
         glrmask_compile_options options{};
         (void)glrmask_compile_options_init(&options, sizeof(options));
         options.mask_strategy = static_cast<std::uint32_t>(mask_strategy);
-        options.boundary_mask_strategy = static_cast<std::uint32_t>(boundary_mask_strategy);
         return options;
     }
 };
@@ -170,12 +160,6 @@ inline Bytes take_bytes(glrmask_bytes* raw) {
     const std::uint8_t* data = nullptr; std::size_t len = 0;
     check(glrmask_bytes_data(raw, &data, &len));
     return len ? Bytes(data, data + len) : Bytes{};
-}
-inline std::vector<TokenId> take_ids(glrmask_u32s* raw) {
-    std::unique_ptr<glrmask_u32s, decltype(&glrmask_u32s_free)> owner(raw, glrmask_u32s_free);
-    const TokenId* data = nullptr; std::size_t len = 0;
-    check(glrmask_u32s_data(raw, &data, &len));
-    return len ? std::vector<TokenId>(data, data + len) : std::vector<TokenId>{};
 }
 inline std::vector<Extern> take_externs(glrmask_externs* raw) {
     std::unique_ptr<glrmask_externs, decltype(&glrmask_externs_free)> owner(raw, glrmask_externs_free);
@@ -223,7 +207,7 @@ private:
     }
 };
 
-/// A vocabulary: the bytes of each token ID.
+/// Each token ID and its bytes.
 class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone> {
     using Base = detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone>;
     static glrmask_vocab* create(const std::vector<VocabEntry>& entries) {
@@ -233,11 +217,10 @@ class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vo
         detail::check(glrmask_vocab_new(native.data(), native.size(), &p)); return p;
     }
 public:
-    /// Creates a vocabulary from `entries`.
+
     explicit Vocab(const std::vector<VocabEntry>& entries) : Base(create(entries)) {}
 };
 
-/// A grammar.
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
@@ -245,13 +228,13 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
         glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), &p)); return Grammar(p);
     }
 public:
-    /// Creates a grammar from GLRM source.
+    /// Parses GLRM source.
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
-    /// Creates a grammar from JSON Schema source.
+    /// Parses JSON Schema source.
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
-    /// Creates a grammar from Lark source.
+    /// Parses Lark source.
     static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
-    /// Creates a grammar from an expression.
+
     static Grammar from_expr(const Expr& value);
     /// Binds the extern `name` to a grammar.
     void bind(std::string_view name, const Grammar& value) {
@@ -273,11 +256,6 @@ public:
     }
     /// Compiles the grammar for `vocab`. Fails if any extern is unbound.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
-    /// Compiles as much as possible for `vocab` now, and returns a `Module` that
-    /// keeps the work.
-    ///
-    /// Externs may still be unbound.
-    Module precompile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
 /// One part of an expression: a grammar, module, expression or token set.
@@ -335,7 +313,7 @@ inline void Grammar::bind(std::string_view name, const Expr& value) {
     detail::check(glrmask_grammar_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
 }
 
-/// A grammar you can compose with others and partly compile before its externs are bound.
+/// A partially compiled grammar.
 class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone> {
     using Base = detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone>;
     explicit Module(glrmask_module* p) : Base(p) {}
@@ -344,7 +322,7 @@ class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask
         glrmask_module* p = nullptr; detail::check(glrmask_module_new(grammar.native_handle(), &p)); return p;
     }
 public:
-    /// Creates a module from `grammar`.
+
     explicit Module(const Grammar& grammar) : Base(create(grammar)) {}
 
     /// Binds the extern `name` to a module. Throws `Error` if `name` is
@@ -373,7 +351,7 @@ public:
         const glrmask_compile_options native = options.native();
         detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle(), &native));
     }
-    /// Compiles the module for `vocab`, reusing any precompiled work. Fails if any extern is unbound or the module was precompiled for another vocabulary.
+    /// Reuses any precompiled work, which must be for the same vocabulary.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 
     /// The module's externs, in declaration order.
@@ -396,7 +374,7 @@ public:
     Bytes save() const {
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
-    /// Loads a module saved with `save()`.
+
     static Module load(const Bytes& bytes) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes.data(), bytes.size(), &p)); return Module(p);
     }
@@ -411,15 +389,15 @@ inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handl
 /// From a token set.
 inline ExprOperand::ExprOperand(const TokenSet& value) : value{4, value.native_handle()} {}
 
-/// A grammar compiled for a vocabulary. Call `start` for each sequence you generate.
+/// A compiled grammar, ready to use.
 class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone> {
     using Base = detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone>;
     explicit Constraint(glrmask_constraint* p) : Base(p) {}
     friend class Grammar; friend class Module;
 public:
-    /// Creates a state for one generated sequence.
+    /// Starts a new sequence.
     ConstraintState start() const;
-    /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    /// One more than the largest token ID.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
     /// Saves the constraint as bytes, without the vocabulary.
     ///
@@ -432,13 +410,13 @@ public:
     }
 };
 
-/// A constraint's state during generation.
+/// The state of one generated sequence.
 class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone> {
     using Base = detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone>;
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
 public:
-    /// Number of token slots covered by the mask, including gaps, or zero if empty. Not the number of allowed tokens or the highest allowed ID. Packed buffers need (N + 31) / 32 words, where N is this value.
+    /// One more than the largest token ID.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Writes the mask into `output`, setting extra words to zero.
     ///
@@ -446,7 +424,7 @@ public:
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
     /// Writes the mask into `output`, setting extra words to zero.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
-    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
+    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
     /// Allowed token IDs as a packed bitmask.
     ///
@@ -456,29 +434,25 @@ public:
     std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
     /// Whether nothing more can be committed.
     bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
-    /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the token isn't allowed.
     [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
-    /// Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone.
+    /// Returns how many were committed. Stops at the first token that isn't allowed, which ends the state.
     [[nodiscard]] std::size_t commit_tokens(const std::uint32_t* ids, std::size_t count) { return glrmask_state_commit_tokens(native_handle(), ids, count); }
-    /// Returns the number of tokens committed. If fewer than requested, the state is terminated. To try tokens without changing this state, commit them on a clone.
+    /// Returns how many were committed. Stops at the first token that isn't allowed, which ends the state.
     [[nodiscard]] std::size_t commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
-    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the bytes aren't allowed.
     [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return glrmask_state_commit_bytes(native_handle(), bytes, size); }
-    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the bytes aren't allowed.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
-    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the bytes aren't allowed.
     [[nodiscard]] bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    std::vector<TokenId> commit_forced_tokens() { glrmask_u32s* p = nullptr; detail::check(glrmask_state_commit_forced_tokens(native_handle(), &p)); return detail::take_ids(p); }
+    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    Bytes forced_bytes() const { glrmask_bytes* p = nullptr; detail::check(glrmask_state_forced_bytes(native_handle(), &p)); return detail::take_bytes(p); }
 };
 
 inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& options) const {
     const auto native = options.native(); glrmask_constraint* p = nullptr;
     detail::check(glrmask_grammar_compile(native_handle(), vocab.native_handle(), &native, &p)); return Constraint(p);
-}
-inline Module Grammar::precompile(const Vocab& vocab, const CompileOptions& options) const {
-    const auto native = options.native(); glrmask_module* p = nullptr;
-    detail::check(glrmask_grammar_precompile(native_handle(), vocab.native_handle(), &native, &p)); return Module(p);
 }
 inline Constraint Module::compile(const Vocab& vocab, const CompileOptions& options) const {
     const auto native = options.native(); glrmask_constraint* p = nullptr;

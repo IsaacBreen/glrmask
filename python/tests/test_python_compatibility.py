@@ -35,9 +35,9 @@ def test_forcing_tokens_query():
     s = c.start()
     # Both tokens are forced along this unique completion. Querying must not
     # advance the original state; this also exercises the migrated PyO3 detach.
-    forced = s.copy().commit_forced_tokens()
-    assert forced == [0, 1]
-    assert s.copy().commit_forced_tokens() == forced
+    forced = s.forced_bytes()
+    assert forced == b"ab"
+    assert s.forced_bytes() == forced
     assert s.mask().tolist() == [1]
 
 

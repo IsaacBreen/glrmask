@@ -77,22 +77,11 @@ pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
     }
 }
 
-pub fn boundary_mask_strategy(val: u32) -> Result<glrmask::BoundaryMaskStrategy> {
-    match val {
-        0 => Ok(glrmask::BoundaryMaskStrategy::Auto),
-        3 => Ok(glrmask::BoundaryMaskStrategy::FastCompile),
-        4 => Ok(glrmask::BoundaryMaskStrategy::FastMasks),
-        _ => Err(Error::invalid("unknown boundary mask strategy; expected Auto (0), FastCompile (3) or FastMasks (4)")),
-    }
-}
-
 pub fn compile_options(
     mask_strategy: glrmask::MaskStrategy,
-    boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
 ) -> glrmask::CompileOptions {
     glrmask::CompileOptions::default()
         .mask_strategy(mask_strategy)
-        .boundary_mask_strategy(boundary_mask_strategy)
 }
 
 /// Foreign-language state owns its compiled constraint through the core Arc handle.
@@ -155,7 +144,7 @@ impl State {
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<bool> { self.write(|s| Ok(s.commit_bytes(bytes))) }
     pub fn is_accepting(&self) -> Result<bool> { self.read(|s| Ok(s.is_accepting())) }
     pub fn is_terminated(&self) -> Result<bool> { self.read(|s| Ok(s.is_terminated())) }
-    pub fn commit_forced_tokens(&mut self) -> Result<Vec<u32>> { self.write(|s| Ok(s.commit_forced_tokens())) }
+    pub fn forced_bytes(&self) -> Result<Vec<u8>> { self.read(|s| Ok(s.forced_bytes())) }
 }
 
 #[cfg(test)]
@@ -169,7 +158,6 @@ mod tests {
             let module = glrmask::Module::new(&grammar);
             let options = compile_options(
                 mask_strategy(mode).unwrap(),
-                glrmask::BoundaryMaskStrategy::Auto,
             );
             let c = Arc::new(module.compile_with(&vocab, options).unwrap());
             let expected = c.start().mask();

@@ -1,7 +1,6 @@
 //! Python's source/module/root lifecycle, backed by the production Rust API.
 mod canonical;
 use super::{check_token_id, PyConstraint, PyVocab};
-use glrmask::__private::ConstraintExt as _;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
@@ -15,16 +14,16 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
     PyConstraint { inner: Arc::new(inner) }
 }
 
-/// Cost preferences, not engine selections or performance guarantees.
+/// A preference for faster compiling or faster masks.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "MaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PyMaskStrategy {
-    /// Let the library choose. The default.
+    /// Let GLRMask choose. The default.
     AUTO = 0,
-    /// Prefer lower preparation cost.
+    /// Prefer faster compiling over faster masks.
     FAST_COMPILE = 3,
-    /// Prefer lower cost per mask.
+    /// Prefer faster masks over faster compiling.
     FAST_MASKS = 4,
 }
 #[pymethods]
@@ -37,32 +36,6 @@ impl From<PyMaskStrategy> for glrmask::MaskStrategy {
             PyMaskStrategy::AUTO => Self::Auto,
             PyMaskStrategy::FAST_COMPILE => Self::FastCompile,
             PyMaskStrategy::FAST_MASKS => Self::FastMasks,
-        }
-    }
-}
-
-/// Cost preferences for masks at grammar boundaries.
-#[allow(non_camel_case_types)]
-#[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, frozen, from_py_object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum PyBoundaryMaskStrategy {
-    /// Let the library choose. The default.
-    AUTO = 0,
-    /// Prefer lower boundary preparation cost.
-    FAST_COMPILE = 3,
-    /// Prefer lower boundary mask cost.
-    FAST_MASKS = 4,
-}
-#[pymethods]
-impl PyBoundaryMaskStrategy {
-    fn __hash__(&self) -> isize { *self as isize }
-}
-impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
-    fn from(value: PyBoundaryMaskStrategy) -> Self {
-        match value {
-            PyBoundaryMaskStrategy::AUTO => Self::Auto,
-            PyBoundaryMaskStrategy::FAST_COMPILE => Self::FastCompile,
-            PyBoundaryMaskStrategy::FAST_MASKS => Self::FastMasks,
         }
     }
 }
@@ -136,7 +109,6 @@ fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeIncl
 
 #[pymethods]
 impl PyTokenSet {
-    /// Creates a set from `ids`.
     #[new]
     #[pyo3(signature = (ids, /))]
     fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -149,7 +121,7 @@ impl PyTokenSet {
         })
     }
 
-    /// Creates a set from `range` objects, which must have step 1.
+    /// Each range must have step 1.
     #[staticmethod]
     #[pyo3(signature = (ranges, /))]
     fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -160,7 +132,6 @@ impl PyTokenSet {
         Ok(Self { inner: glrmask::TokenSet::from_ranges(ranges.into_iter().flatten()) })
     }
 
-    /// An expression that rebuilds the set, or a summary for large sets.
     fn __repr__(&self) -> String {
         let ranges = self.inner.range_pairs();
         if ranges.len() > 8 {
@@ -241,14 +212,14 @@ impl Drop for PyGrammar {
 
 #[pymethods]
 impl PyGrammar {
-    /// Creates a grammar from GLRM source.
+    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_glrm(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Glrm)
     }
 
-    /// Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text or a dict.
     #[staticmethod]
     #[pyo3(signature = (schema, /))]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -264,14 +235,13 @@ impl PyGrammar {
         Self::new(source, SourceKind::JsonSchema)
     }
 
-    /// Creates a grammar from Lark source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_lark(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Lark)
     }
 
-    /// Creates a grammar from a portable expression (no Module or TokenSet, even nested).
     #[staticmethod]
     #[pyo3(signature = (expr, /))]
     fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -281,9 +251,7 @@ impl PyGrammar {
         })
     }
 
-    /// Binds a portable Grammar or Expr to the extern `name`. Bind token sets and modules on a Module instead.
-    ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+    /// Binds externs by name. If one fails, none are bound.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -320,7 +288,7 @@ impl PyGrammar {
         Ok(())
     }
 
-    /// The grammar's externs.
+    /// A snapshot; read it again after `bind()`.
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {
         let inner = self.inner.clone();
@@ -329,20 +297,16 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
-    /// Compiles the grammar for `vocab`. Raises `GLRMaskError` if any extern is unbound.
-    ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<&Bound<'_, PyAny>>,
-        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
         let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
-        let options = canonical::compile_options(mask_strategy, boundary_mask_strategy)?;
+        let options = canonical::compile_options(mask_strategy)?;
         py.detach(move || {
             let module = glrmask::Module::new(&grammar);
             module.compile_with(&vocab, options)
@@ -351,43 +315,16 @@ impl PyGrammar {
         .map_err(api_error)
     }
 
-    /// Compiles as much as possible for `vocab` now, even with externs unbound, and returns a `Module` that keeps the work.
-    ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
-    fn precompile(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        vocab: &PyVocab,
-        mask_strategy: Option<&Bound<'_, PyAny>>,
-        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-    ) -> PyResult<canonical::PyModule> {
-        let grammar = slf.try_borrow()?.inner.clone();
-        let vocab = vocab.inner.clone();
-        let options = canonical::compile_options(mask_strategy, boundary_mask_strategy)?;
-        let module = py
-            .detach(move || {
-                let mut module = glrmask::Module::new(&grammar);
-                module.precompile_with(&vocab, options)?;
-                Ok::<_, glrmask::Error>(module)
-            })
-            .map_err(api_error)?;
-        Ok(canonical::PyModule::from_inner(module))
-    }
-
-    /// A copy of the grammar. Binding the copy does not change the original.
     fn copy(&self) -> Self {
         Self {
             inner: self.inner.clone(),
         }
     }
 
-    /// Same as `copy()`.
     fn __copy__(&self) -> Self {
         self.copy()
     }
 
-    /// Same as `copy()`.
     fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
         let copy = Py::new(slf.py(), slf.try_borrow()?.copy())?;
         memo.set_item(slf.as_ptr() as usize, &copy)?;
@@ -400,7 +337,6 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGrammar>()?;
     module.add_class::<PyTokenSet>()?;
     module.add_class::<PyMaskStrategy>()?;
-    module.add_class::<PyBoundaryMaskStrategy>()?;
     Ok(())
 }
 

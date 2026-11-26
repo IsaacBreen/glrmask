@@ -25,7 +25,7 @@ text = b""
 while True:
     logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
     allowed = np.zeros(len(logits), dtype=bool)
-    allowed[:state.mask_bit_len()] = state.mask(dtype=bool)
+    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
     allowed[eos] = state.is_accepting()
     assert allowed.any()
     logits[~allowed] = -np.inf
@@ -38,8 +38,8 @@ print(text.decode())
 ```
 
 Packed masks use 32-bit words: bit `id % 32` of word `id // 32` is set when token `id` is allowed.
-`mask_bit_len()` returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
-Allocate `(mask_bit_len() + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
+Python `mask_bit_len` (a method in Rust and C++) returns the number of token slots (largest domain ID plus one, or zero if empty), including gaps.
+Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
 To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
@@ -65,10 +65,10 @@ token without committing to it, copy the state first.
 `is_accepting()` says whether the text so far is a complete match. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed.
 
-### Forced tokens
+### Forced bytes
 
-`commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing. When the forced text could be tokenized in several ways, it takes the longest token at each step, at most 1,000 tokens per call.
-See [forced tokens](https://github.com/IsaacBreen/glrmask/blob/main/docs/forcing.md).
+`forced_bytes()` returns the bytes the grammar requires next without changing the state. Tokenize them with your model's tokenizer and commit the tokens. The query stops before a choice, an accepting position or a token-set item. Handle special tokens yourself. Long forced runs may be returned in parts; call again after committing.
+
 
 ## Composing grammars
 
@@ -128,7 +128,6 @@ call.bind(WEATHER_ARGS=weather_args, SEARCH_ARGS=search_args)
 constraint = call.compile(vocab)
 ```
 
-`grammar.precompile(vocab)` is short for creating a module from the grammar and precompiling it.
 
 `module.save()` returns bytes, and `Module.load(data)` restores the module with its bindings and precompiled work. A
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling it with another is an error.
@@ -165,12 +164,10 @@ on applicability or deterministic size grounds, another supported plan may be us
 artifacts and operational resource failures are not hidden by fallback. All supported plans preserve mask semantics.
 Retained compatible work may be reused in any mode.
 
-`BoundaryMaskStrategy` expresses the same three preferences for applicable grammar boundary work, independently
-of overall strategy. Pass the preferences to `compile` and `precompile` on either Grammar or Module.
+Pass the preference to `compile` on a Grammar or Module, or to `precompile` on a Module.
 
 ```python
-constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
-                             boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE)
+constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASKS)
 ```
 
 ## Errors

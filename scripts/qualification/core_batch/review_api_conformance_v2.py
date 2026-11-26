@@ -80,7 +80,7 @@ def walk(c):
     counters["constraints"]+=1
     assert not hasattr(c.start(),"forced")
     assert not hasattr(c.start(),"forced_token_ids")
-    assert not hasattr(c.start(),"forced_bytes")
+    assert not hasattr(c.start(),"commit_forced_tokens")
     assert not hasattr(c.start(),"mask_if_at_most")
     todo=[(c.start(),0)]
     while todo:

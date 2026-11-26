@@ -37,7 +37,7 @@ pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
-    /// Let the library choose. The default.
+    /// Let GLRMask choose. The default.
     #[default]
     Auto,
     /// Prefer faster compiling over faster masks.
@@ -46,28 +46,9 @@ pub enum MaskStrategy {
     FastMasks,
 }
 impl MaskStrategy {
-    /// Prefer lower preparation cost.
+    /// Prefer faster compiling over faster masks.
     pub const FAST_COMPILE: Self = Self::FastCompile;
     /// Prefer lower mask cost.
-    pub const FAST_MASKS: Self = Self::FastMasks;
-}
-
-/// The same preference, for masks where one grammar meets another at an extern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
-pub enum BoundaryMaskStrategy {
-    /// Let the library choose. The default.
-    #[default]
-    Auto,
-    /// Prefer lower boundary preparation cost.
-    FastCompile,
-    /// Prefer lower cost of masks at boundaries.
-    FastMasks,
-}
-impl BoundaryMaskStrategy {
-    /// Prefer lower boundary preparation cost.
-    pub const FAST_COMPILE: Self = Self::FastCompile;
-    /// Prefer lower boundary mask cost.
     pub const FAST_MASKS: Self = Self::FastMasks;
 }
 
@@ -562,7 +543,6 @@ fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// A grammar.
 #[derive(Debug, Clone)]
 pub struct Grammar {
     source: GrammarSource,
@@ -650,7 +630,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Creates a grammar from GLRM source.
+    /// Parses GLRM source.
     pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
         grammar.component()?;
@@ -658,7 +638,7 @@ impl Grammar {
     }
 
 
-    /// Creates a grammar from Lark source.
+    /// Parses Lark source.
     pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
         grammar.lark_document()?;
@@ -666,7 +646,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Creates a grammar from a JSON Schema, given as JSON text.
+    /// Parses a JSON Schema given as JSON text.
     pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
         let source = source.as_ref();
         crate::import::parse_json_schema_to_named(source)?;
@@ -806,7 +786,6 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Creates a grammar from an expression.
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)
@@ -873,7 +852,7 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// The grammar's externs.
+    /// The grammar's externs, borrowed from this grammar. Read it again after `bind()`.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Grammar(self),
@@ -908,12 +887,6 @@ impl Grammar {
         options: CompileOptions,
     ) -> Result<Constraint> {
         Module::new(self).compile_with(vocab, options)
-    }
-
-    /// Compiles as much as possible for `vocab` now, even with externs unbound, and
-    /// returns a [`Module`] that keeps the work.
-    pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
-        self.precompile_with(vocab, CompileOptions::default())
     }
 
     #[cfg(any(test, feature = "internal-api"))]
@@ -1513,13 +1486,6 @@ impl Grammar {
         } else {
             self.compile_token_trie(vocab, boundary, token_trie_backend(parser_backend))
         }
-    }
-
-    /// Like [`precompile`](Self::precompile), with `options`.
-    pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module> {
-        let mut module = Module::new(self);
-        module.precompile_with(vocab, options)?;
-        Ok(module)
     }
 
     pub(crate) fn from_expr_ref(expr: &Expr) -> Result<Grammar> {

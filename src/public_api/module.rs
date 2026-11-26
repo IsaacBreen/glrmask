@@ -16,25 +16,17 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 #[non_exhaustive]
 pub struct CompileOptions {
     mask_strategy: MaskStrategy,
-    boundary_mask_strategy: BoundaryMaskStrategy,
     internal_mask: Option<InternalMaskStrategy>,
     retry_mask: Option<InternalMaskStrategy>,
     internal_boundary: Option<InternalBoundaryMaskStrategy>,
 }
 
 impl CompileOptions {
-    /// Sets the mask cost preference. Defaults to Auto.
+
     pub fn mask_strategy(mut self, strategy: impl Into<MaskStrategy>) -> Self {
         self.mask_strategy = strategy.into();
         self.internal_mask = None;
         self.retry_mask = None;
-        self
-    }
-
-    /// Sets the boundary mask cost preference. Defaults to Auto.
-    pub fn boundary_mask_strategy(mut self, strategy: BoundaryMaskStrategy) -> Self {
-        self.boundary_mask_strategy = strategy;
-        self.internal_boundary = None;
         self
     }
 
@@ -58,10 +50,7 @@ impl CompileOptions {
     }
 
     fn selected_boundary(&self) -> InternalBoundaryMaskStrategy {
-        self.internal_boundary.unwrap_or(match self.boundary_mask_strategy {
-            BoundaryMaskStrategy::Auto | BoundaryMaskStrategy::FastMasks => InternalBoundaryMaskStrategy::Auto,
-            BoundaryMaskStrategy::FastCompile => InternalBoundaryMaskStrategy::TokenTrie,
-        })
+        self.internal_boundary.unwrap_or(InternalBoundaryMaskStrategy::Auto)
     }
 
     fn can_fallback(&self, error: &Error) -> bool {
@@ -167,7 +156,7 @@ pub(crate) enum BoundValue {
     TokenSet(TokenSet),
 }
 
-/// A grammar that can be compiled before its externs are bound. Binding them later only links the compiled parts, so the final compile is fast.
+/// A partially compiled grammar.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) node: Arc<Node>,
@@ -374,7 +363,7 @@ impl Grammar {
 }
 
 impl Module {
-    /// Creates a module from `grammar`.
+
     pub fn new(grammar: &Grammar) -> Self {
         fn convert(grammar: &Grammar, cache: &mut HashMap<usize, Module>) -> Module {
             if let Some(module) = grammar.module_snapshot.get() { return module.clone(); }
@@ -423,7 +412,7 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// The module's externs.
+    /// The module's externs, borrowed from this module. Read it again after `bind()`.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),
@@ -992,7 +981,7 @@ impl Module {
         }
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work. Fails if any extern is unbound or the module was precompiled for another vocabulary.
+    /// Reuses any precompiled work, which must be for the same vocabulary.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
@@ -1720,7 +1709,7 @@ mod b_shell_tests {
 }
 
 #[cfg(test)]
-mod grammar_precompile_tests {
+mod module_precompile_tests {
     use super::*;
 
     fn vocab() -> Vocab {
@@ -1733,12 +1722,13 @@ mod grammar_precompile_tests {
     const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
 
     #[test]
-    fn grammar_precompile_returns_a_module_that_retains_its_work() {
+    fn module_precompile_retains_its_work() {
         let vocab = vocab();
         let options = CompileOptions::default().internal_mask_strategy(InternalMaskStrategy::ParserDwa);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
 
-        let module = child.precompile_with(&vocab, options).expect("grammar precompile");
+        let mut module = Module::new(&child);
+        module.precompile_with(&vocab, options).expect("module precompile");
         let builds = static_build_probe::builds(&module);
         assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
 
@@ -1751,7 +1741,8 @@ mod grammar_precompile_tests {
 
         // Composing through the returned Module still matches the explicit
         // Module::new + bind + precompile path.
-        let mut parent = Grammar::from_glrm(HOST).unwrap().precompile(&vocab).expect("open parent precompile");
+        let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
+        parent.precompile(&vocab).expect("open parent precompile");
         parent.bind("child", module).expect("bind child");
         let composed = parent.compile(&vocab).expect("compile composed modules");
         let mut state = composed.start();

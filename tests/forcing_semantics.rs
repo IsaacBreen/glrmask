@@ -27,8 +27,7 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     let state = constraint.start();
     let before = state.mask();
     let accepted = state.is_accepting();
-    let ids = state.clone().commit_forced_tokens();
-    assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
+    let ids = state.forced_canonical_reference();
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
     assert_live(&state);
@@ -342,31 +341,36 @@ fn long_forced_fixture() -> (Constraint, Vocab) {
 }
 
 #[test]
-fn commit_forced_tokens_semantics_match_commit_tokens_replay() {
+fn forced_bytes_read_only_and_commit_replay() {
     let (constraint, _) = long_forced_fixture();
     let mut state = constraint.start();
-    let mut replay = state.clone();
-    let returned = state.commit_forced_tokens();
-    assert!(!returned.is_empty());
-    assert_eq!(replay.commit_tokens(&returned), returned.len());
-    assert_eq!(state.mask(), replay.mask());
-    assert_eq!(state.is_accepting(), replay.is_accepting());
-    assert_eq!(state.is_terminated(), replay.is_terminated());
+    let before = state.mask();
+    let bytes = state.forced_bytes();
+    assert!(!bytes.is_empty());
+    assert_eq!(state.mask(), before);
+    assert!(!state.is_accepting());
+    assert!(state.commit_bytes(&bytes));
 }
 
 #[test]
-fn commit_forced_tokens_stops_after_1000_tokens_and_continues() {
+fn forced_bytes_long_run_in_chunks() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
-    let parts = (0..1005).map(|_| glrmask::Expr::literal("a"));
-    let grammar = Grammar::from_expr(glrmask::Expr::sequence(parts)).unwrap();
-    let constraint = grammar.compile(&vocab).unwrap();
+    let literal = "a".repeat(10_005);
+    let grammar = Grammar::from_expr(glrmask::Expr::literal(literal.as_str())).unwrap();
+    let constraint = grammar.compile_with(&vocab, glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::FastCompile)).unwrap();
     let mut state = constraint.start();
-    let first = state.commit_forced_tokens();
-    assert_eq!(first.len(), 1000);
-    assert!(!state.is_accepting());
-    let second = state.commit_forced_tokens();
-    assert_eq!(second.len(), 5);
-    assert!(state.is_accepting());
+    let mut collected = Vec::new();
+    let mut chunks = 0;
+    while !state.is_accepting() {
+        let bytes = state.forced_bytes();
+        assert!(!bytes.is_empty() && bytes.len() <= 10_000);
+        assert!(state.commit_bytes(&bytes));
+        collected.extend(bytes);
+        chunks += 1;
+    }
+    assert!(chunks > 1);
+    assert_eq!(collected, literal.as_bytes());
+    assert!(state.forced_bytes().is_empty());
 }
 
 #[test]
@@ -394,10 +398,11 @@ fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
         let options = mode.build_options();
         let plain = optional.compile_with_build_options(&vocab, options.clone()).unwrap();
         let mut s = plain.start();
-        assert_eq!(s.commit_forced_tokens(), [0], "{mode:?}");
+        assert_eq!(s.forced_bytes(), b"a", "{mode:?}");
+        assert!(s.commit_bytes(b"a"));
         assert!(s.is_accepting() && !s.is_terminated());
         assert_eq!(s.mask()[0], 1 << 1);
-        assert!(s.commit_forced_tokens().is_empty());
+        assert!(s.forced_bytes().is_empty());
         assert!(s.forced_token_ids_reference().is_empty());
 
         for (body, ends, expected) in [
@@ -419,14 +424,15 @@ fn acceptance_is_a_stop_choice_but_required_end_is_an_event() {
                 assert!(allows(&s.mask(), 9));
                 if expected.len() == 2 {
                     assert_eq!(s.forced_token_ids_reference(), [9]);
-                    assert_eq!(s.commit_forced_tokens(), [9]);
+                    assert!(s.forced_bytes().is_empty());
+                    assert!(s.commit_token(9));
                 } else {
-                    assert!(s.commit_forced_tokens().is_empty());
+                    assert!(s.forced_bytes().is_empty());
                     assert!(s.commit_token(9));
                 }
                 assert!(s.is_accepting() && s.is_terminated());
                 assert!(s.mask().iter().all(|&x| x == 0));
-                assert!(s.commit_forced_tokens().is_empty());
+                assert!(s.forced_bytes().is_empty());
             }
         }
     }

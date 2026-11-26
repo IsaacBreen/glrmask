@@ -7,16 +7,15 @@ pub struct glrmask_expr(pub(super) g::Expr);
 #[repr(C)] pub struct glrmask_compile_options {
     pub struct_size: usize,
     pub mask_strategy: u32,
-    pub boundary_mask_strategy: u32,
-    pub reserved: [u32; 2],
+    pub reserved: [u32; 3],
 }
 /// kind: 0 Grammar, 1 Module, 2 Expr, 4 TokenSet. Inputs are borrowed for this call only.
 #[repr(C)] pub struct glrmask_expr_operand { pub kind: u32, pub handle: *const c_void }
 
 pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g::CompileOptions> {
     if p.is_null() { return Ok(g::CompileOptions::default()); }
-    // The first three fields are the original ABI. A caller built against it
-    // passes the shorter struct; its missing fields count as zero.
+    // The mask preference is followed by reserved fields. Shorter structs
+    // retain zero defaults for missing fields.
     let minimum = size_of::<usize>() + 2 * size_of::<u32>();
     valid(p)?;
     let struct_size = unsafe { p.cast::<usize>().read() };
@@ -29,12 +28,11 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     let complete_size = minimum + (known_size - minimum) / size_of::<u32>() * size_of::<u32>();
     unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), complete_size) };
     o.struct_size = struct_size;
-    if o.reserved != [0, 0] {
+    if o.reserved != [0, 0, 0] {
         return Err(Error::invalid("reserved compile-options fields must be zero"));
     }
     Ok(core::compile_options(
         core::mask_strategy(o.mask_strategy)?,
-        core::boundary_mask_strategy(o.boundary_mask_strategy)?,
     ))
 }
 
@@ -60,14 +58,6 @@ clone_handle!(glrmask_expr_clone, glrmask_expr);
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_new(p: *const glrmask_grammar, out: *mut *mut glrmask_module) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::new(&read(p)?.0)))) })
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_precompile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_module) -> i32 {
-    ffi(|| unsafe { produce(out, || {
-        let mut module = g::Module::new(&read(p)?.0);
-        module.precompile_with(&read(v)?.0, root_options(o)?)?;
-        Ok(glrmask_module(module))
-    }) })
 }
 
 macro_rules! bind_handle {($name:ident,$child:ty,$wrap:expr)=>{

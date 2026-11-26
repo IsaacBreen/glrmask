@@ -8,7 +8,8 @@ const bytes = await c.save(); const loaded = await Constraint.load(bytes, v);
 const words: Uint32Array = loaded.start().mask();
 
 const module = new Module(Grammar.fromLark('start: "a"'));
-const precompiled: Module = await Grammar.fromLark('start: "a"').precompile(v, options);
+const precompiled = new Module(Grammar.fromLark('start: "a"'));
+await precompiled.precompile(v, options);
 void precompiled;
 const tokenTrie: MaskStrategy = MaskStrategy.FastCompile;
 await module.precompile(v, {maskStrategy: tokenTrie});

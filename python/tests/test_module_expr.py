@@ -36,17 +36,15 @@ def test_compile_options_and_helpers():
     assert not hasattr(g, "CompileOptions")
     assert not hasattr(source(), "mask_strategy")
     assert g.MaskStrategy.FAST_COMPILE != g.MaskStrategy.FAST_MASKS
-    assert g.BoundaryMaskStrategy.FAST_MASKS != g.BoundaryMaskStrategy.FAST_COMPILE
+    assert not hasattr(g, "BoundaryMaskStrategy")
 
     assert module.precompile(
         v,
         mask_strategy=g.MaskStrategy.FAST_MASKS,
-        boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_MASKS,
     ) is None
     state = module.compile(
         v,
         mask_strategy=g.MaskStrategy.FAST_MASKS,
-        boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_COMPILE,
     ).start()
     assert token_allowed(state.mask(), 1)
     assert state.commit_token(1)
@@ -129,14 +127,18 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
     assert token_parent.compile(v) is not None
 
 
-def test_grammar_precompile_returns_a_module():
+def test_module_precompile_retains_work():
     v = vocab()
 
     # A grammar precompiles into a bindable Module, including while its own
     # externs are still open.
     open_grammar = g.Grammar.from_glrm(HOST)
-    module = open_grammar.precompile(v)
-    module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS))
+    assert not hasattr(open_grammar, "precompile")
+    module = g.Module(open_grammar)
+    module.precompile(v)
+    child = g.Module(source())
+    child.precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
+    module.bind('child', child)
     state = module.compile(v).start()
     assert token_allowed(state.mask(), 4)
     assert state.commit_token(4)
@@ -151,7 +153,8 @@ def test_grammar_precompile_returns_a_module():
 
     # The returned Module retains work: its artifact carries the static
     # preparation, survives a round-trip, and a TokenTrie compile keeps it.
-    retained = source().precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
+    retained = g.Module(source())
+    retained.precompile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
     assert len(retained.save()) > len(g.Module(source()).save())
     restored = g.Module.load(retained.save())
     expected = list(g.Module(source()).compile(v).start().mask())
@@ -220,3 +223,11 @@ def test_self_attachment_rejected_when_open():
     module = g.Module(g.Grammar.from_glrm(HOST))
     with pytest.raises(ValueError, match="unbound externs"):
         module.bind('child', module)
+
+def test_externs_are_snapshots():
+    for owner in [g.Grammar.from_glrm(HOST), g.Module(g.Grammar.from_glrm(HOST))]:
+        before = owner.externs
+        assert "child" in before.unbound
+        owner.bind("child", source())
+        assert "child" in before.unbound
+        assert "child" not in owner.externs.unbound

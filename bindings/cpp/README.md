@@ -23,9 +23,9 @@ Configure with `-DCMAKE_PREFIX_PATH=/absolute/path/to/glrmask`. C consumers link
 
 GLRMask has four core types:
 
-- `Grammar`: a grammar.
-- `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
-- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `Grammar`
+- `Module`: a partially compiled grammar.
+- `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
 
 ## Quickstart
@@ -121,7 +121,7 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 
 ## Mask strategies
 
-`compile` and `precompile` take a `CompileOptions` with `mask_strategy` and `boundary_mask_strategy`.
+`compile` and `precompile` take a `CompileOptions` with `mask_strategy`.
 
 | `MaskStrategy` | Preference |
 | --- | --- |
@@ -129,7 +129,7 @@ Grammar bindings and Grammar expressions must contain neither modules nor token 
 | `FastCompile` | Prefer lower preparation cost. |
 | `FastMasks` | Prefer lower mask cost. |
 
-`BoundaryMaskStrategy` makes the same independent choice at grammar boundaries. These preferences do not
+These preferences do not
 guarantee a specific implementation or speed; another supported plan may be selected on a deterministic decline.
 See [mask strategies](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#mask-strategies).
 
@@ -157,7 +157,7 @@ so copy it first to try a token without committing to it. Commit special tokens 
 bytes never match them.
 
 `is_accepting()` says whether the input so far is a complete match, and `is_terminated()` whether nothing more can be
-committed. `commit_forced_tokens()` commits the tokens the grammar forces next and returns them; call it on a copy to look without committing.
+committed. `forced_bytes()` returns the grammar-forced bytes without changing the state. Tokenize and commit them yourself; exact token-set items are not included.
 
 [examples/generate.cpp](https://github.com/IsaacBreen/glrmask/blob/main/bindings/cpp/examples/generate.cpp) is a
 complete generation loop.

@@ -76,39 +76,20 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
         constraint.save(True)
 
 @pytest.mark.parametrize("mode", MODES)
-def test_boundary_option_is_eager_and_does_not_change_masks(mode):
-    vocab = glrmask.Vocab({0: b"a", 1: b"ab", 2: b"b"})
-    grammar = glrmask.Grammar.from_lark('start: "a" "b"?')
-    plain = grammar.compile(vocab, **mode)
-    assert grammar.compile(vocab, **mode,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE).save() == plain.save()
-    for detail in [glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS]:
-        requested = grammar.compile(vocab, **mode, boundary_mask_strategy=detail)
-        saved = requested.save()
-        for prefix in [b"", b"a", b"ab"]:
-            a, b = requested.start(), plain.start()
-            assert a.commit_bytes(prefix)
-            assert b.commit_bytes(prefix)
-            assert np.array_equal(a.mask(), b.mask())
-            assert a.is_accepting() == b.is_accepting()
-        assert requested.save() == saved
-    with pytest.raises(TypeError):
-        grammar.compile(vocab, boundary_mask_strategy="EXACT")
-
-
-def test_boundary_request_applies_to_compile_after_save_and_bind():
+def test_composed_grammar_with_automatic_boundaries(mode):
     vocab = glrmask.Vocab({0: b"x", 1: b"a", 2: b"y", 3: b"xay"})
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
     child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
-    for detail in [glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS]:
-        module = glrmask.Module(grammar)
-        with pytest.raises(ValueError, match="unbound"):
-            module.compile(vocab, boundary_mask_strategy=detail)
-        restored = glrmask.Module.load(module.save())
-        restored.bind("child", child)
-        requested = restored.compile(vocab, boundary_mask_strategy=detail)
-        assert token_allowed(requested.start().mask(), 3)
+    module = glrmask.Module(grammar)
+    with pytest.raises(ValueError, match="unbound"):
+        module.compile(vocab, **mode)
+    with pytest.raises(TypeError):
+        module.compile(vocab, boundary_mask_strategy="EXACT")
+    restored = glrmask.Module.load(module.save())
+    restored.bind("child", child)
+    requested = restored.compile(vocab, **mode)
+    assert token_allowed(requested.start().mask(), 3)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -138,7 +119,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
             for ended in [branch, branch.copy()]:
                 assert ended.is_accepting() and not ended.mask().any()
                 assert not ended.mask().any()
-                assert ended.copy().commit_forced_tokens() == []
+                assert ended.forced_bytes() == b""
                 assert not ended.commit_token(0)
                 assert not ended.commit_bytes(b"a")
                 assert not ended.is_accepting() and not ended.mask().any()

@@ -14,7 +14,6 @@ pub struct glrmask_grammar(g::Grammar);
 pub struct glrmask_constraint(Arc<g::Constraint>);
 pub struct glrmask_state(core::State);
 pub struct glrmask_bytes(Vec<u8>);
-pub struct glrmask_u32s(Vec<u32>);
 
 pub struct glrmask_extern_item {
     pub name: String,
@@ -115,7 +114,6 @@ free!(glrmask_grammar_free, glrmask_grammar);
 free!(glrmask_constraint_free, glrmask_constraint);
 free!(glrmask_state_free, glrmask_state);
 free!(glrmask_bytes_free, glrmask_bytes);
-free!(glrmask_u32s_free, glrmask_u32s);
 free!(glrmask_externs_free, glrmask_externs);
 
 clone_handle!(glrmask_vocab_clone, glrmask_vocab);
@@ -242,9 +240,9 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_terminated(p: *const glrmask_state, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_terminated()?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_forced_tokens(p: *mut glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_bytes(p: *const glrmask_state, out: *mut *mut glrmask_bytes) -> i32 {
     ffi(|| unsafe {
-        produce(out, || Ok(glrmask_u32s(write(p)?.0.commit_forced_tokens()?)))
+        produce(out, || Ok(glrmask_bytes(read(p)?.0.forced_bytes()?)))
     })
 }
 
@@ -254,7 +252,6 @@ macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
     }
 };}
 data!(glrmask_bytes_data, glrmask_bytes, u8);
-data!(glrmask_u32s_data, glrmask_u32s, u32);
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_len(p: *const glrmask_externs, out: *mut usize) -> i32 {
     ffi(|| unsafe { *write(out)? = read(p)?.0.iter().len(); Ok(()) })

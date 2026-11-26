@@ -29,8 +29,7 @@ assert state.is_accepting()
 ### Mask strategies
 
 `MaskStrategy` expresses a cost preference: `Auto` (the default), `FastCompile` (prefer less preparation),
-or `FastMasks` (prefer lower cost per mask). `BoundaryMaskStrategy` makes the same independent choice for
-grammar boundaries. The library can select another supported plan on a deterministic strategy decline; these
+or `FastMasks` (prefer lower cost per mask). The library can select another supported plan on a deterministic strategy decline; these
 preferences do not guarantee a particular engine or speed, and preserve mask semantics.
 
 The [full guide](GUIDE.md) covers generation, composition, token sets, strategies and errors.

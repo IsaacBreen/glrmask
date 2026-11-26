@@ -105,18 +105,17 @@ impl NativeModule {
         call(|| Ok(externs_to_native(self.snapshot()?.externs().unbound().iter())))
     }
 
-    fn options(mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
+    fn options(mode: f64) -> core::Result<g::CompileOptions> {
         Ok(core::compile_options(
             core::mask_strategy(uint(mode)?)?,
-            core::boundary_mask_strategy(uint(boundary)?)?,
         ))
     }
 
     #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<()> {
+    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<()> {
         call(|| {
             let vocab = live(&vocab.inner)?.clone();
-            let options = Self::options(mode, boundary)?;
+            let options = Self::options(mode)?;
             let mut target = live(&self.inner)?;
             target.module.precompile_with(&vocab, options)?;
             target.revision += 1;
@@ -124,7 +123,7 @@ impl NativeModule {
         })
     }
     #[napi]
-    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
+    pub fn precompile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
         call(|| {
             let target = live(&self.inner)?;
             Ok(AsyncTask::new(ModulePrecompileTask {
@@ -132,23 +131,23 @@ impl NativeModule {
                 revision: target.revision,
                 owner: self.inner.clone(),
                 vocab: live(&vocab.inner)?.clone(),
-                options: Self::options(mode, boundary)?,
+                options: Self::options(mode)?,
             }))
         })
     }
 
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
+    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {
         call(|| Ok(NativeConstraint {
-            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(mode, boundary)?)?)),
+            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(mode)?)?)),
         }))
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<ModuleCompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<ModuleCompileTask>> {
         call(|| Ok(AsyncTask::new(ModuleCompileTask {
             module: self.snapshot()?,
             vocab: live(&vocab.inner)?.clone(),
-            options: Self::options(mode, boundary)?,
+            options: Self::options(mode)?,
         })))
     }
 

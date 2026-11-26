@@ -2,7 +2,7 @@
 
 //! Native Node-API bindings. Public JS classes live in index.cjs.
 mod arrays;
-use module_api::{NativeExpr, NativeModule};
+use module_api::NativeExpr;
 use glrmask_binding_core::{self as core, glrmask as g};
 use napi::{bindgen_prelude::*, Env, Task, Unknown};
 use napi_derive::napi;
@@ -130,10 +130,9 @@ impl NativeTokenSet {
     pub fn to_string(&self) -> napi::Result<String> { call(|| Ok(format!("{:?}", *live(&self.inner)?))) }
 }
 
-fn grammar_compile_options(mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
+fn grammar_compile_options(mode: f64) -> core::Result<g::CompileOptions> {
     Ok(core::compile_options(
         core::mask_strategy(uint(mode)?)?,
-        core::boundary_mask_strategy(uint(boundary)?)?,
     ))
 }
 
@@ -181,33 +180,18 @@ impl NativeGrammar {
         call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
     }
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
+    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            let options = grammar_compile_options(mode, boundary)?;
+            let options = grammar_compile_options(mode)?;
             Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, options)?)) })
         })
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<CompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<CompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary)? }))
-        })
-    }
-    #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeModule> {
-        call(|| {
-            let mut m = g::Module::new(&*live(&self.inner)?);
-            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(mode, boundary)?)?;
-            Ok(NativeModule::new(m))
-        })
-    }
-    #[napi]
-    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<GrammarPrecompileTask>> {
-        call(|| {
-            let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary)? }))
+            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode)? }))
         })
     }
 }
@@ -279,8 +263,8 @@ impl NativeState {
     #[napi]
     pub fn is_terminated(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_terminated()) }
     #[napi]
-    pub fn commit_forced_tokens(&self) -> napi::Result<Uint32Array> {
-        call(|| Ok(live(&self.inner)?.commit_forced_tokens()?.into()))
+    pub fn forced_bytes(&self) -> napi::Result<Uint8Array> {
+        call(|| Ok(live(&self.inner)?.forced_bytes()?.into()))
     }
 }
 
@@ -291,15 +275,6 @@ impl Task for CompileTask {
     type JsValue = NativeConstraint;
     fn compute(&mut self) -> napi::Result<Self::Output> { call(|| Ok(Arc::new(self.module.compile_with(&self.vocab, self.options.clone())?))) }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeConstraint { inner: Handle::new(value) }) }
-}
-
-pub struct GrammarPrecompileTask { module: g::Module, vocab: g::Vocab, options: g::CompileOptions }
-#[napi]
-impl Task for GrammarPrecompileTask {
-    type Output = g::Module;
-    type JsValue = NativeModule;
-    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, self.options.clone())?; Ok(self.module.clone()) }) }
-    fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeModule::new(value)) }
 }
 
 enum SaveObject { Module(g::Module), Constraint(Arc<g::Constraint>) }

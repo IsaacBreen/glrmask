@@ -1,6 +1,6 @@
 //! Public-consumer lifecycle tests: no internal-api shortcuts or private field access.
 use glrmask::test_modes::MaskMode;
-use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
+use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new::<Vec<u8>>(vec![
@@ -96,8 +96,7 @@ fn compile_options_never_invalidate_retained_work() {
     let root = root.compile_with(
         &v,
         CompileOptions::default()
-            .mask_strategy(MaskStrategy::FastMasks)
-            .boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
+            .mask_strategy(MaskStrategy::FastMasks),
     )
     .unwrap();
     let mut state = root.start();

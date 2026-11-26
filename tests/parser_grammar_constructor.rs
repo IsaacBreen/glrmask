@@ -272,7 +272,10 @@ fn exact_token_extern_mask_cache_agrees_with_commit_and_forcing() {
             }
             assert!(state.is_accepting());
             let mut forced = c.start();
-            assert_eq!(forced.commit_forced_tokens(), [70, 1]);
+            assert!(forced.forced_bytes().is_empty());
+            assert!(forced.commit_token(70));
+            assert!(!forced.forced_bytes().is_empty());
+            assert!(forced.commit_token(1));
             assert!(forced.is_accepting());
         }
     }

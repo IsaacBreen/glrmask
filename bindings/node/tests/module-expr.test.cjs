@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy,GLRMaskError}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,GLRMaskError}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]]);
 const source=(text='a')=>Grammar.fromLark(`start: "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
@@ -14,7 +14,7 @@ test('Module: copy and root-only final options',()=>{
 
   const configured=original.clone();
   const child=new Module(source());
-  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks,boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile}),undefined);
+  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks}),undefined);
   accept(child,v,[1]);
 
   assert.equal(configured.bind('child',child),undefined);
@@ -22,7 +22,7 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const options={maskStrategy:MaskStrategy.FastMasks,boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile};
+  const options={maskStrategy:MaskStrategy.FastMasks};
   const root=new Module(Grammar.fromGlrm('start s extern grammar item nt s = item'));
   root.bind('item',Expr.sequence(configured,new TokenSet([63])));
   const state=root.compileSync(v,options).start();
@@ -30,12 +30,12 @@ test('Module: copy and root-only final options',()=>{
   assert.throws(()=>configured.compileSync(v,{bogus:true}),TypeError);
 });
 
-test('Grammar: precompile returns a bindable Module with retained work',async()=>{
+test('Module: precompile retains work',async()=>{
   const v=vocab();
   const child=source();
-  const parent=host().precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
+  const parent=new Module(host());parent.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
   assert.ok(parent instanceof Module);
-  parent.bind('child',child.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks}));
+  const childModule=new Module(child);childModule.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});parent.bind('child',childModule);
   const state=parent.compileSync(v).start();
   assert.ok(allowed(state,4));assert.ok(state.commitToken(4));assert.ok(state.isAccepting());
 
@@ -44,14 +44,14 @@ test('Grammar: precompile returns a bindable Module with retained work',async()=
   assert.equal(parent.compileSync(v).start().isAccepting(),reference.compileSync(v).start().isAccepting());
 
   // The asynchronous spelling returns the same bindable Module.
-  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.FastCompile});
+  const asyncParent=new Module(host());await asyncParent.precompile(v,{maskStrategy:MaskStrategy.FastCompile});
   assert.ok(asyncParent instanceof Module);
-  asyncParent.bind('child',await child.precompile(v));
+  const asyncChild=new Module(child);await asyncChild.precompile(v);asyncParent.bind('child',asyncChild);
   accept(asyncParent,v,[4]);
 
   // Retained work is serialized, survives a round-trip, and a TokenTrie
   // compile keeps it instead of rebuilding dynamically.
-  const retained=source().precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
+  const retained=new Module(source());retained.precompileSync(v,{maskStrategy:MaskStrategy.FastMasks});
   const bytes=retained.saveSync();
   assert.ok(bytes.length>new Module(source()).saveSync().length);
   const restored=Module.loadSync(bytes,v);
@@ -62,7 +62,7 @@ test('Grammar: precompile returns a bindable Module with retained work',async()=
 test('Module: retained work round-trips without stored settings',()=>{
   const v=vocab();
   const m=new Module(source());
-  m.precompileSync(v,{maskStrategy:MaskStrategy.FastCompile,boundaryMaskStrategy:BoundaryMaskStrategy.FastMasks});
+  m.precompileSync(v,{maskStrategy:MaskStrategy.FastCompile});
   const bytes=m.saveSync();
   const loaded=Module.loadSync(bytes,v);
   accept(loaded,v,[1]);
@@ -238,7 +238,7 @@ test('Externs snapshots survive bind and owner disposal',()=>{
 
 test('Grammar rejects direct and nested module expressions; Module.bind still accepts',()=>{
   const v=vocab(), parent=()=>Grammar.fromGlrm('start s extern grammar item nt s = item');
-  const prepared=source().precompileSync(v);
+  const prepared=new Module(source());prepared.precompileSync(v);
   const error=e=>e.code==='GLRMASK_INVALID_INPUT' && e.message==="an expression containing a Module can't become a Grammar; bind it into a Module instead";
   for(const m of [new Module(source()),prepared]){
     assert.throws(()=>Grammar.fromExpr(m),error);

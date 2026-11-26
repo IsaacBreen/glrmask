@@ -20,10 +20,9 @@ template<class F> void throws(F&& fn, glrmask_status status=-1) {
 }
 
 bool allowed(const std::vector<TokenId>& m, TokenId id) { return id/32<m.size() && (m[id/32]&(TokenId{1}<<(id%32)))!=0; }
-CompileOptions strategy_options(unsigned mode, BoundaryMaskStrategy boundary = BoundaryMaskStrategy::Auto) {
+CompileOptions strategy_options(unsigned mode) {
     CompileOptions options;
     options.mask_strategy = static_cast<MaskStrategy>(mode);
-    options.boundary_mask_strategy = boundary;
     return options;
 }
 Vocab vocabulary() { return Vocab({{0,"a"},{1,"b"},{31,"ab"},{32,"a"},{65,"z"}}); }
@@ -47,7 +46,7 @@ void basic() {
         auto copy = s; c.dispose(); g.dispose(); v.dispose();
         CHECK(!s.is_terminated());
         CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(s.is_terminated()); CHECK(!copy.is_accepting());
-        CHECK(copy.commit_token(0)); auto look = copy; CHECK(look.commit_forced_tokens()==std::vector<TokenId>{1});
+        CHECK(copy.commit_token(0)); auto before = copy.mask(); CHECK(copy.forced_bytes()==Bytes{static_cast<uint8_t>('b')}); CHECK(copy.mask()==before);
         CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting()); CHECK(copy.is_terminated());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
         s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
@@ -97,7 +96,7 @@ void exact_and_unicode() {
 void reject_module_expr_in_grammar() {
     Vocab v({{0,"a"}});
     auto source = Grammar::from_lark("start: \"a\"");
-    auto prepared = source.precompile(v);
+    auto prepared = Module(source); prepared.precompile(v);
     auto host = Grammar::from_glrm("start s extern grammar item nt s = item");
     auto token = TokenSet({5});
     for (const auto& expr : {Expr::choice({token,Expr::literal("x")}), Expr::sequence({Expr::literal(""),token}), Expr::sequence({Expr::choice({token,Expr::literal("x")}),Expr::literal("")})}) {
@@ -253,7 +252,7 @@ int thread_stack_probe(std::size_t stack_bytes) {
             for (auto& constraint : *p.constraints) for (int j=0; j<8; ++j) {
                 auto s = constraint.start(); CHECK(allowed(s.mask(), 31));
                 auto snapshot = s; CHECK(s.commit_token(31)); CHECK(s.is_accepting());
-                CHECK(snapshot.commit_token(0)); auto look = snapshot; CHECK(look.commit_forced_tokens()==std::vector<TokenId>{1});
+                CHECK(snapshot.commit_token(0)); auto before = snapshot.mask(); CHECK(snapshot.forced_bytes()==Bytes{static_cast<uint8_t>('b')}); CHECK(snapshot.mask()==before);
                 CHECK(snapshot.commit_token(1)); CHECK(snapshot.is_accepting());
             }
             p.okay = true;
@@ -342,12 +341,9 @@ void canonical_modules() {
     auto original = parent; // copy constructor is a cheap snapshot
 
     auto child = Module(Grammar::from_lark("start: \"a\""));
-    CHECK(BoundaryMaskStrategy::FastCompile != BoundaryMaskStrategy::FastMasks);
     CHECK(MaskStrategy::Auto != MaskStrategy::FastCompile);
-    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::FastCompile) == GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_COMPILE);
-    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::FastMasks) == GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_MASKS);
     CompileOptions child_options = strategy_options(
-        static_cast<unsigned>(MaskStrategy::FastMasks), BoundaryMaskStrategy::FastCompile);
+        static_cast<unsigned>(MaskStrategy::FastMasks));
     child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save());
@@ -419,10 +415,9 @@ void canonical_modules() {
     CHECK(TokenSet({1,2}) != TokenSet::from_ranges({{1,2}}));
     CHECK(!(TokenSet({1,2}) != TokenSet::from_ranges({{1,3}})));
 
-    // Grammar::precompile is the module-returning mirror of Grammar::compile.
-    auto open_host = host.precompile(v);
-    auto precompiled_child = Grammar::from_lark("start: \"a\"").precompile(
-        v, strategy_options(static_cast<unsigned>(MaskStrategy::FastMasks)));
+    auto open_host = Module(host); open_host.precompile(v);
+    auto precompiled_child = Module(Grammar::from_lark("start: \"a\""));
+    precompiled_child.precompile(v, strategy_options(static_cast<unsigned>(MaskStrategy::FastMasks)));
     CHECK(precompiled_child.save().size() > Module(Grammar::from_lark("start: \"a\"")).save().size());
     open_host.bind("child", precompiled_child);
     auto precompiled_state = open_host.compile(
@@ -430,10 +425,10 @@ void canonical_modules() {
     CHECK(allowed(precompiled_state.mask(), 3));
     CHECK(precompiled_state.commit_token(3)); CHECK(precompiled_state.is_accepting());
 
-    // All nine pairs of cost preferences preserve the same language.
+    // All three cost preferences preserve the same language.
     for(auto mask : {MaskStrategy::Auto, MaskStrategy::FastCompile, MaskStrategy::FastMasks})
-        for(auto boundary : {BoundaryMaskStrategy::Auto, BoundaryMaskStrategy::FastCompile, BoundaryMaskStrategy::FastMasks}) {
-            auto c = Grammar::from_lark("start: \"a\"").compile(v, CompileOptions{.mask_strategy=mask,.boundary_mask_strategy=boundary});
+        {
+            auto c = Grammar::from_lark("start: \"a\"").compile(v, CompileOptions{.mask_strategy=mask});
             auto state=c.start();
             CHECK(allowed(state.mask(), 1));
             CHECK(state.mask().size()==(state.mask_bit_len()+31)/32 && state.mask_bit_len()==c.mask_bit_len());

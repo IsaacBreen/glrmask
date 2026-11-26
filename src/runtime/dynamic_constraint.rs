@@ -3631,7 +3631,7 @@ impl DynamicConstraint {
         Self::load_with_vocab(bytes, vocab)
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// One more than the largest token ID.
     /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
     pub fn mask_bit_len(&self) -> usize {
         std::iter::once(&self.inner)
@@ -3757,7 +3757,7 @@ impl DynamicConstraintState {
         }
     }
 
-    /// Commits raw bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the bytes aren't allowed.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
@@ -3770,7 +3770,7 @@ impl DynamicConstraintState {
         self.retain_committing(|state| state.commit_bytes_raw(bytes))
     }
 
-    /// Commits a token. If it isn't allowed, returns `false` and terminates the state.
+    /// Returns `false`, and ends the state, if the token isn't allowed.
     #[must_use]
     pub fn commit_token(&mut self, token_id: u32) -> bool {
         if self
@@ -3887,9 +3887,9 @@ impl DynamicConstraintState {
     }
 
 
-    /// Commits the tokens for what must come next, taking the longest token at each step, and returns them. Stops before anything that could vary, or after 1,000 tokens.
-    pub fn commit_forced_tokens(&mut self) -> Vec<u32> {
-        crate::runtime::force_for_states_result(&mut self.alternatives, Some(true))
+    /// The bytes the grammar requires next. Stops where a token from a token set, the end of the grammar, or more than one byte could come next. May return only part of a long run; call again after committing.
+    pub fn forced_bytes(&self) -> Vec<u8> {
+        crate::runtime::forced_bytes_for_states(&self.alternatives)
     }
     pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
         crate::runtime::mask_for_states_at_most(&self.alternatives,max_allowed)
@@ -3905,7 +3905,7 @@ impl DynamicConstraintState {
         crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
-    /// Whether everything committed so far is a complete match. To allow EOS, add its token ID(s) to the mask when true, and stop without committing EOS.
+    /// Whether what's committed is a complete match. If so, allow EOS (don't commit it).
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }
@@ -3920,7 +3920,7 @@ impl DynamicConstraintState {
         self.alternatives.iter().any(ConstraintState::frontier_complete)
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
+    /// One more than the largest token ID.
     /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
     pub fn mask_bit_len(&self) -> usize { self.mask_bit_len }
 

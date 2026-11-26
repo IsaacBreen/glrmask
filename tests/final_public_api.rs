@@ -1,5 +1,5 @@
 use glrmask::{
-    BoundaryMaskStrategy, CompileOptions, Constraint, Expr, ExternKind, Grammar, MaskStrategy,
+    CompileOptions, Constraint, Expr, ExternKind, Grammar, MaskStrategy,
     Module, TokenSet, Vocab,
 };
 
@@ -386,8 +386,6 @@ fn focused_6_compile_options_never_touch_retained_work() {
     let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
     assert_ne!(MaskStrategy::FastCompile, MaskStrategy::FastMasks);
     assert_ne!(MaskStrategy::Auto, MaskStrategy::FastMasks);
-    assert_ne!(BoundaryMaskStrategy::Auto, BoundaryMaskStrategy::FastCompile);
-    assert_ne!(BoundaryMaskStrategy::FastCompile, BoundaryMaskStrategy::FastMasks);
 
     let mut m = m;
     m.precompile(&v).unwrap();
@@ -398,42 +396,7 @@ fn focused_6_compile_options_never_touch_retained_work() {
         .compile_with(
             &v,
             CompileOptions::default()
-                .mask_strategy(MaskStrategy::FastMasks)
-                .boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
-        )
-        .unwrap();
-    let s = c.start();
-    assert!(allowed(&s.mask(), 1));
-}
-
-#[test]
-fn focused_7_boundary_level_minimum() {
-    let v = vocab();
-    let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m.precompile_with(
-        &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
-    )
-    .unwrap();
-
-    // Switching to the explicit static boundary keeps retained work valid.
-    m.precompile_with(
-        &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastMasks),
-    )
-    .unwrap();
-
-    // Switching back to the token-trie boundary also keeps retained work valid.
-    m.precompile_with(
-        &v,
-        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
-    )
-    .unwrap();
-
-    let c = m
-        .compile_with(
-            &v,
-            CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::FastCompile),
+                .mask_strategy(MaskStrategy::FastMasks),
         )
         .unwrap();
     let s = c.start();
@@ -548,13 +511,16 @@ fn focused_11_grammar_compile_equals_module_new_compile() {
 }
 
 #[test]
-fn focused_12_grammar_precompile_returns_a_module() {
+fn focused_12_module_precompile_retains_work() {
     let v = vocab();
     let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
 
     // The returned Module is bindable and compiles like Module::new.
-    let mut module = Grammar::from_glrm(HOST).unwrap().precompile(&v).unwrap();
-    module.bind("child", child.precompile(&v).unwrap()).unwrap();
+    let mut module = Module::new(&Grammar::from_glrm(HOST).unwrap());
+    module.precompile(&v).unwrap();
+    let mut prepared_child = Module::new(&child);
+    prepared_child.precompile(&v).unwrap();
+    module.bind("child", prepared_child).unwrap();
     let c = module.compile(&v).unwrap();
     let mut s = c.start();
     assert!(allowed(&s.mask(), 4), "xay must compose the precompiled child");
@@ -570,7 +536,8 @@ fn focused_12_grammar_precompile_returns_a_module() {
     assert_eq!(c.start().is_accepting(), reference.start().is_accepting());
 
     // Options are honoured by precompile_with.
-    let configured = child
+    let mut configured = Module::new(&child);
+    configured
         .precompile_with(
             &v,
             CompileOptions::default().mask_strategy(MaskStrategy::FastMasks),

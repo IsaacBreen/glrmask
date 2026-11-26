@@ -7,7 +7,7 @@ def test_mask_domain(n):
     v = glrmask.Vocab({n-1: b"a"} if n else {})
     c = glrmask.Grammar.from_lark('start: "a"').compile(v)
     s = c.start()
-    assert c.mask_bit_len() == s.mask_bit_len() == n
+    assert c.mask_bit_len == s.mask_bit_len == n
     w = (n+31)//32
     p = s.mask()
     assert p.dtype == np.uint32 and p.shape == (w,)
@@ -39,7 +39,7 @@ def test_mask_domain(n):
         assert s.commit_token(n-1)
         s.fill_mask(p)
         assert np.array_equal(p, s.mask())
-        assert s.mask_bit_len() == n
+        assert s.mask_bit_len == n
 
 
 def test_threaded_fill_mask_matches_sequential():
@@ -58,7 +58,7 @@ def test_threaded_fill_mask_matches_sequential():
     barrier = Barrier(len(states))
     def fill(i):
         # Odd threads fill an int32 buffer through a zero-copy uint32 view.
-        out = np.zeros((c.mask_bit_len()+31)//32+2, dtype=np.int32 if i % 2 else np.uint32)
+        out = np.zeros((c.mask_bit_len+31)//32+2, dtype=np.int32 if i % 2 else np.uint32)
         barrier.wait(timeout=30)
         for _ in range(5):
             s = states[i]
@@ -69,3 +69,10 @@ def test_threaded_fill_mask_matches_sequential():
     with ThreadPoolExecutor(max_workers=len(states)) as pool:
         results = list(pool.map(fill, range(len(states))))
     assert len(results) == len(states)
+
+def test_mask_bit_len_is_read_only():
+    c = glrmask.Grammar.from_lark('start: "a"').compile(glrmask.Vocab({0: b"a"}))
+    for owner in [c, c.start()]:
+        assert owner.mask_bit_len == 1
+        with pytest.raises(AttributeError):
+            owner.mask_bit_len = 3

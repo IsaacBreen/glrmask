@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GLRMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,GLRMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[
   {label:'auto',options:{maskStrategy:MaskStrategy.Auto}},
@@ -29,7 +29,7 @@ for(const {label:maskStrategy,options} of strategies) {
     assert.throws(()=>s.fillMask(short),e=>e.code==='GLRMASK_BUFFER_TOO_SMALL');assert.equal(short[0],123);
     const copy=s.clone();c.dispose();g.dispose();v.dispose();closed(()=>c.start());
     assert.ok(s.commitToken(31));assert.ok(s.isAccepting());assert.ok(!copy.isAccepting());
-    assert.ok(copy.commitToken(0));assert.deepEqual(Array.from(copy.clone().commitForcedTokens()),[1]);assert.ok(!copy.isAccepting());
+    assert.ok(copy.commitToken(0));const before=copy.mask();assert.deepEqual(copy.forcedBytes(),new Uint8Array([98]));assert.deepEqual(copy.mask(),before);assert.ok(!copy.isAccepting());
     assert.ok(copy.commitToken(1));assert.ok(copy.isAccepting());
     s.dispose();s.dispose();closed(()=>s.mask());closed(()=>s.commitToken(0));
     copy[Symbol.dispose]();closed(()=>copy.isAccepting());
@@ -137,10 +137,10 @@ test('frontends and input validation preserve the public contracts',async()=>{
     assert.throws(()=>simple().compileSync(v,{maskStrategy:obsolete}),TypeError);
   assert.equal(Object.keys(MaskStrategy).length,3);
   assert.equal(new Set(Object.values(MaskStrategy)).size,3);
-  assert.equal(Object.keys(BoundaryMaskStrategy).length,3);
+  assert.equal(require("../index.cjs").BoundaryMaskStrategy,undefined);
   assert.equal(require('../index.cjs').ParserBackend,undefined);
-  for(const maskStrategy of Object.values(MaskStrategy)) for(const boundaryMaskStrategy of Object.values(BoundaryMaskStrategy)){
-    const c=simple().compileSync(v,{maskStrategy,boundaryMaskStrategy}), state=c.start();
+  for(const maskStrategy of Object.values(MaskStrategy)){
+    const c=simple().compileSync(v,{maskStrategy}), state=c.start();
     assert.equal(state.mask().length,Math.ceil(state.maskBitLength/32));
     assert.equal(state.maskBitLength,c.maskBitLength);
     const words=new Uint32Array(Math.ceil(state.maskBitLength/32));
@@ -267,4 +267,22 @@ test('mask bit extent includes gaps, empty and non-word-aligned domains',()=>{
     if(n){assert.ok(s.commitToken(n-1));s.fillMask(packed);assert.deepEqual(packed,s.mask());}
     s.dispose();c.dispose();v.dispose();
   }
+});
+
+test('forced byte query stops at choices, acceptance and exact events',()=>{
+  const v=new Vocab([[0,b('a')],[1,b('b')],[2,b('c')],[9,b('')]]);
+  const m=new Module(Grammar.fromGlrm('extern token MARK start r nt r="a" MARK ("b"|"c")'));
+  m.bind('MARK',new TokenSet([9]));
+  const s=m.compileSync(v).start();
+  const before=s.mask();
+  assert.deepEqual(s.forcedBytes(),new Uint8Array([97]));
+  assert.deepEqual(s.mask(),before);
+  assert.ok(s.commitBytes(s.forcedBytes()));
+  assert.equal(s.forcedBytes().length,0);
+  assert.ok(s.commitToken(9));
+  assert.equal(s.forcedBytes().length,0);
+  assert.ok(s.commitToken(1));
+  assert.ok(s.isAccepting());
+  assert.equal(s.forcedBytes().length,0);
+  assert.equal(s.commitForcedTokens,undefined);
 });

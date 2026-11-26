@@ -1,16 +1,6 @@
-//! Conservative, grammar-aware text forcing with exact model-token events.
-//!
-//! Ordinary text is forced only while every live parser/lexer alternative has
-//! the same next byte. Its tokenization is longest admitted spelling, then
-//! lowest original ID, and is withheld if an admitted longer token could extend
-//! the proved prefix. This is a library canonicalization policy, not a claim
-//! that every allowed model-token sequence has the same IDs or probabilities.
-//!
-//! Exact-token events are never reinterpreted as bytes. An event competes with
-//! text; only a unique admitted original ID may pass that boundary. Every
-//! returned ID is committed through the full ordinary/event successor before
-//! any more output is considered. Query limits shorten results, never weaken
-//! their proof. No normal mask/commit hot path depends on this optional query.
+//! Conservative grammar-forced byte prefixes, with internal token-ID oracles.
+//! The public query never consumes exact events or mutates the source state.
+//! Proof limits may shorten the prefix; they never weaken the proof.
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
@@ -19,6 +9,7 @@ use crate::automata::lexer::Lexer;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{frontier_is_accepting, CommitBuffers, ConstraintState, ParserStateMap};
 
+#[cfg(any(test, feature="internal-api"))]
 const MAX_FORCED_TOKENS: usize = 1_000;
 const MAX_BYTE_EXPLORATION: usize = 10_000;
 // Bounds checked byte/event probes, not CPU, allocator work, or mask cost.
@@ -34,9 +25,11 @@ impl Budget {
     }
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn bit(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)
 }
+#[cfg(any(test, feature="internal-api"))]
 fn ids(mask: &[u32]) -> impl Iterator<Item = u32> + '_ {
     mask.iter().enumerate().flat_map(|(word_index, &word)| {
         let mut pending = word;
@@ -48,12 +41,14 @@ fn ids(mask: &[u32]) -> impl Iterator<Item = u32> + '_ {
         })
     })
 }
+#[cfg(any(test, feature="internal-api"))]
 fn singleton(mask: &[u32]) -> Option<u32> {
     let mut iter = ids(mask);
     let first = iter.next()?;
     iter.next().is_none().then_some(first)
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn same_spelling_policy(states: &[ConstraintState]) -> bool {
     let Some(first) = states.first() else { return false; };
     states[1..].iter().all(|state| {
@@ -65,6 +60,7 @@ fn same_spelling_policy(states: &[ConstraintState]) -> bool {
     })
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn masks(states: &[ConstraintState], dynamic: Option<bool>) -> (Vec<Vec<u32>>, Vec<u32>) {
     let individual = states.iter().map(|state| {
         if state.state.is_empty() { return Vec::new(); }
@@ -178,6 +174,7 @@ fn byte_prefix_with_bounds(
     prefix
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn canonical_token(constraint: &Constraint, mask: &[u32], remaining: &[u8]) -> Option<(u32, usize)> {
     if remaining.is_empty() { return None; }
     let mut best = None;
@@ -196,6 +193,7 @@ fn canonical_token(constraint: &Constraint, mask: &[u32], remaining: &[u8]) -> O
     best
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn commit_selected(
     states: &mut Vec<ConstraintState>, individual: &[Vec<u32>], id: u32, dynamic: Option<bool>,
 ) -> bool {
@@ -210,26 +208,25 @@ fn commit_selected(
     !states.is_empty()
 }
 
+#[cfg(any(test, feature="internal-api"))]
 pub(crate) fn force(states: &[ConstraintState], dynamic: Option<bool>) -> Vec<u32> {
     let mut copy = states.to_vec();
     force_result(&mut copy, dynamic)
 }
 
-pub(crate) fn force_single(
-    state: &mut ConstraintState,
-    dynamic: Option<bool>,
-) -> Vec<u32> {
-    let mut states = vec![state.clone()];
-    let res = glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(&mut states, dynamic))
-        .unwrap_or_default();
-    if !res.is_empty() && !states.is_empty() {
-        *state = states.pop().unwrap();
+/// A read-only byte-language proof; never consumes exact-token events.
+pub(crate) fn forced_bytes(states: &[ConstraintState]) -> Vec<u8> {
+    if states.is_empty() || states.iter().any(ConstraintState::is_accepting) {
+        return Vec::new();
     }
-    res
+    glrmask_invariant::__private::catch_compilation_resource_limit(|| {
+        byte_prefix(states, MAX_BYTE_EXPLORATION, &mut Budget(MAX_PROBES))
+    }).unwrap_or_default()
 }
 
 /// Public-query adapter for the canonical reference implementation. A proof or
 /// resource limit returns the empty prefix.
+#[cfg(any(test, feature="internal-api"))]
 pub(crate) fn force_result(
     states: &mut Vec<ConstraintState>,
     dynamic: Option<bool>,
@@ -249,6 +246,7 @@ pub(crate) fn force_result(
 /// Strict token-ID forcing: no canonical spelling selection. Each next ID is
 /// the only one admitted by the union's authoritative token mask, then committed
 /// through every applicable owner. Stop at any accepting boundary or ambiguity.
+#[cfg(any(test, feature="internal-api"))]
 pub(crate) fn force_token_ids(states: &[ConstraintState], dynamic: Option<bool>) -> Vec<u32> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
         let mut states = states.to_vec();
@@ -265,6 +263,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState], dynamic: Option<bool>)
     }).unwrap_or_default()
 }
 
+#[cfg(any(test, feature="internal-api"))]
 fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<u32> {
     if states.is_empty() || !same_spelling_policy(states) {
         return Vec::new();
@@ -368,9 +367,9 @@ mod tests {
         for mode in MaskMode::ALL {
             let options=mode.build_options();
             let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
-            assert_eq!(baseline.start().clone().commit_forced_tokens(),[1],"{mode:?}");
+            assert_eq!(baseline.start().forced_bytes(),b"ab","{mode:?}");
             let event=guarded.compile_with_build_options(&vocab,options).unwrap();
-            assert!(event.start().clone().commit_forced_tokens().is_empty(),"{mode:?}");
+            assert_eq!(event.start().forced_bytes(),b"a","{mode:?}");
         }
     }
 

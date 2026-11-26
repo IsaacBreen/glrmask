@@ -102,9 +102,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
             let got = if canonical {
-                let public=state.clone().commit_forced_tokens();
-                assert_eq!(public,state.forced_canonical_reference(),"public/reference divergence: {label}; trace={trace:?}");
-                public
+                state.forced_canonical_reference()
             } else { state.forced_token_ids_reference() };
             // Both query contracts permit a shorter answer when a conservative
             // byte/proof boundary intervenes, but never a different encoding.

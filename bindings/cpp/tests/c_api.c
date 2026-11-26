@@ -20,8 +20,8 @@ int main(void) {
     const char source[]="start: \"a\"";
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,source,strlen(source),&grammar)==GLRMASK_OK);
     glrmask_compile_options options; CHECK(glrmask_compile_options_init(&options,sizeof(options))==GLRMASK_OK);
-    CHECK(options.mask_strategy==GLRMASK_MASK_STRATEGY_AUTO);CHECK(options.boundary_mask_strategy==GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO);
-    CHECK(options.reserved[0]==0 && options.reserved[1]==0);
+    CHECK(options.mask_strategy==GLRMASK_MASK_STRATEGY_AUTO);
+    CHECK(options.reserved[0]==0 && options.reserved[1]==0 && options.reserved[2]==0);
     {
         glrmask_compile_options wrong; CHECK(glrmask_compile_options_init(&wrong,sizeof(wrong))==GLRMASK_OK);
         wrong.reserved[1]=1;
@@ -36,9 +36,9 @@ int main(void) {
             CHECK(glrmask_grammar_compile(grammar,vocab,&wrong,&constraint)==GLRMASK_INVALID_INPUT && constraint==NULL);
         }
         const uint32_t modes[]={GLRMASK_MASK_STRATEGY_AUTO,GLRMASK_MASK_STRATEGY_FAST_COMPILE,GLRMASK_MASK_STRATEGY_FAST_MASKS};
-        for(size_t i=0;i<3;i++) for(size_t j=0;j<3;j++){
+        for(size_t i=0;i<3;i++){
             glrmask_compile_options requested; CHECK(glrmask_compile_options_init(&requested,sizeof(requested))==GLRMASK_OK);
-            requested.mask_strategy=modes[i]; requested.boundary_mask_strategy=modes[j];
+            requested.mask_strategy=modes[i];
             CHECK(glrmask_grammar_compile(grammar,vocab,&requested,&constraint)==GLRMASK_OK);
             size_t n=0,m=0;glrmask_state* probe=NULL;uint32_t words[2]={0xffffffff,0xffffffff};
             CHECK(glrmask_constraint_mask_bit_len(constraint,&n)==GLRMASK_OK && n==32);
@@ -47,15 +47,23 @@ int main(void) {
             CHECK(glrmask_state_fill_mask(probe,words,(n+31)/32)==GLRMASK_OK && words[0]==0x80000001);
             CHECK(glrmask_state_fill_mask(probe,words,0)==GLRMASK_BUFFER_TOO_SMALL);
             CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[1]==0);
+            glrmask_bytes* forced=NULL;const uint8_t* data=NULL;size_t count=0;
+            CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
+            CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==1 && data[0]=='a');
+            CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[0]==0x80000001 && words[1]==0);
+            CHECK(glrmask_state_commit_bytes(probe,data,count));glrmask_bytes_free(forced);forced=NULL;
+            CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
+            CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==0);
+            glrmask_bytes_free(forced);
             glrmask_state_free(probe);glrmask_constraint_free(constraint);constraint=NULL;
         }
     }
     {
-        struct old_options { size_t struct_size; uint32_t mask_strategy, boundary_mask_strategy; };
+        struct old_options { size_t struct_size; uint32_t mask_strategy, reserved; };
         struct { struct old_options opts; uint64_t guard; } old;
         memset(&old,0xff,sizeof(old));
         CHECK(glrmask_compile_options_init((glrmask_compile_options*)&old.opts,sizeof(old.opts))==GLRMASK_OK);
-        CHECK(old.opts.struct_size==sizeof(old.opts) && old.opts.mask_strategy==0 && old.opts.boundary_mask_strategy==0);
+        CHECK(old.opts.struct_size==sizeof(old.opts) && old.opts.mask_strategy==0 && old.opts.reserved==0);
         CHECK(old.guard==UINT64_MAX);
         CHECK(glrmask_grammar_compile(grammar,vocab,(const glrmask_compile_options*)&old.opts,&constraint)==GLRMASK_OK);
         glrmask_constraint_free(constraint); constraint=NULL;
@@ -89,12 +97,6 @@ int main(void) {
     glrmask_compile_options module_options; CHECK(glrmask_compile_options_init(&module_options,sizeof(module_options))==GLRMASK_OK);
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_FAST_MASKS;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
-    /* Grammar::precompile is the module-returning mirror of Grammar::compile. */
-    glrmask_module *from_grammar=NULL;glrmask_constraint *precompiled_constraint=NULL;
-    CHECK(glrmask_grammar_precompile(grammar,vocab,&module_options,&from_grammar)==GLRMASK_OK);
-    CHECK(glrmask_module_compile(from_grammar,vocab,NULL,&precompiled_constraint)==GLRMASK_OK);
-    glrmask_constraint_free(precompiled_constraint);glrmask_module_free(from_grammar);
-    CHECK(glrmask_grammar_precompile(grammar,vocab,NULL,NULL)==GLRMASK_INVALID_INPUT);
     CHECK(glrmask_module_bind_tokens(module,"missing",7,NULL)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);

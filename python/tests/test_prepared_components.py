@@ -135,7 +135,6 @@ def test_compile_options_and_save_load_roundtrip():
     m.precompile(
         v,
         mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_MASKS,
     )
 
     # Preferences have distinct identities.
@@ -147,7 +146,6 @@ def test_compile_options_and_save_load_roundtrip():
     assert loaded.compile(
         v,
         mask_strategy=glrmask.MaskStrategy.FAST_COMPILE,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_MASKS,
     ).start().mask().tolist() == m.compile(v).start().mask().tolist()
 
 
@@ -180,12 +178,10 @@ def test_grammar_compile_sugar():
     sugar_constraint = g.compile(
         v,
         mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     module_constraint = glrmask.Module(g).compile(
         v,
         mask_strategy=glrmask.MaskStrategy.FAST_MASKS,
-        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_COMPILE,
     )
     assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())
 

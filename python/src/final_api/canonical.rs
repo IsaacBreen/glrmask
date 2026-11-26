@@ -20,20 +20,17 @@ pub(super) struct PyExtern {
 
 #[pymethods]
 impl PyExtern {
-    /// The extern's name.
     #[getter]
     fn name(&self) -> &str {
         &self.name
     }
 
-    /// What the extern can be bound to: `"token"` or `"grammar"`.
+    /// What the extern can be bound to.
     #[getter]
     fn kind(&self) -> &str {
         &self.kind
     }
 
-    /// A representation for debugging.
-    /// A representation for debugging.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         extern_repr(py, &self.name, &self.kind)
     }
@@ -45,8 +42,6 @@ impl PyExtern {
         hasher.finish()
     }
 
-    /// Whether both have the same name and kind.
-    /// Whether both list the same externs in the same order.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = other.py();
         match other.extract::<PyRef<'_, Self>>() {
@@ -97,7 +92,6 @@ impl PyExterns {
         }
     }
 
-    /// The number of externs.
     fn __len__(&self) -> usize {
         self.entries.len()
     }
@@ -106,7 +100,6 @@ impl PyExterns {
         self.entries.iter().any(|e| e.name == key)
     }
 
-    /// The extern named `key`. Raises `KeyError` if there is none.
     fn __getitem__(&self, key: &str) -> PyResult<PyExtern> {
         self.entries
             .iter()
@@ -115,7 +108,6 @@ impl PyExterns {
             .ok_or_else(|| PyKeyError::new_err(key.to_string()))
     }
 
-    /// The extern named `key`, or `default` if there is none.
     #[pyo3(signature = (key, default = None, /))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if let Some(e) = self.entries.iter().find(|e| e.name == key) {
@@ -125,7 +117,6 @@ impl PyExterns {
         }
     }
 
-    /// The extern names, in declaration order.
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let names: Vec<String> = slf.borrow().entries.iter().map(|e| e.name.clone()).collect();
@@ -133,17 +124,14 @@ impl PyExterns {
         Ok(py_list.call_method0("__iter__")?.unbind())
     }
 
-    /// The extern names, in declaration order.
     fn keys(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf.py().import("collections.abc")?.getattr("KeysView")?.call1((slf,))?.unbind())
     }
 
-    /// The externs, in declaration order.
     fn values(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf.py().import("collections.abc")?.getattr("ValuesView")?.call1((slf,))?.unbind())
     }
 
-    /// `(name, extern)` pairs, in declaration order.
     fn items(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf.py().import("collections.abc")?.getattr("ItemsView")?.call1((slf,))?.unbind())
     }
@@ -258,7 +246,7 @@ fn collect_parts(args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Vec<glrmask
 
 #[pymethods]
 impl PyExpr {
-    /// Matches exactly `value`. A `str` is UTF-8 encoded.
+    /// Matches `value` exactly.
     #[staticmethod]
     #[pyo3(signature = (value, /))]
     fn literal(value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -275,8 +263,6 @@ impl PyExpr {
     }
 
     /// Matches any one of `parts`.
-    ///
-    /// Raises `GLRMaskError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn choice(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -287,8 +273,6 @@ impl PyExpr {
     }
 
     /// Matches `parts` in order.
-    ///
-    /// Raises `GLRMaskError` if a part has unbound externs.
     #[staticmethod]
     #[pyo3(signature = (*parts))]
     fn sequence(parts: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Self> {
@@ -430,21 +414,13 @@ pub(super) fn bind_arguments<'py>(
 
 pub(super) fn compile_options(
     mask_strategy: Option<&Bound<'_, PyAny>>,
-    boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
 ) -> PyResult<glrmask::CompileOptions> {
     let mask_strategy = super::resolve_mask_strategy(mask_strategy)?;
-    let boundary_mask_strategy = boundary_mask_strategy
-        .as_deref()
-        .copied()
-        .unwrap_or(PyBoundaryMaskStrategy::AUTO);
-    Ok(glrmask::CompileOptions::default()
-        .mask_strategy(mask_strategy)
-        .boundary_mask_strategy(boundary_mask_strategy.into()))
+    Ok(glrmask::CompileOptions::default().mask_strategy(mask_strategy))
 }
 
 #[pymethods]
 impl PyModule {
-    /// Creates a module from a grammar.
     #[new]
     #[pyo3(signature = (source, /))]
     fn new(source: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -454,9 +430,7 @@ impl PyModule {
         Ok(Self::from_inner(glrmask::Module::new(&grammar.inner)))
     }
 
-    /// Binds the extern `name` to `value`.
-    ///
-    /// `bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `GLRMaskError` if a name is undeclared or already bound, or a value is the wrong kind.
+    /// Binds externs by name. If one fails, none are bound.
     #[pyo3(signature = (*args, **kwargs))]
     fn bind(
         slf: &Bound<'_, Self>,
@@ -493,19 +467,16 @@ impl PyModule {
         Ok(())
     }
 
-    /// Compiles as much as possible for `vocab` now, even with externs unbound, so later compiles are faster.
-    ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
+    /// Compiles what it can for `vocab` now, even with externs unbound.
+    #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<&Bound<'_, PyAny>>,
-        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<()> {
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy, boundary_mask_strategy)?;
+        let options = compile_options(mask_strategy)?;
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
         let next = py
@@ -518,27 +489,24 @@ impl PyModule {
         Ok(())
     }
 
-    /// Compiles the module for `vocab`, reusing any precompiled work. Raises `GLRMaskError` if any extern is unbound or the module was precompiled for another vocabulary.
-    ///
-    /// The keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
+    /// Reuses any precompiled work, which must be for the same vocabulary.
+    #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         mask_strategy: Option<&Bound<'_, PyAny>>,
-        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy, boundary_mask_strategy)?;
+        let options = compile_options(mask_strategy)?;
         let constraint = py
             .detach(move || snapshot.compile_with(&vocab, options))
             .map_err(api_error)?;
         Ok(super::constraint(constraint))
     }
 
-    /// The module's externs.
+    /// A snapshot; read it again after `bind()`.
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
         let snapshot = slf.borrow().snapshot();
@@ -555,31 +523,27 @@ impl PyModule {
         })
     }
 
-    /// A copy of the module. Binding the copy does not change the original.
     fn copy(&self) -> Self {
         Self::from_inner(self.snapshot())
     }
 
-    /// Same as `copy()`.
     fn __copy__(&self) -> Self {
         self.copy()
     }
 
-    /// Same as `copy()`.
     fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyDict>) -> PyResult<Py<Self>> {
         let copy = Py::new(slf.py(), slf.try_borrow()?.copy())?;
         memo.set_item(slf.as_ptr() as usize, &copy)?;
         Ok(copy)
     }
 
-    /// Saves the module as bytes, with its precompiled work but without the vocabulary. Bytes saved by one GLRMask version may not load in another.
+    /// Serializes the module with its precompiled work. Other GLRMask versions may not load it.
     fn save<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = slf.try_borrow()?.snapshot();
         let bytes = slf.py().detach(move || snapshot.save());
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
-    /// Loads a module saved with `save()`.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

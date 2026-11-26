@@ -12576,7 +12576,7 @@ impl Constraint {
             .and_then(|id| self.packed_dwa_token_dense_masks.get(id))
     }
 
-    /// A new state with nothing committed.
+    /// Starts a new sequence.
     pub fn start(&self) -> ConstraintState {
         if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();
@@ -12616,8 +12616,7 @@ impl Constraint {
         state
     }
 
-    /// Number of token slots covered by the mask, in bits: one plus the largest token ID in the constraint's mask domain (including gaps), or zero if empty. Not the number of allowed tokens or the highest allowed ID.
-    /// Packed buffers need `mask_bit_len().div_ceil(32)` 32-bit words.
+    /// One more than the largest token ID.
     pub fn mask_bit_len(&self) -> usize {
         self.max_original_token_id().map_or(0, |id| id as usize + 1)
     }

@@ -28,7 +28,6 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
         "Externs",
         "TokenSet",
         "MaskStrategy",
-        "BoundaryMaskStrategy",
         "Vocab",
         "Constraint",
         "ConstraintState",
@@ -187,7 +186,7 @@ def test_source_constructors_reject_invalid_source_at_construction():
 
 
 def test_strategy_presets_are_distinct_and_legacy_tuning_is_not_public():
-    for strategy in (glrmask.MaskStrategy, glrmask.BoundaryMaskStrategy):
+    for strategy in (glrmask.MaskStrategy,):
         assert len({strategy.AUTO, strategy.FAST_COMPILE, strategy.FAST_MASKS}) == 3
         assert not hasattr(strategy, "PARSER_DWA")
         assert not hasattr(strategy, "TOKEN_TRIE")
@@ -195,9 +194,8 @@ def test_strategy_presets_are_distinct_and_legacy_tuning_is_not_public():
     assert not hasattr(glrmask, "ParserBackend")
     grammar = glrmask.Grammar.from_lark('start: "a"')
     for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS):
-        for boundary in (glrmask.BoundaryMaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS):
-            c = grammar.compile(vocab(), mask_strategy=mode, boundary_mask_strategy=boundary)
-            assert token_allowed(c.start().mask(), 0)
+        c = grammar.compile(vocab(), mask_strategy=mode)
+        assert token_allowed(c.start().mask(), 0)
     for bad in ["token-trie", "parser-dwa", 2, object(), {"kind": "token-trie"}]:
         with pytest.raises(TypeError):
             grammar.compile(vocab(), mask_strategy=bad)
@@ -341,8 +339,7 @@ def test_fill_mask_dtype_and_layout():
 
 
 def test_hashable_public_values_and_token_set_expr_parts():
-    for value in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS,
-                  glrmask.BoundaryMaskStrategy.AUTO, glrmask.BoundaryMaskStrategy.FAST_COMPILE, glrmask.BoundaryMaskStrategy.FAST_MASKS):
+    for value in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS):
         assert {value: 1}[value] == 1
         assert hash(value) == hash(int(value))
     assert hash(glrmask.TokenSet([1])) == hash(glrmask.TokenSet([1]))
@@ -365,7 +362,9 @@ def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
     source = glrmask.Grammar.from_lark('start: "a"')
     def parent():
         return glrmask.Grammar.from_glrm('start s extern grammar item nt s = item')
-    for m in (glrmask.Module(source), source.precompile(v)):
+    prepared = glrmask.Module(source)
+    prepared.precompile(v)
+    for m in (glrmask.Module(source), prepared):
         with pytest.raises(glrmask.GLRMaskError) as exc:
             glrmask.Grammar.from_expr(m)
         assert exc.value.kind == "invalid_input"

@@ -18,9 +18,9 @@
 //!
 //! GLRMask has four core types:
 //!
-//! - `Grammar`: a grammar.
-//! - `Module`: a grammar that can be compiled before its externs are bound, so the final compile only links the parts.
-//! - `Constraint`: a grammar compiled for a vocabulary, ready to use.
+//! - `Grammar`
+//! - `Module`: a partially compiled grammar.
+//! - `Constraint`: a compiled grammar, ready to use.
 //! - `ConstraintState`: the state of one generated sequence.
 //!
 //! # Quickstart
@@ -29,26 +29,42 @@
 //! use glrmask::{Grammar, Vocab};
 //!
 //! fn main() -> glrmask::Result<()> {
-//!     let grammar = Grammar::from_lark(r#"
-//!         start: "hello" " " "world"
-//!     "#)?;
+//!     let grammar = Grammar::from_json_schema(r#"{
+//!         "type": "object",
+//!         "properties": {"color": {"enum": ["red", "green", "blue"]}},
+//!         "required": ["color"],
+//!         "additionalProperties": false
+//!     }"#)?;
 //!
-//!     // A toy vocabulary of token ID -> bytes. With a real model, build it from the tokenizer.
-//!     let vocab = Vocab::new([
-//!         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
-//!     ])?;
+//!     // One token per byte, plus EOS. With a real model, build this from its tokenizer.
+//!     let vocab = Vocab::new((0..256u32).map(|b| (b, vec![b as u8])))?;
+//!     const EOS: u32 = 256;
 //!
-//!     let constraint = grammar.compile(&vocab)?;
-//!     let mut state = constraint.start();
-//!
-//!     // Each mask says which tokens may come next: bit `id` is set if token `id` is allowed.
-//!     assert_eq!(state.mask(), [0b001]); // only "hello"
-//!     assert!(state.commit_token(0));
-//!     assert_eq!(state.mask(), [0b010]); // only " "
-//!     assert!(state.commit_token(1));
-//!     assert!(state.commit_token(2));
-//!     assert!(state.is_accepting());
+//!     let mut state = grammar.compile(&vocab)?.start();
+//!     let mut output = Vec::new();
+//!     loop {
+//!         let logits = model(&output); // stand-in for your model
+//!         let mask = state.mask();
+//!         let allowed = |t: u32| match t {
+//!             EOS => state.is_accepting(),
+//!             t => mask[t as usize / 32] >> (t % 32) & 1 == 1,
+//!         };
+//!         let token = (0..=EOS)
+//!             .filter(|&t| allowed(t))
+//!             .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
+//!             .unwrap();
+//!         if token == EOS {
+//!             break;
+//!         }
+//!         state.commit_token(token);
+//!         output.push(token as u8);
+//!     }
+//!     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
 //!     Ok(())
+//! }
+//!
+//! fn model(output: &[u8]) -> Vec<f32> {
+//!     (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
 //! }
 //! ```
 //!
@@ -88,7 +104,7 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab, MAX_TOKEN_ID};
 pub use error::{Error, ErrorKind, Result};
-pub use public_api::{Grammar, Module, CompileOptions, Binding, GrammarBinding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, Binding, GrammarBinding, Expr, MaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{InternalMaskStrategy, InternalBoundaryMaskStrategy, ParserBackend, TokenTrie};
