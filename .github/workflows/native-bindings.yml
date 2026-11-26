@@ -344,7 +344,7 @@ jobs:
       - name: Restore test-only Cargo cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: ci-test-native
+          key: release-native-pr
           workspaces: . -> target/native-pr
           cache-workspace-crates: 'true'
           cache-bin: 'false'
@@ -353,15 +353,17 @@ jobs:
           python -m pip install cmake ninja
           npm ci --omit=optional --ignore-scripts --prefix bindings/node
           python bindings/ci/check.py
+      # The 128 KiB pthread regression requires full optimizer stack layout.
+      # This cached build is for testing only; no release artifacts are uploaded.
       - name: Build non-distributable test libraries
         run: |
-          cargo build --locked --profile ci-test -p glrmask-c -p glrmask-node
-          npm --prefix bindings/node run build -- --profile ci-test
+          cargo build --locked --release -p glrmask-c -p glrmask-node
+          npm --prefix bindings/node run build -- --profile release
       - name: Node tests and TypeScript
         run: npm --prefix bindings/node run check
       - name: C/C++ install, consumers and parity
         run: |
-          python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/ci-test" --work-dir "$RUNNER_TEMP/cpp-validation"
+          python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/release" --work-dir "$RUNNER_TEMP/cpp-validation"
           node bindings/node/scripts/parity.cjs "$RUNNER_TEMP/cpp-validation/build-static/glrmask_cpp_tests" "$RUNNER_TEMP/native-parity"
 
   fast-abi:
