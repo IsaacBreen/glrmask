@@ -1275,8 +1275,8 @@ impl DenseMaskAcc {
 // `for_each_stack_top_first_bounded(128, ...)` and declining past the cap is
 // unacceptable for a claimed supported static shard: callers interpret
 // `false` as "run the exact dynamic fallback". This evaluator computes the
-// exact same union the enumeration denotes â€” union over paths of
-// (DWA acceptance(path) intersect eligibility(path)) â€” by dynamic programming
+// exact same union the enumeration denotes — union over paths of
+// (DWA acceptance(path) intersect eligibility(path)) — by dynamic programming
 // over the indexed GSS DAG x DWA product with memoized shared tails. No
 // path-count cap affects correctness.
 //
@@ -3152,7 +3152,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     /// independently of the current seed accumulator.
     ///
     /// The denotation evaluated below uses only union and intersection with
-    /// parser-DWA weights. Therefore `E(q, G, a) = a Ã¢Ë†Â© E(q, G, U)` for every
+    /// parser-DWA weights. Therefore `E(q, G, a) = a ∩ E(q, G, U)` for every
     /// seed accumulator `a` and seed universe `U`. Caching `E(q, G, U)` by
     /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
     /// produce a different `a` at the next model token.
