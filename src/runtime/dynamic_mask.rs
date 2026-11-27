@@ -6061,20 +6061,24 @@ fn parser_child(
     if Some(terminal) == constraint.ignore_terminal {
         return Some(stacks.clone());
     }
-    // A proved pure push commutes with mapping every annotation to the empty
-    // value. Apply that same generic GSS primitive directly, rather than
-    // allocating two annotation-mapping memos/interfaces around the advance.
-    // All nontrivial effects retain the complete annotated parser evaluator.
+    // Native stack relations operate on the same unit-annotated GSS that
+    // the mask already owns. No conversion to exclusion-bearing commit
+    // stacks (and back) is needed for any local finite relation.
     if let Some(parser) = constraint.template_parser()
-        && !constraint.parser_skip_terminals().contains(&terminal)
+        && !super::commit::template_advance::debug_template_literal_enabled()
         && let Some(relation) = parser.local_relation(terminal as usize)
-        && let Some(fast) = relation.execution.as_ref()
-        && let Some(advanced) = super::commit::simple_read_shift::apply(fast, stacks)
     {
         parser.record_advance();
-        #[cfg(test)]
-        super::commit::simple_read_shift::MASK_SUCCESSES.with(|count| count.set(count.get() + 1));
-        return Some(advanced);
+        if !constraint.parser_skip_terminals().contains(&terminal)
+            && let Some(advanced) = relation.execution.as_ref()
+                .and_then(|fast| super::commit::simple_read_shift::apply(fast, stacks))
+        {
+            #[cfg(test)]
+            super::commit::simple_read_shift::MASK_SUCCESSES.with(|count| count.set(count.get() + 1));
+            return Some(advanced);
+        }
+        let advanced = super::commit::template_advance::advance_prepared_relation(relation, stacks);
+        return (!advanced.is_empty()).then_some(advanced);
     }
     let parser_gss = with_empty_accumulators(stacks);
     // The actual structural advance is already the definitive admissibility

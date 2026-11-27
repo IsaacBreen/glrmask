@@ -4,6 +4,7 @@ use crate::compiler::glr::labels::{
     negative_to_positive_label,
 };
 use crate::compiler::glr::parser::ParserGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
 use super::template_prepare::PreparedExecution;
@@ -31,10 +32,10 @@ pub(crate) fn advance_stacks_template_dfa(
 /// advances. The prepared shift is an exact specialization of the same finite
 /// program, not an LR shortcut. Try it before cloning the interpreter input.
 #[inline]
-pub(crate) fn advance_prepared_relation(
+pub(crate) fn advance_prepared_relation<A: Merge + Eq + std::hash::Hash>(
     relation: &PreparedRelation,
-    stack: &ParserGSS,
-) -> ParserGSS {
+    stack: &LeveledGSS<u32, A>,
+) -> LeveledGSS<u32, A> {
     let prepared = relation.execution.as_ref();
     if let Some(output) = prepared.and_then(|fast|
         super::simple_read_shift::apply(fast, stack))
@@ -74,7 +75,7 @@ pub(super) fn advance_stacks_template_dfa_owned(
 
 // Opt-in independent interpreter used only to diagnose relation/GSS errors.
 // It never references an LR table and is excluded from timed runs.
-fn debug_template_literal_enabled() -> bool {
+pub(crate) fn debug_template_literal_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env::var_os("GLRMASK_DIAG_TEMPLATE_LITERAL").is_some())
 }
@@ -173,16 +174,16 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
     advance_with_prepared_template(template, stack, None)
 }
 
-pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stack: ParserGSS,
-    prepared: Option<&PreparedExecution>) -> ParserGSS {
+pub(crate) fn advance_with_prepared_template<A: Merge + Eq + std::hash::Hash>(template: &CommitTemplateDfas, stack: LeveledGSS<u32, A>,
+    prepared: Option<&PreparedExecution>) -> LeveledGSS<u32, A> {
     advance_relation(template, stack, prepared, None)
 }
 
 /// A scope changes only the concrete stack alphabet. Stored stack frames
 /// outside the local alphabet remain untouched; DEFAULT never crosses it.
-pub(crate) fn advance_with_template_coordinate(
-    template: &CommitTemplateDfas, stack: ParserGSS, scope: Option<(u32, u32)>,
-) -> ParserGSS {
+pub(crate) fn advance_with_template_coordinate<A: Merge + Eq + std::hash::Hash>(
+    template: &CommitTemplateDfas, stack: LeveledGSS<u32, A>, scope: Option<(u32, u32)>,
+) -> LeveledGSS<u32, A> {
     advance_relation(template, stack, None, scope)
 }
 
@@ -199,17 +200,17 @@ pub(super) fn global_symbol(scope: Option<(u32, u32)>, local: u32) -> u32 {
     scope.map_or(local, |(offset, _)| offset + local)
 }
 
-pub(crate) fn advance_with_prepared_coordinate(
-    template: &CommitTemplateDfas, stack: ParserGSS,
+pub(crate) fn advance_with_prepared_coordinate<A: Merge + Eq + std::hash::Hash>(
+    template: &CommitTemplateDfas, stack: LeveledGSS<u32, A>,
     prepared: Option<&PreparedExecution>, scope: (u32, u32),
-) -> ParserGSS {
+) -> LeveledGSS<u32, A> {
     advance_relation(template, stack, prepared, Some(scope))
 }
 
-fn advance_relation(
-    template: &CommitTemplateDfas, stack: ParserGSS,
+fn advance_relation<A: Merge + Eq + std::hash::Hash>(
+    template: &CommitTemplateDfas, stack: LeveledGSS<u32, A>,
     prepared: Option<&PreparedExecution>, scope: Option<(u32, u32)>,
-) -> ParserGSS {
+) -> LeveledGSS<u32, A> {
     let global = |symbol| global_symbol(scope, symbol);
     let local = |top| local_symbol(scope, top);
     // Uniform inputs permit exact union reassociation in either coordinate.
@@ -220,7 +221,7 @@ fn advance_relation(
         .and_then(|cursor| cursor.apply_input_cursor(template, &stack, scope));
     let (mut output, mut worklist) = match seeded {
         Some(result) => {
-            let mut worklist = SmallVec::<[(Phase, u32, ParserGSS); 8]>::new();
+            let mut worklist = SmallVec::<[(Phase, u32, LeveledGSS<u32, A>); 8]>::new();
             for (phase, state, input) in result.residual.into_iter().rev() {
                 let phase = match phase { 0 => Phase::Pop, 1 => Phase::Read, _ => Phase::Push };
                 worklist.push((phase, state, input));
@@ -228,15 +229,15 @@ fn advance_relation(
             (result.output, worklist)
         }
         None => {
-            let mut worklist = SmallVec::<[(Phase, u32, ParserGSS); 8]>::new();
+            let mut worklist = SmallVec::<[(Phase, u32, LeveledGSS<u32, A>); 8]>::new();
             worklist.push((Phase::Pop, template.pop.start_state, stack));
-            (ParserGSS::empty(), worklist)
+            (LeveledGSS::empty(), worklist)
         }
     };
     // Retain every visited source GSS. Raw pointer keys alone are not safe:
     // temporary isolate/push results can be dropped and their addresses reused
     // later in the same evaluation.
-    let mut visited = FxHashMap::<(Phase, u32, usize), ParserGSS>::default();
+    let mut visited = FxHashMap::<(Phase, u32, usize), LeveledGSS<u32, A>>::default();
 
     while let Some((phase, state_id, gss)) = worklist.pop() {
         if gss.is_empty() {
@@ -560,6 +561,7 @@ mod tests {
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
     use crate::runtime::CommitTemplateDfas;
 
     #[test]

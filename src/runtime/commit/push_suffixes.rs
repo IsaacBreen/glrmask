@@ -6,7 +6,9 @@
 //! correlated annotations retain the ordered exact template evaluator. The
 //! usual shared GSS branch constructor owns all stack storage.
 use crate::compiler::glr::labels::negative_to_positive_label;
+#[cfg(test)]
 use crate::compiler::glr::parser::ParserGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::runtime::CommitTemplateDfas;
 
 const MAX_PATHS: usize = super::phase_dag::PUSH_PATH_LIMIT as usize;
@@ -21,15 +23,15 @@ pub(crate) struct PreparedPushSuffixes {
 }
 
 impl PreparedPushSuffixes {
-    pub(crate) fn apply(&self, base: &ParserGSS, offset: u32) -> Option<ParserGSS> {
+    pub(crate) fn apply<A: Merge + Eq + std::hash::Hash>(&self, base: &LeveledGSS<u32, A>, offset: u32) -> Option<LeveledGSS<u32, A>> {
         // Reordering output construction is valid only for one shared path
         // annotation. Correlated inputs retain the authoritative DAG walk.
-        if base.is_empty() { return Some(ParserGSS::empty()); }
+        if base.is_empty() { return Some(LeveledGSS::empty()); }
         base.single_interface_lower_id()?;
         // An empty list would mean the empty relation, not the identity
         // returned by the GSS helper for an empty branch iterator.
         let nonempty = if self.suffixes.is_empty() {
-            ParserGSS::empty()
+            LeveledGSS::empty()
         } else if offset == 0 {
             if self.single_symbols {
                 base.apply_shared_pop_push_single_branches(0, self.suffixes.iter().map(|s| &s[0]))?

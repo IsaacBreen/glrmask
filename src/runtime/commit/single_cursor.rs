@@ -9,33 +9,33 @@
 //! POP/READ program; neither output branches nor parser state are truncated.
 #[cfg(test)]
 use crate::automata::unweighted_u32::dfa::DFA;
+#[cfg(test)]
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 #[cfg(test)]
-use crate::compiler::glr::labels::is_negative_label;
 use crate::compiler::glr::parser::ParserGSS;
-use crate::ds::leveled_gss::VirtualStack;
+use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
 use crate::runtime::CommitTemplateDfas;
 use smallvec::SmallVec;
 use super::phase_dag::PreparedPhaseDag;
 
 const MAX_CURSOR_STEPS: usize = 64;
 
-pub(super) struct InputCursorResult {
-    pub(super) output: ParserGSS,
-    pub(super) residual: SmallVec<[(usize, u32, ParserGSS); 8]>,
+pub(super) struct InputCursorResult<A: Merge + Eq + std::hash::Hash> {
+    pub(super) output: LeveledGSS<u32, A>,
+    pub(super) residual: SmallVec<[(usize, u32, LeveledGSS<u32, A>); 8]>,
 }
 
 impl PreparedPhaseDag {
-    pub(super) fn apply_input_cursor(&self, template: &CommitTemplateDfas, input: &ParserGSS, scope: Option<(u32, u32)>) -> Option<InputCursorResult> {
+    pub(super) fn apply_input_cursor<A: Merge + Eq + std::hash::Hash>(&self, template: &CommitTemplateDfas, input: &LeveledGSS<u32, A>, scope: Option<(u32, u32)>) -> Option<InputCursorResult<A>> {
         if !self.productive(0, template.pop.start_state)? {
-            return Some(InputCursorResult { output: ParserGSS::empty(), residual: SmallVec::new() });
+            return Some(InputCursorResult { output: LeveledGSS::empty(), residual: SmallVec::new() });
         }
-        let mut stack: VirtualStack<u32, TerminalsDisallowed> = input.try_virtual_stack()?;
+        let mut stack: VirtualStack<u32, A> = input.try_virtual_stack()?;
         let mut id = template.pop.start_state;
         let mut remaining = MAX_CURSOR_STEPS;
         let mut popped = false;
-        let mut output = ParserGSS::empty();
+        let mut output = LeveledGSS::empty();
         let mut residual = SmallVec::new();
         loop {
             let mut materialized = None;

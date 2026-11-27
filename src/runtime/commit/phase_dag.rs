@@ -21,7 +21,9 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use crate::automata::unweighted_u32::dfa::DFA;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, negative_to_positive_label};
+#[cfg(test)]
 use crate::compiler::glr::parser::ParserGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::runtime::CommitTemplateDfas;
 use super::template_advance::{Phase, global_symbol, local_symbol};
 
@@ -61,13 +63,13 @@ impl PreparedPhaseDag {
         self.ranks.get(phase)?.get(id as usize).map(|&rank| rank != DEAD_RANK)
     }
 
-    pub(super) fn apply_large_push(
-        &self, template: &CommitTemplateDfas, entry: u32, base: &ParserGSS, scope: Option<(u32, u32)>,
-    ) -> Option<ParserGSS> {
+    pub(super) fn apply_large_push<A: Merge + Eq + std::hash::Hash>(
+        &self, template: &CommitTemplateDfas, entry: u32, base: &LeveledGSS<u32, A>, scope: Option<(u32, u32)>,
+    ) -> Option<LeveledGSS<u32, A>> {
         if *self.push_paths.get(entry as usize)? <= PUSH_PATH_LIMIT { return None; }
-        if base.is_empty() { return Some(ParserGSS::empty()); }
+        if base.is_empty() { return Some(LeveledGSS::empty()); }
         base.single_interface_lower_id()?;
-        Some(self.apply(template, [(Phase::Push, entry, base.clone())], ParserGSS::empty(), scope))
+        Some(self.apply(template, [(Phase::Push, entry, base.clone())], LeveledGSS::empty(), scope))
     }
     fn phase_number(phase: Phase) -> u8 {
         match phase { Phase::Pop => 0, Phase::Read => 1, Phase::Push => 2 }
@@ -76,18 +78,18 @@ impl PreparedPhaseDag {
     /// Evaluate the exact residual work of a partially completed uniform
     /// interpreter. Previously emitted output is retained. No initial input
     /// clone or new work is required on the ordinary small-frontier path.
-    pub(super) fn apply(
+    pub(super) fn apply<A: Merge + Eq + std::hash::Hash>(
         &self,
         template: &CommitTemplateDfas,
-        work: impl IntoIterator<Item = (Phase, u32, ParserGSS)>,
-        mut output: ParserGSS,
+        work: impl IntoIterator<Item = (Phase, u32, LeveledGSS<u32, A>)>,
+        mut output: LeveledGSS<u32, A>,
         scope: Option<(u32, u32)>,
-    ) -> ParserGSS {
-        let mut incoming = FxHashMap::<(u8, u32), ParserGSS>::default();
+    ) -> LeveledGSS<u32, A> {
+        let mut incoming = FxHashMap::<(u8, u32), LeveledGSS<u32, A>>::default();
         let mut queue = BinaryHeap::<Reverse<(u8, u32, u32)>>::new();
-        let enqueue = |incoming: &mut FxHashMap<(u8, u32), ParserGSS>,
+        let enqueue = |incoming: &mut FxHashMap<(u8, u32), LeveledGSS<u32, A>>,
                        queue: &mut BinaryHeap<Reverse<(u8, u32, u32)>>,
-                       phase: u8, id: u32, stacks: ParserGSS| {
+                       phase: u8, id: u32, stacks: LeveledGSS<u32, A>| {
             if stacks.is_empty() { return; }
             let Some(&rank) = self.ranks[phase as usize].get(id as usize) else { return; };
             if rank == DEAD_RANK { return; }
@@ -130,7 +132,7 @@ impl PreparedPhaseDag {
                         stacks.apply_shared_pop_push_single_branches(
                             0, siblings.iter().map(|(_, label)| label),
                         ).unwrap_or_else(|| {
-                            let mut language = ParserGSS::empty();
+                            let mut language = LeveledGSS::empty();
                             for &(_, label) in siblings { language = language.merge(&stacks.push(label)); }
                             language
                         })
