@@ -3530,7 +3530,7 @@ impl Constraint {
         let word_len = vocab.all_original_token_words().len();
         let mut exact_safe_words = vec![vec![0u32; word_len]];
         let mut whitespace_words = vec![0u32; word_len];
-        let mut ascii_word_words = vec![0u32; word_len];
+        let mut ascii_word_words = if ascii_word.is_some() { vec![0u32; word_len] } else { Vec::new() };
         let mut safe_token_bytes = U8Set::empty();
         let mut whitespace_token_bytes = U8Set::empty();
         let mut ascii_word_token_bytes = U8Set::empty();
@@ -3538,7 +3538,7 @@ impl Constraint {
         let mut whitespace_max_token_byte_len = 0u32;
         let mut ascii_word_max_token_byte_len = 0u32;
         let mut ascii_word_residual_entries =
-            Vec::<(u16, usize, &[u8])>::with_capacity(vocab.canonical_token_count());
+            Vec::<(u16, usize, &[u8])>::with_capacity(if ascii_word.is_some() { vocab.canonical_token_count() } else { 0 });
         let mut entries = Vec::<(u16, usize, &[u8])>::with_capacity(vocab.canonical_token_count());
         
         for canonical in 0..vocab.canonical_token_count() as u32 {
@@ -3582,7 +3582,7 @@ impl Constraint {
                 for &byte in bytes {
                     ascii_word_token_bytes.insert(byte);
                 }
-            } else {
+            } else if ascii_word.is_some() {
                 ascii_word_residual_entries.push((0, canonical as usize, bytes));
             }
             for &token in originals {
@@ -3613,11 +3613,7 @@ impl Constraint {
                 .then_with(|| left.1.cmp(&right.1))
         });
         let master_trie = DynamicMaskTrie::from_partitioned_token_refs(&entries);
-        ascii_word_residual_entries.sort_unstable_by(|left, right| {
-            left.2.cmp(right.2).then_with(|| left.1.cmp(&right.1))
-        });
-        let ascii_word_residual_trie =
-            DynamicMaskTrie::from_partitioned_token_refs(&ascii_word_residual_entries);
+        
         let whitespace_words = Arc::new(whitespace_words);
         let safe_words = vocab.set_llg_master_admitted_words(exact_safe_words, Arc::clone(&whitespace_words));
         let mut slices = vec![
@@ -3647,6 +3643,11 @@ impl Constraint {
             ),
         ];
         if let Some(ascii_word) = ascii_word {
+            ascii_word_residual_entries.sort_unstable_by(|left, right| {
+            left.2.cmp(right.2).then_with(|| left.1.cmp(&right.1))
+        });
+        let ascii_word_residual_trie =
+            DynamicMaskTrie::from_partitioned_token_refs(&ascii_word_residual_entries);
             slices.push((
                 ASCII_WORD_CACHE_ID,
                 ascii_word,
