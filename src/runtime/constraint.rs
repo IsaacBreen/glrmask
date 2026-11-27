@@ -151,14 +151,14 @@ impl crate::compiler::glr::parser::ParserActionProvider for RecursiveTemplateRef
     fn control_symbols(&self, _: u32, out: &mut SmallVec<[u32; 4]>) {
         // Enumerate every explicit crossing; the exact interpreter decides
         // feasibility, independently of the production top certificates.
-        out.extend((self.composition.control_start..self.composition.views.len() as u32)
+        out.extend((self.composition.control_start..self.composition.view_count() as u32)
             .map(|index| self.parser.terminal_count + index));
     }
     fn advance_relation(&self, stack: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
         let view = if terminal < self.parser.terminal_count {
             self.composition.outer_view(terminal as usize)
         } else if terminal != crate::compiler::glr::analysis::EOF {
-            self.composition.views.get((terminal - self.parser.terminal_count) as usize)
+            self.composition.view((terminal - self.parser.terminal_count) as usize)
         } else { None };
         Some(view.map_or_else(ParserGSS::empty, |view| Self::advance_view(view, stack)))
     }

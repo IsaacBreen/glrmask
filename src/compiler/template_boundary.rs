@@ -258,10 +258,11 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     let context = metadata.map_or_else(|| crate::template_parser::static_compile::lexical_context(
         layout.total_leaf_terminals), |grammar| grammar.analyze(constraint.terminal_display_names.clone()));
     let follow_started = std::time::Instant::now();
+    let scoped_views = composition.views().cloned().collect::<Vec<_>>();
     let follows = if metadata.is_some() {
         super::pipeline::compute_disallowed_follows(&context)
     } else {
-        let proof_rows = super::template_follow_support::disallowed_scoped(&composition.views,
+        let proof_rows = super::template_follow_support::disallowed_scoped(&scoped_views,
             layout.total_leaf_terminals as usize, 32_000_000).map_err(fail)?;
         proof_rows.into_iter().enumerate().filter_map(|(terminal, exclusions)| {
             if exclusions.is_empty() { return None; }
@@ -337,7 +338,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
                 .ok_or_else(|| fail("scoped exclusion terminal overflow"))?;
             Ok((runtime_terminal, weight))
         }).collect::<Result<BTreeMap<_, _>>>()?;
-    let controls = (composition.control_start..composition.programs.len() as u32).collect::<Vec<_>>();
+    let controls = (composition.control_start..composition.view_count() as u32).collect::<Vec<_>>();
     let mut selected = controls.iter().copied().collect::<std::collections::BTreeSet<_>>();
     let mut ending_selected=std::collections::BTreeSet::new();
     for walk in &walks {
@@ -358,11 +359,11 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         }
     }
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=programs_selected selected={} total={} elapsed_ms={:.3}",
-        selected.len(), composition.programs.len(), started.elapsed().as_secs_f64() * 1000.0); }
+        selected.len(), composition.view_count(), started.elapsed().as_secs_f64() * 1000.0); }
     let (templates, mut classes) = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
-        &composition.views, parser.state_count, &selected)?;
+        &scoped_views, parser.state_count, &selected)?;
     let admissions=crate::template_parser::static_compile::prepare_scoped_boundary_admissions(
-        &composition.views,&ending_selected,&mut classes)?;
+        &scoped_views,&ending_selected,&mut classes)?;
     let predecessor=metadata.and_then(|metadata|metadata.stack_effects()).filter(|summary|summary.states==parser.state_count)
         .and_then(|summary|super::boundary_stack_support::from_compiler_effects(summary).ok());
     let read_context=predecessor.as_ref().and_then(|certificate|certificate.native_context())

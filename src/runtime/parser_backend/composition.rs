@@ -124,12 +124,11 @@ impl ControlRows {
 #[derive(Debug, Clone)]
 pub(crate) struct TemplateComposition {
     pub(crate) control_start: u32,
-    pub(crate) views: Vec<ScopedProgram>,
-    // Outer lexical terminals normally alias a leaf-local relation. Keep
-    // only a dispatch ID; genuinely distinct outer descriptors live after
-    // the canonical exact/control inventory.
+    // All exact, control, and outer terminal identities are dispatch IDs
+    // into a single immutable descriptor inventory.
+    descriptors: Box<[ScopedProgram]>,
+    view_ids: Box<[u32]>,
     outer_ids: Box<[u32]>,
-    outer_only: Box<[ScopedProgram]>,
     pub(crate) completion_view: ScopedProgram,
     controls_by_top: ControlRows,
 }
@@ -150,10 +149,15 @@ impl TemplateComposition {
         {
             return Err(crate::Error::Compilation("composition control certificates exceed the resource budget".into()));
         }
-        let prepare = |programs: &TemplateDfasByTerminal| programs.iter().map(|program| {
-            let mut view = ScopedProgram::prepare(Arc::clone(program.as_ref().ok_or_else(||
-                crate::Error::Compilation("missing composition program".into()))?), state_count)?;
+        let mut prepared = FxHashMap::<usize, ScopedProgram>::default();
+        let mut prepare = |programs: &TemplateDfasByTerminal| programs.iter().map(|program| {
+            let source = program.as_ref().ok_or_else(||
+                crate::Error::Compilation("missing composition program".into()))?;
+            let key = Arc::as_ptr(source) as usize;
+            if let Some(view) = prepared.get(&key) { return Ok(view.clone()); }
+            let mut view = ScopedProgram::prepare(Arc::clone(source), state_count)?;
             view.guard_owner = false;
+            prepared.insert(key, view.clone());
             Ok(view)
         }).collect::<crate::Result<Vec<_>>>();
         let mut completion = ScopedProgram::prepare(completion, state_count)?;
@@ -180,38 +184,43 @@ impl TemplateComposition {
             view.guard_owner, view.append_push,
         );
         let mut ids = FxHashMap::default();
-        for (id, view) in views.iter().enumerate() {
-            ids.entry(key(view)).or_insert(u32::try_from(id)
-                .map_err(|_| crate::Error::Compilation("too many scoped programs".into()))?);
-        }
-        let mut outer_ids = Vec::with_capacity(outer_views.len());
-        let mut outer_only = Vec::new();
-        for view in outer_views {
-            let id = match ids.entry(key(&view)) {
+        let mut descriptors = Vec::new();
+        let mut intern = |view: ScopedProgram| -> crate::Result<u32> {
+            Ok(match ids.entry(key(&view)) {
                 std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let id = views.len().checked_add(outer_only.len())
-                        .and_then(|id| u32::try_from(id).ok())
-                        .ok_or_else(|| crate::Error::Compilation("too many scoped programs".into()))?;
-                    outer_only.push(view);
+                    let id = u32::try_from(descriptors.len())
+                        .map_err(|_| crate::Error::Compilation("too many scoped programs".into()))?;
+                    descriptors.push(view);
                     entry.insert(id);
                     id
                 }
-            };
-            outer_ids.push(id);
-        }
+            })
+        };
+        let view_ids = views.into_iter().map(&mut intern)
+            .collect::<crate::Result<Vec<_>>>()?.into_boxed_slice();
+        let outer_ids = outer_views.into_iter().map(intern)
+            .collect::<crate::Result<Vec<_>>>()?.into_boxed_slice();
         Ok(Self {
-            control_start, views, outer_ids: outer_ids.into_boxed_slice(),
-            outer_only: outer_only.into_boxed_slice(), completion_view, controls_by_top,
+            control_start, descriptors: descriptors.into_boxed_slice(),
+            view_ids, outer_ids, completion_view, controls_by_top,
         })
+    }
+
+    pub(crate) fn view_count(&self) -> usize { self.view_ids.len() }
+
+    pub(crate) fn view(&self, index: usize) -> Option<&ScopedProgram> {
+        self.descriptors.get(*self.view_ids.get(index)? as usize)
+    }
+
+    pub(crate) fn views(&self) -> impl ExactSizeIterator<Item = &ScopedProgram> {
+        self.view_ids.iter().map(|&id| &self.descriptors[id as usize])
     }
 
     pub(crate) fn outer_len(&self) -> usize { self.outer_ids.len() }
 
     pub(crate) fn outer_view(&self, terminal: usize) -> Option<&ScopedProgram> {
-        let id = *self.outer_ids.get(terminal)? as usize;
-        if id < self.views.len() { self.views.get(id) }
-        else { self.outer_only.get(id - self.views.len()) }
+        self.descriptors.get(*self.outer_ids.get(terminal)? as usize)
     }
 
     pub(crate) fn outer_views(&self) -> impl Iterator<Item = &ScopedProgram> {
@@ -219,11 +228,11 @@ impl TemplateComposition {
     }
 
     pub(crate) fn has_controls(&self) -> bool {
-        (self.control_start as usize) < self.views.len()
+        (self.control_start as usize) < self.view_count()
     }
 
     pub(crate) fn admits<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, index: u32) -> bool {
-        self.views.get(index as usize).is_some_and(|view| {
+        self.view(index as usize).is_some_and(|view| {
             if let Some(top) = stack.single_exclusive_top_value() {
                 match view.classify_top(top) {
                     TopAdmission::Always => return true,
@@ -241,14 +250,14 @@ impl TemplateComposition {
     }
 
     fn advance<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, index: u32) -> LeveledGSS<u32, A> {
-        self.views.get(index as usize).map_or_else(LeveledGSS::empty, |view| view.advance(stack))
+        self.view(index as usize).map_or_else(LeveledGSS::empty, |view| view.advance(stack))
     }
 
     pub(crate) fn report(&self) -> serde_json::Value {
         serde_json::json!({
             "scoped_terminal_relations": self.control_start,
-            "control_relations": self.views.len() - self.control_start as usize,
-            "extra_domain_states": self.views.iter().map(|view| view.domain.state_count()).sum::<usize>(),
+            "control_relations": self.view_count() - self.control_start as usize,
+            "extra_domain_states": self.views().map(|view| view.domain.state_count()).sum::<usize>(),
         })
     }
 }
@@ -528,8 +537,8 @@ mod prepared_relation_tests {
         let composition = TemplateComposition::from_views(symbols, terminals,
             vec![view.clone(); terminals as usize], vec![view.clone(); terminals as usize],
             view.clone()).unwrap();
-        assert!(composition.outer_only.is_empty());
-        assert!(std::ptr::eq(composition.outer_view(0).unwrap(), &composition.views[0]));
+        assert_eq!(composition.descriptors.len(), 1);
+        assert!(std::ptr::eq(composition.outer_view(0).unwrap(), composition.view(0).unwrap()));
         let parser = TemplateParser::from_composition(symbols, terminals, composition).unwrap();
         assert!(parser.local_admission().is_none(),
             "scoped queries must not materialize the unused global Cartesian product");
@@ -561,7 +570,7 @@ mod prepared_relation_tests {
             let before = input.to_stacks(128).unwrap();
             for terminal in [0, 1, 2] {
                 let program = if terminal == 0 { outer[0].as_deref().unwrap() }
-                    else { parser.composition().unwrap().views[(terminal-1) as usize].source.as_ref() };
+                    else { parser.composition().unwrap().view((terminal-1) as usize).unwrap().source.as_ref() };
                 let expected = advance_with_prepared_template(program, input.clone(), None);
                 let actual = provider.advance_relation(&input, terminal).unwrap();
                 assert_eq!(actual.semantically_eq(&expected, 65536), Some(true));
@@ -584,11 +593,11 @@ mod prepared_relation_tests {
         let scoped = vec![Some(Arc::new(shift())), Some(Arc::new(suffix_dependent())),
                           Some(Arc::new(rejecting()))];
         let composition = TemplateComposition::compile(8, 2, &outer, scoped, Arc::new(rejecting())).unwrap();
-        assert_eq!(composition.views[0].domain.classify_top(5), TopAdmission::Always);
-        assert_eq!(composition.views[0].domain.classify_top(6), TopAdmission::Never);
-        assert_eq!(composition.views[1].domain.classify_top(5), TopAdmission::DependsOnSuffix);
+        assert_eq!(composition.view(0).unwrap().domain.classify_top(5), TopAdmission::Always);
+        assert_eq!(composition.view(0).unwrap().domain.classify_top(6), TopAdmission::Never);
+        assert_eq!(composition.view(1).unwrap().domain.classify_top(5), TopAdmission::DependsOnSuffix);
         for input in inputs() {
-            for (index, view) in composition.views.iter().enumerate() {
+            for (index, view) in composition.views().enumerate() {
                 assert_eq!(composition.admits(&input, index as u32), matches_gss(&view.domain, &input));
             }
             assert!(!composition.admits(&input, u32::MAX));

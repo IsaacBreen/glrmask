@@ -922,9 +922,9 @@ pub(crate) fn build_exact_component_boundary_trigger(
     // The same immutable scoped relations and exact control-star assembler
     // used by static boundaries also decide readiness at the proper prefix.
     let (mut programs, completion, source_controls) = if let Some(composition) = parser.composition() {
-        (composition.views[..composition.control_start as usize].to_vec(),
+        (composition.views().take(composition.control_start as usize).cloned().collect(),
             composition.completion_view.clone(),
-            composition.views[composition.control_start as usize..].to_vec())
+            composition.views().skip(composition.control_start as usize).cloned().collect())
     } else {
         ((0..parser.terminal_count as usize).map(|terminal|
             ScopedProgram::terminal(constraint, terminal)).collect(),

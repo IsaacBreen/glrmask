@@ -114,7 +114,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             outer_views.push(view);
         }
         if let Some(composition) = parser.composition() {
-            for (terminal, view) in composition.views.iter().enumerate() {
+            for (terminal, view) in composition.views().enumerate() {
                 let view = view.relocated(offset)?;
                 if terminal < composition.control_start as usize { exact_views.push(view); }
                 else { control_views.push(view); }
