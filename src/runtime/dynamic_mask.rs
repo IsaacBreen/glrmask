@@ -2867,7 +2867,7 @@ fn full_walk_classify_finalizer_branches(
     mut branches: FullWalkBranches,
 ) -> FullWalkScalarFinalizerOutcome {
     match branches.len() {
-        0 => unreachable!("finalizer classification requires a continuation branch"),
+        0 => FullWalkScalarFinalizerOutcome::Many(branches),
         1 => FullWalkScalarFinalizerOutcome::Scalar(
             branches.pop().expect("one full-walk branch disappeared"),
         ),
@@ -2970,7 +2970,7 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
     constraint: &Constraint,
 ) -> FullWalkTwoStepOutcome {
     let mut next = FullWalkBranches::new();
-    for (cell, (source_lexer, parser_node)) in
+    for (cell, (_, parser_node)) in
         [(first_cell, branches.0), (second_cell, branches.1)]
     {
         if T::cell_is_dead(cell) {
@@ -2997,28 +2997,15 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
             }
             continue;
         }
-        let _ = source_lexer;
-        match full_walk_scalar_finalizer(
+        full_walk_append_scalar_finalizer(
+            &mut next,
             target,
             parser_node,
             initial_lexer_state,
             transitions,
             parser_cache,
             constraint,
-        ) {
-            FullWalkScalarFinalizerOutcome::Scalar(branch) => {
-                full_walk_push_unique(&mut next, branch);
-            }
-            FullWalkScalarFinalizerOutcome::Two(first, second) => {
-                full_walk_push_unique(&mut next, first);
-                full_walk_push_unique(&mut next, second);
-            }
-            FullWalkScalarFinalizerOutcome::Many(branches) => {
-                for branch in branches {
-                    full_walk_push_unique(&mut next, branch);
-                }
-            }
-        }
+        );
     }
     match next.len() {
         0 => FullWalkTwoStepOutcome::Dead,
@@ -3049,65 +3036,100 @@ fn full_walk_scalar_finalizer(
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkScalarFinalizerOutcome {
-    const MULTI: u32 = u32::MAX - 1;
+    let mut next = FullWalkBranches::new();
+    full_walk_append_scalar_finalizer(
+        &mut next,
+        target,
+        parser_node,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+    );
+    full_walk_classify_finalizer_branches(next)
+}
+
+/// Append directly into the caller's union, without first classifying and
+/// unpacking the scalar result when two branches are already being advanced.
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn full_walk_append_scalar_finalizer(
+    next: &mut FullWalkBranches,
+    target: u32,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    transitions: &mut impl FullWalkTransitionTable,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+) {
     let code = transitions.finalizer_code(target);
-    if code != MULTI {
-        let mut next = FullWalkBranches::new();
-        let guard = if transitions.terminal_is_ignore(constraint, code) {
-            FullWalkPruneGuard::Passed
-        } else if transitions.single_finalizer_continues(target) {
-            FullWalkPruneGuard::Passed.remember_terminal_match(transitions, target, code)
-        } else {
-            FullWalkPruneGuard::Passed
-        };
-        for (reset_lexer, next_parser) in full_walk_terminal_reset_branches(
-            code,
-            parser_node,
-            initial_lexer_state,
-            transitions,
-            parser_cache,
-            constraint,
-        ) {
-            full_walk_push_unique(
-                &mut next,
-                FullWalkBranch {
-                    lexer_state: reset_lexer,
-                    parser_node: next_parser,
-                    prune_guard: guard.clone(),
-                },
-            );
-        }
-        if full_walk_continuation_viable(
-            target,
-            parser_node,
-            initial_lexer_state,
-            transitions,
-            parser_cache,
-            constraint,
-        ) {
-            full_walk_push_unique(&mut next, FullWalkBranch {
+    full_walk_emit_finalizer_resets::<_, true>(
+        next,
+        &FullWalkPruneGuard::Passed,
+        code,
+        target,
+        parser_node,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+    );
+    if full_walk_continuation_viable(
+        target,
+        parser_node,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+    ) {
+        full_walk_push_unique(
+            next,
+            FullWalkBranch {
                 lexer_state: target,
                 parser_node,
                 prune_guard: FullWalkPruneGuard::Passed,
-            });
-        }
-        if next.is_empty() {
-            // The terminal finalized but neither parser advancement nor lexical
-            // continuation can produce a valid future. Represent this as the
-            // exact dead result for the caller.
-            return FullWalkScalarFinalizerOutcome::Many(next);
-        }
-        return full_walk_classify_finalizer_branches(next);
+            },
+        );
     }
+}
 
-    let mut next = FullWalkBranches::new();
-    for terminal in transitions.matched_terminals(target) {
-        let guard = if transitions.terminal_is_ignore(constraint, terminal) {
-            FullWalkPruneGuard::Passed
+/// Emit exactly the reset branches for all matched terminals. The scalar
+/// lane already has an exact single-finalizer continuation certificate;
+/// a many-branch guard instead queries residual coordinates directly.
+/// Keep both policies, while sharing their reset and guard algebra.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn full_walk_emit_finalizer_resets<
+    T: FullWalkTransitionTable,
+    const CHECK_SINGLE_CONTINUATION: bool,
+>(
+    next: &mut FullWalkBranches,
+    previous: &FullWalkPruneGuard,
+    code: u32,
+    target: u32,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    transitions: &mut T,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+) {
+    const NONE: u32 = u32::MAX;
+    const MULTI: u32 = u32::MAX - 1;
+    let terminals = match code {
+        NONE => return,
+        MULTI => transitions.matched_terminals(target),
+        terminal => smallvec::smallvec![terminal],
+    };
+    for terminal in terminals {
+        let guard = if transitions.terminal_is_ignore(constraint, terminal)
+            || (CHECK_SINGLE_CONTINUATION
+                && code != MULTI
+                && !transitions.single_finalizer_continues(target))
+        {
+            previous.clone()
         } else {
-            FullWalkPruneGuard::Passed.remember_terminal_match(
-                transitions, target, terminal,
-            )
+            previous.remember_terminal_match(transitions, target, terminal)
         };
         for (reset_lexer, next_parser) in full_walk_terminal_reset_branches(
             terminal,
@@ -3118,7 +3140,7 @@ fn full_walk_scalar_finalizer(
             constraint,
         ) {
             full_walk_push_unique(
-                &mut next,
+                next,
                 FullWalkBranch {
                     lexer_state: reset_lexer,
                     parser_node: next_parser,
@@ -3127,27 +3149,6 @@ fn full_walk_scalar_finalizer(
             );
         }
     }
-    if full_walk_continuation_viable(
-        target,
-        parser_node,
-        initial_lexer_state,
-        transitions,
-        parser_cache,
-        constraint,
-    ) {
-        full_walk_push_unique(
-            &mut next,
-            FullWalkBranch {
-                lexer_state: target,
-                parser_node,
-                prune_guard: FullWalkPruneGuard::Passed,
-            },
-        );
-    }
-    if next.is_empty() {
-        return FullWalkScalarFinalizerOutcome::Many(next);
-    }
-    full_walk_classify_finalizer_branches(next)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3276,8 +3277,6 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkBranches {
-    const NONE: u32 = u32::MAX;
-    const MULTI: u32 = u32::MAX - 1;
     let mut next = FullWalkBranches::new();
     for branch in branches {
         let Some(advanced_guard) = branch
@@ -3299,55 +3298,17 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
             parser_cache,
             constraint,
         );
-        if code == MULTI {
-            for terminal in transitions.matched_terminals(target) {
-                let matched_guard = if transitions.terminal_is_ignore(constraint, terminal) {
-                    advanced_guard.clone()
-                } else {
-                    advanced_guard.remember_terminal_match(transitions, target, terminal)
-                };
-                for (reset_lexer, parser_node) in full_walk_terminal_reset_branches(
-                    terminal,
-                    branch.parser_node,
-                    initial_lexer_state,
-                    transitions,
-                    parser_cache,
-                    constraint,
-                ) {
-                    full_walk_push_unique(
-                        &mut next,
-                        FullWalkBranch {
-                            lexer_state: reset_lexer,
-                            parser_node,
-                            prune_guard: matched_guard.clone(),
-                        },
-                    );
-                }
-            }
-        } else if code != NONE {
-            let matched_guard = if transitions.terminal_is_ignore(constraint, code) {
-                advanced_guard.clone()
-            } else {
-                advanced_guard.remember_terminal_match(transitions, target, code)
-            };
-            for (reset_lexer, parser_node) in full_walk_terminal_reset_branches(
-                code,
-                branch.parser_node,
-                initial_lexer_state,
-                transitions,
-                parser_cache,
-                constraint,
-            ) {
-                full_walk_push_unique(
-                    &mut next,
-                    FullWalkBranch {
-                    lexer_state: reset_lexer,
-                    parser_node,
-                        prune_guard: matched_guard.clone(),
-                    },
-                );
-            }
-        }
+        full_walk_emit_finalizer_resets::<T, false>(
+            &mut next,
+            &advanced_guard,
+            code,
+            target,
+            branch.parser_node,
+            initial_lexer_state,
+            transitions,
+            parser_cache,
+            constraint,
+        );
         if continuation_viable {
             full_walk_push_unique(
                 &mut next,
