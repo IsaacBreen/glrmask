@@ -2210,6 +2210,9 @@ impl PackedRuntimeDwa {
     /// DWF6 is preferred when the hot execution view is narrow; DWF7 remains
     /// the wide runtime-shaped fallback.
     pub fn direct_fast_wire_len(&self) -> Option<usize> {
+        if !cfg!(target_endian = "little") {
+            return None;
+        }
         self.owned_narrow_fast_wire_len()
             .or_else(|| self.runtime_shaped_fast_wire_len())
     }
@@ -3135,39 +3138,6 @@ impl PackedRuntimeDwa {
             .map(|backed| backed.section_len)
             .or_else(|| self.owned_narrow_fast_wire_len())
             .or_else(|| self.runtime_shaped_fast_wire_len())
-            .or_else(|| {
-                // Compiler-owned JS-like DWAs use the row-local DWF6 layout.
-                // Its exact byte length depends only on already-materialized
-                // runtime array lengths, not on any serialization pass. Return
-                // that size here so the outer Constraint serializer can reserve
-                // the final artifact once instead of growing again after the
-                // 10+ MiB DWA has already been appended.
-                if self.states.len() <= (1usize << 17) {
-                    return None;
-                }
-                let ranges = self.flat_token_ranges_u16.as_deref()?;
-                let spans = self.flat_token_spans.as_deref()?;
-                if spans.len() != self.token_set_count() {
-                    return None;
-                }
-                let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
-                let transition_section_len = 4usize
-                    .saturating_add(self.label_pool.values.len().saturating_mul(7))
-                    .saturating_add(4 + self.label_pool.spans.len().saturating_mul(4));
-                Some(
-                    16usize
-                        .saturating_add(spans.len().saturating_mul(3))
-                        .saturating_add(spans.len().saturating_mul(2))
-                        .saturating_add(ranges.len().saturating_mul(4))
-                        .saturating_add(4)
-                        .saturating_add(self.geometries.len().saturating_mul(2))
-                        .saturating_add(geometry_range_count.saturating_mul(4))
-                        .saturating_add(4 + self.weights.len().saturating_mul(6))
-                        .saturating_add(4 + self.weight_token_ids.len().saturating_mul(2))
-                        .saturating_add(transition_section_len)
-                        .saturating_add(4 + self.states.len().saturating_mul(4)),
-                )
-            })
 
     }
 
@@ -3187,7 +3157,9 @@ impl PackedRuntimeDwa {
     /// encoded independently so the expensive millions-of-ranges pass scales
     /// across cores without requiring lexicographic set sorting.
     pub fn fast_wire_bytes(&self) -> Vec<u8> {
-        if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
+        if self.backed.is_none() && self.owned_narrow.is_none()
+            && std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some()
+        {
             let token_range_count = self
                 .materialized_token_sets
                 .as_ref()
@@ -4795,22 +4767,22 @@ impl PackedRuntimeDwa {
             materialized_token_word_spans: (!narrow_token_ranges && !owned_narrow_present)
                 .then(|| token_word_spans.into_boxed_slice()),
             geometries: geometries.into_boxed_slice(),
-            weights: weights.into_boxed_slice(),
-            weight_token_ids: weight_token_ids.into_boxed_slice(),
+            weights: if owned_narrow_present { Box::new([]) } else { weights.into_boxed_slice() },
+            weight_token_ids: if owned_narrow_present { Box::new([]) } else { weight_token_ids.into_boxed_slice() },
             label_pool: PackedRuntimeSeqPool {
-                values: label_values.into_boxed_slice(),
-                spans: label_spans.into_boxed_slice(),
+                values: if owned_narrow_present { Box::new([]) } else { label_values.into_boxed_slice() },
+                spans: if owned_narrow_present { Box::new([]) } else { label_spans.into_boxed_slice() },
             },
             target_pool: PackedRuntimeSeqPool {
-                values: target_values.into_boxed_slice(),
-                spans: target_spans.into_boxed_slice(),
+                values: if owned_narrow_present { Box::new([]) } else { target_values.into_boxed_slice() },
+                spans: if owned_narrow_present { Box::new([]) } else { target_spans.into_boxed_slice() },
             },
             weight_id_pool: PackedRuntimeSeqPool {
-                values: weight_values.into_boxed_slice(),
-                spans: weight_spans.into_boxed_slice(),
+                values: if owned_narrow_present { Box::new([]) } else { weight_values.into_boxed_slice() },
+                spans: if owned_narrow_present { Box::new([]) } else { weight_spans.into_boxed_slice() },
             },
-            rows: rows.into_boxed_slice(),
-            states: states.into_boxed_slice(),
+            rows: if owned_narrow_present { Box::new([]) } else { rows.into_boxed_slice() },
+            states: if owned_narrow_present { Box::new([]) } else { states.into_boxed_slice() },
         })
     }
 
@@ -8065,6 +8037,11 @@ mod cache_tests {
 
         let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
         assert!(packed.owned_narrow.is_some());
+        assert!(packed.states.is_empty() && packed.rows.is_empty());
+        assert!(packed.weights.is_empty() && packed.weight_token_ids.is_empty());
+        assert!(packed.label_pool.values.is_empty() && packed.label_pool.spans.is_empty());
+        assert!(packed.target_pool.values.is_empty() && packed.target_pool.spans.is_empty());
+        assert!(packed.weight_id_pool.values.is_empty() && packed.weight_id_pool.spans.is_empty());
         let (owned_target, owned_weight) = packed.transition(0, 7).unwrap();
         assert_eq!(owned_target, large_target);
         assert!(!owned_weight.is_full());
