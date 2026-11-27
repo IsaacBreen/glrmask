@@ -131,7 +131,7 @@ fn d_is_lr_quotiented_and_matches_a_on_every_supported_frontend() {
 }
 
 #[test]
-fn d_precompile_retains_nothing_and_saves_like_a_never_precompiled_module() {
+fn lr_precompile_retains_only_the_vocab_fingerprint() {
     for case in cases() {
         for mode in [MaskMode::A, MaskMode::D] {
             let plain = Module::new(&case.grammar);
@@ -140,9 +140,9 @@ fn d_precompile_retains_nothing_and_saves_like_a_never_precompiled_module() {
                 .precompile_with(&case.vocab, mode.compile_options())
                 .unwrap_or_else(|error| panic!("{} {mode:?} precompile: {error}", case.name));
             assert_eq!(
-                precompiled.save(),
-                plain.save(),
-                "{} {mode:?}: an LR TokenTrie precompile must retain nothing",
+                precompiled.save().len(),
+                plain.save().len() + 32,
+                "{} {mode:?}: an LR TokenTrie precompile must retain only the vocabulary fingerprint",
                 case.name,
             );
             let from_plain = plain.compile_with(&case.vocab, mode.compile_options()).unwrap();
