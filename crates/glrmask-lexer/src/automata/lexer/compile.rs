@@ -2749,44 +2749,20 @@ fn direct_expression_graph_class_transitions(
 }
 
 fn expand_direct_expression_graph_classes(dfa: &mut DFA, class_members: &[Vec<u8>]) {
-    let expanded = dfa
-        .states()
-        .iter()
-        .map(|state| {
-            let capacity = state
-                .transitions
-                .iter()
-                .map(|(class, _)| class_members[class as usize].len())
-                .sum();
-            let mut entries = Vec::with_capacity(capacity);
-            for (class, &target) in state.transitions.iter() {
-                entries.extend(
-                    class_members[class as usize]
-                        .iter()
-                        .map(|&byte| (byte, target)),
-                );
-            }
-            entries.sort_unstable_by_key(|entry| entry.0);
-            crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
-        })
-        .collect::<Vec<_>>();
-    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded) {
-        state.transitions = transitions;
+    for state in dfa.states_mut() {
+        let capacity = state.transitions.iter()
+            .map(|(class, _)| class_members[class as usize].len()).sum();
+        let mut entries = Vec::with_capacity(capacity);
+        for (class, &target) in state.transitions.iter() {
+            entries.extend(class_members[class as usize].iter().map(|&byte| (byte, target)));
+        }
+        entries.sort_unstable_by_key(|entry| entry.0);
+        state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries);
     }
 }
-
-struct DirectExpressionGraphEdge {
-    symbol: usize,
-    targets: Box<[u32]>,
-    config_base: u32,
-}
-
-struct DirectReadyExpansion {
-    configs: Box<[u32]>,
-    accepting: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Local DFA residual with the union of outer-control continuations to
+/// resume if this residual accepts. The continuation IDs refer to sets of
+/// nullable-control SCCs, never to a Cartesian edge/local-state coordinate.#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct DirectGroupedConfig {
     symbol: u32,
     local_state: u32,
@@ -2836,7 +2812,7 @@ struct DirectGroupedContinuation {
     groups: Box<[DirectGroupedConfig]>,
 }
 
-struct DirectEdgeSetInterner {
+struct DirectContinuationSets {
     sets: Vec<Arc<[u32]>>,
     map: FxHashMap<Arc<[u32]>, u32>,
     union_cache: FxHashMap<Arc<[u32]>, u32>,
@@ -2845,7 +2821,7 @@ struct DirectEdgeSetInterner {
     union_cache_misses: usize,
 }
 
-impl DirectEdgeSetInterner {
+impl DirectContinuationSets {
     fn new() -> Self {
         Self {
             sets: Vec::new(),
@@ -2906,56 +2882,9 @@ impl DirectEdgeSetInterner {
     }
 }
 
-fn group_direct_configs(
-    configs: &[u32],
-    config_edge: &[u32],
-    config_local_state: &[u32],
-    edges: &[DirectExpressionGraphEdge],
-    edge_sets: &mut DirectEdgeSetInterner,
-) -> Box<[DirectGroupedConfig]> {
-    let mut entries = configs
-        .iter()
-        .map(|&config| {
-            let edge = config_edge[config as usize];
-            let edge_data = &edges[edge as usize];
-            (
-                edge_data.symbol as u32,
-                config_local_state[config as usize],
-                edge,
-            )
-        })
-        .collect::<Vec<_>>();
-    entries.sort_unstable();
-    entries.dedup();
-    let mut groups = Vec::new();
-    let mut position = 0usize;
-    while position < entries.len() {
-        let (symbol, local_state, _) = entries[position];
-        let start = position;
-        position += 1;
-        while position < entries.len()
-            && entries[position].0 == symbol
-            && entries[position].1 == local_state
-        {
-            position += 1;
-        }
-        let edge_ids = entries[start..position]
-            .iter()
-            .map(|entry| entry.2)
-            .collect::<Vec<_>>();
-        let edge_set = edge_sets.intern_sorted(&edge_ids);
-        groups.push(DirectGroupedConfig {
-            symbol,
-            local_state,
-            edge_set,
-        });
-    }
-    groups.into_boxed_slice()
-}
-
 fn canonicalize_direct_group_fragments(
     fragments: &mut [DirectGroupedConfig],
-    edge_sets: &mut DirectEdgeSetInterner,
+    edge_sets: &mut DirectContinuationSets,
     edge_set_ids: &mut Vec<u32>,
     output: &mut Vec<DirectGroupedConfig>,
 ) {
@@ -2983,73 +2912,151 @@ fn canonicalize_direct_group_fragments(
     }
 }
 
-fn compile_direct_expression_graph_grouped(
+struct DirectGraphPreparation {
+    edge_sets: DirectContinuationSets,
+    ready: Vec<Arc<DirectGroupedContinuation>>,
+    initial: Arc<DirectGroupedContinuation>,
+}
+
+fn ready_for_continuation(
+    id: u32,
+    ready: &[Arc<DirectGroupedContinuation>],
+    sets: &mut DirectContinuationSets,
+    cache: &mut FxHashMap<u32, Arc<DirectGroupedContinuation>>,
+    fragments: &mut Vec<DirectGroupedConfig>,
+    set_ids: &mut Vec<u32>,
+    canonical: &mut Vec<DirectGroupedConfig>,
+) -> Arc<DirectGroupedContinuation> {
+    if let Some(row) = cache.get(&id) { return Arc::clone(row); }
+    let targets = sets.get(id);
+    if let [target] = targets {
+        return Arc::clone(&ready[*target as usize]);
+    }
+    let mut accepting = false;
+    fragments.clear();
+    for &target in targets {
+        let row = &ready[target as usize];
+        accepting |= row.accepting;
+        fragments.extend_from_slice(&row.groups);
+    }
+    canonicalize_direct_group_fragments(fragments, sets, set_ids, canonical);
+    let result = Arc::new(DirectGroupedContinuation {
+        accepting, groups: canonical.clone().into_boxed_slice(),
+    });
+    cache.insert(id, Arc::clone(&result));
+    result
+}
+
+/// Epsilon edges and nullable expression edges form a single outer-control
+/// relation. Sink-first SCCs expose the least fixed point of ready symbols
+/// and acceptance without a per-root DFS or any expanded configurations.
+fn prepare_direct_expression_graph(
     graph: &crate::automata::unweighted_u32::nfa::NFA,
-    edges: &[DirectExpressionGraphEdge],
-    config_edge: &[u32],
-    config_local_state: &[u32],
-    ready_expansions: &[DirectReadyExpansion],
-    initial_accepting: bool,
-    initial_configs: &[u32],
+    local_dfas: &[DFA],
+    local_class_transitions: &[Vec<Box<[(u8, u32)]>>],
+) -> Result<Option<DirectGraphPreparation>, String> {
+    let n = graph.states.len();
+    let mut nullable = vec![Vec::new(); n];
+    let mut has_edges = false;
+    for (source, state) in graph.states.iter().enumerate() {
+        for &target in &state.epsilons {
+            if target as usize >= n { return Err(format!("NFA epsilon target {target} is out of range")); }
+            nullable[source].push(target as usize);
+        }
+        for (&label, targets) in &state.transitions {
+            let symbol = usize::try_from(label)
+                .map_err(|_| format!("NFA has invalid negative symbol label {label}"))?;
+            let dfa = local_dfas.get(symbol).ok_or_else(|| {
+                format!("NFA symbol label {label} is out of range for {} symbols", local_dfas.len())
+            })?;
+            has_edges |= !targets.is_empty();
+            for &target in targets {
+                if target as usize >= n { return Err(format!("NFA target state {target} is out of range")); }
+                if !dfa.finalizers(0).is_empty() {
+                    nullable[source].push(target as usize);
+                }
+            }
+        }
+    }
+    if !has_edges { return Ok(None); }
+    for &start in &graph.start_states {
+        if start as usize >= n { return Err(format!("NFA start state {start} is out of range")); }
+    }
+    let components = super::graph::components(n, |state| nullable[state].iter().copied());
+    let successors = components.successors(|state| nullable[state].iter().copied());
+    if components.count > u32::MAX as usize { return Ok(None); }
+    let mut sets = DirectContinuationSets::new();
+    let mut local = vec![Vec::<DirectGroupedConfig>::new(); components.count];
+    let mut accepting = vec![false; components.count];
+    let mut targets = Vec::new();
+    for (source, state) in graph.states.iter().enumerate() {
+        let class = components.of[source];
+        accepting[class] |= state.is_accepting;
+        for (&label, destinations) in &state.transitions {
+            let symbol = label as usize;
+            if destinations.is_empty() || local_class_transitions[symbol][0].is_empty() { continue; }
+            targets.clear();
+            targets.extend(destinations.iter().map(|&target| components.of[target as usize] as u32));
+            targets.sort_unstable();
+            targets.dedup();
+            local[class].push(DirectGroupedConfig {
+                symbol: symbol as u32, local_state: 0, edge_set: sets.intern_sorted(&targets),
+            });
+        }
+    }
+    let mut ready: Vec<Arc<DirectGroupedContinuation>> = Vec::with_capacity(components.count);
+    let mut set_ids = Vec::new();
+    let mut canonical = Vec::new();
+    let mut cells = 0usize;
+    for (class, mut fragments) in local.into_iter().enumerate() {
+        let children = &successors[class];
+        // A pure unary epsilon chain owns no extra row.
+        if fragments.is_empty() && !accepting[class] && let [child] = children.as_slice() {
+            ready.push(Arc::clone(&ready[*child]));
+            continue;
+        }
+        let mut is_accepting = accepting[class];
+        for &child in children {
+            is_accepting |= ready[child].accepting;
+            fragments.extend_from_slice(&ready[child].groups);
+        }
+        canonicalize_direct_group_fragments(&mut fragments, &mut sets, &mut set_ids, &mut canonical);
+        cells = cells.saturating_add(canonical.len());
+        if cells > 4_000_000 { return Ok(None); }
+        ready.push(Arc::new(DirectGroupedContinuation {
+            accepting: is_accepting, groups: canonical.clone().into_boxed_slice(),
+        }));
+    }
+    targets.clear();
+    targets.extend(graph.start_states.iter().map(|&start| components.of[start as usize] as u32));
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.is_empty() { return Err("expression-labelled NFA has no start state".to_owned()); }
+    let initial_id = sets.intern_sorted(&targets);
+    let initial = ready_for_continuation(initial_id, &ready, &mut sets, &mut FxHashMap::default(),
+        &mut Vec::new(), &mut set_ids, &mut canonical);
+    Ok(Some(DirectGraphPreparation { edge_sets: sets, ready, initial }))
+}
+
+fn compile_direct_expression_graph_grouped(
+    prepared: DirectGraphPreparation,
     local_dfas: &[DFA],
     local_class_transitions: &[Vec<Box<[(u8, u32)]>>],
     class_members: &[Vec<u8>],
     profile: bool,
 ) -> DFA {
-    let setup_started = profile.then(Instant::now);
-    let mut edge_sets = DirectEdgeSetInterner::new();
-    let ready_groups = ready_expansions
-        .iter()
-        .map(|expansion| {
-            group_direct_configs(
-                &expansion.configs,
-                config_edge,
-                config_local_state,
-                edges,
-                &mut edge_sets,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut fragments = Vec::<DirectGroupedConfig>::new();
+    let DirectGraphPreparation { mut edge_sets, ready, initial } = prepared;
+    let mut continuation_cache = FxHashMap::default();
+    let mut continuation_fragments = Vec::new();
+    let mut continuation_set_ids = Vec::new();
+    let mut continuation_canonical = Vec::new();
     let mut edge_set_ids = Vec::<u32>::new();
-    let mut canonical_groups = Vec::<DirectGroupedConfig>::new();
-    let grouped_continuations = edges
-        .iter()
-        .map(|edge| {
-            fragments.clear();
-            let mut accepting = false;
-            for &target in edge.targets.iter() {
-                accepting |= ready_expansions[target as usize].accepting;
-                fragments.extend_from_slice(&ready_groups[target as usize]);
-            }
-            canonicalize_direct_group_fragments(
-                &mut fragments,
-                &mut edge_sets,
-                &mut edge_set_ids,
-                &mut canonical_groups,
-            );
-            DirectGroupedContinuation {
-                accepting,
-                groups: canonical_groups.clone().into_boxed_slice(),
-            }
-        })
-        .collect::<Vec<_>>();
-    let initial_groups = group_direct_configs(
-        initial_configs,
-        config_edge,
-        config_local_state,
-        edges,
-        &mut edge_sets,
-    );
-    let setup_ms = setup_started.map_or(0.0, |started| {
-        started.elapsed().as_secs_f64() * 1000.0
-    });
-
-    let determinize_started = profile.then(Instant::now);
+    let initial_accepting = initial.accepting;
+    let initial_groups = initial.groups.clone();    let determinize_started = profile.then(Instant::now);
     let initial = Arc::new(DirectGroupedState::new(initial_accepting, initial_groups));
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
-    let state_capacity = config_edge.len().max(edges.len() * 8);
+    let state_capacity = ready.len().max(local_dfas.len() * 8);
     let mut state_map = FxHashMap::<Arc<DirectGroupedState>, u32>::default();
     state_map.reserve(state_capacity);
     state_map.insert(Arc::clone(&initial), 0);
@@ -3105,14 +3112,12 @@ fn compile_direct_expression_graph_grouped(
                     }
                 }
                 if !local_dfa.finalizers(next_local).is_empty() {
-                    for &edge in edge_sets.get(group.edge_set) {
-                        let continuation = &grouped_continuations[edge as usize];
-                        class_accepting[class_index] |= continuation.accepting;
-                        class_fragments[class_index].extend_from_slice(&continuation.groups);
-                        if profile {
-                            continuation_group_contributions += continuation.groups.len();
-                        }
-                    }
+                    let continuation = ready_for_continuation(group.edge_set, &ready, &mut edge_sets,
+                        &mut continuation_cache, &mut continuation_fragments,
+                        &mut continuation_set_ids, &mut continuation_canonical);
+                    class_accepting[class_index] |= continuation.accepting;
+                    class_fragments[class_index].extend_from_slice(&continuation.groups);
+                    if profile { continuation_group_contributions += continuation.groups.len(); }
                 }
             }
         }
@@ -3193,7 +3198,7 @@ fn compile_direct_expression_graph_grouped(
     });
     if profile {
         eprintln!(
-            "[glrmask/profile][tokenizer] grouped_expression_graph edge_sets={} union_cache_hits={} union_cache_misses={} pre_states={} pre_class_transitions={} post_states={} post_class_transitions={} post_byte_transitions={} avg_source_groups={:.2} direct_group_contributions={} continuation_group_contributions={} state_hits={} state_misses={} setup_ms={:.3} scan_ms={:.3} canonicalize_ms={:.3} lookup_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} expand_ms={:.3}",
+            "[glrmask/profile][tokenizer] grouped_expression_graph edge_sets={} union_cache_hits={} union_cache_misses={} pre_states={} pre_class_transitions={} post_states={} post_class_transitions={} post_byte_transitions={} avg_source_groups={:.2} direct_group_contributions={} continuation_group_contributions={} state_hits={} state_misses={} scan_ms={:.3} canonicalize_ms={:.3} lookup_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} expand_ms={:.3}",
             edge_sets.sets.len(),
             edge_sets.union_cache_hits,
             edge_sets.union_cache_misses,
@@ -3207,7 +3212,6 @@ fn compile_direct_expression_graph_grouped(
             continuation_group_contributions,
             state_hits,
             state_misses,
-            setup_ms,
             scan_duration.as_secs_f64() * 1000.0,
             canonicalize_duration.as_secs_f64() * 1000.0,
             lookup_duration.as_secs_f64() * 1000.0,
@@ -3217,97 +3221,6 @@ fn compile_direct_expression_graph_grouped(
         );
     }
     minimized
-}
-
-fn direct_expression_graph_ready_expansions(
-    graph: &crate::automata::unweighted_u32::nfa::NFA,
-    outgoing_edges: &[Vec<u32>],
-    edges: &[DirectExpressionGraphEdge],
-    local_dfas: &[DFA],
-    local_class_transitions: &[Vec<Box<[(u8, u32)]>>],
-) -> Vec<DirectReadyExpansion> {
-    let num_states = graph.states.len();
-    let mut marks = vec![0u32; num_states];
-    let mut generation = 0u32;
-    let mut stack = Vec::<u32>::new();
-    let mut configs = Vec::<u32>::new();
-    let mut result = Vec::with_capacity(num_states);
-
-    for root in 0..num_states {
-        generation = generation.wrapping_add(1);
-        if generation == 0 {
-            marks.fill(0);
-            generation = 1;
-        }
-        stack.clear();
-        configs.clear();
-        stack.push(root as u32);
-        marks[root] = generation;
-        let mut accepting = false;
-        while let Some(state) = stack.pop() {
-            let graph_state = &graph.states[state as usize];
-            accepting |= graph_state.is_accepting;
-            for &edge_id in &outgoing_edges[state as usize] {
-                let edge = &edges[edge_id as usize];
-                let local_dfa = &local_dfas[edge.symbol];
-                if !local_class_transitions[edge.symbol][0].is_empty() {
-                    configs.push(edge.config_base);
-                }
-                if !local_dfa.finalizers(0).is_empty() {
-                    for &target in edge.targets.iter() {
-                        let mark = &mut marks[target as usize];
-                        if *mark != generation {
-                            *mark = generation;
-                            stack.push(target);
-                        }
-                    }
-                }
-            }
-            for &target in &graph_state.epsilons {
-                let mark = &mut marks[target as usize];
-                if *mark != generation {
-                    *mark = generation;
-                    stack.push(target);
-                }
-            }
-        }
-        configs.sort_unstable();
-        configs.dedup();
-        result.push(DirectReadyExpansion {
-            configs: configs.clone().into_boxed_slice(),
-            accepting,
-        });
-    }
-    result
-}
-
-fn union_direct_ready_expansions(
-    targets: impl IntoIterator<Item = u32>,
-    expansions: &[DirectReadyExpansion],
-    config_marks: &mut [u32],
-    generation: &mut u32,
-    configs: &mut Vec<u32>,
-) -> bool {
-    *generation = generation.wrapping_add(1);
-    if *generation == 0 {
-        config_marks.fill(0);
-        *generation = 1;
-    }
-    configs.clear();
-    let mut accepting = false;
-    for target in targets {
-        let expansion = &expansions[target as usize];
-        accepting |= expansion.accepting;
-        for &config in expansion.configs.iter() {
-            let mark = &mut config_marks[config as usize];
-            if *mark != *generation {
-                *mark = *generation;
-                configs.push(config);
-            }
-        }
-    }
-    configs.sort_unstable();
-    accepting
 }
 
 fn set_direct_expression_graph_finalizers(dfa: &mut DFA, accepting: &[bool]) {
@@ -3359,98 +3272,23 @@ fn try_compile_expression_labeled_nfa_direct(
         direct_expression_graph_class_transitions(&local_dfas, &class_members);
 
     let setup_started = profile.then(Instant::now);
-    let mut outgoing_edges = vec![Vec::<u32>::new(); graph.states.len()];
-    let mut edges = Vec::<DirectExpressionGraphEdge>::with_capacity(edge_group_count);
-    let mut config_edge = Vec::<u32>::new();
-    let mut config_local_state = Vec::<u32>::new();
-    for (source, state) in graph.states.iter().enumerate() {
-        for (&label, targets) in &state.transitions {
-            let symbol = usize::try_from(label)
-                .map_err(|_| format!("NFA has invalid negative symbol label {label}"))?;
-            let local_dfa = local_dfas.get(symbol).ok_or_else(|| {
-                format!(
-                    "NFA symbol label {label} is out of range for {} symbols",
-                    symbols.len()
-                )
-            })?;
-            let config_base = u32::try_from(config_edge.len())
-                .map_err(|_| "direct expression graph configuration overflow".to_string())?;
-            let edge_id = u32::try_from(edges.len())
-                .map_err(|_| "direct expression graph edge overflow".to_string())?;
-            let mut checked_targets = Vec::with_capacity(targets.len());
-            for &target in targets {
-                if target as usize >= graph.states.len() {
-                    return Err(format!("NFA target state {target} is out of range"));
-                }
-                checked_targets.push(target);
-            }
-            checked_targets.sort_unstable();
-            checked_targets.dedup();
-            for local_state in 0..local_dfa.num_states() {
-                config_edge.push(edge_id);
-                config_local_state.push(local_state as u32);
-            }
-            edges.push(DirectExpressionGraphEdge {
-                symbol,
-                targets: checked_targets.into_boxed_slice(),
-                config_base,
-            });
-            outgoing_edges[source].push(edge_id);
-        }
-    }
-    if config_edge.is_empty() {
+    let Some(prepared) = prepare_direct_expression_graph(graph, &local_dfas, &local_class_transitions)? else {
         return Ok(None);
-    }
-
-    for &start in &graph.start_states {
-        if start as usize >= graph.states.len() {
-            return Err(format!("NFA start state {start} is out of range"));
-        }
-    }
-
-    let ready_expansions = direct_expression_graph_ready_expansions(
-        graph,
-        &outgoing_edges,
-        &edges,
-        &local_dfas,
-        &local_class_transitions,
-    );
-    let mut config_marks = vec![0u32; config_edge.len()];
-    let mut generation = 0u32;
-    let mut initial_configs = Vec::<u32>::new();
-    let initial_accepting = union_direct_ready_expansions(
-        graph.start_states.iter().copied(),
-        &ready_expansions,
-        &mut config_marks,
-        &mut generation,
-        &mut initial_configs,
-    );
-    let setup_ms = setup_started.map_or(0.0, |started| {
-        started.elapsed().as_secs_f64() * 1000.0
-    });
-
+    };
+    let ready_components = prepared.ready.len();
+    let setup_ms = setup_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let result = compile_direct_expression_graph_grouped(
-        graph,
-        &edges,
-        &config_edge,
-        &config_local_state,
-        &ready_expansions,
-        initial_accepting,
-        &initial_configs,
-        &local_dfas,
-        &local_class_transitions,
-        &class_members,
-        profile,
+        prepared, &local_dfas, &local_class_transitions, &class_members, profile,
     );
     if let Some(started) = total_started {
         eprintln!(
-            "[glrmask/profile][tokenizer] grouped_expression_graph_total graph_states={} graph_edges={} symbols={} classes={} local_states={} configs={} local_ms={:.3} outer_setup_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] grouped_expression_graph_total graph_states={} graph_edges={} symbols={} classes={} local_states={} ready_components={} local_ms={:.3} outer_setup_ms={:.3} total_ms={:.3}",
             graph.states.len(),
             edge_group_count,
             symbols.len(),
             class_members.len(),
             local_dfas.iter().map(DFA::num_states).sum::<usize>(),
-            config_edge.len(),
+            ready_components,
             local_ms,
             setup_ms,
             started.elapsed().as_secs_f64() * 1000.0,
