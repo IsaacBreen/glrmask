@@ -5260,18 +5260,37 @@ pub fn close_provider_control_stacks<P: ParserActionProvider>(
 fn close_provider_control_stacks_budgeted<P: ParserActionProvider>(
     provider: &P,
     stack: &ParserGSS,
-    mut work_left: usize,
+    work_left: usize,
 ) -> ParserGSS {
+    close_stack_relations(stack, work_left,
+        |top, out| provider.control_symbols(top, out),
+        |frontier, symbol| advance_stacks_with_provider(provider, frontier.clone(), symbol))
+}
+
+/// Shared bounded control closure for finite stack relations. The native
+/// parser may apply the same relation directly to a unit-annotated GSS;
+/// an LR provider uses its exclusion-bearing parser GSS instead.
+#[doc(hidden)]
+pub fn close_stack_relations<A, S>(
+    stack: &LeveledGSS<u32, A>,
+    mut work_left: usize,
+    mut controls: impl FnMut(u32, &mut SmallVec<[S; 4]>),
+    mut advance: impl FnMut(&LeveledGSS<u32, A>, S) -> LeveledGSS<u32, A>,
+) -> LeveledGSS<u32, A>
+where
+    A: Merge + Eq + std::hash::Hash,
+    S: Copy + Eq,
+{
     if stack.is_empty() { return stack.clone(); }
     let mut closure = stack.clone();
     let mut frontier = stack.clone();
-    let mut symbols = SmallVec::<[P::Symbol; 4]>::new();
+    let mut symbols = SmallVec::<[S; 4]>::new();
     let mut rounds = 0usize;
     loop {
         symbols.clear();
         let tops = frontier.peek_values();
-        for &state in &tops { provider.control_symbols(state, &mut symbols); }
-        let mut unique = SmallVec::<[P::Symbol; 4]>::new();
+        for &state in &tops { controls(state, &mut symbols); }
+        let mut unique = SmallVec::<[S; 4]>::new();
         for symbol in symbols.drain(..) {
             if !unique.contains(&symbol) { unique.push(symbol); }
         }
@@ -5291,10 +5310,12 @@ fn close_provider_control_stacks_budgeted<P: ParserActionProvider>(
                 "parser control closure exceeded one million GSS nodes; no partial closure was returned");
         }
         rounds += 1;
-        let mut additions = ParserGSS::empty();
+        let mut additions = LeveledGSS::empty();
         for symbol in unique {
-            merge_into(&mut additions,
-                advance_stacks_with_provider(provider, frontier.clone(), symbol));
+            let branch = advance(&frontier, symbol);
+            if !branch.is_empty() {
+                additions = if additions.is_empty() { branch } else { additions.merge(&branch) };
+            }
         }
         if additions.is_empty() { return closure; }
         let merged = closure.merge(&additions);

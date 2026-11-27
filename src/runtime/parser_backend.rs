@@ -34,6 +34,7 @@ use crate::automata::unweighted_u32::dfa::DFA;
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::glr::labels::encode_negative_label;
 use crate::compiler::glr::parser::ParserGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::compiler::glr::table::{AdmissionPolicy, GLRTable};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
@@ -234,7 +235,7 @@ fn compile_domain(template: &CommitTemplateDfas) -> crate::Result<TemplateDomain
     TemplateDomain::compile(template).map_err(crate::Error::Compilation)
 }
 
-pub(super) fn matches_gss(domain: &TemplateDomain, stack: &ParserGSS) -> bool {
+pub(super) fn matches_gss<A: Merge + Eq + std::hash::Hash>(domain: &TemplateDomain, stack: &LeveledGSS<u32, A>) -> bool {
     if stack.is_empty() { return false; }
     let cursor = match domain.start() {
         DomainProbe::Accept => return true,
@@ -369,20 +370,19 @@ impl TemplateParser {
     }
 
     #[inline]
-    pub(crate) fn admits(&self, stack: &ParserGSS, terminal: TerminalID) -> bool {
+    pub(crate) fn admits<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, terminal: TerminalID) -> bool {
         if let Some(provider) = self.composition_provider() {
+            let closed = provider.close_native(stack);
             return if terminal == EOF {
-                crate::compiler::glr::parser::stacks_finished_with_provider(&provider, stack, EOF)
+                !closed.is_empty() && self.admits_control_closed(&closed, EOF)
             } else {
-                crate::compiler::glr::parser::stack_may_advance_on_with_provider(
-                    &provider, stack, terminal,
-                )
+                provider.closed_admits_native(&closed, terminal)
             };
         }
         self.admits_control_closed(stack, terminal)
     }
 
-    fn admits_control_closed(&self, stack: &ParserGSS, terminal: TerminalID) -> bool {
+    fn admits_control_closed<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, terminal: TerminalID) -> bool {
         if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
         if let Some(composition) = self.composition() {
             return if terminal == EOF || terminal < self.terminal_count {
@@ -419,11 +419,10 @@ impl TemplateParser {
         matches_gss(domain, stack)
     }
 
-    pub(crate) fn admits_any(&self, stack: &ParserGSS, candidates: &BitSet) -> bool {
+    pub(crate) fn admits_any<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, candidates: &BitSet) -> bool {
         if let Some(provider) = self.composition_provider() {
-            return crate::compiler::glr::parser::stack_may_advance_on_any_with_provider(
-                &provider, stack, candidates.iter().map(|terminal| terminal as u32),
-            );
+            let closed = provider.close_native(stack);
+            return candidates.iter().any(|terminal| provider.closed_admits_native(&closed, terminal as u32));
         }
         let local = self.local_admission().expect("local admission");
         if let Some(top) = stack.single_exclusive_top_value()
@@ -459,14 +458,15 @@ impl TemplateParser {
         false
     }
 
-    pub(crate) fn admitted(&self, stack: &ParserGSS, candidates: &BitSet) -> BitSet {
+    pub(crate) fn admitted<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, candidates: &BitSet) -> BitSet {
         if let Some(provider) = self.composition_provider() {
             let mut admitted = BitSet::new(candidates.len());
-            crate::compiler::glr::parser::for_each_admitted_symbol_with_provider(
-                &provider, stack,
-                candidates.iter().map(|terminal| (terminal, terminal as u32)),
-                |terminal| admitted.set(terminal),
-            );
+            let closed = provider.close_native(stack);
+            for terminal in candidates.iter() {
+                if provider.closed_admits_native(&closed, terminal as u32) {
+                    admitted.set(terminal);
+                }
+            }
             return admitted;
         }
         let local = self.local_admission().expect("local admission");

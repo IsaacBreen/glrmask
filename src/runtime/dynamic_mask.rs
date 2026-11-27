@@ -62,6 +62,9 @@ fn raw_terminal_radius_enabled() -> bool {
 }
 
 fn exact_parser_admission_for_stacks(constraint: &Constraint, stacks: &ParserStacks) -> BitSet {
+    if let Some(parser) = constraint.template_parser() {
+        return parser.admitted(stacks, &BitSet::all(constraint.parser_terminal_count() as usize));
+    }
     let parser_gss = with_empty_accumulators(stacks);
     constraint.direct_regular_admissible_terminals(&parser_gss).unwrap_or_else(|| {
         let candidates = BitSet::all(constraint.parser_terminal_count() as usize);

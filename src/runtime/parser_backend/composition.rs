@@ -12,6 +12,7 @@ use smallvec::SmallVec;
 
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::glr::parser::{ParserActionProvider, ParserGSS, ProvidedAction};
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::compiler::glr::table::GLRTable;
 use crate::runtime::artifact::TemplateDfasByTerminal;
 use super::scoped_program::ScopedProgram;
@@ -221,7 +222,7 @@ impl TemplateComposition {
         (self.control_start as usize) < self.views.len()
     }
 
-    pub(crate) fn admits(&self, stack: &ParserGSS, index: u32) -> bool {
+    pub(crate) fn admits<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, index: u32) -> bool {
         self.views.get(index as usize).is_some_and(|view| {
             if let Some(top) = stack.single_exclusive_top_value() {
                 match view.classify_top(top) {
@@ -234,13 +235,13 @@ impl TemplateComposition {
         })
     }
 
-    pub(crate) fn admits_outer(&self, stack: &ParserGSS, terminal: u32) -> bool {
+    pub(crate) fn admits_outer<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, terminal: u32) -> bool {
         if terminal == EOF { self.completion_view.admits(stack) }
         else { self.outer_view(terminal as usize).is_some_and(|view| view.admits(stack)) }
     }
 
-    fn advance(&self, stack: &ParserGSS, index: u32) -> ParserGSS {
-        self.views.get(index as usize).map_or_else(ParserGSS::empty, |view| view.advance(stack))
+    fn advance<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>, index: u32) -> LeveledGSS<u32, A> {
+        self.views.get(index as usize).map_or_else(LeveledGSS::empty, |view| view.advance(stack))
     }
 
     pub(crate) fn report(&self) -> serde_json::Value {
@@ -255,6 +256,50 @@ impl TemplateComposition {
 pub(crate) struct TemplateCompositionProvider<'a> {
     parser: &'a TemplateParser,
     composition: &'a TemplateComposition,
+}
+
+impl TemplateCompositionProvider<'_> {
+    fn append_controls(&self, top: u32, out: &mut SmallVec<[u32; 4]>) {
+        if let Some(controls) = self.composition.controls_by_top.get(top) {
+            out.extend(controls.iter().map(|index| self.parser.terminal_count + index));
+        }
+    }
+
+    /// The native composition's actual relation. This is independent of the
+    /// stack annotation carried by commit, mask or admission.
+    pub(crate) fn advance_native<A: Merge + Eq + std::hash::Hash>(
+        &self, stack: &LeveledGSS<u32, A>, terminal: u32,
+    ) -> LeveledGSS<u32, A> {
+        self.parser.record_advance();
+        if terminal < self.parser.terminal_count {
+            self.composition.outer_view(terminal as usize).expect("outer terminal").advance(stack)
+        } else if terminal != EOF {
+            self.composition.advance(stack, terminal - self.parser.terminal_count)
+        } else {
+            LeveledGSS::empty()
+        }
+    }
+
+    pub(crate) fn close_native<A: Merge + Eq + std::hash::Hash>(
+        &self, stack: &LeveledGSS<u32, A>,
+    ) -> LeveledGSS<u32, A> {
+        crate::compiler::glr::parser::close_stack_relations(stack, 16_000_000,
+            |top, out| self.append_controls(top, out),
+            |frontier, symbol| self.advance_native(frontier, symbol))
+    }
+
+    pub(crate) fn advance_closed_native<A: Merge + Eq + std::hash::Hash>(
+        &self, stack: &LeveledGSS<u32, A>, terminal: u32,
+    ) -> LeveledGSS<u32, A> {
+        let advanced = self.advance_native(stack, terminal);
+        self.close_native(&advanced)
+    }
+
+    pub(crate) fn closed_admits_native<A: Merge + Eq + std::hash::Hash>(
+        &self, stack: &LeveledGSS<u32, A>, terminal: u32,
+    ) -> bool {
+        !stack.is_empty() && terminal != EOF && self.parser.admits_control_closed(stack, terminal)
+    }
 }
 
 impl ParserActionProvider for TemplateCompositionProvider<'_> {
@@ -272,24 +317,15 @@ impl ParserActionProvider for TemplateCompositionProvider<'_> {
     fn state_count_hint(&self) -> usize { self.parser.state_count as usize }
 
     fn control_symbols(&self, top: u32, out: &mut SmallVec<[u32; 4]>) {
-        if let Some(controls) = self.composition.controls_by_top.get(top) {
-            out.extend(controls.iter().map(|index| self.parser.terminal_count + index));
-        }
+        self.append_controls(top, out);
     }
 
     fn advance_relation(&self, stack: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
-        self.parser.record_advance();
-        Some(if terminal < self.parser.terminal_count {
-            self.composition.outer_view(terminal as usize).expect("outer terminal").advance(stack)
-        } else if terminal != EOF {
-            self.composition.advance(stack, terminal - self.parser.terminal_count)
-        } else {
-            ParserGSS::empty()
-        })
+        Some(self.advance_native(stack, terminal))
     }
 
     fn relation_admits(&self, stack: &ParserGSS, terminal: u32) -> Option<bool> {
-        Some(terminal != EOF && self.parser.admits_control_closed(stack, terminal))
+        Some(self.closed_admits_native(stack, terminal))
     }
 
     fn relation_finished(&self, stack: &ParserGSS, terminal: u32) -> Option<bool> {

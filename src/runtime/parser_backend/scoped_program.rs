@@ -3,7 +3,10 @@
 use crate::ErrorExt as _;
 use std::{ops::ControlFlow, sync::Arc};
 use super::{CommitTemplateDfas, Constraint, PreparedRelation, TopAdmission, DomainProbe};
-use crate::compiler::glr::{labels::DEFAULT_LABEL, parser::ParserGSS};
+use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
+#[cfg(test)]
+use crate::compiler::glr::parser::ParserGSS;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedProgram {
@@ -71,7 +74,7 @@ impl ScopedProgram {
         self.local(top).map_or(TopAdmission::Never, |symbol| self.domain.classify_top(symbol))
     }
 
-    pub(crate) fn admits(&self, stack: &ParserGSS) -> bool {
+    pub(crate) fn admits<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>) -> bool {
         if stack.is_empty() { return false; }
         let start = self.domain.start();
         if !self.guard_owner {
@@ -93,7 +96,7 @@ impl ScopedProgram {
         })
     }
 
-    pub(crate) fn advance(&self, stack: &ParserGSS) -> ParserGSS {
+    pub(crate) fn advance<A: Merge + Eq + std::hash::Hash>(&self, stack: &LeveledGSS<u32, A>) -> LeveledGSS<u32, A> {
         if let Some(top) = stack.single_exclusive_top_value()
             && let Some(local) = self.local(top)
             && let Some(symbol) = self.execution.as_ref().and_then(|fast| fast.read_shift.as_ref())
@@ -105,7 +108,7 @@ impl ScopedProgram {
             return self.append_push.map_or(output.clone(), |symbol| output.push(symbol));
         }
         let input = if self.guard_owner {
-            let mut owned = ParserGSS::empty();
+            let mut owned = LeveledGSS::empty();
             for top in stack.peek_values() {
                 if self.local(top).is_some() { owned = owned.merge(&stack.isolate(Some(top))); }
             }
