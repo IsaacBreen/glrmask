@@ -322,12 +322,12 @@ impl<'a> RuntimeWeightRef<'a> {
         if self.is_empty() {
             return Weight::empty();
         }
-        let mut entries = Vec::<(u32, RangeSetBlaze<u32>)>::new();
+        let mut runs = Vec::new();
         self.for_each_entry(|start, end, tokens| {
-            let tokens = tokens.to_range_set();
-            entries.extend((start..=end).map(|tsid| (tsid, tokens.clone())));
+            let tokens = crate::ds::weight::shared_rangeset(tokens.to_range_set());
+            runs.push((start, end, tokens));
         });
-        Weight::from_per_tsid_token_sets(entries)
+        Weight::from_tsid_runs_shared(runs)
     }
 
     pub(crate) fn for_each_entry(
