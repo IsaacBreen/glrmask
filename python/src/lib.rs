@@ -1900,7 +1900,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDynamicConstraint>()?;
     m.add_class::<PyDynamicConstraintState>()?;
     add_internal_module(m)?;
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__version__", env!("CARGO_PKG_VERSION").replace("-rc.", "rc"))?;
     m.setattr(
         "__all__",
         [
