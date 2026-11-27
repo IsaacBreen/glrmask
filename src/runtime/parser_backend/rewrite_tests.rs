@@ -315,7 +315,7 @@ fn sparse_preparation_matches_every_dense_top_certificate() {
         ] {
             let completion = Arc::new(compile_domain(&completion).unwrap());
             for state_count in [0, 1, 4, 64, 71, 129] {
-                let (possible, unconditional) =
+                let rows =
                     top_certificate_rows(state_count, &domains, &completion);
                 for top in 0..state_count {
                     let mut expected_possible = BitSet::new(terminal_count + 1);
@@ -332,8 +332,8 @@ fn sparse_preparation_matches_every_dense_top_certificate() {
                             TopAdmission::DependsOnSuffix => expected_possible.set(terminal),
                         }
                     }
-                    assert_eq!(possible[top as usize], expected_possible);
-                    assert_eq!(unconditional[top as usize], expected_unconditional);
+                    assert_eq!(rows.possible(top), Some(&expected_possible));
+                    assert_eq!(rows.unconditional(top), Some(&expected_unconditional));
                 }
             }
         }
@@ -348,14 +348,25 @@ fn grouped_certificate_masks_cover_aliases_across_word_boundaries() {
         Arc::clone(if terminal % 3 == 0 { &yes } else { &no })
     }).collect::<Vec<_>>();
     let completion = Arc::new(compile_domain(&pop_word(&[0], true)).unwrap());
-    let (possible, unconditional) = top_certificate_rows(3, &domains, &completion);
+    let rows = top_certificate_rows(3, &domains, &completion);
     for terminal in 0..257 {
-        assert_eq!(possible[1].contains(terminal), terminal % 3 == 0);
-        assert_eq!(unconditional[1].contains(terminal), terminal % 3 == 0);
-        assert!(!possible[0].contains(terminal));
+        assert_eq!(rows.possible(1).unwrap().contains(terminal), terminal % 3 == 0);
+        assert_eq!(rows.unconditional(1).unwrap().contains(terminal), terminal % 3 == 0);
+        assert!(!rows.possible(0).unwrap().contains(terminal));
     }
-    assert!(possible[0].contains(257));
-    assert!(unconditional[0].contains(257));
+    assert!(rows.possible(0).unwrap().contains(257));
+    assert!(rows.unconditional(0).unwrap().contains(257));
+}
+
+#[test]
+fn many_equivalent_tops_share_one_immutable_certificate_pair() {
+    let yes = Arc::new(compile_domain(&pop_word(&[], true)).unwrap());
+    let no = Arc::new(compile_domain(&pop_word(&[], false)).unwrap());
+    let domains = vec![yes; 257];
+    let rows = top_certificate_rows(100_000, &domains, &no);
+    assert_eq!(rows.stored_rows(), 2);
+    assert!(std::ptr::eq(rows.possible(0).unwrap(), rows.possible(99_999).unwrap()));
+    assert_eq!(rows.possible(100_000), None);
 }
 
 #[test]

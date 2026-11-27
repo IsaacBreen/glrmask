@@ -190,8 +190,7 @@ enum TemplateAdmission {
 struct LocalAdmission {
     programs: Vec<Arc<PreparedRelation>>,
     completion: Arc<PreparedRelation>,
-    possible: Vec<BitSet>,
-    unconditional: Vec<BitSet>,
+    top_rows: prepare::TopCertificateRows,
 }
 
 #[derive(Debug)]
@@ -356,12 +355,12 @@ impl TemplateParser {
 
     #[inline]
     fn possible_row(&self, top: u32) -> Option<&BitSet> {
-        self.local_admission()?.possible.get(top as usize)
+        self.local_admission()?.top_rows.possible(top)
     }
 
     #[inline]
     fn unconditional_row(&self, top: u32) -> Option<&BitSet> {
-        self.local_admission()?.unconditional.get(top as usize)
+        self.local_admission()?.top_rows.unconditional(top)
     }
 
     #[inline]
@@ -400,20 +399,20 @@ impl TemplateParser {
             (terminal as usize, domain)
         };
         if let Some(top) = stack.single_exclusive_top_value() {
-            if local.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
+            if local.top_rows.unconditional(top).is_some_and(|row| row.contains(bit)) {
                 return true;
             }
-            if local.possible.get(top as usize).is_some_and(|row| !row.contains(bit)) {
+            if local.top_rows.possible(top).is_some_and(|row| !row.contains(bit)) {
                 return false;
             }
         } else {
             let tops = stack.peek_values();
             let mut possible = tops.is_empty();
             for top in tops {
-                if local.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
+                if local.top_rows.unconditional(top).is_some_and(|row| row.contains(bit)) {
                     return true;
                 }
-                possible |= local.possible.get(top as usize).is_none_or(|row| row.contains(bit));
+                possible |= local.top_rows.possible(top).is_none_or(|row| row.contains(bit));
             }
             if !possible { return false; }
         }
@@ -428,10 +427,10 @@ impl TemplateParser {
         }
         let local = self.local_admission().expect("local admission");
         if let Some(top) = stack.single_exclusive_top_value()
-            && let Some(possible) = local.possible.get(top as usize)
+            && let Some(possible) = local.top_rows.possible(top)
         {
             if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
-            if local.unconditional.get(top as usize).is_some_and(|row| {
+            if local.top_rows.unconditional(top).is_some_and(|row| {
                 row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
             }) {
                 return true;
@@ -446,7 +445,7 @@ impl TemplateParser {
             });
         }
         for top in stack.peek_values() {
-            if local.unconditional.get(top as usize).is_some_and(|row| {
+            if local.top_rows.unconditional(top).is_some_and(|row| {
                 row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
             }) {
                 if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
@@ -479,7 +478,7 @@ impl TemplateParser {
             possible = candidates.clone();
         }
         for top in tops {
-            match local.possible.get(top as usize) {
+            match local.top_rows.possible(top) {
                 Some(row) => {
                     for ((dst, a), b) in possible.words_mut().iter_mut()
                         .zip(row.words()).zip(candidates.words())
@@ -489,7 +488,7 @@ impl TemplateParser {
                 }
                 None => possible = candidates.clone(),
             }
-            if let Some(row) = local.unconditional.get(top as usize) {
+            if let Some(row) = local.top_rows.unconditional(top) {
                 for ((dst, a), b) in result.words_mut().iter_mut()
                     .zip(row.words()).zip(candidates.words())
                 {
@@ -550,12 +549,12 @@ impl TemplateParser {
         let local = self.local_admission().expect("local admission");
         if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
         let top = stack.last().copied();
-        if top.and_then(|top| local.unconditional.get(top as usize)).is_some_and(|row| {
+        if top.and_then(|top| local.top_rows.unconditional(top)).is_some_and(|row| {
             row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
         }) {
             return true;
         }
-        if let Some(possible) = top.and_then(|top| local.possible.get(top as usize)) {
+        if let Some(possible) = top.and_then(|top| local.top_rows.possible(top)) {
             return intersecting_bits(possible, candidates).any(|bit| {
                 let domain = if bit == self.terminal_count as usize {
                     Some(&local.completion.domain)
@@ -568,7 +567,7 @@ impl TemplateParser {
             });
         }
         for bit in candidates.iter() {
-            if top.and_then(|top| local.possible.get(top as usize))
+            if top.and_then(|top| local.top_rows.possible(top))
                 .is_some_and(|row| !row.contains(bit))
             {
                 continue;
@@ -601,7 +600,7 @@ impl TemplateParser {
         match &mut self.admission {
             TemplateAdmission::Local(local) => {
                 local.completion = relation;
-                (local.possible, local.unconditional) = top_certificate_rows(
+                local.top_rows = top_certificate_rows(
                     self.state_count,
                     &local.programs.iter().map(|p| Arc::clone(&p.domain)).collect::<Vec<_>>(),
                     &local.completion.domain,
@@ -1121,7 +1120,7 @@ impl Constraint {
                             "shared_retained_domains": domains,
                             "synthetic_ignore_or_skip_relations": identities,
                             "dense_global_certificate_rows":
-                                parser.local_admission().map_or(0, |local| local.possible.len() + local.unconditional.len())
+                                parser.local_admission().map_or(0, |local| local.top_rows.stored_rows())
                         });
                     }
                 }

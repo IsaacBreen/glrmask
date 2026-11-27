@@ -224,55 +224,95 @@ fn apply_certificate(
     }
 }
 
+/// Top admission is a three-valued relation; its two bitsets are simply the
+/// hot bulk-query form. Equal exception signatures describe identical rows.
+/// Store one immutable pair for each such signature, not a dense pair for
+/// every stack symbol. A symbol outside the declared alphabet still declines
+/// the certificate and uses the exact input domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TopCertificateRows {
+    row_for_top: Box<[u32]>,
+    rows: Box<[(BitSet, BitSet)]>,
+}
+
+impl TopCertificateRows {
+    #[inline]
+    fn row(&self, top: u32) -> Option<&(BitSet, BitSet)> {
+        self.rows.get(*self.row_for_top.get(top as usize)? as usize)
+    }
+
+    #[inline]
+    pub(super) fn possible(&self, top: u32) -> Option<&BitSet> {
+        Some(&self.row(top)?.0)
+    }
+
+    #[inline]
+    pub(super) fn unconditional(&self, top: u32) -> Option<&BitSet> {
+        Some(&self.row(top)?.1)
+    }
+
+    pub(super) fn stored_rows(&self) -> usize { self.rows.len() * 2 }
+}
+
 fn grouped_top_rows(
     symbols: u32,
     terminals: usize,
     groups: &[DomainGroup],
     completion: &Arc<TemplateDomain>,
-) -> (Vec<BitSet>, Vec<BitSet>) {
-    let mut default_possible = BitSet::new(terminals + 1);
-    let mut default_unconditional = BitSet::new(terminals + 1);
-    let masks = groups.iter().map(|group| word_masks(&group.terminals))
+) -> TopCertificateRows {
+    let mut defaults = (BitSet::new(terminals + 1), BitSet::new(terminals + 1));
+    let mut masks = groups.iter().map(|group| word_masks(&group.terminals))
         .collect::<Vec<_>>();
+    masks.push(vec![(terminals / 64, 1u64 << (terminals % 64))]);
 
-    for (group, masks) in groups.iter().zip(&masks) {
-        apply_certificate(
-            &mut default_possible, &mut default_unconditional, masks,
-            group.domain.top_admission_partition().0,
-        );
-    }
-    let completion_mask = [(terminals / 64, 1u64 << (terminals % 64))];
-    apply_certificate(
-        &mut default_possible, &mut default_unconditional, &completion_mask,
-        completion.top_admission_partition().0,
-    );
-
-    let mut possible = Vec::with_capacity(symbols as usize);
-    let mut unconditional = Vec::with_capacity(symbols as usize);
-    for _ in 0..symbols {
-        possible.push(default_possible.clone());
-        unconditional.push(default_unconditional.clone());
-    }
-    for (group, masks) in groups.iter().zip(&masks) {
-        for (top, certificate) in group.domain.top_admission_partition().1 {
-            let Some(row) = possible.get_mut(top as usize) else { continue; };
-            apply_certificate(row, &mut unconditional[top as usize], masks, certificate);
+    // The domain groups partition terminal IDs. Thus a signature is exact:
+    // two tops agree iff every group has the same default or exception value.
+    // Visit groups in order, so signatures need no sorting.
+    let mut changes = vec![smallvec::SmallVec::<[(u32, u8); 2]>::new(); symbols as usize];
+    let code = |value: TopAdmission| match value {
+        TopAdmission::Never => 0, TopAdmission::Always => 1,
+        TopAdmission::DependsOnSuffix => 2,
+    };
+    for (group, domain) in groups.iter().map(|group| &group.domain)
+        .chain(std::iter::once(completion)).enumerate()
+    {
+        let (default, exceptions) = domain.top_admission_partition();
+        apply_certificate(&mut defaults.0, &mut defaults.1, &masks[group], default);
+        for (top, certificate) in exceptions {
+            if certificate == default { continue; }
+            if let Some(signature) = changes.get_mut(top as usize) {
+                signature.push((group as u32, code(certificate)));
+            }
         }
     }
-    for (top, certificate) in completion.top_admission_partition().1 {
-        let Some(row) = possible.get_mut(top as usize) else { continue; };
-        apply_certificate(
-            row, &mut unconditional[top as usize], &completion_mask, certificate,
-        );
+
+    let mut ids = FxHashMap::default();
+    let mut rows = Vec::new();
+    let mut row_for_top = Vec::with_capacity(symbols as usize);
+    for signature in changes {
+        let id = *ids.entry(signature).or_insert_with_key(|signature| {
+            let mut row = defaults.clone();
+            for &(group, code) in signature {
+                let certificate = match code {
+                    0 => TopAdmission::Never, 1 => TopAdmission::Always,
+                    _ => TopAdmission::DependsOnSuffix,
+                };
+                apply_certificate(&mut row.0, &mut row.1, &masks[group as usize], certificate);
+            }
+            let id = rows.len() as u32;
+            rows.push(row);
+            id
+        });
+        row_for_top.push(id);
     }
-    (possible, unconditional)
+    TopCertificateRows { row_for_top: row_for_top.into_boxed_slice(), rows: rows.into_boxed_slice() }
 }
 
 pub(super) fn top_certificate_rows(
     symbols: u32,
     domains: &[Arc<TemplateDomain>],
     completion: &Arc<TemplateDomain>,
-) -> (Vec<BitSet>, Vec<BitSet>) {
+) -> TopCertificateRows {
     let mut identities = FxHashMap::<usize, usize>::default();
     let mut groups = Vec::<DomainGroup>::new();
     for (terminal, domain) in domains.iter().enumerate() {
@@ -297,7 +337,7 @@ fn assemble(
     inventory: Inventory,
     completion: PreparedRelation,
 ) -> TemplateParser {
-    let (possible, unconditional) = grouped_top_rows(
+    let top_rows = grouped_top_rows(
         symbols, terminals as usize, &inventory.groups, &completion.domain,
     );
     TemplateParser {
@@ -307,8 +347,7 @@ fn assemble(
         admission: super::TemplateAdmission::Local(super::LocalAdmission {
             programs: inventory.programs,
             completion: Arc::new(completion),
-            possible,
-            unconditional,
+            top_rows,
         }),
         embedding: None,
         link_grammar: None,
@@ -632,8 +671,7 @@ mod tests {
                 reused.parser.local_domain(terminal).unwrap().to_bytes().unwrap(),
             );
         }
-        assert_eq!(rebuilt.parser.local_admission().unwrap().possible, reused.parser.local_admission().unwrap().possible);
-        assert_eq!(rebuilt.parser.local_admission().unwrap().unconditional, reused.parser.local_admission().unwrap().unconditional);
+        assert_eq!(rebuilt.parser.local_admission().unwrap().top_rows, reused.parser.local_admission().unwrap().top_rows);
     }
 
     #[test]
