@@ -1,12 +1,7 @@
 //! Composition of already-compiled constraint artifacts.
 //!
-//! The expensive component parser DWAs are reused exactly. Their private
-//! `(tokenizer-state class, vocabulary-token class)` coordinates are first
-//! reconciled through the merged raw tokenizer and the shared original
-//! vocabulary. Parser-state labels are transported through the table splice's
-//! one-to-many relation. Default parser labels retain wildcard semantics during
-//! the overlap-local union: explicit positive labels override them, unmatched
-//! positive labels fall through to them, and negative labels never do.
+//! Leaf providers retain their own parser and lexer coordinates. Composition
+//! links those providers and publishes only the cross-boundary relations.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -18,15 +13,13 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
+#[cfg(test)]
 use crate::automata::lexer::ast::Expr;
 use crate::automata::weighted_u32::determinize::determinize;
-use crate::automata::weighted_u32::minimize::{minimize_owned, reverse_hashcons_owned};
-use crate::automata::weighted_u32::equivalence::find_difference;
-use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::nwa::{NWA, NWAState};
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
-use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
     negative_to_positive_label,
@@ -35,54 +28,32 @@ use crate::compiler::stages::equiv_types::{
     InternalIdMap, ManyToOneIdMap, MappedArtifact,
 };
 use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
-use crate::compiler::stages::id_map_and_terminal_dwa::classify::vocab_tokens_with_adjacent_pairs;
 use crate::compiler::stages::parser_dwa::{
-    build_parser_nwa_from_terminal_dwa_with_precomputed_templates,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
-    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table,
-    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles,
-    build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
-    PrebuiltParserBundleCache,
     normalize_weighted_parser_stack_nwa,
-    normalize_weighted_parser_stack_nwa_small_boundary,
-    normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
-    normalize_weighted_parser_stack_nwa_small_boundary_with_tsid_map,
     normalize_signed_weighted_parser_stack_nwa_small_boundary,
-    normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
     resolve_negative_codes_small_boundary,
 };
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::characterize::{
-    characterize_selected_terminals,
     try_characterize_selected_terminals_for_terminal_count,
-    try_characterize_terminal_action_state_seeds_for_terminal_count,
-    try_characterize_terminal_nt_predecessor_seeds_for_terminal_count,
-};
-use crate::compiler::stages::templates::compile_dfa::{
-    specialize_template_dfa_defaults_for_commit_split_input,
-    try_split_commit_template_dfas,
 };
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::constraint_possible_matches::{
-};
 use crate::compiler::glr::table::{
     Action,
     ComposedTable,
     ControlEliminationReport,
 };
-use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
-use crate::ds::u8set::U8Set;
 use crate::ds::weight::{
     ScopedWeightOpCache,
     Weight,
 };
 use crate::runtime::{
-    CompositionGrammarSummary, Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
+    Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
 };
 use crate::Vocab;
-use super::{macro_parallelism_disabled, report_macro_item_timings};
 
 #[inline]
 pub(crate) fn compose_profile_enabled() -> bool {
@@ -763,11 +734,14 @@ pub(crate) fn publish_walk_boundary_shard_work(
             (dwa, materialize_ms, normalize_started_at.elapsed().as_secs_f64() * 1000.0)
         }
     };
-
+            "[glrmask/profile][constraint_walk_shard_publish] start_component={} terms={} parser_states={} parser_trans={} templates_ms={templates_ms:.3} materialize_ms={materialize_ms:.3} normalize_ms={normalize_ms:.3}",
+            work.start_component,
+            selected.iter().filter(|slot| **slot).count(),
             parser_dwa.num_states(),
             parser_dwa.num_transitions(),
         );
     }
+    finish_walk_shard_publication(
     finish_walk_shard_publication(
         work.start_component,
         work.candidate_tokens,
@@ -995,7 +969,7 @@ fn apply_boundary_tsid_quotient_to_dwa_and_id_map(
     id_map.tokenizer_states.internal_to_originals = new_groups;
     id_map.tokenizer_states.representative_original_ids = new_representatives;
     Some(())
-
+}
 
 /// Runtime parser segments are allowed to remain nondeterministic, but their
 /// alphabet is strictly the positive parser-stack read alphabet (plus DEFAULT).
