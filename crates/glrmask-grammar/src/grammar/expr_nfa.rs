@@ -1,7 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-
-use rustc_hash::FxHashMap;
 
 use crate::automata::unweighted_u32::dfa::{DFA, Label};
 use crate::automata::unweighted_u32::minimize_acyclic::{
@@ -151,35 +149,23 @@ impl ExprNFA {
             .map(|state| state.transitions.len())
             .sum::<usize>();
         let minimize_started = profile.then(std::time::Instant::now);
-        if self.is_determinized_and_minimized && dfa.compute_is_acyclic() {
-            let minimized = reindex_minimized_acyclic_dfa(&dfa);
-            if let Some(total_started) = total_started {
-                eprintln!(
-                    "[glrmask/profile][expr_nfa_detmin] nfa_states={} pre_states={} pre_transitions={} post_states={} post_transitions={} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-                    self.nfa.states.len(), pre_states, pre_transitions,
-                    minimized.states.len(), minimized.states.iter().map(|s| s.transitions.len()).sum::<usize>(),
-                    determinize_ms,
-                    minimize_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
-                    total_started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            minimized
+        let minimized = if self.is_determinized_and_minimized && dfa.compute_is_acyclic() {
+            reindex_minimized_acyclic_dfa(&dfa)
         } else {
-            let minimized = minimize_dfa(&dfa);
-            if let Some(total_started) = total_started {
-                eprintln!(
-                    "[glrmask/profile][expr_nfa_detmin] nfa_states={} pre_states={} pre_transitions={} post_states={} post_transitions={} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-                    self.nfa.states.len(), pre_states, pre_transitions,
-                    minimized.states.len(), minimized.states.iter().map(|s| s.transitions.len()).sum::<usize>(),
-                    determinize_ms,
-                    minimize_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
-                    total_started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            minimized
+            minimize_dfa(&dfa)
+        };
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][expr_nfa_detmin] nfa_states={} pre_states={} pre_transitions={} post_states={} post_transitions={} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+                self.nfa.states.len(), pre_states, pre_transitions,
+                minimized.states.len(), minimized.states.iter().map(|s| s.transitions.len()).sum::<usize>(),
+                determinize_ms,
+                minimize_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
+        minimized
     }
-
     pub fn symbol_for_label(&self, label: Label) -> Option<&GrammarExpr> {
         usize::try_from(label).ok().and_then(|index| self.symbols.get(index))
     }
@@ -273,308 +259,9 @@ pub fn minimize_dfa(dfa: &DFA) -> DFA {
     }
 }
 
-fn subset_is_accepting(nfa: &NFA, subset: &[u32]) -> bool {
-    subset.iter().any(|&state| nfa.states[state as usize].is_accepting)
-}
-
-fn epsilon_closure(nfa: &NFA, seeds: &[u32]) -> BTreeSet<u32> {
-    let mut closed = BTreeSet::new();
-    let mut queue: VecDeque<u32> = seeds.iter().copied().collect();
-    while let Some(state) = queue.pop_front() {
-        if !closed.insert(state) {
-            continue;
-        }
-        let Some(nfa_state) = nfa.states.get(state as usize) else {
-            continue;
-        };
-        for &target in &nfa_state.epsilons {
-            if !closed.contains(&target) {
-                queue.push_back(target);
-            }
-        }
-    }
-    closed
-}
-
-fn gather_label_targets(nfa: &NFA, subset: &[u32]) -> BTreeMap<Label, Vec<u32>> {
-    let mut label_targets = BTreeMap::<Label, Vec<u32>>::new();
-    for &state in subset {
-        let Some(nfa_state) = nfa.states.get(state as usize) else {
-            continue;
-        };
-        for (&label, targets) in &nfa_state.transitions {
-            label_targets
-                .entry(label)
-                .or_default()
-                .extend(targets.iter().copied());
-        }
-    }
-    label_targets
-}
-
-/// Lazily cache single-state epsilon closures.  Determinization repeatedly
-/// computes closures of unions of NFA targets; expanding the constituent
-/// closures once and deduplicating through a generation-mark array avoids a
-/// B-tree allocation for every labeled edge while retaining sorted subset keys.
-struct EpsilonClosureCache<'a> {
-    nfa: &'a NFA,
-    closures: Vec<Option<Vec<u32>>>,
-    marks: Vec<u32>,
-    generation: u32,
-}
-
-impl<'a> EpsilonClosureCache<'a> {
-    fn new(nfa: &'a NFA) -> Self {
-        Self {
-            nfa,
-            closures: vec![None; nfa.states.len()],
-            marks: vec![0; nfa.states.len()],
-            generation: 0,
-        }
-    }
-
-    fn ensure_closure_for_state(&mut self, state: u32) -> Option<usize> {
-        let index = state as usize;
-        if index >= self.closures.len() {
-            return None;
-        }
-        if self.closures[index].is_none() {
-            self.closures[index] = Some(epsilon_closure(self.nfa, &[state]).into_iter().collect());
-        }
-        Some(index)
-    }
-
-    fn union<I>(&mut self, states: I) -> Vec<u32>
-    where
-        I: IntoIterator<Item = u32>,
-    {
-        self.generation = self.generation.wrapping_add(1);
-        if self.generation == 0 {
-            self.marks.fill(0);
-            self.generation = 1;
-        }
-        let generation = self.generation;
-        let mut result = Vec::new();
-        for state in states {
-            let Some(closure_index) = self.ensure_closure_for_state(state) else {
-                continue;
-            };
-            let (closures, marks) = (&self.closures, &mut self.marks);
-            let closure = closures[closure_index]
-                .as_deref()
-                .expect("ensured epsilon closure is present");
-            for &target in closure {
-                let mark = &mut marks[target as usize];
-                if *mark != generation {
-                    *mark = generation;
-                    result.push(target);
-                }
-            }
-        }
-        result.sort_unstable();
-        result
-    }
-}
-
-fn get_or_create_subset_state(
-    dfa: &mut DFA,
-    subset_map: &mut FxHashMap<Vec<u32>, u32>,
-    worklist: &mut VecDeque<Vec<u32>>,
-    subset: Vec<u32>,
-) -> u32 {
-    if let Some(&state) = subset_map.get(&subset) {
-        return state;
-    }
-    let state = dfa.add_state();
-    subset_map.insert(subset.clone(), state);
-    worklist.push_back(subset);
-    state
-}
-
-/// Reusable target buckets for the overwhelmingly common ExprNFA case where
-/// transition labels are the dense symbol-table indices 0..N. This avoids
-/// allocating and balancing a fresh `BTreeMap<Label, Vec<_>>` for every DFA
-/// subset while preserving the old ascending-label traversal order exactly.
-struct DenseLabelTargetScratch {
-    buckets: Vec<Vec<u32>>,
-    used: Vec<usize>,
-    seen: Vec<bool>,
-}
-
-impl DenseLabelTargetScratch {
-    fn for_nfa(nfa: &NFA) -> Option<Self> {
-        const MAX_DENSE_LABELS: usize = 4096;
-        let mut max_label = None::<usize>;
-        for state in &nfa.states {
-            for &label in state.transitions.keys() {
-                let label = usize::try_from(label).ok()?;
-                if label >= MAX_DENSE_LABELS {
-                    return None;
-                }
-                max_label = Some(max_label.map_or(label, |current| current.max(label)));
-            }
-        }
-        let len = max_label.map_or(0, |label| label + 1);
-        Some(Self {
-            buckets: (0..len).map(|_| Vec::new()).collect(),
-            used: Vec::with_capacity(len.min(64)),
-            seen: vec![false; len],
-        })
-    }
-
-    fn gather(&mut self, nfa: &NFA, subset: &[u32]) {
-        debug_assert!(self.used.is_empty());
-        for &state in subset {
-            let Some(nfa_state) = nfa.states.get(state as usize) else {
-                continue;
-            };
-            for (&label, targets) in &nfa_state.transitions {
-                let label = label as usize;
-                if !self.seen[label] {
-                    self.seen[label] = true;
-                    self.used.push(label);
-                }
-                self.buckets[label].extend(targets.iter().copied());
-            }
-        }
-        self.used.sort_unstable();
-    }
-
-    fn clear_label(&mut self, label: usize) {
-        self.buckets[label].clear();
-        self.seen[label] = false;
-    }
-
-    fn finish_subset(&mut self) {
-        self.used.clear();
-    }
-}
-
 pub fn determinize_nfa(nfa: &NFA) -> DFA {
-    if nfa.start_states.len() == 1
-        && nfa.states.iter().all(|state| {
-            state.epsilons.is_empty() && state.transitions.values().all(|targets| targets.len() <= 1)
-        })
-    {
-        return determinize_already_deterministic_nfa(nfa);
-    }
-
-    determinize_general_nfa(nfa)
+    crate::automata::unweighted_u32::determinize::determinize_general(nfa)
 }
-
-/// Preserve the ordinary subset construction's breadth-first state numbering
-/// when the input is already a deterministic epsilon-free automaton.  This is
-/// common for schema-generated discriminator automata and avoids allocating a
-/// sorted subset, closure, and target set for every edge.
-fn determinize_already_deterministic_nfa(nfa: &NFA) -> DFA {
-    if nfa.states.is_empty() || nfa.start_states.is_empty() {
-        return DFA::new();
-    }
-
-    let start = nfa.start_states[0] as usize;
-    if start >= nfa.states.len() {
-        return determinize_general_nfa(nfa);
-    }
-
-    let mut dfa = DFA {
-        states: Vec::new(),
-        start_state: 0,
-    };
-    let mut state_map = vec![None; nfa.states.len()];
-    let mut worklist = VecDeque::new();
-
-    let start_id = dfa.add_state();
-    dfa.start_state = start_id;
-    state_map[start] = Some(start_id);
-    worklist.push_back(start);
-
-    while let Some(nfa_state_id) = worklist.pop_front() {
-        let dfa_state_id = state_map[nfa_state_id].expect("queued deterministic state has a DFA id");
-        let nfa_state = &nfa.states[nfa_state_id];
-        if nfa_state.is_accepting {
-            dfa.set_accepting(dfa_state_id, true);
-        }
-
-        for (&label, targets) in &nfa_state.transitions {
-            let Some(&target) = targets.first() else {
-                continue;
-            };
-            let target = target as usize;
-            if target >= nfa.states.len() {
-                continue;
-            }
-            let target_id = if let Some(target_id) = state_map[target] {
-                target_id
-            } else {
-                let target_id = dfa.add_state();
-                state_map[target] = Some(target_id);
-                worklist.push_back(target);
-                target_id
-            };
-            dfa.add_transition(dfa_state_id, label, target_id);
-        }
-    }
-
-    dfa
-}
-
-fn determinize_general_nfa(nfa: &NFA) -> DFA {
-    if nfa.states.is_empty() || nfa.start_states.is_empty() {
-        return DFA::new();
-    }
-
-    let mut dfa = DFA {
-        states: Vec::new(),
-        start_state: 0,
-    };
-    let mut subset_map = FxHashMap::<Vec<u32>, u32>::default();
-    subset_map.reserve(nfa.states.len());
-    let mut worklist = VecDeque::<Vec<u32>>::new();
-    let mut epsilon_closures = EpsilonClosureCache::new(nfa);
-    let mut dense_targets = DenseLabelTargetScratch::for_nfa(nfa);
-
-    let start_key = epsilon_closures.union(nfa.start_states.iter().copied());
-    let start_id = dfa.add_state();
-    dfa.start_state = start_id;
-    subset_map.insert(start_key.clone(), start_id);
-    worklist.push_back(start_key);
-
-    while let Some(subset_key) = worklist.pop_front() {
-        let dfa_state = subset_map[&subset_key];
-        if subset_is_accepting(nfa, &subset_key) {
-            dfa.set_accepting(dfa_state, true);
-        }
-
-        if let Some(dense_targets) = dense_targets.as_mut() {
-            dense_targets.gather(nfa, &subset_key);
-            let used = dense_targets.used.clone();
-            for label in used {
-                let next_key = epsilon_closures.union(dense_targets.buckets[label].iter().copied());
-                dense_targets.clear_label(label);
-                if next_key.is_empty() {
-                    continue;
-                }
-                let next_state =
-                    get_or_create_subset_state(&mut dfa, &mut subset_map, &mut worklist, next_key);
-                dfa.add_transition(dfa_state, label as Label, next_state);
-            }
-            dense_targets.finish_subset();
-        } else {
-            for (label, raw_targets) in gather_label_targets(nfa, &subset_key) {
-                let next_key = epsilon_closures.union(raw_targets);
-                if next_key.is_empty() {
-                    continue;
-                }
-                let next_state =
-                    get_or_create_subset_state(&mut dfa, &mut subset_map, &mut worklist, next_key);
-                dfa.add_transition(dfa_state, label, next_state);
-            }
-        }
-    }
-
-    dfa
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::DefaultHasher;
@@ -660,7 +347,7 @@ mod tests {
         nfa.add_transition(second, 4, accept);
         nfa.set_accepting(accept);
 
-        assert_eq!(determinize_nfa(&nfa), determinize_general_nfa(&nfa));
+        assert_eq!(determinize_nfa(&nfa), crate::automata::unweighted_u32::determinize::determinize(&nfa));
     }
 
     #[test]

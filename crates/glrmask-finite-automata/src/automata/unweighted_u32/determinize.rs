@@ -7,6 +7,7 @@
 //! that invariant is required.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -79,116 +80,161 @@ impl ClosureScratch {
     }
 }
 
-fn get_or_create_subset_state(
-    dfa: &mut DFA,
-    subset_map: &mut FxHashMap<Vec<u32>, u32>,
-    worklist: &mut VecDeque<(u32, Vec<u32>)>,
-    subset: &[u32],
-) -> u32 {
-    if let Some(&existing) = subset_map.get(subset) {
-        return existing;
-    }
-    let key = subset.to_vec();
-    let new_id = dfa.add_state();
-    subset_map.insert(key.clone(), new_id);
-    worklist.push_back((new_id, key));
-    new_id
+/// Singleton subsets need neither a heap key nor a hash lookup. Other
+/// subsets share their sorted immutable key between the index and agenda.
+enum Subset {
+    Singleton(u32),
+    Many(Arc<[u32]>),
 }
 
-/// Determinize an acyclic NFA into a DFA using exact subset construction.
-///
-/// This is the same powerset construction as the reference implementation, but
-/// avoids balanced-tree allocation in its two hottest inner loops:
-///
-/// * outgoing targets are accumulated in persistent label buckets;
-/// * epsilon closure uses dense epoch marks plus reusable vectors.
-///
-/// Subset keys are still sorted `Vec<u32>` values and labels are processed in
-/// sorted order, preserving deterministic state-discovery order.
+impl Subset {
+    fn states(&self) -> &[u32] {
+        match self {
+            Self::Singleton(state) => std::slice::from_ref(state),
+            Self::Many(states) => states,
+        }
+    }
+}
+
+struct Subsets {
+    singleton_ids: Vec<u32>,
+    many_ids: FxHashMap<Arc<[u32]>, u32>,
+    pending: VecDeque<(u32, Subset)>,
+}
+
+impl Subsets {
+    fn new(n: usize) -> Self {
+        Self {
+            singleton_ids: vec![u32::MAX; n],
+            many_ids: FxHashMap::default(),
+            pending: VecDeque::new(),
+        }
+    }
+
+    fn intern(&mut self, dfa: &mut DFA, states: &[u32]) -> u32 {
+        if let [state] = states {
+            let slot = &mut self.singleton_ids[*state as usize];
+            if *slot != u32::MAX { return *slot; }
+            let id = dfa.add_state();
+            *slot = id;
+            self.pending.push_back((id, Subset::Singleton(*state)));
+            return id;
+        }
+        if let Some(&id) = self.many_ids.get(states) { return id; }
+        let id = dfa.add_state();
+        let key: Arc<[u32]> = Arc::from(states);
+        self.many_ids.insert(Arc::clone(&key), id);
+        self.pending.push_back((id, Subset::Many(key)));
+        id
+    }
+}
+
+struct TargetBuckets {
+    dense: Option<Vec<Vec<u32>>>,
+    sparse: FxHashMap<Label, Vec<u32>>,
+    touched: Vec<Label>,
+}
+
+impl TargetBuckets {
+    fn new(nfa: &NFA) -> Self {
+        // Dense grammar-symbol IDs avoid hashing. Sparse or signed parser
+        // labels use the same schedule with persistent hash buckets.
+        let mut max = 0usize;
+        let dense = nfa.states.iter().flat_map(|state| state.transitions.keys()).all(|&label| {
+            if let Ok(label) = usize::try_from(label) {
+                max = max.max(label);
+                label < 4096
+            } else {
+                false
+            }
+        });
+        Self {
+            dense: dense.then(|| vec![Vec::new(); max + 1]),
+            sparse: FxHashMap::default(),
+            touched: Vec::new(),
+        }
+    }
+
+    fn bucket(&mut self, label: Label) -> &mut Vec<u32> {
+        if let Some(rows) = &mut self.dense {
+            &mut rows[label as usize]
+        } else {
+            self.sparse.entry(label).or_default()
+        }
+    }
+
+    fn append(&mut self, label: Label, targets: &[u32]) {
+        if targets.is_empty() { return; }
+        let bucket = self.bucket(label);
+        let fresh = bucket.is_empty();
+        bucket.extend_from_slice(targets);
+        if fresh { self.touched.push(label); }
+    }
+}
+
+fn connect(
+    nfa: &NFA, dfa: &mut DFA, subsets: &mut Subsets,
+    closure: &mut ClosureScratch, source: u32, label: Label, targets: &[u32],
+) {
+    let closed = match targets {
+        [target] if nfa.states.get(*target as usize).is_some_and(|s| s.epsilons.is_empty()) => targets,
+        _ => closure.epsilon_closure(nfa, targets),
+    };
+    if !closed.is_empty() {
+        let target = subsets.intern(dfa, closed);
+        dfa.add_transition(source, label, target);
+    }
+}
+
+/// Template determinization retains its explicit acyclicity contract.
 pub fn determinize(nfa: &NFA) -> DFA {
     assert!(nfa.compute_is_acyclic(), "determinize: input NFA is cyclic");
+    determinize_general(nfa)
+}
 
+/// Exact breadth-first subset construction, including cyclic epsilon and
+/// labelled graphs. The same closure and publication path handles all NFAs.
+pub fn determinize_general(nfa: &NFA) -> DFA {
     if nfa.states.is_empty() || nfa.start_states.is_empty() {
         return DFA::new();
     }
-
-    let mut dfa = DFA {
-        states: Vec::new(),
-        start_state: 0,
-    };
-    let mut subset_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(u32, Vec<u32>)> = VecDeque::new();
+    let mut dfa = DFA { states: Vec::new(), start_state: 0 };
+    let mut subsets = Subsets::new(nfa.states.len());
     let mut closure = ClosureScratch::new(nfa.states.len());
+    let mut buckets = None::<TargetBuckets>;
+    let start = closure.epsilon_closure(nfa, &nfa.start_states);
+    dfa.start_state = subsets.intern(&mut dfa, start);
 
-    let start_key = closure.epsilon_closure(nfa, &nfa.start_states).to_vec();
-    let start_id = dfa.add_state();
-    dfa.start_state = start_id;
-    subset_map.insert(start_key.clone(), start_id);
-    worklist.push_back((start_id, start_key));
-
-    // Keep buckets allocated across DFA states. A bucket is touched exactly
-    // when its length changes from zero, so clearing touched buckets is O(labels
-    // actually seen), not O(global alphabet size).
-    let mut label_targets: FxHashMap<Label, Vec<u32>> = FxHashMap::default();
-    let mut touched_labels = Vec::<Label>::new();
-
-    while let Some((dfa_state, subset_key)) = worklist.pop_front() {
-        if subset_is_accepting(nfa, &subset_key) {
-            dfa.set_accepting(dfa_state, true);
+    while let Some((source, subset)) = subsets.pending.pop_front() {
+        let states = subset.states();
+        if subset_is_accepting(nfa, states) {
+            dfa.set_accepting(source, true);
         }
-
-        for &nfa_state in &subset_key {
-            for (&label, targets) in &nfa.states[nfa_state as usize].transitions {
-                if targets.is_empty() {
-                    continue;
-                }
-                let bucket = label_targets.entry(label).or_default();
-                if bucket.is_empty() {
-                    touched_labels.push(label);
-                }
-                bucket.extend_from_slice(targets);
+        // A singleton already has sorted labels. Directly consume its row,
+        // without building label buckets or allocating a subset key.
+        if let [state] = states {
+            for (&label, targets) in &nfa.states[*state as usize].transitions {
+                connect(nfa, &mut dfa, &mut subsets, &mut closure, source, label, targets);
+            }
+            continue;
+        }
+        let buckets = buckets.get_or_insert_with(|| TargetBuckets::new(nfa));
+        for &state in states {
+            for (&label, targets) in &nfa.states[state as usize].transitions {
+                buckets.append(label, targets);
             }
         }
-        touched_labels.sort_unstable();
-
-        for &label in &touched_labels {
-            let raw_targets = label_targets
-                .get(&label)
-                .expect("touched determinization label must have a target bucket");
-            if raw_targets.is_empty() {
-                continue;
-            }
-
-            let next_key: &[u32] = if raw_targets.len() == 1
-                && nfa.states[raw_targets[0] as usize].epsilons.is_empty()
-            {
-                raw_targets.as_slice()
-            } else {
-                closure.epsilon_closure(nfa, raw_targets)
-            };
-            if next_key.is_empty() {
-                continue;
-            }
-            let next_dfa_state = get_or_create_subset_state(
-                &mut dfa,
-                &mut subset_map,
-                &mut worklist,
-                next_key,
-            );
-            dfa.add_transition(dfa_state, label, next_dfa_state);
+        buckets.touched.sort_unstable();
+        for index in 0..buckets.touched.len() {
+            let label = buckets.touched[index];
+            let targets = buckets.bucket(label);
+            connect(nfa, &mut dfa, &mut subsets, &mut closure, source, label, targets);
+            targets.clear();
         }
-
-        for label in touched_labels.drain(..) {
-            label_targets
-                .get_mut(&label)
-                .expect("touched determinization label must remain allocated")
-                .clear();
-        }
+        buckets.touched.clear();
     }
-
     dfa
 }
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -211,7 +257,6 @@ mod tests {
     }
 
     fn reference_determinize(nfa: &NFA) -> DFA {
-        assert!(nfa.compute_is_acyclic());
         if nfa.states.is_empty() || nfa.start_states.is_empty() {
             return DFA::new();
         }
@@ -303,5 +348,18 @@ mod tests {
             let actual = determinize(&nfa);
             assert_eq!(actual, expected, "determinization mismatch for seed {seed}");
         }
+    }
+    #[test]
+    fn cyclic_epsilon_subsets_match_literal_reference() {
+        let mut nfa = NFA::new();
+        let a = nfa.add_state();
+        let b = nfa.add_state();
+        nfa.add_epsilon(0, a);
+        nfa.add_epsilon(a, 0);
+        nfa.add_transition(a, -3, a);
+        nfa.add_transition(0, -3, b);
+        nfa.add_transition(b, 9001, 0);
+        nfa.set_accepting(b);
+        assert_eq!(determinize_general(&nfa), reference_determinize(&nfa));
     }
 }
