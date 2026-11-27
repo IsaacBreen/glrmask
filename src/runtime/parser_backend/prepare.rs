@@ -48,7 +48,7 @@ impl PreparedRelation {
         let validated =
             crate::runtime::commit::template_prepare::TemplatePreparation::new(&source)?;
         validated.validate_alphabet(symbols)?;
-        let domain = Arc::new(TemplateDomain::from_validated(&validated)?);
+        let domain = Arc::new(TemplateDomain::from_shared_validated(Arc::clone(&source), &validated)?);
         let fast = runtime.then(|| Arc::new(
             FastCommitTemplateDfas::from_shared_preparation(
                 Arc::clone(&source), &validated,
