@@ -93,8 +93,7 @@ fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::Range<u32>>
     let convert = |id: i128| match u32::try_from(id) {
         Ok(id) => check_token_id(id),
         Err(_) => Err(super::glrmask_error("invalid_input", format!(
-            "token ID {id} is out of range; token IDs go from 0 to {}",
-            glrmask::__private::MAX_TOKEN_ID
+            "token ID {id} is outside the supported range"
         ))),
     };
     // Validate both endpoints before expanding a potentially huge stepped range.

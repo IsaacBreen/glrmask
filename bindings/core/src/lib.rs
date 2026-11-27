@@ -59,8 +59,7 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 pub fn token_id(id: u32) -> Result<u32> {
     if id > glrmask::__private::MAX_TOKEN_ID {
         return Err(Error::invalid(format!(
-            "token ID {id} is larger than the maximum token ID, {}",
-            glrmask::__private::MAX_TOKEN_ID
+            "token ID {id} is outside the supported range"
         )));
     }
     Ok(id)

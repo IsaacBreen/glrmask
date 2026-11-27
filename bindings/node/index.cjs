@@ -28,7 +28,7 @@ function string(value, name = 'source') {
 const MAX_TOKEN_ID = 0xffffff;
 function tokenId(value) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_TOKEN_ID) {
-    throw new RangeError(`Token IDs must be integers from 0 to ${MAX_TOKEN_ID}`);
+    throw new RangeError("Token IDs must be integers in the supported range");
   }
   return value;
 }

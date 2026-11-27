@@ -113,7 +113,7 @@ impl NativeTokenSet {
             let mut out = Vec::new();
             for r in ranges {
                 if !r.start.is_finite() || r.start.fract() != 0.0 || r.start < 0.0 || r.start > g::__private::MAX_TOKEN_ID as f64 + 1.0 || !r.end.is_finite() || r.end.fract() != 0.0 || r.end < 0.0 || r.end > g::__private::MAX_TOKEN_ID as f64 + 1.0 {
-                    return Err(core::Error::invalid(format!("ranges must have integer endpoints from 0 to {}, with the end excluded", g::__private::MAX_TOKEN_ID as u64 + 1)));
+                    return Err(core::Error::invalid("ranges must have integer endpoints in the supported range, with the end excluded"));
                 }
                 if r.end < r.start { return Err(core::Error::invalid("range start exceeds end")); }
                 if r.end == r.start { continue; }

@@ -32,13 +32,27 @@ impl fmt::Debug for TokenSet {
 }
 
 impl TokenSet {
+    /// Builds a normalized set of IDs.
+    ///
+    /// # Panics
+    /// Panics if an ID is outside the supported range (far above any real vocabulary).
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
-        Self::from_pairs(ids.into_iter().map(|id| (id, id)))
+        Self::from_pairs(ids.into_iter().map(|id| {
+            assert!(id <= MAX_TOKEN_ID, "token ID {id} is outside the supported range");
+            (id, id)
+        }))
     }
 
     /// Builds a normalized set from half-open ranges. Empty ranges contribute no IDs.
+    ///
+    /// # Panics
+    /// Panics if an ID is outside the supported range (far above any real vocabulary).
     pub fn from_ranges(ranges: impl IntoIterator<Item = Range<u32>>) -> Self {
-        Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| (r.start, r.end - 1)))
+        Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| {
+            let last = r.end - 1;
+            assert!(last <= MAX_TOKEN_ID, "token ID {last} is outside the supported range");
+            (r.start, last)
+        }))
     }
 
     fn from_pairs(ranges: impl IntoIterator<Item = (u32, u32)>) -> Self {
@@ -152,7 +166,7 @@ impl Vocab {
         let mut validated = Vec::new();
         for (id, bytes) in entries {
             if id > MAX_TOKEN_ID {
-                return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("token ID {id} is larger than the maximum token ID, {MAX_TOKEN_ID}")));
+                return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("token ID {id} is outside the supported range")));
             }
             if !ids.insert(id) {
                 return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("duplicate vocabulary ID {id}")));
@@ -481,7 +495,7 @@ mod compact_token_range_tests {
     fn coverage_validation_handles_gaps_and_u32_endpoint_without_expansion() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, Vec::new()), (1, Vec::new()), (3, Vec::new()), (4, Vec::new()), (u32::MAX, Vec::new())]);
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges(std::iter::once(0..5))), Some(2));
-        let selected = TokenSet::new([3, 4, u32::MAX, 0, 1]);
+        let selected = TokenSet::from_pairs([(3, 4), (u32::MAX, u32::MAX), (0, 1)]);
         assert_eq!(selected.range_pairs(), &[(0, 1), (3, 4), (u32::MAX, u32::MAX)]);
         assert_eq!(vocab.next_available_token_id(0), Some(2));
         assert_eq!(vocab.next_available_token_id(3), Some(5));

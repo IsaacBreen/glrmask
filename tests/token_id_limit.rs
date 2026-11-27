@@ -1,5 +1,5 @@
 //! Token IDs above `MAX_TOKEN_ID` are errors, not huge allocations.
-use glrmask::{Expr, Grammar, Module, TokenSet, Vocab};
+use glrmask::{ Grammar, Module, TokenSet, Vocab};
 
 const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
@@ -28,7 +28,7 @@ fn a_vocab_with_a_huge_id_is_an_error_at_construction() {
         let error = Vocab::new([(0, b"a".to_vec()), (id, b"b".to_vec())]).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
         assert!(error.to_string().contains(&id.to_string()), "{error}");
-        assert!(error.to_string().contains("16777215"), "{error}");
+        assert!(error.to_string().contains("supported range"), "{error}");
     }
 }
 
@@ -40,29 +40,10 @@ fn duplicate_vocab_ids_are_invalid_input() {
 }
 
 #[test]
-fn binding_a_huge_token_id_is_an_error() {
+fn token_sets_panic_at_construction_for_unsupported_ids() {
     for id in HUGE_IDS {
-        let mut grammar = token_extern();
-        let error = grammar.bind("E", Expr::from(glrmask::TokenSet::new([id]))).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
-        let error = grammar.bind("E", Expr::from(TokenSet::new([1, id]))).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
-
-        let mut module = Module::new(&token_extern());
-        let error = module.bind("E", glrmask::TokenSet::new([id])).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
-        assert!(module.externs().unbound().get("E").is_some(), "a failed bind binds nothing");
-    }
-}
-
-#[test]
-fn a_huge_token_id_in_an_expression_is_an_error() {
-    for id in HUGE_IDS {
-        let error = Grammar::from_expr(&Expr::sequence([Expr::literal("a"), Expr::from(TokenSet::new([id]))])).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
-        let mut grammar = Grammar::from_glrm("start s extern grammar G nt s = G").unwrap();
-        let error = grammar.bind("G", Expr::from(TokenSet::new([id]))).unwrap_err();
-        assert!(is_invalid_input(&error), "{id}: {error}");
+        assert!(std::panic::catch_unwind(|| TokenSet::new([id])).is_err());
+        assert!(std::panic::catch_unwind(|| TokenSet::new([1, id])).is_err());
     }
 }
 
@@ -86,8 +67,7 @@ fn ordinary_token_bindings_still_compile() {
 }
 
 #[test]
-fn a_constructed_above_cap_range_is_rejected_on_use() {
-    let tokens = TokenSet::from_ranges(std::iter::once(MAX_TOKEN_ID..MAX_TOKEN_ID + 2));
-    assert!(is_invalid_input(&Module::new(&token_extern()).bind("E", tokens.clone()).unwrap_err()));
-    assert!(is_invalid_input(&Grammar::from_expr(&Expr::from(tokens)).unwrap_err()));
+fn unsupported_nonempty_range_panics_at_construction() {
+    assert!(std::panic::catch_unwind(|| TokenSet::from_ranges([MAX_TOKEN_ID..MAX_TOKEN_ID + 2])).is_err());
+    assert_eq!(TokenSet::from_ranges([u32::MAX..u32::MAX]), TokenSet::new([]));
 }
