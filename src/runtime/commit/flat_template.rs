@@ -67,7 +67,7 @@ fn read_outputs(
         // Epsilon phase links and empty READ words work even on an empty
         // stack. Only an actual READ edge needs a visible input symbol.
         let Some(&top) = base.last() else { break; };
-        let Some(next) = fast.input_target(1, state, &row.transitions, top as i32) else { break; };
+        let Some(next) = row.transitions.get(&(top as i32)).copied() else { break; };
         state = next;
     }
     Some(())
@@ -97,7 +97,7 @@ fn evaluate(
         let Some(&top) = base.last() else { break; };
         // Resolve explicit shadowing BEFORE testing destination productivity:
         // an explicit dead edge still excludes that symbol from DEFAULT.
-        let Some(next) = fast.input_target(0, state, &row.transitions, top as i32).or_else(|| row.transitions.get(&DEFAULT_LABEL).copied()) else { break; };
+        let Some(next) = row.transitions.get(&(top as i32)).or_else(|| row.transitions.get(&DEFAULT_LABEL)).copied() else { break; };
         state = next;
         keep -= 1;
     }

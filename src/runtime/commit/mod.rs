@@ -54,7 +54,6 @@ use self::profile::{
     PerAdvanceEntry,
 };
 use self::template_advance::advance_stacks_template_dfa_owned;
-pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
     execute_tokenizer_from_state_small, scan_commit_lane,
 };

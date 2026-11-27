@@ -10,7 +10,6 @@ use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::ds::leveled_gss::VirtualStack;
-use super::commit::TemplateAdvanceRuntime;
 use glrmask_parser_dwa::__private::templates::admissibility::{TemplateDomain, TopAdmission};
 use glrmask_parser_dwa::__private::templates::native::{NativeTableIndex, ProgramCompiler};
 use crate::compiler::glr::table::AdmissionPolicy;
@@ -333,9 +332,6 @@ pub(crate) trait CommitObserver {
     #[inline] fn flat(&mut self, _constraint: &Constraint, _stack: &[u32], _offset: usize) {}
     #[inline] fn carried(&mut self, _constraint: &Constraint,
         _stack: &VirtualStack<u32, TerminalsDisallowed>, _offset: usize) {}
-    #[inline] fn language(&mut self, _constraint: &Constraint,
-        _runtime: &mut TemplateAdvanceRuntime, _language: u32,
-        _accumulator: &TerminalsDisallowed, _offset: usize) {}
     #[inline] fn frontier(&mut self, constraint: &Constraint, frontier: &super::state::ParserStateMap, offset: usize) {
         if Self::ENABLED {
             for (&lexer, stack) in frontier.iter() {
@@ -390,27 +386,6 @@ impl CommitObserver for LiveMarkers<'_> {
             } {
                 self.state.events.push(MarkerEvent { id: candidate.terminal.marker_id,
                     byte_offset: self.base + offset as u64 });
-            }
-        }
-    }
-    #[inline] fn language(&mut self, constraint: &Constraint,
-        runtime: &mut TemplateAdvanceRuntime, language: u32,
-        accumulator: &TerminalsDisallowed, offset: usize) {
-        if !self.queries.empty.is_empty() && runtime.language_contains_empty_stack(language) {
-            self.state.events.extend(self.queries.empty.iter().map(|&id| MarkerEvent {
-                id, byte_offset: self.base + offset as u64,
-            }));
-        }
-        let mut fallback = None;
-        for top in runtime.language_top_states(language) {
-            for candidate in self.queries.for_top(top) {
-                if candidate.unconditional || {
-                    let gss = fallback.get_or_insert_with(|| runtime.gss_from_language(language, accumulator.clone()));
-                    self.queries.admits_gss(constraint, gss, candidate.terminal.terminal_id)
-                } {
-                    self.state.events.push(MarkerEvent { id: candidate.terminal.marker_id,
-                        byte_offset: self.base + offset as u64 });
-                }
             }
         }
     }
@@ -578,21 +553,18 @@ mod tests {
         let nonempty = ParserGSS::from_single_stack(vec![0], acc.clone());
         let mixed = ParserGSS::from_stacks(&[(vec![],acc.clone()),(vec![0],acc.clone())]);
         for stack in [&empty, &nonempty, &mixed] {
-            let mut runtime = TemplateAdvanceRuntime::default();
-            let (language, accumulator) = runtime.language_from_uniform_gss(stack).unwrap();
             let mut marker_state = MarkerState::new(&queries);
             LiveMarkers { queries: &queries, state: &mut marker_state, base: 10 }
-                .language(&constraint, &mut runtime, language, &accumulator, 2);
+                .stack(&constraint, stack, 2);
             marker_state.finish(&queries,12,true);
             let expected = if stack.contains_empty_stack() {
                 vec![MarkerEvent { id:7,byte_offset:12 }]
             } else { vec![] };
             assert_eq!(marker_state.events,expected);
         }
-        let mut runtime = TemplateAdvanceRuntime::default();
         let mut rejected = MarkerState::new(&queries);
         LiveMarkers { queries:&queries,state:&mut rejected,base:0 }
-            .language(&constraint,&mut runtime,0,&acc,0);
+            .stack(&constraint,&ParserGSS::empty(),0);
         assert!(rejected.events.is_empty());
         let mut carried = nonempty.try_virtual_stack().unwrap();
         assert_eq!(carried.pop(1),0);

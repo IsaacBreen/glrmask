@@ -5329,8 +5329,7 @@ mod tests {
         assert_eq!(loaded_template.read_to_push, template.read_to_push);
         assert!(loaded_fast_template.is_for_source(loaded.terminal_template(1).unwrap()));
         assert_eq!(
-            loaded_fast_template.input_target(0, template.pop.start_state,
-                &loaded_template.pop.states[template.pop.start_state as usize].transitions, 7),
+            loaded_template.pop.states[template.pop.start_state as usize].transitions.get(&7).copied(),
             Some(accepted)
         );
     }

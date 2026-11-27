@@ -1683,20 +1683,6 @@ impl FastTemplateTransitionRow {
     }
 }
 
-/// Only wide input rows warrant a separate hash index. Every other field
-/// (including DEFAULT, acceptance, links and all PUSH edges) is observed
-/// directly on the immutable source graph.
-type WideTemplateRows = FxHashMap<u32, FxHashMap<i32, u32>>;
-
-fn wide_template_rows(dfa: &UnweightedDfa) -> WideTemplateRows {
-    dfa.states.iter().enumerate().filter_map(|(id, row)| {
-        if row.transitions.len() <= INLINE_TEMPLATE_TRANSITION_LIMIT { return None; }
-        let mut index = FxHashMap::with_capacity_and_hasher(row.transitions.len(), Default::default());
-        index.extend(row.transitions.iter().map(|(&label, &target)| (label, target)));
-        Some((id as u32, index))
-    }).collect()
-}
-
 #[cfg(test)]
 mod fast_template_row_construction_tests {
     use super::*;
@@ -1735,7 +1721,6 @@ pub(crate) struct FastCommitTemplateDfas {
     pub(crate) read_shift: Option<Box<super::commit::simple_read_shift::PreparedReadShift>>,
     pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
     pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
-    input_rows: [WideTemplateRows; 2],
 }
 
 impl std::fmt::Debug for FastCommitTemplateDfas {
@@ -1746,21 +1731,11 @@ impl std::fmt::Debug for FastCommitTemplateDfas {
             .field("read_shift", &self.read_shift)
             .field("phase_dag", &self.phase_dag)
             .field("push_suffixes", &self.push_suffixes)
-            .field("wide_input_rows", &self.input_rows)
             .finish()
     }
 }
 
 impl FastCommitTemplateDfas {
-    #[inline]
-    pub(crate) fn input_target(&self, phase: usize, id: u32,
-        row: &std::collections::BTreeMap<i32, u32>, label: i32) -> Option<u32> {
-        match self.input_rows[phase].get(&id) {
-            Some(index) => index.get(&label).copied(),
-            None => row.get(&label).copied(),
-        }
-    }
-
     pub(crate) fn is_for_source(&self, source: &Arc<CommitTemplateDfas>) -> bool {
         self.source.as_ref().is_some_and(|old| Arc::ptr_eq(old, source))
     }
@@ -1805,7 +1780,6 @@ impl FastCommitTemplateDfas {
             read_shift: prepared.and_then(|_| super::commit::simple_read_shift::PreparedReadShift::prepare(template)),
             phase_dag,
             push_suffixes,
-            input_rows: [wide_template_rows(&template.pop), wide_template_rows(&template.read)],
         }
     }
 }
