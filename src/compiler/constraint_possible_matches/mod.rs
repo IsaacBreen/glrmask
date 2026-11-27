@@ -3575,10 +3575,11 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     };
 
     let prefix_started = profile.then(Instant::now);
-    let prefix = build_ordered_vocab_prefix_tree(&ordered);
+    let refs: Vec<_> = ordered.ordered_token_bytes.iter().enumerate()
+        .map(|(id, bytes)| (0u16, id, bytes.as_slice())).collect();
     let prefix_ms = prefix_started.map_or(0.0, elapsed_ms);
     let trie_started = profile.then(Instant::now);
-    let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(&prefix));
+    let runtime_trie = Arc::new(DynamicMaskTrie::from_sorted_token_refs(&refs));
     let trie_ms = trie_started.map_or(0.0, elapsed_ms);
     // This mask depends only on the model vocabulary, never on the grammar
     // quotient. Reuse the prepared Vocab-global copy instead of scanning all

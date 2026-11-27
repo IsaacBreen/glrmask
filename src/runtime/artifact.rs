@@ -2465,15 +2465,21 @@ impl DynamicMaskTrie {
     /// subtree metadata, so the generic runtime subtree certificates can skip
     /// large groups without any partition-specific masking logic.
     pub(crate) fn from_partitioned_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
-        static DIRECT_FLAT: OnceLock<bool> = OnceLock::new();
-        if *DIRECT_FLAT.get_or_init(|| crate::env::var("GLRMASK_DIRECT_FLAT_MASK_TRIE")
-            .map_or(true, |value| matches!(value.as_str(), "1" | "true")))
-        {
-            return Self::from_partitioned_sorted_direct(entries);
-        }
-        Self::from_partitioned_token_refs_reference(entries)
+        Self::from_partitioned_sorted_direct(entries)
     }
 
+    pub(crate) fn from_structurally_partitioned_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
+        let mut trie = Self::from_partitioned_sorted_direct(entries);
+        trie.root_layout_classes.clear();
+        trie.root_layout_all_valid_utf8.clear();
+        trie
+    }
+
+    pub(crate) fn from_sorted_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
+        Self::from_sorted_ranges(entries, false)
+    }
+
+    #[cfg(test)]
     fn from_partitioned_token_refs_reference(entries: &[(u16, usize, &[u8])]) -> Self {
         let mut output = Self::new();
         if entries.is_empty() {
@@ -2559,35 +2565,46 @@ impl DynamicMaskTrie {
     /// without transient prefix trees, copied whole prefixes or range-set
     /// metadata. Existing subtree/walk metadata finalization is unchanged.
     fn from_partitioned_sorted_direct(entries: &[(u16, usize, &[u8])]) -> Self {
+        Self::from_sorted_ranges(entries, true)
+    }
+
+    fn from_sorted_ranges(entries: &[(u16, usize, &[u8])], partitioned: bool) -> Self {
         enum Task {
-            Node { lo: usize, hi: usize, depth: usize, edge_from: usize, parent_edge: usize },
+            Node { lo: usize, hi: usize, depth: usize, edge_from: usize, parent_edge: Option<usize> },
             FinishEdge { entry: usize, from: usize, to: usize, edge: usize, child: u32 },
         }
         let mut output = Self::new();
         if entries.is_empty() { return output; }
-        let mut index = 0;
-        if entries[0].2.is_empty() {
-            output.nodes[0].token_id = Some(entries[0].1 as u32);
-            index = 1;
-        }
-        let mut groups = Vec::new();
-        while index < entries.len() {
-            let start = index; let class = entries[index].0; index += 1;
-            while index < entries.len() && entries[index].0 == class { index += 1; }
-            groups.push((start,index));
-        }
         output.nodes.reserve(entries.len().saturating_mul(2));
         output.edges.reserve(entries.len().saturating_mul(2));
         output.edge_bytes.reserve(entries.iter().map(|e|e.2.len()).sum());
-        output.edges.resize_with(groups.len(), DynamicMaskTrieEdge::default);
-        output.nodes[0].child_len = groups.len() as u32;
-        for &(lo,hi) in &groups {
-            output.root_layout_classes.push(entries[lo].0);
-            output.root_layout_all_valid_utf8.push(entries[lo..hi].iter().all(|e|std::str::from_utf8(e.2).is_ok()));
-        }
         let mut work = Vec::with_capacity(64);
-        for (parent_edge,&(lo,hi)) in groups.iter().enumerate().rev() {
-            work.push(Task::Node {lo,hi,depth:0,edge_from:0,parent_edge});
+        if partitioned {
+            let mut index = 0;
+            if entries[0].2.is_empty() {
+                output.nodes[0].token_id = Some(entries[0].1 as u32);
+                index = 1;
+            }
+            let mut groups = Vec::new();
+            while index < entries.len() {
+                let start = index;
+                let class = entries[index].0;
+                index += 1;
+                while index < entries.len() && entries[index].0 == class { index += 1; }
+                groups.push((start,index));
+            }
+            output.edges.resize_with(groups.len(), DynamicMaskTrieEdge::default);
+            output.nodes[0].child_len = groups.len() as u32;
+            for &(lo,hi) in &groups {
+                output.root_layout_classes.push(entries[lo].0);
+                output.root_layout_all_valid_utf8.push(
+                    entries[lo..hi].iter().all(|e|std::str::from_utf8(e.2).is_ok()));
+            }
+            for (parent_edge,&(lo,hi)) in groups.iter().enumerate().rev() {
+                work.push(Task::Node {lo,hi,depth:0,edge_from:0,parent_edge:Some(parent_edge)});
+            }
+        } else {
+            work.push(Task::Node {lo:0,hi:entries.len(),depth:0,edge_from:0,parent_edge:None});
         }
         while let Some(task) = work.pop() {
             match task {
@@ -2596,9 +2613,12 @@ impl DynamicMaskTrie {
                     output.edges[edge]=DynamicMaskTrieEdge {byte_start,byte_len,child};
                 }
                 Task::Node {mut lo,hi,depth,edge_from,parent_edge} => {
-                    let node=output.nodes.len() as u32;
-                    output.nodes.push(DynamicMaskTrieNode::default());
-                    work.push(Task::FinishEdge {entry:lo,from:edge_from,to:depth,edge:parent_edge,child:node});
+                    let node = if let Some(edge) = parent_edge {
+                        let node = output.nodes.len() as u32;
+                        output.nodes.push(DynamicMaskTrieNode::default());
+                        work.push(Task::FinishEdge {entry:lo,from:edge_from,to:depth,edge,child:node});
+                        node
+                    } else { 0 };
                     if entries[lo].2.len()==depth {
                         output.nodes[node as usize].token_id=Some(entries[lo].1 as u32);
                         lo+=1;
@@ -2619,7 +2639,7 @@ impl DynamicMaskTrie {
                         let mut common=depth+1;
                         while common<a.len().min(b.len()) && a[common]==b[common] {common+=1;}
                         slot-=1;
-                        work.push(Task::Node {lo:start,hi:end,depth:common,edge_from:depth,parent_edge:first+slot});
+                        work.push(Task::Node {lo:start,hi:end,depth:common,edge_from:depth,parent_edge:Some(first+slot)});
                         end=start;
                     }
                 }
