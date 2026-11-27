@@ -2155,27 +2155,8 @@ fn build_json_lexer_partition_classes(
 }
 
 fn json_literal_satisfies_declared_types(value: &Value, types: Option<&[SchemaType]>) -> bool {
-    types.is_none_or(|types| {
-        types
-            .iter()
-            .any(|schema_type| json_literal_has_type(value, *schema_type))
-    })
+    super::ast::TypeDomain::declared(types).includes(super::ast::TypeDomain::value(value))
 }
-
-fn json_literal_has_type(value: &Value, schema_type: SchemaType) -> bool {
-    match schema_type {
-        SchemaType::Null => value.is_null(),
-        SchemaType::Boolean => value.is_boolean(),
-        SchemaType::Object => value.is_object(),
-        SchemaType::Array => value.is_array(),
-        SchemaType::String => value.is_string(),
-        SchemaType::Number => value.is_number(),
-        SchemaType::Integer => value
-            .as_number()
-            .is_some_and(json_number_is_integer),
-    }
-}
-
 fn number_value_satisfies_schema(value: &Value, schema: &NumberSchema) -> bool {
     let Some(number) = value.as_number() else {
         return true;

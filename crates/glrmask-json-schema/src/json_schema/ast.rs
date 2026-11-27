@@ -108,6 +108,71 @@ pub enum SchemaType {
     Integer,
 }
 
+/// The disjoint JSON value domains. Number is integer OR noninteger, not
+/// an independent tag; all type tests, meets and separation proofs use
+/// these same atoms. A domain inferred from assertions can be empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TypeDomain(u8);
+
+impl TypeDomain {
+    pub(crate) const ANY: Self = Self(0x7f);
+    pub(crate) const NEVER: Self = Self(0);
+    const INTEGER: u8 = 1 << 5;
+    const FRACTIONAL: u8 = 1 << 6;
+
+    pub(crate) fn of(ty: SchemaType) -> Self {
+        Self(match ty {
+            SchemaType::Null => 1 << 0,
+            SchemaType::Boolean => 1 << 1,
+            SchemaType::Object => 1 << 2,
+            SchemaType::Array => 1 << 3,
+            SchemaType::String => 1 << 4,
+            SchemaType::Integer => Self::INTEGER,
+            SchemaType::Number => Self::INTEGER | Self::FRACTIONAL,
+        })
+    }
+
+    pub(crate) fn from_types(types: &[SchemaType]) -> Self {
+        types.iter().fold(Self::NEVER, |domain, &ty| domain.union(Self::of(ty)))
+    }
+
+    pub(crate) fn declared(types: Option<&[SchemaType]>) -> Self {
+        types.map_or(Self::ANY, Self::from_types)
+    }
+
+    pub(crate) fn value(value: &Value) -> Self {
+        match value {
+            Value::Null => Self::of(SchemaType::Null),
+            Value::Bool(_) => Self::of(SchemaType::Boolean),
+            Value::Object(_) => Self::of(SchemaType::Object),
+            Value::Array(_) => Self::of(SchemaType::Array),
+            Value::String(_) => Self::of(SchemaType::String),
+            Value::Number(number) if json_number_is_integer(number) => Self(Self::INTEGER),
+            Value::Number(_) => Self(Self::FRACTIONAL),
+        }
+    }
+
+    pub(crate) fn meet(self, other: Self) -> Self { Self(self.0 & other.0) }
+    pub(crate) fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
+    pub(crate) fn is_empty(self) -> bool { self == Self::NEVER }
+    pub(crate) fn overlaps(self, other: Self) -> bool { !self.meet(other).is_empty() }
+    pub(crate) fn includes(self, other: Self) -> bool { self.meet(other) == other }
+
+    /// Meets of declared type unions cannot isolate noninteger numbers.
+    pub(crate) fn declared_types(self) -> Vec<SchemaType> {
+        let mut result = Vec::new();
+        for ty in [SchemaType::Null, SchemaType::Boolean, SchemaType::Object,
+            SchemaType::Array, SchemaType::String, SchemaType::Number, SchemaType::Integer] {
+            if self.includes(Self::of(ty))
+                && !(ty == SchemaType::Integer && self.includes(Self::of(SchemaType::Number))) {
+                result.push(ty);
+            }
+        }
+        debug_assert_eq!(Self::from_types(&result), self);
+        result
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ObjectSchema {
     pub properties: Vec<PropertySchema>,

@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::ast::{
     json_number_is_integer, json_values_equal,
     AdditionalProperties, ArraySchema, ObjectSchema, PropertySchema, Schema, SchemaAssertions,
-    SchemaKind, SchemaType,
+    SchemaKind, SchemaType, TypeDomain,
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
@@ -19,43 +19,43 @@ use super::lower::{
 use super::string::{plain_fully_anchored_ascii_literal, string_value_satisfies_schema};
 
 // Conservative supersets used only to prove oneOf branch separation. Number
-// and integer share a bit because their JSON Schema domains overlap.
+// and integer are interpreted by the shared disjoint-atom domain algebra.
 #[derive(Clone)]
 struct OneOfValueBounds {
-    types: u8,
+    types: TypeDomain,
     finite: Option<Vec<Value>>,
     required_properties: BTreeMap<String, OneOfValueBounds>,
 }
 
 impl OneOfValueBounds {
     fn any() -> Self {
-        Self { types: 0x3f, finite: None, required_properties: BTreeMap::new() }
+        Self { types: TypeDomain::ANY, finite: None, required_properties: BTreeMap::new() }
     }
 
     fn empty() -> Self {
-        Self { types: 0, ..Self::any() }
+        Self { types: TypeDomain::NEVER, ..Self::any() }
     }
 
     fn finite(values: Vec<Value>) -> Self {
         Self {
-            types: values.iter().fold(0, |mask, value| mask | one_of_value_type_mask(value)),
+            types: values.iter().fold(TypeDomain::NEVER, |domain, value| domain.union(TypeDomain::value(value))),
             finite: Some(values),
             required_properties: BTreeMap::new(),
         }
     }
 
     fn intersect(&mut self, other: Self) {
-        self.types &= other.types;
+        self.types = self.types.meet(other.types);
         self.finite = match (self.finite.take(), other.finite) {
             (Some(left), Some(right)) => Some(left.into_iter().filter(|value| {
-                right.iter().any(|candidate| one_of_values_may_equal(value, candidate))
+                right.iter().any(|candidate| json_values_equal(value, candidate))
             }).collect()),
             (left @ Some(_), None) => left,
             (None, right) => right,
         };
         if let Some(values) = &mut self.finite {
-            values.retain(|value| one_of_value_type_mask(value) & self.types != 0);
-            if values.is_empty() { self.types = 0; }
+            values.retain(|value| self.types.includes(TypeDomain::value(value)));
+            if values.is_empty() { self.types = TypeDomain::NEVER; }
         }
         for (name, bound) in other.required_properties {
             if let Some(existing) = self.required_properties.get_mut(&name) {
@@ -67,8 +67,8 @@ impl OneOfValueBounds {
     }
 
     fn union(&mut self, other: Self) {
-        let was_empty = self.types == 0;
-        self.types |= other.types;
+        let was_empty = self.types.is_empty();
+        self.types = self.types.union(other.types);
         self.finite = match (self.finite.take(), other.finite) {
             (Some(mut left), Some(right)) => { left.extend(right); Some(left) }
             // The initial empty bound has no finite list.
@@ -80,45 +80,19 @@ impl OneOfValueBounds {
     }
 
     fn disjoint(&self, other: &Self) -> bool {
-        if self.types & other.types == 0 { return true; }
+        if !self.types.overlaps(other.types) { return true; }
         if let (Some(left), Some(right)) = (&self.finite, &other.finite)
             && !left.iter().any(|value| right.iter().any(|candidate| {
-                one_of_values_may_equal(value, candidate)
+                json_values_equal(value, candidate)
             })) { return true; }
         // Required-property conflicts separate objects only. Both branches must
         // exclude every non-object value, where object keywords are inapplicable.
-        self.types == one_of_type_mask(SchemaType::Object)
+        self.types == TypeDomain::of(SchemaType::Object)
             && other.types == self.types
             && self.required_properties.iter().any(|(name, bound)| {
                 other.required_properties.get(name).is_some_and(|other| bound.disjoint(other))
             })
     }
-}
-
-fn one_of_type_mask(ty: SchemaType) -> u8 {
-    1 << match ty {
-        SchemaType::Null => 0,
-        SchemaType::Boolean => 1,
-        SchemaType::Object => 2,
-        SchemaType::Array => 3,
-        SchemaType::String => 4,
-        SchemaType::Number | SchemaType::Integer => 5,
-    }
-}
-
-fn one_of_value_type_mask(value: &Value) -> u8 {
-    one_of_type_mask(match value {
-        Value::Null => SchemaType::Null,
-        Value::Bool(_) => SchemaType::Boolean,
-        Value::Object(_) => SchemaType::Object,
-        Value::Array(_) => SchemaType::Array,
-        Value::String(_) => SchemaType::String,
-        Value::Number(_) => SchemaType::Number,
-    })
-}
-
-fn one_of_values_may_equal(left: &Value, right: &Value) -> bool {
-    json_values_equal(left, right)
 }
 
 fn discriminator_anyof_fastpath_disabled() -> bool {
@@ -406,7 +380,7 @@ impl<'a> Lowerer<'a> {
             SchemaKind::Assertions(assertions) => {
                 let mut bound = OneOfValueBounds::any();
                 if let Some(types) = &assertions.types {
-                    bound.types = types.iter().fold(0, |mask, ty| mask | one_of_type_mask(*ty));
+                    bound.types = TypeDomain::from_types(types);
                 }
                 if let Some(value) = &assertions.const_value {
                     bound.intersect(OneOfValueBounds::finite(vec![value.clone()]));
@@ -748,88 +722,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn schema_definitely_excludes_primitive_type(
-        &self,
-        schema: &Schema,
-        primitive_type: SchemaType,
+        &self, schema: &Schema, primitive_type: SchemaType,
         visiting_refs: &mut BTreeSet<String>,
     ) -> ImportResult<bool> {
-        match &schema.kind {
-            SchemaKind::Never => Ok(true),
-            SchemaKind::Any => Ok(false),
-            SchemaKind::Ref(pointer) => {
-                if !visiting_refs.insert(pointer.clone()) {
-                    return Ok(false);
-                }
-                let target = self.resolve_ref_target(pointer)?;
-                let result = self.schema_definitely_excludes_primitive_type(
-                    target,
-                    primitive_type,
-                    visiting_refs,
-                );
-                visiting_refs.remove(pointer);
-                result
-            }
-            SchemaKind::Assertions(assertions) => {
-                if let Some(value) = &assertions.const_value {
-                    return Ok(!value_has_primitive_type(value, primitive_type));
-                }
-                if let Some(values) = &assertions.enum_values
-                    && values
-                        .iter()
-                        .all(|value| !value_has_primitive_type(value, primitive_type))
-                {
-                    return Ok(true);
-                }
-                if let Some(types) = &assertions.types {
-                    return Ok(!types_may_include_primitive(types, primitive_type));
-                }
-                if !assertions.all_of.is_empty() {
-                    for branch in &assertions.all_of {
-                        if self.schema_definitely_excludes_primitive_type(
-                            branch,
-                            primitive_type,
-                            visiting_refs,
-                        )? {
-                            return Ok(true);
-                        }
-                    }
-                }
-                if !assertions.any_of.is_empty() {
-                    return assertions
-                        .any_of
-                        .iter()
-                        .map(|branch| {
-                            self.schema_definitely_excludes_primitive_type(
-                                branch,
-                                primitive_type,
-                                visiting_refs,
-                            )
-                        })
-                        .try_fold(true, |acc, item| item.map(|value| acc && value));
-                }
-                if !assertions.one_of.is_empty() {
-                    return assertions
-                        .one_of
-                        .iter()
-                        .map(|branch| {
-                            self.schema_definitely_excludes_primitive_type(
-                                branch,
-                                primitive_type,
-                                visiting_refs,
-                            )
-                        })
-                        .try_fold(true, |acc, item| item.map(|value| acc && value));
-                }
-                Ok(false)
-            }
-        }
+        let bound = self.one_of_value_bounds(schema, visiting_refs)?;
+        Ok(!bound.types.overlaps(TypeDomain::of(primitive_type)))
     }
-
     fn ref_implies_types(&self, branch: &Schema, required: &[SchemaType]) -> ImportResult<bool> {
         let SchemaKind::Ref(pointer) = &branch.kind else { return Ok(false); };
         let SchemaKind::Assertions(target) = &self.resolve_ref_target(pointer)?.kind else { return Ok(false); };
         Ok(target.types.as_ref().is_some_and(|types| !types.is_empty()
-            && types.iter().all(|ty| intersect_schema_types(&[*ty], required) == vec![*ty])))
+            && TypeDomain::from_types(required).includes(TypeDomain::from_types(types))))
     }
 
     pub fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
@@ -1538,10 +1441,12 @@ impl<'a> Lowerer<'a> {
         &self,
         superset: &ObjectSchema,
         subset: &ObjectSchema,
-        seen_pairs: &mut BTreeSet<(String, String)>,
+        seen_pairs: &mut BTreeSet<(usize, usize)>,
     ) -> ImportResult<bool> {
         if !matches!(superset.additional_properties, AdditionalProperties::AllowAny)
             || !superset.pattern_properties.is_empty()
+            || superset.property_names.is_some()
+            || !superset.property_dependencies.is_empty()
         {
             return Ok(false);
         }
@@ -1583,7 +1488,7 @@ impl<'a> Lowerer<'a> {
         &self,
         superset: &Schema,
         subset: &Schema,
-        seen_pairs: &mut BTreeSet<(String, String)>,
+        seen_pairs: &mut BTreeSet<(usize, usize)>,
     ) -> ImportResult<bool> {
         if schemas_shape_equivalent(superset, subset) {
             return Ok(true);
@@ -1596,11 +1501,11 @@ impl<'a> Lowerer<'a> {
         }
 
         let pair = (
-            schema_subsumption_key(superset)?,
-            schema_subsumption_key(subset)?,
+            superset as *const Schema as usize,
+            subset as *const Schema as usize,
         );
-        if !seen_pairs.insert(pair.clone()) {
-            return Ok(true);
+        if !seen_pairs.insert(pair) {
+            return Ok(false);
         }
 
         let result = match (&superset.kind, &subset.kind) {
@@ -2139,45 +2044,16 @@ fn finite_string_filter_assertions(
 }
 
 fn intersect_schema_types(left: &[SchemaType], right: &[SchemaType]) -> Vec<SchemaType> {
-    let mut result = BTreeSet::new();
-    for left in left {
-        for right in right {
-            if left == right {
-                result.insert(*left);
-            } else if matches!((left, right),
-                (SchemaType::Number, SchemaType::Integer) | (SchemaType::Integer, SchemaType::Number))
-            {
-                result.insert(SchemaType::Integer);
-            }
-        }
-    }
-    if result.contains(&SchemaType::Number) { result.remove(&SchemaType::Integer); }
-    result.into_iter().collect()
+    TypeDomain::from_types(left).meet(TypeDomain::from_types(right)).declared_types()
 }
 
 fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<SchemaType>> {
-    let mut intersection: Option<BTreeSet<SchemaType>> = None;
-
-    for branch in branches {
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            continue;
-        };
-        let Some(types) = &assertions.types else {
-            continue;
-        };
-
-        let branch_types = types.iter().cloned().collect::<BTreeSet<_>>();
-        intersection = Some(match intersection {
-            Some(existing) => intersect_schema_types(
-                &existing.into_iter().collect::<Vec<_>>(), types,
-            ).into_iter().collect(),
-            None => branch_types,
-        });
-    }
-
-    intersection
+    let domain = branches.iter().filter_map(|branch| match &branch.kind {
+        SchemaKind::Assertions(assertions) => assertions.types.as_deref().map(TypeDomain::from_types),
+        _ => None,
+    }).reduce(TypeDomain::meet)?;
+    Some(domain.declared_types().into_iter().collect())
 }
-
 fn untyped_single_family_assertion(schema: &Schema) -> Option<SchemaType> {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return None;
@@ -2705,13 +2581,6 @@ fn property_schema_by_name<'a>(object: &'a ObjectSchema, name: &str) -> Option<&
         .map(|property| &property.schema)
 }
 
-fn schema_subsumption_key(schema: &Schema) -> ImportResult<String> {
-    match &schema.kind {
-        SchemaKind::Ref(pointer) => normalize_local_ref(pointer).map(|pointer| format!("ref:{pointer}")),
-        _ => Ok(format!("loc:{}", schema.location)),
-    }
-}
-
 fn pure_any_of_assertions(assertions: &SchemaAssertions) -> bool {
     !assertions.any_of.is_empty()
         && assertions.types.is_none()
@@ -2812,6 +2681,8 @@ fn option_objects_shape_equivalent(left: Option<&ObjectSchema>, right: Option<&O
 fn object_schemas_shape_equivalent(left: &ObjectSchema, right: &ObjectSchema) -> bool {
     additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
         && left.required == right.required
+        && left.required_order == right.required_order
+        && option_schemas_shape_equivalent(left.property_names.as_ref(), right.property_names.as_ref())
         && left.property_dependencies == right.property_dependencies
         && left.min_properties == right.min_properties
         && left.max_properties == right.max_properties
@@ -2848,6 +2719,8 @@ fn singleton_string_discriminator_object_metadata_matches(
 ) -> bool {
     additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
         && left.required == right.required
+        && left.required_order == right.required_order
+        && option_schemas_shape_equivalent(left.property_names.as_ref(), right.property_names.as_ref())
         && left.property_dependencies == right.property_dependencies
         && left.min_properties == right.min_properties
         && left.max_properties == right.max_properties
@@ -3227,6 +3100,7 @@ fn option_numbers_shape_equivalent(
                 && left.exclusive_minimum == right.exclusive_minimum
                 && left.exclusive_maximum == right.exclusive_maximum
                 && left.multiple_of == right.multiple_of
+                && left.format == right.format
         }
         _ => false,
     }
@@ -3356,23 +3230,6 @@ fn value_primitive_type(value: &Value) -> Option<SchemaType> {
     }
 }
 
-fn value_has_primitive_type(value: &Value, schema_type: SchemaType) -> bool {
-    match schema_type {
-        SchemaType::String => value.is_string(),
-        SchemaType::Boolean => value.is_boolean(),
-        SchemaType::Integer => value.as_number().is_some_and(json_number_is_integer),
-        SchemaType::Number => value.is_number(),
-        SchemaType::Null | SchemaType::Object | SchemaType::Array => false,
-    }
-}
-
-fn types_may_include_primitive(types: &[SchemaType], primitive_type: SchemaType) -> bool {
-    types.iter().any(|schema_type| {
-        *schema_type == primitive_type
-            || matches!((*schema_type, primitive_type), (SchemaType::Number, SchemaType::Integer))
-    })
-}
-
 enum InlineBranchFamily {
     Primitive(SchemaType),
     Array,
@@ -3417,11 +3274,8 @@ fn schema_has_explicit_null_only_type(schema: &Schema) -> bool {
 }
 
 fn primitive_branch_types_overlap(left: SchemaType, right: SchemaType) -> bool {
-    left == right
-        || matches!((left, right), (SchemaType::Number, SchemaType::Integer))
-        || matches!((left, right), (SchemaType::Integer, SchemaType::Number))
+    TypeDomain::of(left).overlaps(TypeDomain::of(right))
 }
-
 // The object merger unions property declarations. A closed operand, however,
 // forbids names declared only by another operand; preserving that intersection
 // requires more than combining the additionalProperties flags.
@@ -4064,9 +3918,9 @@ pub fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSch
 }
 
 fn merge_property_schemas(left: Schema, right: Schema) -> Schema {
-    if is_vacuous_json_value_schema(&left) || is_vacuous_object_schema(&left) {
+    if is_vacuous_json_value_schema(&left) {
         right
-    } else if is_vacuous_json_value_schema(&right) || is_vacuous_object_schema(&right) {
+    } else if is_vacuous_json_value_schema(&right) {
         left
     } else {
         all_of_schema(left, right)
@@ -4411,7 +4265,7 @@ mod exact_one_of_policy_tests {
     #[test]
     fn union_bounds_never_retain_a_partial_finite_set() {
         let mut union = OneOfValueBounds::finite(vec![json!("a")]);
-        union.union(OneOfValueBounds { types: one_of_type_mask(SchemaType::String), ..OneOfValueBounds::any() });
+        union.union(OneOfValueBounds { types: TypeDomain::of(SchemaType::String), ..OneOfValueBounds::any() });
         assert!(!union.disjoint(&OneOfValueBounds::finite(vec![json!("b")])));
     }
 }
