@@ -2236,15 +2236,9 @@ struct InterchangeabilityDfa {
     /// frozen output mentions that terminal.  This is build-local discovery
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
-    terminal_quotient_output_supports: Option<Vec<Option<Vec<(u32, u8)>>>>,
+    terminal_quotient_output_supports: OnceLock<Vec<OnceLock<Vec<(u32, u8)>>>>,
     support_cone_marks: Vec<u32>,
     support_cone_mark_epoch: u32,
-    /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
-    /// only by the parallel certification path. Each terminal's support is
-    /// pure given the (pre-built) global support quotient and immutable
-    /// topology, so workers build exactly the entries they touch — the same
-    /// set the sequential path would build lazily — with no `&mut self`.
-    parallel_terminal_supports: OnceLock<Vec<OnceLock<Vec<(u32, u8)>>>>,
     support_transposition_certified: usize,
     support_transposition_no_template: usize,
     support_transposition_outside_cone: usize,
@@ -2723,10 +2717,9 @@ impl InterchangeabilityDfa {
             canonical_round_one_added_scratch: SmallVec::new(),
             support_partition_seed,
             support_quotient,
-            terminal_quotient_output_supports: None,
+            terminal_quotient_output_supports: OnceLock::new(),
             support_cone_marks: Vec::new(),
             support_cone_mark_epoch: 0,
-            parallel_terminal_supports: OnceLock::new(),
             support_transposition_certified: 0,
             support_transposition_no_template: 0,
             support_transposition_outside_cone: 0,
@@ -3318,53 +3311,29 @@ impl InterchangeabilityDfa {
     }
 
     fn ensure_terminal_quotient_output_support(&mut self, terminal: TerminalID) {
-        let terminal = terminal as usize;
         if self
             .terminal_quotient_output_supports
-            .as_ref()
-            .is_some_and(|supports| supports.get(terminal).is_some_and(Option::is_some))
+            .get()
+            .and_then(|supports| supports.get(terminal as usize))
+            .is_some_and(|slot| slot.get().is_some())
         {
             return;
         }
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let started_at = profile_timing.then(Instant::now);
         self.ensure_support_quotient();
-        let class_for_state = Arc::clone(
-            &self
-                .support_quotient
-                .as_ref()
-                .expect("support quotient initialized")
-                .class_for_state,
-        );
-        let mut support = Vec::<(u32, u8)>::new();
-        for (destinations, mask) in [
-            (&self.finalizer_states_by_terminal[terminal], 1u8),
-            (&self.future_finalizer_states_by_terminal[terminal], 2u8),
-        ] {
-            for &destination in destinations {
-                for &source in &self.reverse_predecessors[destination as usize] {
-                    support.push((class_for_state[source as usize], mask));
-                }
-            }
-        }
-        support.sort_unstable_by_key(|&(class, _)| class);
-        let mut write = 0usize;
-        for read in 0..support.len() {
-            if write > 0 && support[write - 1].0 == support[read].0 {
-                support[write - 1].1 |= support[read].1;
-            } else {
-                support[write] = support[read];
-                write += 1;
-            }
-        }
-        support.truncate(write);
-        let supports = self.terminal_quotient_output_supports.get_or_insert_with(|| {
-            vec![None; self.finalizer_states_by_terminal.len()]
-        });
-        supports[terminal] = Some(support);
+        let _ = self.terminal_support(terminal);
         if let Some(started_at) = started_at {
             self.support_transposition_support_setup_ns += started_at.elapsed().as_nanos() as u64;
         }
+    }
+
+    fn terminal_support_slots(&self) -> &[OnceLock<Vec<(u32, u8)>>] {
+        self.terminal_quotient_output_supports.get_or_init(|| {
+            (0..self.finalizer_states_by_terminal.len())
+                .map(|_| OnceLock::new())
+                .collect()
+        })
     }
 
     /// Materialize quotient output supports for a batch of terminals in one
@@ -3383,13 +3352,11 @@ impl InterchangeabilityDfa {
         }
         self.ensure_support_quotient();
         let terminal_count = self.finalizer_states_by_terminal.len();
-        let supports = self
-            .terminal_quotient_output_supports
-            .get_or_insert_with(|| vec![None; terminal_count]);
+        let supports = self.terminal_support_slots();
         let missing = candidates
             .iter()
             .copied()
-            .filter(|&terminal| supports[terminal as usize].is_none())
+            .filter(|&terminal| supports[terminal as usize].get().is_none())
             .collect::<Vec<_>>();
         if missing.is_empty() {
             return;
@@ -3434,7 +3401,8 @@ impl InterchangeabilityDfa {
             }
         }
         for terminal in missing {
-            supports[terminal as usize] = Some(std::mem::take(&mut built[terminal as usize]));
+            let _ = supports[terminal as usize]
+                .get_or_init(|| std::mem::take(&mut built[terminal as usize]));
         }
         if let Some(started_at) = started_at {
             self.support_transposition_support_setup_ns +=
@@ -3526,10 +3494,10 @@ impl InterchangeabilityDfa {
         self.ensure_terminal_quotient_output_support(right);
         let supports = self
             .terminal_quotient_output_supports
-            .as_ref()
+            .get()
             .expect("terminal quotient output supports initialized");
-        let left_support = supports.get(left as usize)?.as_ref()?;
-        let right_support = supports.get(right as usize)?.as_ref()?;
+        let left_support = supports.get(left as usize)?.get()?;
+        let right_support = supports.get(right as usize)?.get()?;
         let result = Self::support_transposition_deviations_from_supports(
             left_support,
             right_support,
@@ -3769,10 +3737,10 @@ impl InterchangeabilityDfa {
         self.ensure_terminal_quotient_output_support(right);
         let supports = self
             .terminal_quotient_output_supports
-            .as_ref()
+            .get()
             .expect("terminal quotient output supports initialized");
-        let left_support = supports[left as usize].as_ref()?;
-        let right_support = supports[right as usize].as_ref()?;
+        let left_support = supports[left as usize].get()?;
+        let right_support = supports[right as usize].get()?;
         self.support_transposition_search_deviations_with_supports(
             left,
             right,
@@ -3884,13 +3852,13 @@ impl InterchangeabilityDfa {
             .expect("support quotient initialized");
         let supports = self
             .terminal_quotient_output_supports
-            .as_ref()
+            .get()
             .expect("terminal quotient output supports initialized");
         let left_support = supports[left as usize]
-            .as_ref()
+            .get()
             .expect("left terminal support initialized");
         let right_support = supports[right as usize]
-            .as_ref()
+            .get()
             .expect("right terminal support initialized");
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
@@ -6840,10 +6808,9 @@ impl InterchangeabilityDfa {
         }
     }
 
-    /// Force every lazily built structure the certification path reads, so the
-    /// `&self` variants never trigger a build. `candidates` is the flattened set
-    /// of terminals that enter the certification loop.
-    fn prebuild_certification_state(&mut self, candidates: &[TerminalID]) {
+    /// Prepare immutable quotient and canonical-round inputs before parallel
+    /// certification. Individual terminal supports remain lazy.
+    fn prebuild_certification_state(&mut self) {
         self.ensure_canonical_identity_round(1);
         if self.canonical_round_one_class_counts.is_none() {
             let class_count = self.canonical_rounds[1].representative_by_class.len();
@@ -6854,13 +6821,7 @@ impl InterchangeabilityDfa {
             self.canonical_round_one_class_counts = Some(counts);
         }
         self.ensure_support_quotient();
-        // Size the thread-safe on-demand support slots once; workers fill only
-        // the terminals they actually reach at the support stage.
-        let terminal_count = self.finalizer_states_by_terminal.len();
-        let _ = self.parallel_terminal_supports.get_or_init(|| {
-            (0..terminal_count).map(|_| OnceLock::new()).collect()
-        });
-        let _ = candidates;
+        let _ = self.terminal_support_slots();
         // Force the identity transport used by the frozen-preserve branch.
         let _ = self.canonical_identity_map();
     }
@@ -6868,19 +6829,8 @@ impl InterchangeabilityDfa {
     /// Thread-safe, `&self` lazy build of one terminal's quotient output
     /// support. Idempotent and pure given the pre-built global support
     /// quotient, so racing workers converge on identical contents.
-    fn terminal_support_parallel(&self, terminal: TerminalID) -> &[(u32, u8)] {
-        if let Some(support) = self
-            .terminal_quotient_output_supports
-            .as_ref()
-            .and_then(|supports| supports.get(terminal as usize))
-            .and_then(Option::as_ref)
-        {
-            return support;
-        }
-        let slots = self
-            .parallel_terminal_supports
-            .get()
-            .expect("parallel terminal supports sized before certification loop");
+    fn terminal_support(&self, terminal: TerminalID) -> &[(u32, u8)] {
+        let slots = self.terminal_support_slots();
         slots[terminal as usize].get_or_init(|| {
             let class_for_state = &self
                 .support_quotient
@@ -7110,8 +7060,8 @@ impl InterchangeabilityDfa {
             ) {
                 return Some(map);
             }
-        let left_support = self.terminal_support_parallel(left);
-        let right_support = self.terminal_support_parallel(right);
+        let left_support = self.terminal_support(left);
+        let right_support = self.terminal_support(right);
         let deviations = self.support_transposition_search_deviations_with_supports(
             left,
             right,
@@ -7128,8 +7078,8 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> Option<SupportDeviationMap> {
-        let left_support = self.terminal_support_parallel(left);
-        let right_support = self.terminal_support_parallel(right);
+        let left_support = self.terminal_support(left);
+        let right_support = self.terminal_support(right);
         Self::support_transposition_deviations_from_supports(left_support, right_support)
     }
 
@@ -7145,8 +7095,8 @@ impl InterchangeabilityDfa {
             .support_quotient
             .as_ref()
             .expect("support quotient pre-built");
-        let left_support = self.terminal_support_parallel(left);
-        let right_support = self.terminal_support_parallel(right);
+        let left_support = self.terminal_support(left);
+        let right_support = self.terminal_support(right);
         let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
             quotient,
             left_support,
@@ -8290,9 +8240,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
             // representative, so the verdicts fan out across `pool`; they are
             // then applied sequentially in the original member order, which
             // preserves the pivot sequence and hence the exact partition.
-            let all_candidates: Vec<TerminalID> =
-                candidate_groups.iter().flatten().copied().collect();
-            dfa.prebuild_certification_state(&all_candidates);
+            dfa.prebuild_certification_state();
             // Within a single discover-one-round call the same unordered pair is
             // never certified twice (a member accepted by a pivot is removed;
             // rejected members form fresh pairs against later pivots). The
