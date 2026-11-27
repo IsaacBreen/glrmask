@@ -2723,7 +2723,7 @@ enum ObservedAction<'a> {
 }
 
 impl<'a> ObservedAction<'a> {
-    fn new(action: &'a Action, mapping: &[u32]) -> Self {
+    fn new(action: &'a Action, mapping: &[u32], normalize: bool) -> Self {
         match action {
             Action::Shift(target, replace) => Self::Shift(mapping[*target as usize], *replace),
             Action::Reduce(nt, len) => Self::Reduce(*nt, *len),
@@ -2733,7 +2733,11 @@ impl<'a> ObservedAction<'a> {
             ),
             Action::Accept => Self::Accept,
             Action::Skip => Self::Skip,
-            _ => Self::Stack(remap_action_targets(action, mapping)),
+            _ => {
+                let mut mapped = action.clone();
+                remap_action_state_references(&mut mapped, mapping, normalize);
+                Self::Stack(mapped)
+            }
         }
     }
 }
@@ -2768,10 +2772,11 @@ fn remapped_row_fingerprint(
     goto_row: &GotoRow,
     advance_row: Option<&BitSet>,
     state_to_group: &[u32],
+    normalize: bool,
 ) -> u64 {
     let (action_sum, action_xor) = unordered_row_hash(
         action_row.iter().map(|(terminal, action)| {
-            (terminal, ObservedAction::new(action, state_to_group))
+            (terminal, ObservedAction::new(action, state_to_group, normalize))
         }),
         action_row.len(),
     );
@@ -2814,7 +2819,7 @@ fn rows_equal(
             .all(|(&nonterminal, target)| goto_b.get(&nonterminal) == Some(target))
 }
 
-fn rows_equal_after_remap(
+fn rows_equal_mapped(
     action_a: &ActionRow,
     goto_a: &GotoRow,
     advance_a: Option<&BitSet>,
@@ -2822,6 +2827,7 @@ fn rows_equal_after_remap(
     goto_b: &GotoRow,
     advance_b: Option<&BitSet>,
     state_to_group: &[u32],
+    normalize: bool,
 ) -> bool {
     advance_a == advance_b
         && action_a.len() == action_b.len()
@@ -2829,7 +2835,7 @@ fn rows_equal_after_remap(
         && action_a.iter().all(|(terminal, action)| {
             action_b
                 .get(&terminal)
-                .is_some_and(|other| ObservedAction::new(action, state_to_group) == ObservedAction::new(other, state_to_group))
+                .is_some_and(|other| ObservedAction::new(action, state_to_group, normalize) == ObservedAction::new(other, state_to_group, normalize))
         })
         && goto_a.iter().all(|(&nonterminal, &(target, replace))| {
             goto_b.get(&nonterminal).is_some_and(|&(other_target, other_replace)| {
@@ -2839,6 +2845,114 @@ fn rows_equal_after_remap(
         })
 }
 
+#[cfg(test)]
+fn rows_equal_after_remap(
+    action_a: &ActionRow, goto_a: &GotoRow, advance_a: Option<&BitSet>,
+    action_b: &ActionRow, goto_b: &GotoRow, advance_b: Option<&BitSet>,
+    mapping: &[u32],
+) -> bool {
+    rows_equal_mapped(action_a, goto_a, advance_a, action_b, goto_b, advance_b, mapping, true)
+}
+
+/// Every guard membership is an observable predicate on an ORIGINAL
+/// stack symbol. Equal outgoing LR rows alone do not authorize identifying
+/// two symbols tested differently by any such predicate.
+#[derive(Default, Hash, PartialEq, Eq)]
+struct RowMarkers {
+    forwarded: SmallVec<[TerminalID; 1]>,
+    guard_roles: SmallVec<[usize; 1]>,
+    pinned: Option<u32>,
+}
+
+struct RowObservations<'a> {
+    table: &'a GLRTable,
+    markers: Vec<RowMarkers>,
+    has_advance: bool,
+    has_guard_roles: bool,
+}
+
+impl<'a> RowObservations<'a> {
+    fn new(table: &'a GLRTable) -> Self {
+        let n = table.num_states as usize;
+        let mut markers = (0..n).map(|_| RowMarkers::default()).collect::<Vec<_>>();
+        for &(state, terminal) in &table.forwarded_shifts {
+            markers[state as usize].forwarded.push(terminal);
+        }
+        for marker in &mut markers {
+            marker.forwarded.sort_unstable();
+        }
+        let mut role = 0usize;
+        for row in &table.action {
+            for action in row.values() {
+                if let Action::GuardedStackShifts(shifts) = action {
+                    for shift in shifts {
+                        for guard in &shift.guards {
+                            for &state in &guard.states {
+                                let roles = &mut markers[state as usize].guard_roles;
+                                if roles.last() != Some(&role) {
+                                    roles.push(role);
+                                }
+                            }
+                            role += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Wide frontier certificates describe specific physical LR
+        // symbols. Until a quotient-aware certificate exists, retain them.
+        for descriptor in &table.direct_regular_wide_frontiers {
+            for state in std::iter::once(descriptor.source_state)
+                .chain(descriptor.target_states.iter().copied())
+            {
+                markers[state as usize].pinned = Some(state);
+            }
+        }
+        Self { table, markers, has_advance: table.advance.len() == n, has_guard_roles: role != 0 }
+    }
+
+    fn fingerprint(&self, state: u32, mapping: &[u32], normalize: bool) -> u64 {
+        let state = state as usize;
+        unordered_entry_hash(&(
+            remapped_row_fingerprint(
+                &self.table.action[state], &self.table.goto[state],
+                self.has_advance.then(|| &self.table.advance[state]), mapping, normalize,
+            ),
+            &self.markers[state],
+        ))
+    }
+
+    fn equal(&self, left: u32, right: u32, mapping: &[u32], normalize: bool) -> bool {
+        let (left, right) = (left as usize, right as usize);
+        self.markers[left] == self.markers[right]
+            && rows_equal_mapped(
+                &self.table.action[left], &self.table.goto[left],
+                self.has_advance.then(|| &self.table.advance[left]),
+                &self.table.action[right], &self.table.goto[right],
+                self.has_advance.then(|| &self.table.advance[right]), mapping, normalize,
+            )
+    }
+}
+
+/// First-representative exact partition of a fingerprint bucket. The
+/// fingerprint has no authority to merge states. This works for both
+/// bottom-up coarsening and top-down splitting of an initial core class.
+fn exact_row_bucket(
+    mut states: SmallVec<[u32; 1]>,
+    mut equal: impl FnMut(u32, u32) -> bool,
+    pairs: &mut Vec<(u32, u32)>,
+) {
+    states.sort_unstable();
+    let mut representatives = SmallVec::<[u32; 2]>::new();
+    for state in states {
+        if let Some(&rep) = representatives.iter().find(|&&rep| equal(rep, state)) {
+            pairs.push((rep, state));
+        } else {
+            representatives.push(state);
+        }
+    }
+}
+
 /// Exact collision-checked row coarsening, with a canonical first-state
 /// representative and eager original-to-representative coordinates.
 /// A hash bucket is processed once per round, not once per active member.
@@ -2846,8 +2960,7 @@ struct RowCoarsener<'a> {
     table: &'a GLRTable,
     mapping: Vec<u32>,
     members: Vec<SmallVec<[u32; 1]>>,
-    forwarded: Vec<SmallVec<[TerminalID; 1]>>,
-    has_advance: bool,
+    observations: RowObservations<'a>,
     fingerprints: Vec<u64>,
     buckets: FxHashMap<u64, SmallVec<[u32; 1]>>,
     reverse: Option<Vec<SmallVec<[u32; 2]>>>,
@@ -2855,20 +2968,11 @@ struct RowCoarsener<'a> {
 
 impl<'a> RowCoarsener<'a> {
     fn new(table: &'a GLRTable) -> Self {
-        let n = table.num_states as usize;
-        let mut forwarded = vec![SmallVec::<[TerminalID; 1]>::new(); n];
-        for &(state, terminal) in &table.forwarded_shifts {
-            forwarded[state as usize].push(terminal);
-        }
-        for row in &mut forwarded {
-            row.sort_unstable();
-        }
         let mut this = Self {
             table,
             mapping: (0..table.num_states).collect(),
             members: (0..table.num_states).map(|state| smallvec![state]).collect(),
-            forwarded,
-            has_advance: table.advance.len() == n,
+            observations: RowObservations::new(table),
             fingerprints: Vec::new(),
             buckets: FxHashMap::default(),
             reverse: None,
@@ -2882,27 +2986,11 @@ impl<'a> RowCoarsener<'a> {
     }
 
     fn fingerprint(&self, state: u32) -> u64 {
-        let state = state as usize;
-        unordered_entry_hash(&(
-            remapped_row_fingerprint(
-                &self.table.action[state], &self.table.goto[state],
-                self.has_advance.then(|| &self.table.advance[state]), &self.mapping,
-            ),
-            &self.forwarded[state],
-        ))
+        self.observations.fingerprint(state, &self.mapping, true)
     }
 
     fn equal(&self, left: u32, right: u32) -> bool {
-        let (left, right) = (left as usize, right as usize);
-        // A forwarded replace shift appends rather than replacing. Its
-        // marker must be an observation, not a union of unequal row flags.
-        self.forwarded[left] == self.forwarded[right]
-            && rows_equal_after_remap(
-                &self.table.action[left], &self.table.goto[left],
-                self.has_advance.then(|| &self.table.advance[left]),
-                &self.table.action[right], &self.table.goto[right],
-                self.has_advance.then(|| &self.table.advance[right]), &self.mapping,
-            )
+        self.observations.equal(left, right, &self.mapping, true)
     }
 
     fn remove_bucket_member(&mut self, state: u32) {
@@ -2955,22 +3043,20 @@ impl<'a> RowCoarsener<'a> {
             if bucket.len() <= 1 {
                 continue;
             }
-            let mut states = bucket.clone();
-            states.sort_unstable();
-            let mut exact_reps = SmallVec::<[u32; 2]>::new();
-            for state in states {
-                if let Some(&rep) = exact_reps.iter().find(|&&rep| self.equal(rep, state)) {
-                    pairs.push((rep, state));
-                } else {
-                    exact_reps.push(state);
-                }
-            }
+            exact_row_bucket(bucket.clone(), |left, right| self.equal(left, right), &mut pairs);
         }
         pairs
     }
 
     fn solve(mut self, dirty: Option<&[u32]>) -> Option<(Vec<u32>, Vec<u32>)> {
-        let mut active = dirty.map(|states| states.to_vec());
+        // Guard-role observations are global: adding/removing a guard in
+        // one cell can change another state's role without changing its
+        // own outgoing row. Use the full initial schedule on guarded input.
+        let mut active = if self.observations.has_guard_roles {
+            None
+        } else {
+            dirty.map(|states| states.to_vec())
+        };
         let mut merged = false;
         loop {
             if let Some(active) = &mut active {
@@ -7548,13 +7634,7 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     action
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RowSignature {
-    core_class: u32,
-    action: Vec<(TerminalID, Action)>,
-    goto: Vec<(NonterminalID, (u32, bool))>,
-}
-
+#[cfg(test)]
 fn remap_action_to_partition(action: &Action, partition: &[u32]) -> Action {
     let mut action = action.clone();
     remap_action_state_references(&mut action, partition, false);
@@ -7592,214 +7672,73 @@ fn nontrivial_partition_members(partition: &[u32]) -> FxHashMap<u32, Vec<usize>>
 }
 
 fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
-    let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_CORE_MERGE_DETAIL")
-        .map(|value| value == "1")
-        .unwrap_or(false);
-    let core_classes_started_at = profile_detail.then(std::time::Instant::now);
-    let nstates = table.num_states as usize;
-    let has_advance_rows = table.advance.len() == nstates;
-    let core_class_of = core_classes(core_keys);
-    let core_classes_ms = core_classes_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-    let mut partition = core_class_of.clone();
+    let profile = std::env::var("GLRMASK_PROFILE_GLR_CORE_MERGE_DETAIL").is_ok_and(|value| value == "1");
+    let mut partition = core_classes(core_keys);
+    let observations = RowObservations::new(table);
     let mut iteration = 0usize;
-
     loop {
-        let members_by_class = nontrivial_partition_members(&partition);
-        if members_by_class.is_empty() {
+        let members = nontrivial_partition_members(&partition);
+        if members.is_empty() {
             return partition;
         }
         iteration += 1;
-        let iteration_started_at = profile_detail.then(std::time::Instant::now);
-        let mut active_states = members_by_class
-            .values()
-            .flat_map(|members| members.iter().copied())
-            .collect::<Vec<_>>();
-        active_states.sort_unstable();
-
-        // The initial core partition forbids every singleton state from
-        // merging. Signatures are needed only for the small set of members in
-        // still-nontrivial core classes. Retain parallel work for genuinely
-        // ambiguous grammars, but avoid Rayon setup on the common tiny set.
-        let make_signature = |&state: &usize| {
-            let action = table.action[state]
-                .iter()
-                .map(|(terminal, action)| {
-                    (terminal, remap_action_to_partition(action, &partition))
-                })
-                .collect();
-            let goto = table.goto[state]
-                .iter()
-                .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
-                .collect();
-            let signature = RowSignature {
-                core_class: core_class_of[state],
-                action,
-                goto,
-            };
-            let mut hasher = FxHasher::default();
-            signature.hash(&mut hasher);
-            if has_advance_rows {
-                table.advance[state].hash(&mut hasher);
-            }
-            (state, hasher.finish(), signature)
+        let started = profile.then(std::time::Instant::now);
+        let mut active = members.values().flat_map(|members| members.iter().copied()).collect::<Vec<_>>();
+        active.sort_unstable();
+        let fingerprint = |&state: &usize| {
+            (state as u32, unordered_entry_hash(&(
+                partition[state], observations.fingerprint(state as u32, &partition, false),
+            )))
         };
-        let signatures = if active_states.len() >= 256 {
-            active_states
-                .par_iter()
-                .map(make_signature)
-                .collect::<Vec<_>>()
+        let fingerprints = if active.len() >= 256 {
+            active.par_iter().map(fingerprint).collect::<Vec<_>>()
         } else {
-            active_states.iter().map(make_signature).collect::<Vec<_>>()
+            active.iter().map(fingerprint).collect::<Vec<_>>()
         };
-
-        let mut fingerprint_to_classes: FxHashMap<u64, Vec<(usize, u32, RowSignature)>> =
-            FxHashMap::default();
-        let mut next_partition = partition.clone();
-        let mut action_entries = 0usize;
-        let mut goto_entries = 0usize;
-        for (state, fingerprint, signature) in signatures {
-            action_entries += table.action[state].len();
-            goto_entries += table.goto[state].len();
-            let bucket = fingerprint_to_classes.entry(fingerprint).or_default();
-            let mut class = None;
-            for (rep_state, representative, rep_signature) in bucket.iter() {
-                if core_class_of[*rep_state] == core_class_of[state]
-                    && rep_signature == &signature
-                    && (!has_advance_rows || table.advance[*rep_state] == table.advance[state])
-                {
-                    class = Some(*representative);
-                    break;
-                }
-            }
-            let class = class.unwrap_or_else(|| {
-                let representative = state as u32;
-                bucket.push((state, representative, signature));
-                representative
-            });
-            next_partition[state] = class;
+        let mut buckets = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+        let mut next = partition.clone();
+        for (state, hash) in fingerprints {
+            next[state as usize] = state;
+            buckets.entry(hash).or_default().push(state);
         }
-
-        let changed = next_partition != partition;
-        if let Some(iteration_started_at) = iteration_started_at {
-            let unique_partitions = nstates - nontrivial_partition_members(&next_partition)
-                .values()
-                .map(|members| members.len() - 1)
-                .sum::<usize>();
-            eprintln!(
-                "[glrmask/profile][same_core_refine] iteration={} states={} active_states={} core_classes_ms={:.3} unique_partitions={} action_entries={} goto_entries={} changed={} elapsed_ms={:.3}",
-                iteration,
-                nstates,
-                active_states.len(),
-                core_classes_ms,
-                unique_partitions,
-                action_entries,
-                goto_entries,
-                changed,
-                iteration_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
+        let mut pairs = Vec::new();
+        for bucket in buckets.into_values() {
+            exact_row_bucket(bucket, |left, right| {
+                partition[left as usize] == partition[right as usize]
+                    && observations.equal(left, right, &partition, false)
+            }, &mut pairs);
+        }
+        for (winner, loser) in pairs {
+            next[loser as usize] = winner;
+        }
+        let changed = next != partition;
+        if let Some(started) = started {
+            eprintln!("[glrmask/profile][same_core_refine] iteration={iteration} states={} active_states={} changed={changed} elapsed_ms={:.3}",
+                partition.len(), active.len(), started.elapsed().as_secs_f64() * 1000.0);
         }
         if !changed {
             return partition;
         }
-        partition = next_partition;
+        partition = next;
     }
 }
 
-pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
+pub(super) fn merge_same_core_lr1_states(mut table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
     let partition = refine_same_core_partition(&table, core_keys);
-    let nstates = table.num_states as usize;
-
-    // Sparse representative labels keep the refinement cheap. Compact them in
-    // first-source-state order only when a real quotient is needed; this is
-    // the same canonical ordering that the prior dense partition produced.
-    let mut group_to_new: FxHashMap<u32, u32> = FxHashMap::default();
-    let mut representatives = Vec::with_capacity(nstates);
-    let mut mapping = Vec::with_capacity(nstates);
-    for (state, &group) in partition.iter().enumerate() {
-        let new_group = match group_to_new.get(&group) {
-            Some(&existing) => existing,
-            None => {
-                let next = representatives.len() as u32;
-                group_to_new.insert(group, next);
-                representatives.push(state as u32);
-                next
-            }
-        };
-        mapping.push(new_group);
-    }
-    if representatives.len() == nstates {
+    let n = table.num_states as usize;
+    let keep = partition.iter().enumerate().map(|(state, &rep)| state as u32 == rep).collect::<Vec<_>>();
+    if keep.iter().all(|&keep| keep) {
         return table;
     }
-
-    let action = representatives
-        .iter()
-        .map(|&rep| {
-            table.action[rep as usize]
-                .iter()
-                .map(|(terminal, action)| (terminal, remap_action_targets(action, &mapping)))
-                .collect()
-        })
-        .collect();
-    let goto = representatives
-        .iter()
-        .map(|&rep| {
-            table.goto[rep as usize]
-                .iter()
-                .map(|(&nt, &(target, replace))| (nt, (mapping[target as usize], replace)))
-                .collect()
-        })
-        .collect();
-    let advance = if table.advance.len() == nstates {
-        representatives
-            .iter()
-            .map(|&rep| table.advance[rep as usize].clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let forwarded_shifts: FxHashSet<(u32, TerminalID)> = table
-        .forwarded_shifts
-        .iter()
-        .map(|&(state, terminal)| (mapping[state as usize], terminal))
-        .collect();
-    let direct_regular_wide_frontiers = table
-        .direct_regular_wide_frontiers
-        .iter()
-        .map(|descriptor| {
-            let mut target_states = descriptor
-                .target_states
-                .iter()
-                .map(|&state| mapping[state as usize])
-                .collect::<Vec<_>>();
-            target_states.sort_unstable();
-            target_states.dedup();
-            DirectRegularWideFrontierDescriptor {
-                source_state: mapping[descriptor.source_state as usize],
-                terminal: descriptor.terminal,
-                target_states,
-            }
-        })
-        .collect();
-
-    GLRTable {
-        action,
-        goto,
-        num_states: representatives.len() as u32,
-        num_terminals: table.num_terminals,
-        num_rules: table.num_rules,
-        rules: table.rules,
-        nonterminal_display_names: table.nonterminal_display_names,
-        construction: table.construction,
-        admission_policy: table.admission_policy,
-        advance,
-        unconditional_advance: Vec::new(),
-        forwarded_shifts,
-        control_terminals: table.control_terminals,
-        skip_terminals: table.skip_terminals,
-        guarded_shift_index: Vec::new(),
-        direct_regular_wide_frontiers,
+    let mut compact = vec![u32::MAX; n];
+    let mut next = 0u32;
+    for (state, &keep) in keep.iter().enumerate() {
+        if keep {
+            compact[state] = next;
+            next += 1;
+        }
     }
+    let mapping = partition.iter().map(|&rep| compact[rep as usize]).collect::<Vec<_>>();
+    table.publish_state_mapping(&mapping, &keep);
+    table
 }
