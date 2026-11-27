@@ -1663,45 +1663,128 @@ pub(crate) struct WalkStaticLinkOutput {
     pub clear_nested_boundary_components: BitSet,
 }
 
-/// One visited composed node during leaf expansion: its overlay plus the
-/// per-direct-component leaf ranges assigned depth-first. Visits are keyed by
-/// POSITION (visit order), never by constraint identity: DAG reuse of one
-/// child under several slots expands once per use with distinct ranges, which
-/// is valid and must not be rejected.
-struct ExpansionVisit<'a> {
-    overlay: &'a crate::runtime::StaticDynamicOverlayMetadata,
-    /// Composed terminal domain of the visited node (its table's count).
-    node_terminals: u32,
-    subs: Vec<ExpansionSubtree>,
-}
-
-/// Leaf range assigned to one direct component of a visited node.
-struct ExpansionSubtree {
-    root: usize,
+/// A subtree occupies contiguous leaves and terminals in the installing
+/// runtime coordinate. The first leaf is its root. No visit IDs or pending
+/// raw links survive the expansion of a subtree.
+#[derive(Clone, Copy)]
+struct LeafSpan {
     first: usize,
-    /// Exclusive end; ranges are contiguous depth-first by construction.
-    last: usize,
-    /// Visit id of the sub-expansion, or None when the component is intact.
-    visit: Option<usize>,
+    end: usize,
+    terminal_base: u32,
+    terminal_end: u32,
 }
 
-/// An inner-overlay link before slot resolution: `slot_terminal` still names
-/// a terminal in the PARENT COMPONENT's composed coordinate, not in a leaf.
-/// Resolution descends to the owning leaf (see `resolve_expansion_slot`).
-struct RawNestedLink {
-    visit: usize,
-    parent_component: usize,
-    slot_terminal: u32,
-    child_component: usize,
-    child_start: u32,
-    return_pop: u32,
-    child_start_nullable: bool,
-}
-
-struct NestedExpansionRecorder<'a> {
+#[derive(Default)]
+struct LeafExpansion<'a> {
     leaves: Vec<&'a Constraint>,
-    visits: Vec<ExpansionVisit<'a>>,
-    raw_links: Vec<RawNestedLink>,
+    offsets: Vec<u32>,
+    links: Vec<ScopedSubgrammarLink>,
+    next_terminal: u32,
+}
+
+impl<'a> LeafExpansion<'a> {
+    fn append(&mut self, constraint: &'a Constraint) -> Result<LeafSpan, String> {
+        let first = self.leaves.len();
+        let terminal_base = self.next_terminal;
+        let expected_end = terminal_base.checked_add(constraint.parser_terminal_count())
+            .ok_or_else(|| "nested link terminal domain overflow".to_string())?;
+        if constraint.uses_compact_segmented_parser_runtime() {
+            let overlay = constraint.static_dynamic_overlay.as_ref().ok_or_else(|| {
+                "nested link subtree reports a segmented tree but has no overlay".to_string()
+            })?;
+            if overlay.segmented_parser_components.is_empty() {
+                return Err("nested link subtree has no segmented components".into());
+            }
+            validate_overlay_terminal_layout(overlay, constraint.parser_terminal_count())?;
+            let mut spans = Vec::with_capacity(overlay.segmented_parser_components.len());
+            for component in &overlay.segmented_parser_components {
+                spans.push(self.append(&component.constraint)?);
+            }
+            // Descendants are already in the final coordinate. Resolve
+            // inherited links now, in the original postorder, instead of
+            // recording a second expansion tree and deferred remap list.
+            for link in &overlay.segmented_parser_links {
+                let parent = link.parent_component as usize;
+                let child = link.child_component as usize;
+                let parent_span = *spans.get(parent).ok_or_else(|| {
+                    format!("nested link references unknown inner parent {parent}")
+                })?;
+                let child_span = *spans.get(child).ok_or_else(|| {
+                    format!("nested link references unknown inner child {child}")
+                })?;
+                self.append_link(
+                    &overlay.segmented_parser_components[parent].constraint,
+                    parent_span, child_span, link,
+                )?;
+            }
+        } else {
+            self.leaves.push(constraint);
+            self.offsets.push(terminal_base);
+            self.next_terminal = expected_end;
+        }
+        if self.next_terminal != expected_end || self.leaves.len() == first {
+            return Err("nested link leaf expansion disagrees with subtree layout".into());
+        }
+        Ok(LeafSpan {
+            first,
+            end: self.leaves.len(),
+            terminal_base,
+            terminal_end: expected_end,
+        })
+    }
+
+    fn resolve_slot(
+        &self, mut constraint: &Constraint, span: LeafSpan, slot: u32,
+    ) -> Result<(u32, u32), String> {
+        let global = span.terminal_base.checked_add(slot)
+            .filter(|&id| id < span.terminal_end)
+            .ok_or_else(|| format!("nested link slot {slot} lies outside its component domain"))?;
+
+        // Validate alias ownership along the actual immutable provider path.
+        // The interval coordinate is already global, so no duplicate visit
+        // tree is needed to translate a component index into a leaf index.
+        let mut local = slot;
+        while constraint.uses_compact_segmented_parser_runtime() {
+            let overlay = constraint.static_dynamic_overlay.as_ref()
+                .ok_or_else(|| "nested slot owner has no overlay".to_string())?;
+            let (child, child_local) = map_overlay_slot_terminal(overlay, local)?;
+            constraint = &overlay.segmented_parser_components[child].constraint;
+            local = child_local;
+        }
+        let leaf = self.offsets.partition_point(|&offset| offset <= global)
+            .checked_sub(1)
+            .filter(|&leaf| leaf >= span.first && leaf < span.end)
+            .ok_or_else(|| "nested slot falls outside its expanded leaf span".to_string())?;
+        if !std::ptr::eq(self.leaves[leaf], constraint)
+            || global - self.offsets[leaf] != local
+            || local >= constraint.parser_terminal_count()
+        {
+            return Err("nested slot alias path disagrees with packed leaf coordinate".into());
+        }
+        Ok((u32::try_from(leaf).map_err(|_| "nested link leaf index overflow")?, local))
+    }
+
+    fn append_link(
+        &mut self,
+        parent: &Constraint,
+        parent_span: LeafSpan,
+        child_span: LeafSpan,
+        link: &ScopedSubgrammarLink,
+    ) -> Result<(), String> {
+        let (parent_component, slot_terminal) =
+            self.resolve_slot(parent, parent_span, link.slot_terminal)?;
+        let child_component = u32::try_from(child_span.first)
+            .map_err(|_| "nested link leaf index overflow".to_string())?;
+        self.links.push(ScopedSubgrammarLink {
+            parent_component,
+            slot_terminal,
+            child_component,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        });
+        Ok(())
+    }
 }
 
 /// Validate contiguous component terminal intervals against the owning domain.
@@ -1786,60 +1869,6 @@ fn map_overlay_slot_terminal(
     }
 }
 
-/// Resolve a slot in a direct component's terminal space to its owning leaf
-/// plus the leaf-local terminal, descending composed subtrees. Intact
-/// components resolve to their single leaf with a domain check.
-fn resolve_expansion_slot(
-    visits: &[ExpansionVisit<'_>],
-    leaves: &[&Constraint],
-    visit: usize,
-    component: usize,
-    slot: u32,
-) -> Result<(usize, u32), String> {
-    let record = visits
-        .get(visit)
-        .ok_or_else(|| format!("nested link references unknown expansion visit {visit}"))?;
-    let sub = record.subs.get(component).ok_or_else(|| {
-        format!("nested link references unknown inner component {component}")
-    })?;
-    match sub.visit {
-        None => {
-            if sub.last != sub.first + 1 {
-                return Err(
-                    "nested link intact sub-expansion covers multiple leaves".to_string(),
-                );
-            }
-            let leaf = leaves.get(sub.first).ok_or_else(|| {
-                format!("nested link leaf index {} is out of range", sub.first)
-            })?;
-            if slot >= leaf.parser_terminal_count() {
-                return Err(format!(
-                    "nested link slot terminal {slot} lies outside leaf table domain {}",
-                    leaf.parser_terminal_count(),
-                ));
-            }
-            Ok((sub.first, slot))
-        }
-        Some(sub_visit) => resolve_expansion_node_slot(visits, leaves, sub_visit, slot),
-    }
-}
-
-/// Resolve a slot in a visited node's composed terminal space: map to the
-/// owning direct component, then descend.
-fn resolve_expansion_node_slot(
-    visits: &[ExpansionVisit<'_>],
-    leaves: &[&Constraint],
-    visit: usize,
-    slot: u32,
-) -> Result<(usize, u32), String> {
-    let overlay = &visits
-        .get(visit)
-        .ok_or_else(|| format!("nested link references unknown expansion visit {visit}"))?
-        .overlay;
-    let (sub, local) = map_overlay_slot_terminal(overlay, slot)?;
-    resolve_expansion_slot(visits, leaves, visit, sub, local)
-}
-
 /// A link expanded to intact leaves: the parent block (leaves `0..P`, where an
 /// intact parent is exactly leaf 0) plus every direct child, where composed
 /// children AND a composed parent recurse into their overlays' intact
@@ -1870,213 +1899,41 @@ pub(crate) struct NestedLinkExpansion<'a> {
     pub nested: bool,
 }
 
-fn expand_recorded_subtree_leaves<'a>(
-    constraint: &'a Constraint,
-    recorder: &mut NestedExpansionRecorder<'a>,
-) -> Result<ExpansionSubtree, String> {
-    if !constraint.uses_compact_segmented_parser_runtime() {
-        let index = recorder.leaves.len();
-        recorder.leaves.push(constraint);
-        return Ok(ExpansionSubtree {
-            root: index,
-            first: index,
-            last: index + 1,
-            visit: None,
-        });
-    }
-    let overlay = constraint.static_dynamic_overlay.as_ref().ok_or_else(|| {
-        "nested link subtree reports a segmented tree but has no overlay".to_string()
-    })?;
-    if overlay.segmented_parser_components.is_empty() {
-        return Err("nested link subtree has no segmented components".to_string());
-    }
-    validate_overlay_terminal_layout(overlay, constraint.parser_terminal_count())?;
-    let first = recorder.leaves.len();
-    let mut subs = Vec::with_capacity(overlay.segmented_parser_components.len());
-    for component in &overlay.segmented_parser_components {
-        subs.push(expand_recorded_subtree_leaves(
-            &component.constraint,
-            recorder,
-        )?);
-    }
-    // Depth-first sequential expansion assigns contiguous ranges; verify
-    // rather than assume, since slot resolution depends on it.
-    let mut cursor = first;
-    for sub in &subs {
-        if sub.first != cursor {
-            return Err("nested link leaf ranges are not contiguous".to_string());
-        }
-        cursor = sub.last;
-    }
-    let visit = recorder.visits.len();
-    recorder.visits.push(ExpansionVisit {
-        overlay,
-        node_terminals: constraint.parser_terminal_count(),
-        subs,
-    });
-    for link in &overlay.segmented_parser_links {
-        let parent_component = usize::try_from(link.parent_component)
-            .map_err(|_| "nested link inner parent index overflow".to_string())?;
-        let child_component = usize::try_from(link.child_component)
-            .map_err(|_| "nested link inner child index overflow".to_string())?;
-        if parent_component >= recorder.visits[visit].subs.len()
-            || child_component >= recorder.visits[visit].subs.len()
-        {
-            return Err(format!(
-                "nested link references unknown inner component (parent {}, child {})",
-                link.parent_component, link.child_component,
-            ));
-        }
-        recorder.raw_links.push(RawNestedLink {
-            visit,
-            parent_component,
-            slot_terminal: link.slot_terminal,
-            child_component,
-            child_start: link.child_start,
-            return_pop: link.return_pop,
-            child_start_nullable: link.child_start_nullable,
-        });
-    }
-    let root = recorder.visits[visit]
-        .subs
-        .first()
-        .map(|sub| sub.root)
-        .ok_or_else(|| "nested link subtree has no segmented components".to_string())?;
-    Ok(ExpansionSubtree {
-        root,
-        first,
-        last: cursor,
-        visit: Some(visit),
-    })
-}
-
-/// Expand one production link to intact leaves with leaf-coordinate links.
-/// Composed parents expand exactly like composed children; every inner and
-/// outer slot is resolved from its component-local coordinate to the owning
-/// leaf plus a leaf-local slot, so links stay valid at any nesting depth.
+/// Expand leaves and inherited links once. A reused artifact is expanded per
+/// storage occurrence, never deduplicated by pointer. A multi-slot edge to a
+/// single child component reuses that child's already established root.
 pub(crate) fn expand_nested_link_leaves<'a>(
     parent: &'a Constraint,
     children: &'a [CompiledSubgrammarInput<'a>],
 ) -> Result<NestedLinkExpansion<'a>, String> {
-    let mut recorder = NestedExpansionRecorder {
-        leaves: Vec::new(),
-        visits: Vec::new(),
-        raw_links: Vec::new(),
-    };
-    let parent_expansion = expand_recorded_subtree_leaves(parent, &mut recorder)?;
-    if parent_expansion.first != 0 || parent_expansion.root != 0 {
-        return Err(
-            "nested link parent expansion must occupy leaves from index 0".to_string(),
-        );
-    }
-    let mut nested = parent_expansion.last - parent_expansion.first != 1;
-    let mut top_root_leaves = vec![u32::try_from(parent_expansion.root)
-        .map_err(|_| "nested link root leaf index overflow".to_string())?];
-    let mut top_leaf_ranges =
-        vec![(parent_expansion.first..parent_expansion.last).collect::<Vec<usize>>()];
-    // Outer links over direct children (leaf remap happens below).
+    let mut expansion = LeafExpansion::default();
+    let parent_span = expansion.append(parent)?;
+    let mut spans = vec![parent_span];
     let outer_links = build_segmented_parser_links(children)?;
-    for child in children.iter() {
-        let expansion = expand_recorded_subtree_leaves(child.constraint, &mut recorder)?;
-        let range: Vec<usize> = (expansion.first..expansion.last).collect();
-        if range.len() != 1 {
-            nested = true;
+    for child in children {
+        spans.push(expansion.append(child.constraint)?);
+    }
+    for link in &outer_links {
+        let child = link.child_component as usize;
+        if child == 0 || child >= spans.len() {
+            return Err(format!("nested link outer reference targets unknown top component {child}"));
         }
-        let root_leaf = u32::try_from(expansion.root)
-            .map_err(|_| "nested link root leaf index overflow".to_string())?;
-        top_root_leaves.push(root_leaf);
-        top_leaf_ranges.push(range);
+        expansion.append_link(parent, parent_span, spans[child], link)?;
     }
-    let NestedExpansionRecorder {
-        leaves,
-        visits,
-        raw_links,
-    } = recorder;
-    let mut links: Vec<ScopedSubgrammarLink> = Vec::new();
-    // Remap inner-overlay links: slot coordinates are parent-component-local
-    // and must be resolved to the owning leaf at any depth.
-    for raw in &raw_links {
-        let (parent_leaf, local_slot) = resolve_expansion_slot(
-            &visits,
-            &leaves,
-            raw.visit,
-            raw.parent_component,
-            raw.slot_terminal,
-        )?;
-        let child_root = visits
-            .get(raw.visit)
-            .and_then(|record| record.subs.get(raw.child_component))
-            .map(|sub| sub.root)
-            .ok_or_else(|| {
-                format!(
-                    "nested link references unknown inner child {}",
-                    raw.child_component
-                )
-            })?;
-        links.push(ScopedSubgrammarLink {
-            parent_component: u32::try_from(parent_leaf)
-                .map_err(|_| "nested link leaf index overflow".to_string())?,
-            slot_terminal: local_slot,
-            child_component: u32::try_from(child_root)
-                .map_err(|_| "nested link leaf index overflow".to_string())?,
-            child_start: raw.child_start,
-            return_pop: raw.return_pop,
-            child_start_nullable: raw.child_start_nullable,
-        });
-    }
-    // Remap outer links (parent block, child i+1) to leaf coordinates. Slots
-    // name terminals in the parent block's composed coordinate; intact parents
-    // keep the existing identity mapping, composed parents resolve per slot.
-    for link in outer_links {
-        let child_top = link.child_component as usize;
-        if child_top == 0 || child_top > children.len() {
-            return Err(format!(
-                "nested link outer reference targets unknown top component {child_top}"
-            ));
-        }
-        let (parent_leaf, local_slot) = match parent_expansion.visit {
-            None => (0usize, link.slot_terminal),
-            Some(visit) => {
-                resolve_expansion_node_slot(&visits, &leaves, visit, link.slot_terminal)?
-            }
-        };
-        links.push(ScopedSubgrammarLink {
-            parent_component: u32::try_from(parent_leaf)
-                .map_err(|_| "nested link leaf index overflow".to_string())?,
-            slot_terminal: local_slot,
-            child_component: top_root_leaves[child_top],
-            child_start: link.child_start,
-            return_pop: link.return_pop,
-            child_start_nullable: link.child_start_nullable,
-        });
-    }
-    let mut leaf_terminal_offsets = Vec::with_capacity(leaves.len());
-    let mut total = 0u32;
-    for leaf in &leaves {
-        leaf_terminal_offsets.push(total);
-        total = total
-            .checked_add(leaf.parser_terminal_count())
-            .ok_or_else(|| "nested link terminal domain overflow".to_string())?;
-    }
-    let mut top_terminal_offsets = Vec::with_capacity(children.len() + 1);
-    let mut top_terminal_sizes = Vec::with_capacity(children.len() + 1);
-    for range in &top_leaf_ranges {
-        let start = leaf_terminal_offsets[range[0]];
-        let size: u32 = range
-            .iter()
-            .map(|&leaf| leaves[leaf].parser_terminal_count())
-            .try_fold(0u32, |acc, size| {
-                acc.checked_add(size)
-                    .ok_or_else(|| "nested link block size overflow".to_string())
-            })?;
-        top_terminal_offsets.push(start);
-        top_terminal_sizes.push(size);
-    }
+    let top_root_leaves = spans.iter().map(|span| {
+        u32::try_from(span.first).map_err(|_| "nested link root leaf index overflow".to_string())
+    }).collect::<Result<Vec<_>, _>>()?;
+    let top_leaf_ranges = spans.iter().map(|span| {
+        (span.first..span.end).collect::<Vec<_>>()
+    }).collect::<Vec<_>>();
+    let top_terminal_offsets = spans.iter().map(|span| span.terminal_base).collect();
+    let top_terminal_sizes = spans.iter().map(|span| span.terminal_end - span.terminal_base).collect();
+    let nested = spans.iter().any(|span| span.end - span.first > 1);
     Ok(NestedLinkExpansion {
-        leaves,
-        links,
-        leaf_terminal_offsets,
-        num_terminals: total,
+        leaves: expansion.leaves,
+        links: expansion.links,
+        leaf_terminal_offsets: expansion.offsets,
+        num_terminals: expansion.next_terminal,
         top_root_leaves,
         top_leaf_ranges,
         top_terminal_offsets,
