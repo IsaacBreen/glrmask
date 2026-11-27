@@ -145,7 +145,7 @@ fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
     let vocab = Vocab::new(Vec::<(u32, Vec<u8>)>::new()).unwrap();
     for excluded in [None, Some(65_535)] {
         let ranges = match excluded {
-            None => vec![0..N],
+            None => std::iter::once(0..N).collect(),
             Some(id) => vec![0..id, id + 1..N],
         };
         let tokens = TokenSet::from_ranges(ranges.iter().cloned());

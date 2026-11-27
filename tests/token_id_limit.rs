@@ -1,5 +1,5 @@
 //! Token IDs above `MAX_TOKEN_ID` are errors, not huge allocations.
-use glrmask::{ Grammar, Module, TokenSet, Vocab};
+use glrmask::{Grammar, Module, TokenSet, Vocab};
 
 const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
@@ -68,6 +68,6 @@ fn ordinary_token_bindings_still_compile() {
 
 #[test]
 fn unsupported_nonempty_range_panics_at_construction() {
-    assert!(std::panic::catch_unwind(|| TokenSet::from_ranges([MAX_TOKEN_ID..MAX_TOKEN_ID + 2])).is_err());
-    assert_eq!(TokenSet::from_ranges([u32::MAX..u32::MAX]), TokenSet::new([]));
+    assert!(std::panic::catch_unwind(|| TokenSet::from_ranges(std::iter::once(MAX_TOKEN_ID..MAX_TOKEN_ID + 2))).is_err());
+    assert_eq!(TokenSet::from_ranges(std::iter::once(u32::MAX..u32::MAX)), TokenSet::new([]));
 }
