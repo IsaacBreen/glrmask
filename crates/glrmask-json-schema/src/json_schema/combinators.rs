@@ -749,114 +749,15 @@ impl<'a> Lowerer<'a> {
         if siblings.has_value_assertions_without_combinators() {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
-        branches = self.inline_all_of_refs(&branches)?;
-        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+        let Some(branches) = self.normalize_conjunction(branches)? else {
             return Ok(never());
-        }
-        // true is the identity of intersection. Remove it before type pruning
-        // and return a sole conjunct unchanged, preserving untyped/type unions.
-        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
-        if branches.is_empty() { return Ok(r(JSON_VALUE_RULE)); }
-        if branches.len() == 1 { return self.lower_schema(&branches[0]); }
-        validate_object_all_of_merge_bounds(&branches)?;
-        if let [left, right] = branches.as_slice() {
-            if is_vacuous_object_schema(left)
-                && let Some(branch) = push_object_only_type_into_branch(right)
-            {
-                return self.lower_schema(&branch);
-            }
-            if is_vacuous_object_schema(right)
-                && let Some(branch) = push_object_only_type_into_branch(left)
-            {
-                return self.lower_schema(&branch);
-            }
-        }
-        let explicit_types_before_vacuous_prune = explicit_all_of_type_intersection(&branches);
-        if branches.len() > 1 && branches.iter().any(schema_has_explicit_object_only_type) {
-            branches.retain(|branch| !is_vacuous_object_schema(branch));
-            if branches.is_empty() {
-                return Ok(r(JSON_OBJECT_RULE));
-            }
-            if branches.len() == 1 {
-                let mut branch = branches.pop().unwrap();
-                if let Some(explicit_types) = explicit_types_before_vacuous_prune {
-                    let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
-                    if let SchemaKind::Assertions(assertions) = &mut branch.kind {
-                        if assertions.types.is_none() {
-                            assertions.types = Some(explicit_types_vec.clone());
-                        } else if let Some(types) = &mut assertions.types {
-                            *types = intersect_schema_types(types, &explicit_types_vec);
-                        }
-                        prune_assertion_families_to_types(assertions);
-                    } else if !self.ref_implies_types(&branch, &explicit_types_vec)? {
-                        // A recursive ref cannot inherit an object guard by
-                        // mutating assertions. Never drop the removed guard.
-                        return Err(SchemaImportError::at(&branch.location,
-                            "unsupported allOf recursive schema constraint: cannot apply the object type intersection exactly"));
-                    }
-                }
-                return self.lower_schema(&branch);
-            }
-        }
-        branches = flatten_pure_all_of_branches(branches);
-        branches = self.inline_all_of_refs(&branches)?;
-        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
-            return Ok(never());
-        }
-        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
-        validate_object_all_of_merge_bounds(&branches)?;
-        branches = collapse_pure_single_choice_branches(branches);
-        branches = self.inline_all_of_refs(&branches)?;
-        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
-            return Ok(never());
-        }
-        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
-        if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
-            branches = filtered;
-        } else {
-            return Ok(never());
-        }
-        // Preserve every explicit type guard before removing redundant family
-        // branches; an untyped or union string branch does not imply string-only.
-        let explicit_types = match (
-            explicit_all_of_type_intersection(&branches),
-            explicit_types_before_vacuous_prune.clone(),
-        ) {
-            (Some(current), Some(saved)) => Some(intersect_schema_types(
-                &current.into_iter().collect::<Vec<_>>(),
-                &saved.into_iter().collect::<Vec<_>>(),
-            ).into_iter().collect::<BTreeSet<_>>()),
-            (current, saved) => current.or(saved),
         };
-        if let Some(explicit_types) = explicit_types {
-            let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
-            for branch in &mut branches {
-                if let SchemaKind::Assertions(assertions) = &mut branch.kind {
-                    if assertions.types.is_none() {
-                        assertions.types = Some(explicit_types_vec.clone());
-                    } else if let Some(types) = &mut assertions.types {
-                        *types = intersect_schema_types(types, &explicit_types_vec);
-                    }
-                    prune_assertion_families_to_types(assertions);
-                } else if matches!(branch.kind, SchemaKind::Ref(_))
-                    && !self.ref_implies_types(branch, &explicit_types_vec)? {
-                    return Err(SchemaImportError::at(&branch.location,
-                        "unsupported allOf recursive schema constraint: cannot apply the type intersection exactly"));
-                }
-            }
-            branches = drop_vacuous_string_branches(branches);
-        }
-
         if branches.is_empty() {
-            // Flattened true-only tails can outlive a pruned object guard.
-            // The saved explicit intersection must still constrain the result.
-            if let Some(types) = explicit_types_before_vacuous_prune {
-                return self.lower_schema(&Schema::assertions("<allOf-type-intersection>",
-                    SchemaAssertions { types: Some(types.into_iter().collect()), ..SchemaAssertions::default() }));
-            }
             return Ok(r(JSON_VALUE_RULE));
         }
-        if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
+        if branches.len() == 1 {
+            return self.lower_schema(&branches[0]);
+        }        if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
             return self.lower_schema(&merged);
         }
         if let Some(merged) = merge_all_of_string_like_schema(&branches) {
@@ -952,6 +853,59 @@ impl<'a> Lowerer<'a> {
         }))
     }
 
+    /// One conjunction pipeline. Reference expansion retains its bounded
+    /// local policy; the common type meet survives removal of identity
+    /// conjuncts and is applied to every surviving assertion.
+    fn normalize_conjunction(&self, mut branches: Vec<Schema>) -> ImportResult<Option<Vec<Schema>>> {
+        for _ in 0..3 {
+            branches = self.inline_all_of_refs(&branches)?;
+            if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+                return Ok(None);
+            }
+            branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
+            validate_object_all_of_merge_bounds(&branches)?;
+            branches = flatten_conjuncts(branches);
+        }
+        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+            return Ok(None);
+        }
+        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
+        validate_object_all_of_merge_bounds(&branches)?;
+        let explicit = branches.iter().filter_map(|branch| match &branch.kind {
+            SchemaKind::Assertions(assertions) => assertions.types.as_deref().map(TypeDomain::from_types),
+            _ => None,
+        }).reduce(TypeDomain::meet);
+        if explicit == Some(TypeDomain::NEVER) {
+            return Ok(None);
+        }
+        if let Some(domain) = explicit {
+            let types = domain.declared_types();
+            for branch in &mut branches {
+                match &mut branch.kind {
+                    SchemaKind::Assertions(assertions) => {
+                        assertions.types = Some(types.clone());
+                        prune_assertion_families_to_types(assertions);
+                    }
+                    SchemaKind::Ref(_) if domain != TypeDomain::ANY => {
+                        if !self.ref_implies_types(branch, &types)? {
+                            return Err(SchemaImportError::at(&branch.location,
+                                "unsupported allOf recursive schema constraint: cannot apply the type intersection exactly"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            branches.retain(|branch| !schema_is_only_domain(branch, domain));
+            if branches.is_empty() {
+                branches.push(Schema::assertions("<allOf-type-intersection>",
+                    SchemaAssertions { types: Some(types), ..SchemaAssertions::default() }));
+            }
+        } else {
+            branches.retain(|branch| !is_vacuous_json_value_schema(branch));
+        }
+        Ok(Some(branches))
+    }
+
     fn try_lower_single_ref_with_object_siblings(
         &mut self,
         assertions: &SchemaAssertions,
@@ -1038,69 +992,22 @@ impl<'a> Lowerer<'a> {
         wanted: &str,
         seen_refs: &mut BTreeSet<String>,
     ) -> ImportResult<bool> {
-        match &schema.kind {
-            SchemaKind::Any | SchemaKind::Never => Ok(false),
-            SchemaKind::Ref(pointer) => {
+        let mut pending = vec![schema];
+        while let Some(node) = pending.pop() {
+            if let SchemaKind::Ref(pointer) = &node.kind {
                 let normalized = normalize_local_ref(pointer)?;
                 if normalized == wanted {
                     return Ok(true);
                 }
-                if !seen_refs.insert(normalized.clone()) {
-                    return Ok(false);
+                if seen_refs.insert(normalized) {
+                    pending.push(self.resolve_ref_target(pointer)?);
                 }
-                let target = self.resolve_ref_target(pointer)?;
-                self.schema_transitively_refs_pointer(target, wanted, seen_refs)
-            }
-            SchemaKind::Assertions(assertions) => {
-                if let Some(object) = &assertions.object {
-                    for property in &object.properties {
-                        if self.schema_transitively_refs_pointer(&property.schema, wanted, seen_refs)? {
-                            return Ok(true);
-                        }
-                    }
-                    for property in &object.pattern_properties {
-                        if self.schema_transitively_refs_pointer(&property.schema, wanted, seen_refs)? {
-                            return Ok(true);
-                        }
-                    }
-                    if let AdditionalProperties::Schema(schema) = &object.additional_properties
-                        && self.schema_transitively_refs_pointer(schema, wanted, seen_refs)?
-                    {
-                        return Ok(true);
-                    }
-                }
-
-                if let Some(array) = &assertions.array {
-                    if self.schema_transitively_refs_pointer(&array.items, wanted, seen_refs)? {
-                        return Ok(true);
-                    }
-                    for item in &array.prefix_items {
-                        if self.schema_transitively_refs_pointer(item, wanted, seen_refs)? {
-                            return Ok(true);
-                        }
-                    }
-                }
-
-                for branch in assertions
-                    .any_of
-                    .iter()
-                    .chain(assertions.one_of.iter())
-                    .chain(assertions.all_of.iter())
-                {
-                    if self.schema_transitively_refs_pointer(branch, wanted, seen_refs)? {
-                        return Ok(true);
-                    }
-                }
-                if let Some(schema) = &assertions.not
-                    && self.schema_transitively_refs_pointer(schema, wanted, seen_refs)? {
-                        return Ok(true);
-                    }
-
-                Ok(false)
+            } else {
+                pending.extend(node.children());
             }
         }
+        Ok(false)
     }
-
     fn inline_all_of_ref_target(&self, pointer: &str, fallback: &Schema) -> ImportResult<Schema> {
         let normalized = normalize_local_ref(pointer)?;
         let target = self.resolve_ref_target(pointer)?;
@@ -1160,8 +1067,7 @@ impl<'a> Lowerer<'a> {
         }
 
         branches = self.inline_all_of_refs(&branches)?;
-        branches = flatten_pure_all_of_branches(branches);
-        branches = collapse_pure_single_choice_branches(branches);
+        branches = flatten_conjuncts(branches);
 
         let Some((kind, distributed)) = self.distribute_all_of_over_single_object_choice(&branches)?
         else {
@@ -1430,14 +1336,17 @@ impl<'a> Lowerer<'a> {
 
     fn object_branch_resolved<'schema>(
         &'schema self,
-        schema: &'schema Schema,
+        mut schema: &'schema Schema,
     ) -> ImportResult<Option<&'schema ObjectSchema>> {
-        match &schema.kind {
-            SchemaKind::Ref(pointer) => self.object_branch_resolved(self.resolve_ref_target(pointer)?),
-            _ => Ok(object_branch(schema)),
+        let mut seen = BTreeSet::new();
+        while let SchemaKind::Ref(pointer) = &schema.kind {
+            if !seen.insert(normalize_local_ref(pointer)?) {
+                return Ok(None);
+            }
+            schema = self.resolve_ref_target(pointer)?;
         }
+        Ok(object_branch(schema))
     }
-
     fn object_schema_subsumes(
         &self,
         superset: &ObjectSchema,
@@ -1934,96 +1843,38 @@ fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<Sch
     }).reduce(TypeDomain::meet)?;
     Some(domain.declared_types().into_iter().collect())
 }
-fn untyped_single_family_assertion(schema: &Schema) -> Option<SchemaType> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    if assertions.types.is_some()
-        || assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return None;
-    }
-
-    let mut family = None;
-    for candidate in [
-        (assertions.object.is_some(), SchemaType::Object),
-        (assertions.array.is_some(), SchemaType::Array),
-        (assertions.string.is_some(), SchemaType::String),
-        (assertions.number.is_some(), SchemaType::Number),
-    ] {
-        if !candidate.0 {
-            continue;
-        }
-        if family.is_some() {
-            return None;
-        }
-        family = Some(candidate.1);
-    }
-
-    family
-}
-
-fn family_overlaps_types(family: SchemaType, types: &BTreeSet<SchemaType>) -> bool {
-    match family {
-        SchemaType::Number => {
-            types.contains(&SchemaType::Number) || types.contains(&SchemaType::Integer)
-        }
-        other => types.contains(&other),
-    }
-}
-
-fn drop_vacuous_untyped_family_branches(branches: Vec<Schema>) -> Option<Vec<Schema>> {
-    let Some(explicit_types) = explicit_all_of_type_intersection(&branches) else {
-        return Some(branches);
-    };
-    if explicit_types.is_empty() {
-        return None;
-    }
-
-    Some(
-        branches
-            .into_iter()
-            .filter(|branch| {
-                untyped_single_family_assertion(branch)
-                    .is_none_or(|family| family_overlaps_types(family, &explicit_types))
-            })
-            .collect(),
-    )
-}
-
-fn flatten_pure_all_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
-    let mut out = Vec::new();
-    for branch in branches {
-        match &branch.kind {
-            SchemaKind::Assertions(assertions)
-                if !assertions.all_of.is_empty()
-                    && assertions.clone_without_combinators().is_empty() =>
+/// Consume nested pure conjunctions and singleton choices in source order.
+/// A singleton choice is an identity only in the absence of sibling
+/// assertions, including a type restriction or a negation.
+fn flatten_conjuncts(branches: Vec<Schema>) -> Vec<Schema> {
+    let mut pending: Vec<_> = branches.into_iter().rev().collect();
+    let mut result = Vec::new();
+    while let Some(mut branch) = pending.pop() {
+        if let SchemaKind::Assertions(assertions) = &mut branch.kind
+            && !assertions.has_value_assertions_without_combinators()
+            && assertions.not.is_none()
+        {
+            if !assertions.all_of.is_empty()
+                && assertions.any_of.is_empty() && assertions.one_of.is_empty()
             {
-                out.extend(flatten_pure_all_of_branches(assertions.all_of.clone()));
+                pending.extend(std::mem::take(&mut assertions.all_of).into_iter().rev());
+                continue;
             }
-            _ => out.push(branch),
+            if assertions.all_of.is_empty() {
+                if assertions.any_of.len() == 1 && assertions.one_of.is_empty() {
+                    pending.push(assertions.any_of.pop().unwrap());
+                    continue;
+                }
+                if assertions.one_of.len() == 1 && assertions.any_of.is_empty() {
+                    pending.push(assertions.one_of.pop().unwrap());
+                    continue;
+                }
+            }
         }
+        result.push(branch);
     }
-    out
+    result
 }
-
-fn collapse_pure_single_choice_branches(branches: Vec<Schema>) -> Vec<Schema> {
-    branches
-        .into_iter()
-        .map(|branch| {
-            if let Some((_, [single])) = pure_choice_branch(&branch) {
-                single.clone()
-            } else {
-                branch
-            }
-        })
-        .collect()
-}
-
 fn try_factor_required_property_any_of(
     assertions: &SchemaAssertions,
 ) -> Option<(ObjectSchema, BTreeSet<String>)> {
@@ -2429,30 +2280,8 @@ fn object_schema_is_unconstrained_open(object: &ObjectSchema) -> bool {
 }
 
 fn object_branch(schema: &Schema) -> Option<&ObjectSchema> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || assertions.not.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return None;
-    }
-    if let Some(types) = &assertions.types
-        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
-    {
-        return None;
-    }
-
-    assertions.object.as_ref()
+    plain_object_schema(schema)
 }
-
 fn property_schema_by_name<'a>(object: &'a ObjectSchema, name: &str) -> Option<&'a Schema> {
     object
         .properties
@@ -2919,7 +2748,7 @@ fn schema_has_explicit_object_only_type(schema: &Schema) -> bool {
     assertions
         .types
         .as_ref()
-        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Object))
+        .is_some_and(|types| TypeDomain::from_types(types) == TypeDomain::of(SchemaType::Object))
 }
 
 fn schema_has_explicit_non_object_only_type(schema: &Schema) -> bool {
@@ -3053,8 +2882,9 @@ pub(super) fn validate_object_all_of_merge_bounds(branches: &[Schema]) -> Import
 pub fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
     if validate_object_all_of_merge_bounds(branches).is_err() { return None; }
     let mut objects = branches.iter().map(plain_object_schema).collect::<Option<Vec<_>>>()?;
-    let mut merged = objects.remove(0).clone();
-    for object in objects {
+    let mut iter = objects.drain(..);
+    let mut merged = iter.next()?.clone();
+    for object in iter {
         merged = merge_two_objects(&merged, object);
     }
     Some(merged)
@@ -3096,7 +2926,7 @@ fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
     if assertions
         .types
         .as_ref()
-        .is_some_and(|types| !types.iter().all(|schema_type| *schema_type == SchemaType::Object))
+        .is_some_and(|types| !TypeDomain::from_types(types) == TypeDomain::of(SchemaType::Object))
         || assertions.const_value.is_some()
         || assertions.enum_values.is_some()
         || assertions.object.is_some()
@@ -3104,6 +2934,7 @@ fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
         || assertions.string.is_some()
         || assertions.number.is_some()
         || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
     {
         return None;
     }
@@ -3227,9 +3058,16 @@ impl<'a> Lowerer<'a> {
                 }
                 let mut distributed_alternatives = Vec::with_capacity(alternatives.len());
                 for alternative in alternatives {
-                    let Some(distributed) = self.object_like_distribution_schema(alternative)? else {
+                    let Some(mut distributed) = self.object_like_distribution_schema(alternative)? else {
                         return Ok(None);
                     };
+                    if schema_has_explicit_object_only_type(branch) {
+                        if let SchemaKind::Assertions(assertions) = &mut distributed.kind {
+                            assertions.types = Some(vec![SchemaType::Object]);
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                     distributed_alternatives.push(distributed);
                 }
                 choice_branch = Some((branch_idx, kind, distributed_alternatives));
@@ -3347,7 +3185,7 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
     for i in 0..objects.len() {
         for j in (i + 1)..objects.len() {
             if closed_object_required_conflict(&objects[i], &objects[j]) {
-                return Some(Schema::never("<merged-allOf-object-like:closed-required-conflict>"));
+                return has_explicit_object_only_type.then(|| Schema::never("<merged-allOf-object-like:closed-required-conflict>"));
             }
         }
     }
@@ -3695,19 +3533,6 @@ fn is_vacuous_json_value_schema(schema: &Schema) -> bool {
 fn is_vacuous_object_schema(schema: &Schema) -> bool {
     schema_is_only_domain(schema, TypeDomain::of(SchemaType::Object))
 }
-fn drop_vacuous_string_branches(branches: Vec<Schema>) -> Vec<Schema> {
-    let has_non_vacuous_string_branch = branches
-        .iter()
-        .any(|branch| !is_vacuous_string_schema(branch) && schema_has_string_family(branch));
-    if !has_non_vacuous_string_branch {
-        return branches;
-    }
-    branches
-        .into_iter()
-        .filter(|branch| !is_vacuous_string_schema(branch))
-        .collect()
-}
-
 fn is_vacuous_string_schema(schema: &Schema) -> bool {
     schema_is_only_domain(schema, TypeDomain::of(SchemaType::String))
 }
