@@ -2142,23 +2142,15 @@ impl Constraint {
             return true;
         }
         if let Some(packed) = &self.packed_token_bytes {
-            // Current artifacts and Vocab's prepared packed-token artifact use
-            // the same canonical TBP2 encoding. Comparing those byte strings is
-            // an exact vocabulary equality proof and lets a 128k-token bind use
-            // one contiguous memcmp instead of 128k map/offset lookups. The
-            // packed Vocab artifact is owned by the caller's Vocab-derived
-            // cache, not a process-global load cache, so this remains honest
-            // model-vocabulary preparation and does not make later constraints
-            // cheaper merely because an earlier constraint was loaded.
+            // Both prepared indexes are deterministic views of immutable
+            // Vocab entries. Compare contiguous arrays instead of traversing
+            // the pointer-heavy maps when both indexes already exist.
             if let Some(vocab_packed) =
                 crate::compiler::compile::prepared_vocab_packed_token_bytes(vocab)
-                && packed.wire() == vocab_packed.wire()
+                && packed.as_ref() == vocab_packed.as_ref()
             {
                 return true;
             }
-            // Legacy/noncanonical packed encodings can still describe the same
-            // vocabulary. Preserve the exact structural fallback rather than
-            // treating unequal wire encodings as unequal vocabularies.
             return packed.len() == vocab.entries_map().len()
                 && packed.iter().eq(
                     vocab

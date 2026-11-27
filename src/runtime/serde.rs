@@ -55,7 +55,7 @@ const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C27\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C28\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 /// Clone a large already-serialized artifact without forcing one core to move
@@ -3600,10 +3600,6 @@ impl Constraint {
                             crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
                         let previous_external_tokenizer =
                             crate::automata::lexer::tokenizer::set_external_artifact_serde(true);
-                        let previous_packed_token_bytes =
-                            crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
-                        let previous_external_token_bytes =
-                            crate::runtime::artifact::token_bytes_artifact_serde::set_external(true);
                         let _external_template_programs = crate::runtime::parser_backend::wire::core_programs::externalize(self.has_template_parser());
                         let started = profile.then(std::time::Instant::now);
                         // `bincode::serialize` first runs `serialized_size` and
@@ -3648,12 +3644,6 @@ impl Constraint {
                         );
                         crate::automata::lexer::tokenizer::set_external_artifact_serde(
                             previous_external_tokenizer,
-                        );
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
-                            previous_packed_token_bytes,
-                        );
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_external(
-                            previous_external_token_bytes,
                         );
                         crate::compiler::glr::table::artifact_serde::set_external_serde(
                             previous_external_table,
@@ -4803,7 +4793,6 @@ impl Constraint {
             || -> Result<
                 (
                     DecodedConstraintCore,
-                    Option<std::sync::Arc<crate::runtime::artifact::token_bytes_artifact_serde::PackedTokenBytes>>,
                     Option<(
                         std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
                         Vec<u32>,
@@ -4825,16 +4814,6 @@ impl Constraint {
                     let previous_external_tokenizer =
                         crate::automata::lexer::tokenizer::set_external_artifact_serde(
                             true,
-                        );
-                    let previous_packed_token_bytes =
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
-                    let previous_external_token_bytes =
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_external(
-                            true,
-                        );
-                    let previous_defer_token_bytes =
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_defer_unpack(
-                            false,
                         );
                     let core_started = profile.then(std::time::Instant::now);
                     let decoded = {
@@ -4863,8 +4842,6 @@ impl Constraint {
                             Err("unsupported constraint core version".to_owned())
                         }
                     };
-                    let deferred_token_bytes =
-                        crate::runtime::artifact::token_bytes_artifact_serde::take_deferred();
                     let deferred_weight_ids = crate::ds::weight::take_pooled_weight_serde_deferred_ids();
                     if let Some(started) = core_started {
                         eprintln!("[glrmask/profile][constraint_section] name=core_bincode ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
@@ -4875,26 +4852,17 @@ impl Constraint {
                     crate::automata::lexer::tokenizer::set_external_artifact_serde(
                         previous_external_tokenizer,
                     );
-                    crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
-                        previous_packed_token_bytes,
-                    );
-                    crate::runtime::artifact::token_bytes_artifact_serde::set_external(
-                        previous_external_token_bytes,
-                    );
-                    crate::runtime::artifact::token_bytes_artifact_serde::set_defer_unpack(
-                        previous_defer_token_bytes,
-                    );
                     crate::compiler::glr::table::artifact_serde::set_external_serde(
                         previous_external_table,
                     );
                     crate::automata::weighted::dwa::set_external_serde(previous_external);
                     crate::ds::weight::end_pooled_weight_serde_decode();
                     decoded.map(|artifact| {
-                        (artifact, deferred_token_bytes, deferred_weight_ids)
+                        (artifact, deferred_weight_ids)
                     })
                 };
 
-                let (artifact, deferred_token_bytes, packed_weights) =
+                let (artifact, packed_weights) =
                     {
                         let weights_started = profile.then(std::time::Instant::now);
                         // WPL3 current-format runtime indexing is now only
@@ -4909,17 +4877,16 @@ impl Constraint {
                         if let Some(started) = weights_started {
                             eprintln!("[glrmask/profile][constraint_section] name=weights_packed ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                         }
-                        let (artifact, deferred_token_bytes, deferred_weight_ids) = decode_core()?;
+                        let (artifact, deferred_weight_ids) = decode_core()?;
                         (
                             artifact,
-                            deferred_token_bytes,
                             Some((std::sync::Arc::new(packed_weights), deferred_weight_ids)),
                         )
                     };
                 if let Some(started) = section_started {
                     eprintln!("[glrmask/profile][constraint_section] name=core_total ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                 }
-                Ok((artifact, deferred_token_bytes, packed_weights))
+                Ok((artifact, packed_weights))
             },
         );
         let parser_dwa = dwa_result.map_err(crate::Error::Serialization)?;
@@ -4933,7 +4900,7 @@ impl Constraint {
             internal_token_buf_masks_result.map_err(crate::Error::Serialization)?;
         let token_mask_cache =
             token_mask_cache_result.map_err(crate::Error::Serialization)?;
-        let (artifact, deferred_token_bytes, packed_weights) =
+        let (artifact, packed_weights) =
             core_result.map_err(crate::Error::Serialization)?;
         let token_bytes_started = profile.then(std::time::Instant::now);
         if !token_bytes_section.is_some_and(<[u8]>::is_empty) {
@@ -5020,11 +4987,7 @@ impl Constraint {
             constraint.internal_token_buf_masks = artifact.internal_token_buf_masks;
             constraint.backed_internal_token_buf_flat = None;
         }
-        constraint.packed_token_bytes = deferred_token_bytes;
         if let Some(vocab) = external_vocab {
-            if constraint.packed_token_bytes.is_some() || !constraint.token_bytes.is_empty() {
-                return Err(crate::Error::Serialization("external template core contains a duplicate vocabulary".into()));
-            }
             constraint.token_bytes = vocab.entries_arc();
         }
         Ok(DecodedNativeArtifactLoad {
