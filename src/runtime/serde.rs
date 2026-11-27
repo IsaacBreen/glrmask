@@ -3949,7 +3949,7 @@ impl Constraint {
             }
             debug_assert_eq!(pos, header.len());
 
-            let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(24);
+            let mut copy_jobs = Vec::<(&mut [u8], &[u8])>::with_capacity(24);
             let mut direct_tokenizer_destination = None;
             let mut direct_dwa_destination = None;
             let sources: [&[u8]; 11] = [
@@ -4012,20 +4012,12 @@ impl Constraint {
                             let count = chunk_size.min(source.len());
                             let (destination_chunk, destination_rest) = destination.split_at_mut(count);
                             let (source_chunk, source_rest) = source.split_at(count);
-                            copy_jobs.push((
-                                destination_chunk.as_mut_ptr() as usize,
-                                source_chunk.as_ptr() as usize,
-                                count,
-                            ));
+                            copy_jobs.push((destination_chunk, source_chunk));
                             destination = destination_rest;
                             source = source_rest;
                         }
                     } else {
-                        copy_jobs.push((
-                            section.as_mut_ptr() as usize,
-                            source.as_ptr() as usize,
-                            source.len(),
-                        ));
+                        copy_jobs.push((section, source));
                     }
                 }
                 body = rest;
@@ -4033,17 +4025,8 @@ impl Constraint {
             debug_assert!(body.is_empty());
             if rayon::current_num_threads() > 1 {
                 let copy_all = || {
-                    copy_jobs.into_par_iter().for_each(|(destination, source, len)| {
-                        // SAFETY: jobs were created from disjoint final-artifact
-                        // ranges. Source sections remain alive for the whole
-                        // join and never overlap the destination allocation.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                source as *const u8,
-                                destination as *mut u8,
-                                len,
-                            );
-                        }
+                    copy_jobs.into_par_iter().for_each(|(destination, source)| {
+                        destination.copy_from_slice(source);
                     });
                 };
                 let write_tokenizer = || {
@@ -4083,15 +4066,8 @@ impl Constraint {
                 };
                 rayon::join(copy_all, || rayon::join(write_dwa, write_tokenizer));
             } else {
-                for (destination, source, len) in copy_jobs {
-                    // SAFETY: same disjointness/liveness argument as above.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            source as *const u8,
-                            destination as *mut u8,
-                            len,
-                        );
-                    }
+                for (destination, source) in copy_jobs {
+                    destination.copy_from_slice(source);
                 }
                 if let Some(destination) = direct_tokenizer_destination {
                     crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes_with_layout(
