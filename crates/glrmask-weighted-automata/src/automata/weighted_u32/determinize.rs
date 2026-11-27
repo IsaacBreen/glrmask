@@ -7,7 +7,7 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::dwa::DWA;
@@ -37,85 +37,6 @@ struct WeightGroupedEdge {
 struct WeightGroupedTransitions {
     weight: Weight,
     edges: Vec<WeightGroupedEdge>,
-}
-
-#[derive(Debug)]
-enum PreparedDirectLabel {
-    Raw(i32, SmallVec<[(u32, Weight); 1]>),
-    Multi {
-        label: i32,
-        next_key: Vec<(u32, Weight)>,
-        edge_weight: Weight,
-        contribution_count: usize,
-        point_entries: bool,
-    },
-}
-
-fn prepare_direct_label_parallel(
-    nwa: &NWA,
-    direct_single_target_enabled: bool,
-    label: i32,
-    mut target_contributions: SmallVec<[(u32, Weight); 1]>,
-) -> PreparedDirectLabel {
-    if target_contributions.len() <= 1
-        || !direct_single_target_enabled
-        || !target_contributions.iter().all(|(dst, _)| {
-            nwa.states()
-                .get(*dst as usize)
-                .is_some_and(|state| state.epsilons.is_empty())
-        })
-    {
-        return PreparedDirectLabel::Raw(label, target_contributions);
-    }
-
-    let point_entries = target_contributions
-        .iter()
-        .all(|(_, weight)| weight.single_tsid_shared_entry().is_some());
-    let contribution_count = target_contributions.len();
-    if point_entries {
-        let (next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
-        return PreparedDirectLabel::Multi {
-            label,
-            next_key,
-            edge_weight,
-            contribution_count,
-            point_entries: true,
-        };
-    }
-
-    target_contributions.sort_unstable_by_key(|(dst, _)| *dst);
-    let mut next_key = Vec::<(u32, Weight)>::new();
-    let mut index = 0usize;
-    while index < target_contributions.len() {
-        let dst = target_contributions[index].0;
-        let mut end = index + 1;
-        while end < target_contributions.len() && target_contributions[end].0 == dst {
-            end += 1;
-        }
-        let combined = if end == index + 1 {
-            target_contributions[index].1.clone()
-        } else {
-            Weight::union_all(
-                target_contributions[index..end]
-                    .iter()
-                    .map(|(_, weight)| weight),
-            )
-        };
-        next_key.push((dst, combined));
-        index = end;
-    }
-    let edge_weight = if next_key.len() == 1 {
-        next_key[0].1.clone()
-    } else {
-        Weight::union_all(next_key.iter().map(|(_, weight)| weight))
-    };
-    PreparedDirectLabel::Multi {
-        label,
-        next_key,
-        edge_weight,
-        contribution_count,
-        point_entries: false,
-    }
 }
 
 fn build_weight_grouped_transitions(nwa: &NWA) -> Vec<Vec<WeightGroupedTransitions>> {
@@ -188,82 +109,16 @@ fn subset_final_weight(
     final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
     max_indexed_path_ranges: usize,
 ) -> Weight {
-    subset_entries.iter().fold(Weight::empty(), |final_weight, (state_id, path_weight)| {
-        let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
-            return final_weight;
-        };
-
-        final_weight.union(&final_weight_intersection(
-            path_weight,
-            state_final,
-            final_weight_indices,
-            max_indexed_path_ranges,
-        ))
-    })
-}
-
-#[derive(Default)]
-struct FinalWeightProfile {
-    subsets: usize,
-    subset_entries: usize,
-    final_entries: usize,
-    nonempty_contributions: usize,
-    max_final_entries: usize,
-    intersection_ms: f64,
-    union_ms: f64,
-}
-
-impl FinalWeightProfile {
-    fn merge(&mut self, other: Self) {
-        self.subsets += other.subsets;
-        self.subset_entries += other.subset_entries;
-        self.final_entries += other.final_entries;
-        self.nonempty_contributions += other.nonempty_contributions;
-        self.max_final_entries = self.max_final_entries.max(other.max_final_entries);
-        self.intersection_ms += other.intersection_ms;
-        self.union_ms += other.union_ms;
-    }
-}
-
-fn subset_final_weight_profiled(
-    nwa: &NWA,
-    subset_entries: &[(u32, Weight)],
-    final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
-    max_indexed_path_ranges: usize,
-) -> (Weight, FinalWeightProfile) {
-    let mut profile = FinalWeightProfile {
-        subsets: 1,
-        subset_entries: subset_entries.len(),
-        ..FinalWeightProfile::default()
-    };
-    let mut final_weight = Weight::empty();
-
-    for (state_id, path_weight) in subset_entries {
-        let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
-            continue;
-        };
-        profile.final_entries += 1;
-        profile.max_final_entries = profile.max_final_entries.max(profile.final_entries);
-
-        let intersection_started_at = Instant::now();
-        let contribution = final_weight_intersection(
-            path_weight,
-            state_final,
-            final_weight_indices,
-            max_indexed_path_ranges,
-        );
-        profile.intersection_ms += intersection_started_at.elapsed().as_secs_f64() * 1000.0;
-        if contribution.is_empty() {
-            continue;
+    let mut contributions = SmallVec::<[Weight; 4]>::new();
+    for (state, path) in subset_entries {
+        if let Some(final_weight) = nwa.states()[*state as usize].final_weight.as_ref() {
+            let contribution = final_weight_intersection(path, final_weight,
+                final_weight_indices, max_indexed_path_ranges);
+            if contribution.is_full() { return contribution; }
+            if !contribution.is_empty() { contributions.push(contribution); }
         }
-        profile.nonempty_contributions += 1;
-
-        let union_started_at = Instant::now();
-        final_weight = final_weight.union(&contribution);
-        profile.union_ms += union_started_at.elapsed().as_secs_f64() * 1000.0;
     }
-
-    (final_weight, profile)
+    Weight::union_all(contributions.iter())
 }
 
 fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
@@ -543,47 +398,150 @@ fn aggregate_direct_point_entries(
     (next_key, edge_weight)
 }
 
-fn intern_determinized_subset(
-    next_key: Vec<(u32, Weight)>,
-    subset_map: &mut FxHashMap<Arc<[(u32, Weight)]>, u32>,
-    worklist: &mut VecDeque<(u32, Arc<[(u32, Weight)]>)>,
-    dwa: &mut DWA,
-) -> u32 {
-    if let Some(existing) = subset_map.get(next_key.as_slice()).copied() {
-        return existing;
-    }
+type WeightedSubset = SmallVec<[(u32, Weight); 1]>;
 
-    let new_id = dwa.add_state();
-    let shared_key: Arc<[(u32, Weight)]> = next_key.into();
-    subset_map.insert(Arc::clone(&shared_key), new_id);
-    worklist.push_back((new_id, shared_key));
-    new_id
+struct PreparedLabel {
+    edge_weight: Weight,
+    subset: WeightedSubset,
 }
 
-/// Intern a one-entry subset through a pointer-identity front cache. The
-/// structural `subset_map` remains authoritative on every cache miss.
-fn intern_determinized_singleton(
-    dst: u32,
-    weight: &Weight,
-    singleton_subsets: &mut FxHashMap<(u32, usize), u32>,
-    subset_map: &mut FxHashMap<Arc<[(u32, Weight)]>, u32>,
-    worklist: &mut VecDeque<(u32, Arc<[(u32, Weight)]>)>,
-    dwa: &mut DWA,
-) -> (u32, bool) {
-    let singleton_key = (dst, weight.ptr_key());
-    if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
-        return (existing, true);
+fn canonicalize(subset: FxHashMap<u32, Weight>) -> WeightedSubset {
+    let mut entries: WeightedSubset = subset.into_iter()
+        .filter(|(_, weight)| !weight.is_empty()).collect();
+    entries.sort_unstable_by_key(|(state, _)| *state);
+    entries
+}
+
+fn epsilon_closure(nwa: &NWA, mut closure: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
+    if closure.len() == 1 && nwa.states()[*closure.keys().next().unwrap() as usize].epsilons.is_empty() {
+        return closure;
+    }
+    let mut queue: VecDeque<u32> = closure.keys().copied().collect();
+    while let Some(state) = queue.pop_front() {
+        let weight = closure[&state].clone();
+        for (target, epsilon) in &nwa.states()[state as usize].epsilons {
+            let contribution = weight.intersection(epsilon);
+            if contribution.is_empty() { continue; }
+            match closure.entry(*target) {
+                HashMapEntry::Vacant(entry) => { entry.insert(contribution); }
+                HashMapEntry::Occupied(mut entry) => {
+                    if contribution.is_subset(entry.get()) { continue; }
+                    *entry.get_mut() = entry.get().union(&contribution);
+                }
+            }
+            queue.push_back(*target);
+        }
+    }
+    closure
+}
+
+/// The exact label image is the union of contributions at each destination.
+/// The edge weight records their total domain; the subset describes residual
+/// behavior on that domain. Direct epsilon-free singleton normalization is
+/// an explicit representation policy, independent of the work schedule.
+fn prepare_label(
+    nwa: &NWA,
+    mut contributions: WeightedSubset,
+    direct_enabled: bool,
+    normalize_singletons: bool,
+) -> Option<PreparedLabel> {
+    if contributions.is_empty() { return None; }
+    let direct = direct_enabled && contributions.iter()
+        .all(|(dst, _)| nwa.states()[*dst as usize].epsilons.is_empty());
+    let (mut subset, edge_weight) = if contributions.len() == 1 {
+        let edge_weight = contributions[0].1.clone();
+        (contributions, edge_weight)
+    } else if direct && contributions.iter()
+        .all(|(_, weight)| weight.single_tsid_shared_entry().is_some()) {
+        let (entries, edge) = aggregate_direct_point_entries(contributions);
+        (SmallVec::from_vec(entries), edge)
+    } else {
+        contributions.sort_unstable_by_key(|(dst, _)| *dst);
+        let mut entries = WeightedSubset::new();
+        let mut start = 0;
+        while start < contributions.len() {
+            let dst = contributions[start].0;
+            let mut end = start + 1;
+            while end < contributions.len() && contributions[end].0 == dst { end += 1; }
+            let weight = if end == start + 1 {
+                contributions[start].1.clone()
+            } else {
+                Weight::union_all(contributions[start..end].iter().map(|(_, weight)| weight))
+            };
+            if !weight.is_empty() { entries.push((dst, weight)); }
+            start = end;
+        }
+        let edge = Weight::union_all(entries.iter().map(|(_, weight)| weight));
+        (entries, edge)
+    };
+    if edge_weight.is_empty() { return None; }
+    if direct {
+        if normalize_singletons && subset.len() == 1 {
+            subset[0].1 = Weight::all();
+        }
+    } else {
+        let closure = epsilon_closure(nwa, subset.into_iter().collect());
+        let complement = edge_weight.complement();
+        subset = if complement.is_empty() {
+            canonicalize(closure)
+        } else {
+            // Outside the incoming edge domain the residual is don't-care.
+            // Preserve the historical normalized generic subset semantics.
+            canonicalize(closure.into_iter().map(|(state, weight)| {
+                (state, weight.union(&complement))
+            }).collect())
+        };
+    }
+    (!subset.is_empty()).then_some(PreparedLabel { edge_weight, subset })
+}
+
+/// One exact structural interner, with the common one-entry subset indexed
+/// by pointer identity. Retain the weight in the front-cache value even
+/// when a structurally equal key was already interned under another pointer.
+struct SubsetInterner {
+    keys: Vec<Arc<[(u32, Weight)]>>,
+    by_key: FxHashMap<Arc<[(u32, Weight)]>, u32>,
+    singleton: FxHashMap<(u32, usize), (Weight, u32)>,
+}
+
+impl SubsetInterner {
+    fn new(start: WeightedSubset) -> Self {
+        let start: Arc<[(u32, Weight)]> = start.into_vec().into();
+        let mut by_key = FxHashMap::default();
+        by_key.insert(Arc::clone(&start), 0);
+        Self { keys: vec![start], by_key, singleton: FxHashMap::default() }
     }
 
-    let state = intern_determinized_subset(
-        vec![(dst, weight.clone())],
-        subset_map,
-        worklist,
-        dwa,
-    );
-    singleton_subsets.insert(singleton_key, state);
-    (state, false)
+    fn intern(&mut self, key: WeightedSubset, dwa: &mut DWA) -> u32 {
+        let single = match key.as_slice() {
+            [(state, weight)] => Some(((*state, weight.ptr_key()), weight.clone())),
+            _ => None,
+        };
+        if let Some((pointer, _)) = &single {
+            if let Some((_, existing)) = self.singleton.get(pointer) { return *existing; }
+        }
+        let id = if let Some(&existing) = self.by_key.get(key.as_slice()) {
+            existing
+        } else {
+            let id = dwa.add_state();
+            debug_assert_eq!(id as usize, self.keys.len());
+            let key: Arc<[(u32, Weight)]> = key.into_vec().into();
+            self.by_key.insert(Arc::clone(&key), id);
+            self.keys.push(key);
+            id
+        };
+        if let Some((pointer, weight)) = single {
+            self.singleton.insert(pointer, (weight, id));
+        }
+        id
+    }
+
+    fn emit(&mut self, dwa: &mut DWA, from: u32, label: i32, prepared: PreparedLabel) {
+        let to = self.intern(prepared.subset, dwa);
+        dwa.add_transition(from, label, to, prepared.edge_weight);
+    }
 }
+
 
 fn determinize_profile_enabled() -> bool {
     std::env::var("GLRMASK_PROFILE_DETERMINIZE")
@@ -683,836 +641,131 @@ fn determinize_impl_with_options(
             "weighted determinization currently supports only acyclic NWAs".into(),
         ));
     }
-
-    let weight_group_build_started_at = profile.then(Instant::now);
-    let weight_grouped_transitions = group_transition_weights.then(|| build_weight_grouped_transitions(nwa));
-    let weight_group_build_ms = weight_group_build_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
-        let mut entries: Vec<_> = subset
-            .iter()
-            .filter_map(|(&state_id, weight)| (!weight.is_empty()).then_some((state_id, weight.clone())))
-            .collect();
-        entries.sort_by_key(|(state_id, _)| *state_id);
-        entries
-    }
-
-    fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
-        // Fast path: single-state seed with no epsilon transitions (99.6% of calls)
-        if seed.len() == 1 {
-            let (&state_id, _) = seed.iter().next().unwrap();
-            if let Some(state) = nwa.states().get(state_id as usize)
-                && state.epsilons.is_empty() {
-                    return seed;
-                }
-        }
-
-        let mut closure = seed;
-        let mut queue: VecDeque<u32> = closure.keys().copied().collect();
-
-        while let Some(state_id) = queue.pop_front() {
-            let Some(current_weight) = closure.get(&state_id).cloned() else {
-                continue;
-            };
-            let Some(state) = nwa.states().get(state_id as usize) else {
-                continue;
-            };
-            for (dst, edge_weight) in &state.epsilons {
-                let contribution = current_weight.intersection(edge_weight);
-                if contribution.is_empty() {
-                    continue;
-                }
-                let existing = closure.get(dst).cloned().unwrap_or_else(Weight::empty);
-                if !contribution.is_subset(&existing) {
-                    closure.insert(*dst, existing.union(&contribution));
-                    queue.push_back(*dst);
-                }
-            }
-        }
-
-        closure
-    }
-
+    let started = Instant::now();
+    let grouped = group_transition_weights.then(|| build_weight_grouped_transitions(nwa));
     let mut dwa = DWA::new(0, 0);
-    let start_id = dwa.start_state();
+    let start = canonicalize(epsilon_closure(nwa, seed_start_subset(nwa)));
+    if start.is_empty() { return Ok(dwa); }
+    let mut subsets = SubsetInterner::new(start);
+    let mut next_pending = 0usize;
+    let mut raw_targets = FxHashMap::<i32, WeightedSubset>::default();
+    let mut cache = ScopedWeightOpCache::default();
 
-    let start_subset = epsilon_closure(nwa, seed_start_subset(nwa));
-
-    if start_subset.is_empty() {
-        return Ok(dwa);
-    }
-
-    let mut subset_map: FxHashMap<Arc<[(u32, Weight)]>, u32> = FxHashMap::default();
-    // This is an identity-only front cache. A miss always falls back through
-    // `subset_map`, which retains structural equality as the source of truth.
-    let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
-    let normalized_singleton_weight = Weight::all();
-    let mut worklist: VecDeque<(u32, Arc<[(u32, Weight)]>)> = VecDeque::new();
-    let start_entries: Arc<[(u32, Weight)]> = canonicalize(&start_subset).into();
-    subset_map.insert(Arc::clone(&start_entries), start_id);
-    worklist.push_back((start_id, start_entries));
-
-    // Almost every label has one surviving destination. Keep that common
-    // case inline instead of allocating a nested hash map and a Vec per label.
-    let mut raw_targets: FxHashMap<i32, SmallVec<[(u32, Weight); 1]>> = FxHashMap::default();
-    // All operands in the expansion loop remain owned by the NWA or subset_map
-    // for the lifetime of this determinization, so a local exact cache avoids
-    // thread-local memo overhead on the heavily reused intersection pairs.
-    let mut scoped_determinize_weight_cache = ScopedWeightOpCache::default();
-    let mut profile_subset_entries = 0usize;
-    let mut profile_max_subset_entries = 0usize;
-    let mut profile_raw_transition_visits = 0usize;
-    let mut profile_weight_group_visits = 0usize;
-    let mut profile_labels = 0usize;
-    let mut profile_target_contributions = 0usize;
-    let mut profile_single_contribution_labels = 0usize;
-    let mut profile_single_contribution_no_epsilon_labels = 0usize;
-    let mut profile_direct_single_target_labels = 0usize;
-    let mut profile_direct_singleton_cache_hits = 0usize;
-    let mut profile_direct_singleton_cache_misses = 0usize;
-    let mut profile_direct_singleton_fast_path_groups = 0usize;
-    let mut profile_direct_singleton_fast_path_labels = 0usize;
-    let mut profile_multi_contribution_single_target_no_epsilon_labels = 0usize;
-    let mut profile_multi_contribution_single_target_no_epsilon_contributions = 0usize;
-    let mut profile_direct_multi_target_labels = 0usize;
-    let mut profile_multi_contribution_all_no_epsilon_labels = 0usize;
-    let mut profile_multi_contribution_all_no_epsilon_contributions = 0usize;
-    let mut profile_expand_ms = 0.0;
-    let mut profile_combine_ms = 0.0;
-    let mut profile_edge_union_ms = 0.0;
-    let mut profile_closure_ms = 0.0;
-    let mut profile_normalize_ms = 0.0;
-    let mut profile_canonicalize_ms = 0.0;
-    let mut profile_subset_lookup_ms = 0.0;
-    let mut profile_direct_point_aggregate_ms = 0.0;
-    let mut profile_direct_point_aggregate_labels = 0usize;
-    let mut profile_direct_point_aggregate_contributions = 0usize;
-    let mut profile_direct_general_aggregate_ms = 0.0;
-    let mut profile_direct_general_single_dst_labels = 0usize;
-    let mut profile_direct_general_single_dst_contributions = 0usize;
-
-    // A large ready frontier benefits from preparing label aggregations in
-    // parallel, but forcing waves on tiny NWAs disables the very cheap direct
-    // singleton path and can be a net loss.  Make the proven large-NWA path
-    // automatic while retaining the historical force-on knob and an explicit
-    // production kill switch.
-    let parallel_direct_waves_forced =
-        std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some();
-    let parallel_direct_waves_disabled =
-        std::env::var_os("GLRMASK_DISABLE_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some();
-    let parallel_direct_waves = !parallel_direct_waves_disabled
+    // Schedule ready subsets in waves when there is enough independent work.
+    // Both the direct emission and batched paths use exactly prepare_label.
+    let parallel_waves = std::env::var_os("GLRMASK_DISABLE_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_none()
         && rayon::current_num_threads() > 1
-        && (parallel_direct_waves_forced || nwa.states().len() >= 128);
-    let wave_max = std::env::var("GLRMASK_DETERMINIZE_WAVE_MAX")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(1_000);
+        && (std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some()
+            || nwa.states().len() >= 128);
+    let parallel_labels = rayon::current_num_threads() > 1
+        && (parallel_waves || std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_LABELS").is_some());
+    let wave_max = std::env::var("GLRMASK_DETERMINIZE_WAVE_MAX").ok()
+        .and_then(|v| v.trim().parse::<usize>().ok()).filter(|&v| v > 0).unwrap_or(1_000);
+    let mut transition_visits = 0usize;
+    let mut group_visits = 0usize;
+    let mut direct_labels = 0usize;
+    let mut contributions = 0usize;
+    let mut max_subset_entries = 0usize;
 
-    while !worklist.is_empty() {
-        // Only states already discovered at wave start are expanded. Newly
-        // interned states are deferred to the next wave, preserving the exact
-        // fixed point while exposing aggregation work across the whole ready
-        // frontier.
-        let wave_len = if parallel_direct_waves {
-            worklist.len().min(wave_max)
+    while next_pending < subsets.keys.len() {
+        let end = if parallel_waves {
+            subsets.keys.len().min(next_pending.saturating_add(wave_max))
         } else {
-            1
+            next_pending + 1
         };
-        let mut raw_target_batches = Vec::new();
-        for _ in 0..wave_len {
-            let Some((from_state, subset_entries)) = worklist.pop_front() else {
-                break;
-            };
-            if profile {
-                profile_subset_entries += subset_entries.len();
-                profile_max_subset_entries = profile_max_subset_entries.max(subset_entries.len());
-            }
-            // Final weight computation is deferred to after the main loop
-            // and parallelized across all states.
-            let expand_started_at = profile.then(Instant::now);
-
-            if let Some(weight_grouped_transitions) = &weight_grouped_transitions {
-                if direct_single_target_enabled
-                    && subset_entries.len() == 1
-                    && !parallel_direct_waves
-                {
-                    let (nwa_state_id, path_weight) = &subset_entries[0];
-                    for group in &weight_grouped_transitions[*nwa_state_id as usize] {
+        let mut batches = Vec::new();
+        while next_pending < end {
+            let from = next_pending as u32;
+            let subset = Arc::clone(&subsets.keys[next_pending]);
+            next_pending += 1;
+            let inline = direct_single_target_enabled && subset.len() == 1 && !parallel_waves;
+            if profile { max_subset_entries = max_subset_entries.max(subset.len()); }
+            if let Some(grouped) = &grouped {
+                for (state, path) in subset.iter() {
+                    for group in &grouped[*state as usize] {
                         if profile {
-                            profile_weight_group_visits += 1;
-                            profile_raw_transition_visits += group.edges.len();
+                            group_visits += 1;
+                            transition_visits += group.edges.len();
                         }
-                        let next_weight = scoped_determinize_weight_cache
-                            .intersection(path_weight, &group.weight);
-                        if next_weight.is_empty() {
-                            continue;
-                        }
-
-                        let mut emitted_direct_singleton = false;
+                        let contribution = cache.intersection(path, &group.weight);
+                        if contribution.is_empty() { continue; }
                         for edge in &group.edges {
-                            if edge.direct_singleton {
-                                emitted_direct_singleton = true;
-                                if profile {
-                                    profile_labels += 1;
-                                    profile_target_contributions += 1;
-                                    profile_single_contribution_labels += 1;
-                                    profile_single_contribution_no_epsilon_labels += 1;
-                                    profile_direct_single_target_labels += 1;
-                                    profile_direct_singleton_fast_path_labels += 1;
-                                }
-                                let subset_lookup_started_at = profile.then(Instant::now);
-                                let (to_state, cache_hit) = intern_determinized_singleton(
-                                    edge.dst,
-                                    if normalize_direct_singletons {
-                                        &normalized_singleton_weight
-                                    } else {
-                                        &next_weight
-                                    },
-                                    &mut singleton_subsets,
-                                    &mut subset_map,
-                                    &mut worklist,
-                                    &mut dwa,
-                                );
-                                if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                                    profile_subset_lookup_ms +=
-                                        subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                                }
-                                if profile {
-                                    if cache_hit {
-                                        profile_direct_singleton_cache_hits += 1;
-                                    } else {
-                                        profile_direct_singleton_cache_misses += 1;
-                                    }
-                                }
-                                dwa.add_transition(from_state, edge.label, to_state, next_weight.clone());
+                            if profile { contributions += 1; }
+                            if inline && edge.direct_singleton {
+                                // A unique source label cannot receive any
+                                // other contribution in this subset.
+                                let prepared = prepare_label(nwa,
+                                    smallvec::smallvec![(edge.dst, contribution.clone())],
+                                    direct_single_target_enabled, normalize_direct_singletons,
+                                ).expect("nonempty direct singleton");
+                                subsets.emit(&mut dwa, from, edge.label, prepared);
+                                if profile { direct_labels += 1; }
                             } else {
-                                raw_targets
-                                    .entry(edge.label)
-                                    .or_default()
-                                    .push((edge.dst, next_weight.clone()));
-                            }
-                        }
-                        if emitted_direct_singleton && profile {
-                            profile_direct_singleton_fast_path_groups += 1;
-                        }
-                    }
-                } else {
-                    for (nwa_state_id, path_weight) in subset_entries.iter() {
-                        for group in &weight_grouped_transitions[*nwa_state_id as usize] {
-                            if profile {
-                                profile_weight_group_visits += 1;
-                                profile_raw_transition_visits += group.edges.len();
-                            }
-                            let next_weight = scoped_determinize_weight_cache
-                                .intersection(path_weight, &group.weight);
-                            if next_weight.is_empty() {
-                                continue;
-                            }
-                            for edge in &group.edges {
-                                raw_targets
-                                    .entry(edge.label)
-                                    .or_default()
-                                    .push((edge.dst, next_weight.clone()));
+                                raw_targets.entry(edge.label).or_default()
+                                    .push((edge.dst, contribution.clone()));
                             }
                         }
                     }
                 }
             } else {
-                for (nwa_state_id, path_weight) in subset_entries.iter() {
-                    let state = &nwa.states()[*nwa_state_id as usize];
-                    for (&label, targets) in &state.transitions {
-                        for (dst, trans_weight) in targets {
-                            if profile {
-                                profile_raw_transition_visits += 1;
+                for (state, path) in subset.iter() {
+                    for (&label, targets) in &nwa.states()[*state as usize].transitions {
+                        for (target, weight) in targets {
+                            if profile { transition_visits += 1; }
+                            let contribution = cache.intersection(path, weight);
+                            if !contribution.is_empty() {
+                                if profile { contributions += 1; }
+                                raw_targets.entry(label).or_default().push((*target, contribution));
                             }
-                            let next_weight = scoped_determinize_weight_cache
-                                .intersection(path_weight, trans_weight);
-                            if next_weight.is_empty() {
-                                continue;
-                            }
-                            raw_targets.entry(label).or_default().push((*dst, next_weight));
                         }
                     }
                 }
             }
-
-            if let Some(expand_started_at) = expand_started_at {
-                profile_expand_ms += expand_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-
-            raw_target_batches.extend(
-                raw_targets
-                    .drain()
-                    .map(|(label, contributions)| (from_state, label, contributions)),
-            );
+            batches.extend(raw_targets.drain().map(|(label, targets)| (from, label, targets)));
         }
-
-        let parallel_direct_labels =
-            (parallel_direct_waves
-                || std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_LABELS").is_some())
-                && raw_target_batches.len() >= 2
-                && rayon::current_num_threads() > 1;
-        let prepared_labels = if parallel_direct_labels {
-            raw_target_batches
-                .into_par_iter()
-                .map(|(from_state, label, contributions)| {
-                    (
-                        from_state,
-                        prepare_direct_label_parallel(
-                            nwa,
-                            direct_single_target_enabled,
-                            label,
-                            contributions,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
-        } else {
-            raw_target_batches
-                .into_iter()
-                .map(|(from_state, label, contributions)| {
-                    (from_state, PreparedDirectLabel::Raw(label, contributions))
-                })
-                .collect::<Vec<_>>()
+        let prepare = |(from, label, targets)| {
+            prepare_label(nwa, targets, direct_single_target_enabled, normalize_direct_singletons)
+                .map(|prepared| (from, label, prepared))
         };
-
-        for (from_state, prepared_label) in prepared_labels {
-            if let PreparedDirectLabel::Multi {
-                label,
-                next_key,
-                edge_weight,
-                contribution_count,
-                point_entries,
-            } = prepared_label
-            {
-                if profile {
-                    profile_labels += 1;
-                    profile_target_contributions += contribution_count;
-                    profile_multi_contribution_all_no_epsilon_labels += 1;
-                    profile_multi_contribution_all_no_epsilon_contributions += contribution_count;
-                    if next_key.len() == 1 {
-                        profile_multi_contribution_single_target_no_epsilon_labels += 1;
-                        profile_multi_contribution_single_target_no_epsilon_contributions +=
-                            contribution_count;
-                    }
-                    if !point_entries {
-                        profile_direct_multi_target_labels += 1;
-                    }
-                }
-                debug_assert!(!edge_weight.is_empty());
-                let subset_lookup_started_at = profile.then(Instant::now);
-                let to_state = intern_determinized_subset(
-                    next_key,
-                    &mut subset_map,
-                    &mut worklist,
-                    &mut dwa,
-                );
-                if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                    profile_subset_lookup_ms +=
-                        subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                }
-                dwa.add_transition(from_state, label, to_state, edge_weight);
-                continue;
+        // Preserve batch order when publishing, regardless of which workers
+        // finished first. Newly interned subsets join the next ready wave.
+        if parallel_labels && batches.len() >= 2 {
+            let prepared = batches.into_par_iter().map(prepare).collect::<Vec<_>>();
+            for (from, label, prepared) in prepared.into_iter().flatten() {
+                subsets.emit(&mut dwa, from, label, prepared);
             }
-            let PreparedDirectLabel::Raw(label, target_contributions) = prepared_label else {
-                unreachable!();
-            };
-            if profile {
-                profile_labels += 1;
-                profile_target_contributions += target_contributions.len();
-                if target_contributions.len() == 1 {
-                    profile_single_contribution_labels += 1;
-                    let (dst, _) = &target_contributions[0];
-                    if nwa
-                        .states()
-                        .get(*dst as usize)
-                        .is_some_and(|state| state.epsilons.is_empty())
-                    {
-                        profile_single_contribution_no_epsilon_labels += 1;
-                    }
-                } else {
-                    let dst = target_contributions[0].0;
-                    let all_no_epsilon = target_contributions.iter().all(|(candidate, _)| {
-                        nwa
-                            .states()
-                            .get(*candidate as usize)
-                            .is_some_and(|state| state.epsilons.is_empty())
-                    });
-                    if all_no_epsilon {
-                        profile_multi_contribution_all_no_epsilon_labels += 1;
-                        profile_multi_contribution_all_no_epsilon_contributions +=
-                            target_contributions.len();
-                    }
-                    if target_contributions.iter().all(|(candidate, _)| *candidate == dst)
-                        && all_no_epsilon
-                    {
-                        profile_multi_contribution_single_target_no_epsilon_labels += 1;
-                        profile_multi_contribution_single_target_no_epsilon_contributions +=
-                            target_contributions.len();
-                    }
-                }
+        } else {
+            for (from, label, prepared) in batches.into_iter().filter_map(prepare) {
+                subsets.emit(&mut dwa, from, label, prepared);
             }
-            if target_contributions.is_empty() {
-                continue;
-            }
-
-            let direct_no_epsilon_targets = direct_single_target_enabled
-                && target_contributions.iter().all(|(dst, _)| {
-                    nwa
-                        .states()
-                        .get(*dst as usize)
-                        .is_some_and(|state| state.epsilons.is_empty())
-                });
-            if direct_no_epsilon_targets {
-                if target_contributions.len() == 1 {
-                    if profile {
-                        profile_direct_single_target_labels += 1;
-                    }
-                    let (dst, edge_weight) = target_contributions.into_iter().next().unwrap();
-                    let subset_lookup_started_at = profile.then(Instant::now);
-                    let (to_state, cache_hit) = intern_determinized_singleton(
-                        dst,
-                        if normalize_direct_singletons {
-                            &normalized_singleton_weight
-                        } else {
-                            &edge_weight
-                        },
-                        &mut singleton_subsets,
-                        &mut subset_map,
-                        &mut worklist,
-                        &mut dwa,
-                    );
-                    if profile {
-                        if cache_hit {
-                            profile_direct_singleton_cache_hits += 1;
-                        } else {
-                            profile_direct_singleton_cache_misses += 1;
-                        }
-                    }
-                    if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                        profile_subset_lookup_ms +=
-                            subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                    }
-                    dwa.add_transition(from_state, label, to_state, edge_weight);
-                    continue;
-                }
-
-                let direct_point_entries = target_contributions
-                    .iter()
-                    .all(|(_, weight)| weight.single_tsid_shared_entry().is_some());
-                if direct_point_entries {
-                    let contribution_count = target_contributions.len();
-                    let direct_point_started_at = profile.then(Instant::now);
-                    let (mut next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
-                    if normalize_direct_singletons && next_key.len() == 1 {
-                        next_key[0].1 = normalized_singleton_weight.clone();
-                    }
-                    if let Some(started_at) = direct_point_started_at {
-                        profile_direct_point_aggregate_ms +=
-                            started_at.elapsed().as_secs_f64() * 1000.0;
-                        profile_direct_point_aggregate_labels += 1;
-                        profile_direct_point_aggregate_contributions += contribution_count;
-                    }
-                    debug_assert!(!edge_weight.is_empty());
-                    let subset_lookup_started_at = profile.then(Instant::now);
-                    let to_state = intern_determinized_subset(
-                        next_key,
-                        &mut subset_map,
-                        &mut worklist,
-                        &mut dwa,
-                    );
-                    if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                        profile_subset_lookup_ms +=
-                            subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                    }
-                    dwa.add_transition(from_state, label, to_state, edge_weight);
-                    continue;
-                }
-
-                if profile {
-                    profile_direct_multi_target_labels += 1;
-                }
-
-                // Exact common case: every contribution lands in the same NWA
-                // destination. The determinized subset then contains exactly one
-                // entry and its path weight is also the transition edge weight.
-                // Build that union once instead of repeatedly unioning by
-                // destination and then unioning the destination weights again.
-                let single_destination = target_contributions
-                    .first()
-                    .map(|(dst, _)| *dst)
-                    .filter(|&dst| {
-                        target_contributions
-                            .iter()
-                            .all(|(candidate, _)| *candidate == dst)
-                    });
-                if let Some(dst) = single_destination {
-                    let contribution_count = target_contributions.len();
-                    let aggregate_started_at = profile.then(Instant::now);
-                    let edge_weight = Weight::union_all(
-                        target_contributions.iter().map(|(_, weight)| weight),
-                    );
-                    if let Some(started_at) = aggregate_started_at {
-                        profile_direct_general_aggregate_ms +=
-                            started_at.elapsed().as_secs_f64() * 1000.0;
-                        profile_direct_general_single_dst_labels += 1;
-                        profile_direct_general_single_dst_contributions += contribution_count;
-                    }
-                    debug_assert!(!edge_weight.is_empty());
-                    let subset_lookup_started_at = profile.then(Instant::now);
-                    let to_state = intern_determinized_subset(
-                        vec![(
-                            dst,
-                            if normalize_direct_singletons {
-                                normalized_singleton_weight.clone()
-                            } else {
-                                edge_weight.clone()
-                            },
-                        )],
-                        &mut subset_map,
-                        &mut worklist,
-                        &mut dwa,
-                    );
-                    if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                        profile_subset_lookup_ms +=
-                            subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                    }
-                    dwa.add_transition(from_state, label, to_state, edge_weight);
-                    continue;
-                }
-
-                let direct_general_started_at = profile.then(Instant::now);
-                let mut sorted_targets = target_contributions;
-                sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
-                let mut next_key: Vec<(u32, Weight)> =
-                    Vec::with_capacity(sorted_targets.len());
-                for (dst, weight) in sorted_targets {
-                    if let Some((last_dst, last_weight)) = next_key.last_mut()
-                        && *last_dst == dst {
-                            *last_weight = last_weight.union(&weight);
-                            continue;
-                        }
-                    next_key.push((dst, weight));
-                }
-                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
-                if let Some(started_at) = direct_general_started_at {
-                    profile_direct_general_aggregate_ms +=
-                        started_at.elapsed().as_secs_f64() * 1000.0;
-                }
-                debug_assert!(!edge_weight.is_empty());
-
-                let subset_lookup_started_at = profile.then(Instant::now);
-                let to_state = intern_determinized_subset(
-                    next_key,
-                    &mut subset_map,
-                    &mut worklist,
-                    &mut dwa,
-                );
-                if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                    profile_subset_lookup_ms +=
-                        subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-                }
-                dwa.add_transition(from_state, label, to_state, edge_weight);
-                continue;
-            }
-
-            let combine_started_at = profile.then(Instant::now);
-            let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
-            if target_contributions.len() == 1 {
-                let (dst, weight) = target_contributions.into_iter().next().unwrap();
-                target_subset.insert(dst, weight);
-            } else {
-                // Keep the first contribution per destination in the compact
-                // target map. On the first repeat, move that destination's
-                // operands into a side bucket and union them once at the end.
-                // This preserves the exact subset construction while avoiding
-                // quadratic growth from repeatedly rebuilding wide weights.
-                let mut duplicate_weights: Option<FxHashMap<u32, SmallVec<[Weight; 2]>>> = None;
-                for (dst, weight) in target_contributions {
-                    if let Some(duplicates) = duplicate_weights.as_mut()
-                        && let Some(weights) = duplicates.get_mut(&dst) {
-                            weights.push(weight);
-                            continue;
-                        }
-
-                    match target_subset.entry(dst) {
-                        HashMapEntry::Vacant(vacant) => {
-                            vacant.insert(weight);
-                        }
-                        HashMapEntry::Occupied(occupied) => {
-                            let previous = occupied.remove();
-                            let mut weights = SmallVec::<[Weight; 2]>::new();
-                            weights.push(previous);
-                            weights.push(weight);
-                            let duplicates = duplicate_weights.get_or_insert_with(FxHashMap::default);
-                            let replaced = duplicates.insert(dst, weights);
-                            debug_assert!(replaced.is_none());
-                        }
-                    }
-                }
-                if let Some(duplicates) = duplicate_weights {
-                    for (dst, weights) in duplicates {
-                        target_subset.insert(dst, Weight::union_all(weights.iter()));
-                    }
-                }
-            }
-
-            if let Some(combine_started_at) = combine_started_at {
-                profile_combine_ms += combine_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            if target_subset.is_empty() {
-                continue;
-            }
-
-            let edge_union_started_at = profile.then(Instant::now);
-            let edge_weight = Weight::union_all(target_subset.values());
-            if let Some(edge_union_started_at) = edge_union_started_at {
-                profile_edge_union_ms += edge_union_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            if edge_weight.is_empty() {
-                continue;
-            }
-
-            let closure_started_at = profile.then(Instant::now);
-            let expanded = epsilon_closure(nwa, target_subset);
-            if let Some(closure_started_at) = closure_started_at {
-                profile_closure_ms += closure_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            if expanded.is_empty() {
-                continue;
-            }
-
-            let normalize_started_at = profile.then(Instant::now);
-            let edge_complement = edge_weight.complement();
-            let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
-                expanded
-            } else {
-                expanded
-                    .into_iter()
-                    .filter_map(|(state_id, weight)| {
-                        let normalized_weight = weight.union(&edge_complement);
-                        (!normalized_weight.is_empty()).then_some((state_id, normalized_weight))
-                    })
-                    .collect()
-            };
-            if let Some(normalize_started_at) = normalize_started_at {
-                profile_normalize_ms += normalize_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            let canonicalize_started_at = profile.then(Instant::now);
-            let next_key = canonicalize(&normalized);
-            if let Some(canonicalize_started_at) = canonicalize_started_at {
-                profile_canonicalize_ms += canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            if next_key.is_empty() {
-                continue;
-            }
-            let subset_lookup_started_at = profile.then(Instant::now);
-            let to_state = intern_determinized_subset(
-                next_key,
-                &mut subset_map,
-                &mut worklist,
-                &mut dwa,
-            );
-            if let Some(subset_lookup_started_at) = subset_lookup_started_at {
-                profile_subset_lookup_ms += subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-
-            dwa.add_transition(from_state, label, to_state, edge_weight);
         }
     }
 
-    if profile {
-        eprintln!(
-            "[glrmask/profile][determinize_scoped_weight_cache] intersections={}",
-            scoped_determinize_weight_cache.intersection_entry_count(),
-        );
-    }
-
-    // Compute final weights in parallel after the main loop.
-    // The subset_map already stores all (entries, state_id) pairs.
-    // Sparse path weights recur against a few wide final weights. Index those
-    // wide maps once so each sparse range can seek directly to its overlaps.
-    let final_weight_indices: FxHashMap<usize, WeightIntersectionIndex> = nwa
-        .states()
-        .iter()
+    // Final weights are a second independent reduction of the same residual
+    // subset; no alternate profiled evaluator or duplicate subset traversal.
+    let final_weight_indices: FxHashMap<usize, WeightIntersectionIndex> = nwa.states().iter()
         .filter_map(|state| state.final_weight.as_ref())
         .filter(|weight| weight.outer_range_count() >= MIN_INDEXED_FINAL_WEIGHT_RANGES)
-        .map(|weight| (weight.ptr_key(), weight.intersection_index()))
-        .collect();
-    let final_weights_started_at = profile.then(Instant::now);
-    let mut final_weight_profile = FinalWeightProfile::default();
-    let final_weights: Vec<(u32, Weight)> = if profile {
-        let profiled: Vec<(u32, Weight, FinalWeightProfile)> = subset_map
-            .par_iter()
-            .map(|(entries, &state_id)| {
-                let (fw, stats) = subset_final_weight_profiled(
-                    nwa,
-                    entries,
-                    &final_weight_indices,
-                    MAX_INDEXED_FINAL_PATH_RANGES,
-                );
-                (state_id, fw, stats)
-            })
-            .collect();
-        profiled
-            .into_iter()
-            .filter_map(|(state_id, fw, stats)| {
-                final_weight_profile.merge(stats);
-                (!fw.is_empty()).then_some((state_id, fw))
-            })
-            .collect()
-    } else {
-        subset_map
-            .par_iter()
-            .filter_map(|(entries, &state_id)| {
-                let fw = subset_final_weight(
-                    nwa,
-                    entries,
-                    &final_weight_indices,
-                    MAX_INDEXED_FINAL_PATH_RANGES,
-                );
-                (!fw.is_empty()).then_some((state_id, fw))
-            })
-            .collect()
-    };
-    for (state_id, fw) in final_weights {
-        dwa.set_final_weight(state_id, fw);
+        .map(|weight| (weight.ptr_key(), weight.intersection_index())).collect();
+    let final_started = Instant::now();
+    let final_weights = subsets.keys.par_iter().map(|entries| {
+        subset_final_weight(nwa, entries, &final_weight_indices, MAX_INDEXED_FINAL_PATH_RANGES)
+    }).collect::<Vec<_>>();
+    for (state, weight) in final_weights.into_iter().enumerate() {
+        if !weight.is_empty() { dwa.set_final_weight(state as u32, weight); }
     }
-    let final_weights_ms = final_weights_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
     if profile {
-        let mut final_group_entries = 0usize;
-        let mut final_group_count = 0usize;
-        let mut final_subsets_with_reused_group = 0usize;
-        let mut max_final_groups_per_subset = 0usize;
-        let mut max_final_entries_per_group = 0usize;
-        for entries in subset_map.keys() {
-            let mut groups = FxHashMap::<usize, usize>::default();
-            for (state_id, _) in entries.iter() {
-                let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
-                    continue;
-                };
-                *groups.entry(state_final.ptr_key()).or_default() += 1;
-            }
-            let final_entry_count: usize = groups.values().sum();
-            if final_entry_count > 0 {
-                final_group_entries += final_entry_count;
-                final_group_count += groups.len();
-                max_final_groups_per_subset = max_final_groups_per_subset.max(groups.len());
-                let max_group = groups.values().copied().max().unwrap_or(0);
-                max_final_entries_per_group = max_final_entries_per_group.max(max_group);
-                final_subsets_with_reused_group += usize::from(max_group > 1);
-            }
-        }
         eprintln!(
-            "[glrmask/profile][determinize_final_groups] entries={} groups={} saved_intersections={} subsets_with_reused_group={} max_groups_per_subset={} max_entries_per_group={}",
-            final_group_entries,
-            final_group_count,
-            final_group_entries.saturating_sub(final_group_count),
-            final_subsets_with_reused_group,
-            max_final_groups_per_subset,
-            max_final_entries_per_group,
-        );
-
-        let max_weight_dim = dwa.states().iter()
-            .filter_map(|s| s.final_weight.as_ref())
-            .map(Weight::num_ranges)
-            .max()
-            .unwrap_or(0);
-        let mut final_pairs = FxHashSet::default();
-        let mut final_path_weights = FxHashSet::default();
-        let mut final_state_weights = FxHashSet::default();
-        let mut final_path_outer_ranges = 0usize;
-        let mut final_state_outer_ranges = 0usize;
-        let mut max_final_path_outer_ranges = 0usize;
-        let mut max_final_state_outer_ranges = 0usize;
-        for entries in subset_map.keys() {
-            for (state_id, path_weight) in entries.iter() {
-                let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
-                    continue;
-                };
-                let path_key = path_weight.ptr_key();
-                let state_key = state_final.ptr_key();
-                final_pairs.insert((path_key, state_key));
-                final_path_weights.insert(path_key);
-                final_state_weights.insert(state_key);
-                let path_ranges = path_weight.outer_range_count();
-                let state_ranges = state_final.outer_range_count();
-                final_path_outer_ranges += path_ranges;
-                final_state_outer_ranges += state_ranges;
-                max_final_path_outer_ranges = max_final_path_outer_ranges.max(path_ranges);
-                max_final_state_outer_ranges = max_final_state_outer_ranges.max(state_ranges);
-            }
-        }
-        eprintln!(
-            "[glrmask/profile][determinize_final_shape] pairs={} unique_pairs={} unique_path_weights={} unique_state_weights={} path_outer_ranges={} state_outer_ranges={} max_path_outer_ranges={} max_state_outer_ranges={}",
-            final_weight_profile.final_entries,
-            final_pairs.len(),
-            final_path_weights.len(),
-            final_state_weights.len(),
-            final_path_outer_ranges,
-            final_state_outer_ranges,
-            max_final_path_outer_ranges,
-            max_final_state_outer_ranges,
-        );
-
-        eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} weight_grouped_transitions={} weight_group_build_ms={:.3} weight_group_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} direct_singleton_cache_hits={} direct_singleton_cache_misses={} direct_singleton_fast_path_groups={} direct_singleton_fast_path_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} direct_point_aggregate_ms={:.3} direct_point_aggregate_labels={} direct_point_aggregate_contributions={} direct_general_aggregate_ms={:.3} direct_general_single_dst_labels={} direct_general_single_dst_contributions={} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
-            nwa.states().len(),
-            dwa.states().len(),
-            subset_map.len(),
-            max_weight_dim,
-            profile_subset_entries,
-            profile_max_subset_entries,
-            profile_raw_transition_visits,
-            group_transition_weights,
-            weight_group_build_ms,
-            profile_weight_group_visits,
-            profile_labels,
-            profile_target_contributions,
-            profile_single_contribution_labels,
-            profile_single_contribution_no_epsilon_labels,
-            profile_direct_single_target_labels,
-            profile_direct_singleton_cache_hits,
-            profile_direct_singleton_cache_misses,
-            profile_direct_singleton_fast_path_groups,
-            profile_direct_singleton_fast_path_labels,
-            profile_multi_contribution_single_target_no_epsilon_labels,
-            profile_multi_contribution_single_target_no_epsilon_contributions,
-            profile_direct_multi_target_labels,
-            profile_multi_contribution_all_no_epsilon_labels,
-            profile_multi_contribution_all_no_epsilon_contributions,
-            profile_expand_ms,
-            profile_combine_ms,
-            profile_edge_union_ms,
-            profile_closure_ms,
-            profile_normalize_ms,
-            profile_canonicalize_ms,
-            profile_subset_lookup_ms,
-            profile_direct_point_aggregate_ms,
-            profile_direct_point_aggregate_labels,
-            profile_direct_point_aggregate_contributions,
-            profile_direct_general_aggregate_ms,
-            profile_direct_general_single_dst_labels,
-            profile_direct_general_single_dst_contributions,
-            final_weights_ms,
-            final_weight_profile.subsets,
-            final_weight_profile.subset_entries,
-            final_weight_profile.final_entries,
-            final_weight_profile.nonempty_contributions,
-            final_weight_profile.max_final_entries,
-            final_weight_profile.intersection_ms,
-            final_weight_profile.union_ms,
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} max_subset_entries={} raw_transition_visits={} weight_group_visits={} direct_singleton_labels={} target_contributions={} intersection_cache_entries={} final_weights_ms={:.3} total_ms={:.3}",
+            nwa.states().len(), dwa.states().len(), max_subset_entries, transition_visits,
+            group_visits, direct_labels, contributions, cache.intersection_entry_count(),
+            final_started.elapsed().as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0,
         );
     }
-
     Ok(dwa)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1582,6 +835,24 @@ mod tests {
 
         let error = determinize_depth2(&nwa).unwrap_err();
         assert!(error.to_string().contains("deeper than two labels"), "{error}");
+    }
+
+    #[test]
+    fn repeated_single_destination_uses_the_same_normalization_policy() {
+        let mut nwa = NWA::new(1, 4);
+        let start = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, accept, tokens([0]));
+        nwa.add_transition(start, 7, accept, tokens([1]));
+        nwa.set_final_weight(accept, tokens([0, 1, 2]));
+
+        let normalized = determinize_impl_with_options(&nwa, true, true, false, true).unwrap();
+        let direct = determinize_impl_with_options(&nwa, true, true, false, false).unwrap();
+        assert_eq!(find_difference(&normalized, &direct).unwrap(), None);
+        let target = normalized.states()[0].transitions.get(&7).unwrap().0;
+        assert_eq!(normalized.states()[target as usize].final_weight.as_ref(), Some(&tokens([0, 1, 2])));
+        assert_eq!(normalized.eval_word(&[7]), tokens([0, 1]));
     }
 
     #[test]
