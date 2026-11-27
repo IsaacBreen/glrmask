@@ -212,29 +212,8 @@ struct CanonicalRound {
     classes_by_signature_hash: FxHashMap<u64, SmallVec<[u32; 1]>>,
 }
 
-/// Stable identity characterization collapsed to its exact state quotient.
-/// The quotient does not merge tokenizer states; it is only a cached view used
-/// to certify a terminal-swap automorphism before materializing its raw map.
-struct CanonicalQuotient {
-    class_for_state: Arc<[u32]>,
-    representative_by_class: Arc<[u32]>,
-    reverse_predecessors: Vec<Vec<u32>>,
-    /// Identity class labels, projected onto stable quotient representatives,
-    /// for rounds 0 through the identity fixed point.
-    identity_classes_by_round: Vec<Vec<u32>>,
-    /// Multiplicity of each identity class at the matching round. This lets a
-    /// sparse swapped update prove class-set equality without scanning every
-    /// quotient class.
-    identity_class_counts_by_round: Vec<Vec<u32>>,
-    /// At the identity fixed point, the preceding class partition maps
-    /// bijectively to the next one. Sparse swapped rows must respect this map.
-    stable_previous_to_next: Vec<u32>,
-    stable_next_to_previous: Vec<u32>,
-}
-
 /// The stable identity quotient data needed by the common support-transport
-/// proof.  It deliberately omits canonical row signatures and historical
-/// round projections, which are required only by the slower generic fallback.
+/// proof, with shared scanner coordinates for its witness maps.
 struct SupportQuotient {
     class_for_state: Arc<[u32]>,
     representative_by_class: Arc<[u32]>,
@@ -275,7 +254,6 @@ struct OutputProjectionSeed {
     output_pairs: Arc<[OutputPair]>,
     output_pair_by_state: Arc<[u32]>,
 }
-
 
 /// Per-swap output-label relabelling. The immutable base ids represent the
 /// original frozen output pairs; ids allocated after `base_count` are local to
@@ -1344,7 +1322,6 @@ impl TiRawDiscoveryData {
     }
 }
 
-
 /// Static per-L2P-partition TI data.  The restricted raw lexer topology and
 /// root observation depend only on vocabulary bytes, not on the historical
 /// active-terminal mask of an iterative TI round.
@@ -1700,7 +1677,6 @@ impl TiDiscoveryContext {
             relevant_bytes: self.relevant_bytes,
         })
     }
-
 
 }
 
@@ -2158,7 +2134,6 @@ struct InterchangeMap {
     scanner_state_map: TransportScannerStateMap,
 }
 
-
 /// One transient exact TI round.  This is deliberately build-local: the only
 /// durable TI result remains the final flat terminal partition.  Keeping the
 /// already-certified witnesses avoids re-running terminal discovery after the
@@ -2257,7 +2232,6 @@ struct InterchangeabilityDfa {
     canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
     support_partition_seed: Option<SupportPartitionSeed>,
     support_quotient: Option<Arc<SupportQuotient>>,
-    canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
     /// frozen output mentions that terminal.  This is build-local discovery
     /// scratch, used to propose a tiny support-transposition witness before
@@ -2271,7 +2245,6 @@ struct InterchangeabilityDfa {
     /// topology, so workers build exactly the entries they touch — the same
     /// set the sequential path would build lazily — with no `&mut self`.
     parallel_terminal_supports: OnceLock<Vec<OnceLock<Vec<(u32, u8)>>>>,
-    quotient_certified: usize,
     support_transposition_certified: usize,
     support_transposition_no_template: usize,
     support_transposition_outside_cone: usize,
@@ -2283,12 +2256,6 @@ struct InterchangeabilityDfa {
     support_transposition_template_ns: u64,
     support_transposition_cone_ns: u64,
     support_transposition_verify_ns: u64,
-    sparse_quotient_certified: usize,
-    sparse_quotient_cone_classes_total: usize,
-    sparse_quotient_cone_classes_max: usize,
-    sparse_quotient_cone_ns: u64,
-    sparse_quotient_refinement_ns: u64,
-    sparse_quotient_map_ns: u64,
     canonical_stable_round: Option<usize>,
     canonical_identity_map: Option<InterchangeMap>,
     /// Per-state canonical identity signature hash as of the last built round.
@@ -2756,12 +2723,10 @@ impl InterchangeabilityDfa {
             canonical_round_one_added_scratch: SmallVec::new(),
             support_partition_seed,
             support_quotient,
-            canonical_quotient: None,
             terminal_quotient_output_supports: None,
             support_cone_marks: Vec::new(),
             support_cone_mark_epoch: 0,
             parallel_terminal_supports: OnceLock::new(),
-            quotient_certified: 0,
             support_transposition_certified: 0,
             support_transposition_no_template: 0,
             support_transposition_outside_cone: 0,
@@ -2773,12 +2738,6 @@ impl InterchangeabilityDfa {
             support_transposition_template_ns: 0,
             support_transposition_cone_ns: 0,
             support_transposition_verify_ns: 0,
-            sparse_quotient_certified: 0,
-            sparse_quotient_cone_classes_total: 0,
-            sparse_quotient_cone_classes_max: 0,
-            sparse_quotient_cone_ns: 0,
-            sparse_quotient_refinement_ns: 0,
-            sparse_quotient_map_ns: 0,
             canonical_stable_round: None,
             canonical_identity_map: None,
             canonical_identity_cached_hashes: Vec::new(),
@@ -2828,262 +2787,6 @@ impl InterchangeabilityDfa {
             "support terminal interchangeability characterization did not stabilize within {} rounds",
             state_count * 2,
         );
-    }
-
-    /// Exact sparse stabilization from canonical round one. Most round-one
-    /// classes are already stable: compare each member directly with its class
-    /// representative, and allocate signature-grouping machinery only for the
-    /// classes that actually fail. Subsequent work is confined to predecessor
-    /// classes of states moved by a split.
-    fn support_identity_stable_partition_sparse_worklist(&mut self) -> (Vec<u32>, Vec<u32>) {
-        self.ensure_canonical_identity_round(1);
-        let state_count = self.state_count();
-        let dead_state = self.dead_state();
-        let mut class_for_state = self.canonical_rounds[1].classes.clone();
-        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
-        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
-        for (state, &class) in class_for_state.iter().enumerate() {
-            members_by_class[class as usize].push(state as u32);
-        }
-        let mut queue = VecDeque::<usize>::new();
-        let mut queued = vec![false; initial_class_count];
-        for class in 0..initial_class_count {
-            let members = &members_by_class[class];
-            if members.len() <= 1 {
-                continue;
-            }
-            let representative = members[0] as usize;
-            if members[1..].iter().any(|&state| {
-                !self.canonical_identity_signatures_equal(
-                    representative,
-                    state as usize,
-                    &class_for_state,
-                )
-            }) {
-                queued[class] = true;
-                queue.push_back(class);
-            }
-        }
-
-        while let Some(class) = queue.pop_front() {
-            queued[class] = false;
-            if members_by_class[class].len() <= 1 {
-                continue;
-            }
-            let members = std::mem::take(&mut members_by_class[class]);
-            let representative = if members.binary_search(&(dead_state as u32)).is_ok() {
-                dead_state as u32
-            } else {
-                members[0]
-            };
-            let mut retained = Vec::<u32>::with_capacity(members.len());
-            let mut deviants = Vec::<u32>::new();
-            for &member in &members {
-                if self.canonical_identity_signatures_equal(
-                    representative as usize,
-                    member as usize,
-                    &class_for_state,
-                ) {
-                    retained.push(member);
-                } else {
-                    deviants.push(member);
-                }
-            }
-            if deviants.is_empty() {
-                members_by_class[class] = retained;
-                continue;
-            }
-
-            // Most unstable classes differ from their representative by only
-            // a tiny exceptional set. Group just those deviants instead of
-            // rehashing every representative-equivalent member.
-            let mut groups = Vec::<Vec<u32>>::new();
-            let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
-            for &member in &deviants {
-                let state = member as usize;
-                let hash = self.canonical_identity_signature_hash(state, &class_for_state);
-                let matched = groups_by_hash.get(&hash).and_then(|candidates| {
-                    candidates.iter().copied().find(|&group_index| {
-                        self.canonical_identity_signatures_equal(
-                            state,
-                            groups[group_index][0] as usize,
-                            &class_for_state,
-                        )
-                    })
-                });
-                let group_index = matched.unwrap_or_else(|| {
-                    let group_index = groups.len();
-                    groups.push(Vec::new());
-                    groups_by_hash.entry(hash).or_default().push(group_index);
-                    group_index
-                });
-                groups[group_index].push(member);
-            }
-
-            members_by_class[class] = retained;
-            for &state in &members_by_class[class] {
-                class_for_state[state as usize] = class as u32;
-            }
-
-            for group in groups {
-                let new_class = members_by_class.len();
-                queued.push(false);
-                for &state in &group {
-                    class_for_state[state as usize] = new_class as u32;
-                }
-                members_by_class.push(group);
-                for &state in &members_by_class[new_class] {
-                    let state = state as usize;
-                    if state >= self.reverse_predecessors.len() {
-                        continue;
-                    }
-                    for &source in &self.reverse_predecessors[state] {
-                        let source_class = class_for_state[source as usize] as usize;
-                        if members_by_class[source_class].len() > 1 && !queued[source_class] {
-                            queued[source_class] = true;
-                            queue.push_back(source_class);
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
-        let mut representative_by_class = Vec::<u32>::new();
-        let mut canonical_classes = Vec::with_capacity(state_count);
-        for state in 0..state_count {
-            let class = class_for_state[state] as usize;
-            let canonical = if canonical_for_class[class] == u32::MAX {
-                let canonical = representative_by_class.len() as u32;
-                canonical_for_class[class] = canonical;
-                representative_by_class.push(state as u32);
-                canonical
-            } else {
-                canonical_for_class[class]
-            };
-            canonical_classes.push(canonical);
-        }
-        (canonical_classes, representative_by_class)
-    }
-
-    /// Exact worklist refinement from canonical round one. The relation only
-    /// splits: when a target class splits, only predecessor classes of states
-    /// that moved can become unstable. This is the sparse counterpart of the
-    /// global Moore ladder and is especially effective when stabilization adds
-    /// only a handful of classes.
-    fn support_identity_stable_partition_worklist(&mut self) -> (Vec<u32>, Vec<u32>) {
-        self.ensure_canonical_identity_round(1);
-        let state_count = self.state_count();
-        let dead_state = self.dead_state();
-        let mut class_for_state = self.canonical_rounds[1].classes.clone();
-        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
-        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
-        for (state, &class) in class_for_state.iter().enumerate() {
-            members_by_class[class as usize].push(state as u32);
-        }
-        let mut queue = VecDeque::<usize>::new();
-        let mut queued = vec![false; initial_class_count];
-        for class in 0..initial_class_count {
-            if members_by_class[class].len() > 1 {
-                queue.push_back(class);
-                queued[class] = true;
-            }
-        }
-
-        while let Some(class) = queue.pop_front() {
-            queued[class] = false;
-            if members_by_class[class].len() <= 1 {
-                continue;
-            }
-            let members = members_by_class[class].clone();
-            let mut groups = Vec::<Vec<u32>>::new();
-            let mut group_hashes = Vec::<u64>::new();
-            let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
-            for &member in &members {
-                let state = member as usize;
-                let hash = self.canonical_identity_signature_hash(state, &class_for_state);
-                let matched = groups_by_hash.get(&hash).and_then(|candidates| {
-                    candidates.iter().copied().find(|&group_index| {
-                        self.canonical_identity_signatures_equal(
-                            state,
-                            groups[group_index][0] as usize,
-                            &class_for_state,
-                        )
-                    })
-                });
-                let group_index = matched.unwrap_or_else(|| {
-                    let group_index = groups.len();
-                    groups.push(Vec::new());
-                    group_hashes.push(hash);
-                    groups_by_hash.entry(hash).or_default().push(group_index);
-                    group_index
-                });
-                groups[group_index].push(member);
-            }
-            if groups.len() == 1 {
-                continue;
-            }
-
-            // Keep the synthetic dead state's subgroup on the old id so the
-            // implicit missing-edge target does not globally change identity.
-            let retained = groups
-                .iter()
-                .position(|group| group.binary_search(&(dead_state as u32)).is_ok())
-                .unwrap_or(0);
-            groups.swap(0, retained);
-            members_by_class[class] = std::mem::take(&mut groups[0]);
-            for &state in &members_by_class[class] {
-                class_for_state[state as usize] = class as u32;
-            }
-
-            for mut group in groups.into_iter().skip(1) {
-                let new_class = members_by_class.len();
-                queued.push(false);
-                for &state in &group {
-                    class_for_state[state as usize] = new_class as u32;
-                }
-                group.shrink_to_fit();
-                members_by_class.push(group);
-                // Only predecessors of moved states can observe the split.
-                for &state in &members_by_class[new_class] {
-                    let state = state as usize;
-                    if state >= self.reverse_predecessors.len() {
-                        continue;
-                    }
-                    for &source in &self.reverse_predecessors[state] {
-                        let source_class = class_for_state[source as usize] as usize;
-                        if members_by_class[source_class].len() > 1 && !queued[source_class] {
-                            queued[source_class] = true;
-                            queue.push_back(source_class);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Canonical first-state numbering keeps downstream representatives
-        // deterministic while discarding any empty historical ids.
-        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
-        let mut representative_by_class = Vec::<u32>::new();
-        let mut canonical_classes = Vec::with_capacity(state_count);
-        for state in 0..state_count {
-            let class = class_for_state[state] as usize;
-            let canonical = if canonical_for_class[class] == u32::MAX {
-                let canonical = representative_by_class.len() as u32;
-                canonical_for_class[class] = canonical;
-                representative_by_class.push(state as u32);
-                canonical
-            } else {
-                canonical_for_class[class]
-            };
-            canonical_classes.push(canonical);
-        }
-
-        if cfg!(debug_assertions) {
-            let moore = self.support_identity_stable_partition_moore();
-            debug_assert!(same_equality_partition_u32(&canonical_classes, &moore.0));
-        }
-        (canonical_classes, representative_by_class)
     }
 
     /// Hopcroft-style exact refinement from canonical round one. Output labels
@@ -3844,38 +3547,6 @@ impl InterchangeabilityDfa {
             .ok()
             .map(|index| deviations[index].1)
             .unwrap_or(class as u32)
-    }
-
-    fn canonical_quotient_support_permuted_signature(
-        &self,
-        quotient: &CanonicalQuotient,
-        class: usize,
-        deviations: &[(u32, u32)],
-        outputs: &mut SwappedOutputIds<'_>,
-    ) -> CanonicalSignature {
-        let state = quotient.representative_by_class[class] as usize;
-        let default_class = Self::mapped_support_class(
-            deviations,
-            quotient.class_for_state[self.dead_state()] as usize,
-        );
-        let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
-        for &(byte, destination) in self.topology.edges_from(state) {
-            let destination = destination as usize;
-            let output = outputs.id(self.output_pair_by_state[destination]);
-            let previous_class = Self::mapped_support_class(
-                deviations,
-                quotient.class_for_state[destination] as usize,
-            );
-            if previous_class == default_class && output == 0 {
-                continue;
-            }
-            components.push(CanonicalComponent {
-                byte,
-                previous_class,
-                output,
-            });
-        }
-        CanonicalSignature(components)
     }
 
     fn support_mask_for_class(support: &[(u32, u8)], class: usize) -> u8 {
@@ -4877,373 +4548,6 @@ impl InterchangeabilityDfa {
             "canonical terminal interchangeability characterization did not stabilize within {} rounds",
             state_count * 2,
         );
-    }
-
-    fn ensure_canonical_quotient(&mut self) {
-        if self.canonical_quotient.is_some() {
-            return;
-        }
-        let stable_round = self.ensure_canonical_identity_stable_round();
-        let class_for_state = self.canonical_rounds[stable_round].classes.clone();
-        let class_count = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .len();
-        debug_assert_eq!(
-            class_count,
-            class_for_state.iter().copied().max().map_or(0, |class| class as usize + 1),
-        );
-
-        let representative_by_class = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .clone();
-
-        let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
-        for (class, &representative) in representative_by_class.iter().enumerate() {
-            let state = representative as usize;
-            for &(_, destination) in self.topology.edges_from(state) {
-                let destination_class = class_for_state[destination as usize] as usize;
-                reverse_predecessors[destination_class].push(class as u32);
-            }
-        }
-        for predecessors in &mut reverse_predecessors {
-            predecessors.sort_unstable();
-            predecessors.dedup();
-        }
-
-        let mut identity_classes_by_round = Vec::with_capacity(stable_round + 1);
-        let mut identity_class_counts_by_round = Vec::with_capacity(stable_round + 1);
-        for round in 0..=stable_round {
-            let identity_classes = representative_by_class
-                .iter()
-                .map(|&state| self.canonical_rounds[round].classes[state as usize])
-                .collect::<Vec<_>>();
-            let class_count_at_round = self.canonical_rounds[round]
-                .classes
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |class| class as usize + 1);
-            let mut counts = vec![0u32; class_count_at_round];
-            for (quotient_class, &class) in identity_classes.iter().enumerate() {
-                if (representative_by_class[quotient_class] as usize) < self.topology.real_state_count {
-                    counts[class as usize] += 1;
-                }
-            }
-            identity_classes_by_round.push(identity_classes);
-            identity_class_counts_by_round.push(counts);
-        }
-
-        let stable_previous = &identity_classes_by_round[stable_round - 1];
-        let stable_next = &identity_classes_by_round[stable_round];
-        let stable_previous_class_count = self.canonical_rounds[stable_round - 1]
-            .classes
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |class| class as usize + 1);
-        let stable_next_class_count = self.canonical_rounds[stable_round]
-            .classes
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |class| class as usize + 1);
-        let mut stable_previous_to_next = vec![u32::MAX; stable_previous_class_count];
-        let mut stable_next_to_previous = vec![u32::MAX; stable_next_class_count];
-        for (&previous, &next) in stable_previous.iter().zip(stable_next) {
-            let previous_target = &mut stable_previous_to_next[previous as usize];
-            if *previous_target == u32::MAX {
-                *previous_target = next;
-            } else {
-                assert_eq!(*previous_target, next, "stable TI quotient split an identity class");
-            }
-            let next_source = &mut stable_next_to_previous[next as usize];
-            if *next_source == u32::MAX {
-                *next_source = previous;
-            } else {
-                assert_eq!(*next_source, previous, "stable TI quotient merged identity classes");
-            }
-        }
-        assert!(
-            stable_previous_to_next.iter().all(|&target| target != u32::MAX)
-                && stable_next_to_previous.iter().all(|&source| source != u32::MAX),
-            "stable TI quotient omitted an identity class",
-        );
-
-        self.canonical_quotient = Some(CanonicalQuotient {
-            class_for_state: class_for_state.into(),
-            representative_by_class: representative_by_class.into(),
-            reverse_predecessors,
-            identity_classes_by_round,
-            identity_class_counts_by_round,
-            stable_previous_to_next,
-            stable_next_to_previous,
-        });
-    }
-
-    fn canonical_quotient_swapped_signature(
-        &self,
-        quotient: &CanonicalQuotient,
-        class: usize,
-        previous: &[u32],
-        outputs: &mut SwappedOutputIds<'_>,
-    ) -> CanonicalSignature {
-        let state = quotient.representative_by_class[class] as usize;
-        let default_class = previous[quotient.class_for_state[self.dead_state()] as usize];
-        let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
-        for &(byte, destination) in self.topology.edges_from(state) {
-            let destination = destination as usize;
-            let output = outputs.id(self.output_pair_by_state[destination]);
-            let previous_class = previous[quotient.class_for_state[destination] as usize];
-            if previous_class == default_class && output == 0 {
-                continue;
-            }
-            components.push(CanonicalComponent {
-                byte,
-                previous_class,
-                output,
-            });
-        }
-        CanonicalSignature(components)
-    }
-
-    fn quotient_identity_classes_at_round<'a>(
-        &self,
-        quotient: &'a CanonicalQuotient,
-        round: usize,
-    ) -> &'a [u32] {
-        quotient
-            .identity_classes_by_round
-            .get(round)
-            .expect("identity quotient round must be cached")
-    }
-
-    fn quotient_rooted_class_set_still_possible(
-        &self,
-        quotient: &CanonicalQuotient,
-        identity: &[u32],
-        swapped: &[u32],
-    ) -> bool {
-        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
-        if identity[root_class] != swapped[root_class] {
-            return false;
-        }
-        let mut identity_set = FxHashSet::<u32>::default();
-        let mut swapped_set = FxHashSet::<u32>::default();
-        for (class, &representative) in quotient.representative_by_class.iter().enumerate() {
-            if representative as usize >= self.topology.real_state_count {
-                continue;
-            }
-            identity_set.insert(identity[class]);
-            swapped_set.insert(swapped[class]);
-        }
-        identity_set == swapped_set
-    }
-
-    /// Non-cone quotient classes retain their identity labels, so equality of
-    /// complete identity and swapped class sets reduces to labels whose final
-    /// occurrence lies inside the cone.
-    fn sparse_quotient_rooted_class_set_still_possible(
-        &self,
-        quotient: &CanonicalQuotient,
-        identity: &[u32],
-        identity_counts: &[u32],
-        swapped_cone: &[u32],
-        cone_classes: &[usize],
-        cone_index_by_class: &FxHashMap<usize, usize>,
-    ) -> bool {
-        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
-        let swapped_root_class = cone_index_by_class
-            .get(&root_class)
-            .map(|&index| swapped_cone[index])
-            .unwrap_or(identity[root_class]);
-        if identity[root_class] != swapped_root_class {
-            return false;
-        }
-
-        let mut changed_counts = FxHashMap::<u32, u32>::default();
-        let mut introduced_or_retained = FxHashSet::<u32>::default();
-        for (cone_index, &class) in cone_classes.iter().enumerate() {
-            let before = identity[class];
-            let after = swapped_cone[cone_index];
-            if after as usize >= identity_counts.len() {
-                return false;
-            }
-            *changed_counts.entry(before).or_default() += 1;
-            introduced_or_retained.insert(after);
-        }
-        changed_counts.into_iter().all(|(class, changed)| {
-            changed < identity_counts[class as usize]
-                || introduced_or_retained.contains(&class)
-        })
-    }
-
-    /// At the stable identity round the old-to-new class map is bijective.
-    /// Outside the cone the paired rows are identity rows, so only the changed
-    /// cone rows need checking to prove paired partition stability.
-    fn sparse_quotient_pair_is_stable(
-        &self,
-        quotient: &CanonicalQuotient,
-        swapped_previous_cone: &[u32],
-        swapped_next_cone: &[u32],
-    ) -> bool {
-        swapped_previous_cone
-            .iter()
-            .zip(swapped_next_cone)
-            .all(|(&previous, &next)| {
-                let previous = previous as usize;
-                let next = next as usize;
-            previous < quotient.stable_previous_to_next.len()
-                && next < quotient.stable_next_to_previous.len()
-                && quotient.stable_previous_to_next[previous] == next as u32
-                && quotient.stable_next_to_previous[next] == previous as u32
-            })
-    }
-
-    fn quotient_interchange_map_from_classes(
-        &self,
-        quotient: &CanonicalQuotient,
-        swapped_classes: &[u32],
-    ) -> Option<InterchangeMap> {
-        let class_count = quotient.representative_by_class.len();
-        if swapped_classes.len() != class_count {
-            return None;
-        }
-        // Invert the stable quotient-level class permutation rather than
-        // scanning every raw state once merely to rediscover its first class
-        // representative. The later raw-state expansion remains exact.
-        let mut source_class_for_target_class = vec![u32::MAX; class_count];
-        for source_class in 0..class_count {
-            // The synthetic dead state may have its own quotient class. The
-            // old raw-state scan never visited it, so keep that same domain.
-            if quotient.representative_by_class[source_class] as usize
-                >= self.topology.real_state_count
-            {
-                continue;
-            }
-            let target_class = swapped_classes[source_class] as usize;
-            if target_class >= class_count
-                || quotient.representative_by_class[target_class] as usize
-                    >= self.topology.real_state_count
-                || source_class_for_target_class[target_class] != u32::MAX
-            {
-                return None;
-            }
-            source_class_for_target_class[target_class] = source_class as u32;
-        }
-        let source_class_for_target_deviations = source_class_for_target_class
-            .iter()
-            .enumerate()
-            .filter_map(|(target_class, &source_class)| {
-                (source_class != u32::MAX && source_class != target_class as u32)
-                    .then_some((target_class as u32, source_class))
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Some(InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                source_class_for_target_deviations,
-            )?,
-        })
-    }
-
-    #[inline]
-    fn quotient_identity_map(&self, quotient: &CanonicalQuotient) -> InterchangeMap {
-        InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                Box::default(),
-            )
-            .expect("identity TI quotient must retain a raw coordinate for every raw source class"),
-        }
-    }
-
-    fn sparse_quotient_interchange_map_from_cone(
-        &self,
-        quotient: &CanonicalQuotient,
-        cone_classes: &[usize],
-        swapped_cone: &[u32],
-        cone_index_by_class: &FxHashMap<usize, usize>,
-    ) -> Option<InterchangeMap> {
-        if cone_classes.len() != swapped_cone.len() {
-            return None;
-        }
-        let mut targets = FxHashSet::<usize>::default();
-        let mut deviations = Vec::new();
-        for (cone_index, &source_class) in cone_classes.iter().enumerate() {
-            let target_class = swapped_cone[cone_index] as usize;
-            if source_class >= quotient.representative_by_class.len()
-                || target_class >= quotient.representative_by_class.len()
-                || quotient.representative_by_class[source_class] as usize
-                    >= self.topology.real_state_count
-                || quotient.representative_by_class[target_class] as usize
-                    >= self.topology.real_state_count
-                || !cone_index_by_class.contains_key(&target_class)
-                || !targets.insert(target_class)
-            {
-                return None;
-            }
-            if source_class != target_class {
-                deviations.push((target_class as u32, source_class as u32));
-            }
-        }
-        if targets.len() != cone_classes.len() {
-            return None;
-        }
-        deviations.sort_unstable_by_key(|&(target, _)| target);
-        Some(InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                deviations.into_boxed_slice(),
-            )?,
-        })
-    }
-
-    /// Evaluate the exact paired characterization on the already-stable
-    /// identity quotient.  Stable quotient classes are congruent for every
-    /// later swapped round, so one representative per class produces the same
-    /// partition relation as the raw computation.  A failed quotient proof is
-    /// inconclusive and falls back to the raw exact refinement below.
-    fn canonical_quotient_affected_cone(
-        &self,
-        quotient: &CanonicalQuotient,
-        left: TerminalID,
-        right: TerminalID,
-    ) -> (Vec<bool>, Vec<usize>) {
-        let mut in_cone = vec![false; quotient.representative_by_class.len()];
-        let mut cone_classes = Vec::<usize>::new();
-        let mut worklist = Vec::<u32>::new();
-        for destinations in [
-            &self.finalizer_states_by_terminal[left as usize],
-            &self.future_finalizer_states_by_terminal[left as usize],
-            &self.finalizer_states_by_terminal[right as usize],
-            &self.future_finalizer_states_by_terminal[right as usize],
-        ] {
-            for &destination in destinations {
-                for &source in &self.reverse_predecessors[destination as usize] {
-                    let class = quotient.class_for_state[source as usize] as usize;
-                    if !in_cone[class] {
-                        in_cone[class] = true;
-                        cone_classes.push(class);
-                        worklist.push(class as u32);
-                    }
-                }
-            }
-        }
-        while let Some(class) = worklist.pop() {
-            for &predecessor in &quotient.reverse_predecessors[class as usize] {
-                let predecessor = predecessor as usize;
-                if !in_cone[predecessor] {
-                    in_cone[predecessor] = true;
-                    cone_classes.push(predecessor);
-                    worklist.push(predecessor as u32);
-                }
-            }
-        }
-        (in_cone, cone_classes)
     }
 
     /// Allocation-free exact reverse closure for the support-transposition
@@ -6882,286 +6186,6 @@ impl InterchangeabilityDfa {
         Some(maps)
     }
 
-    fn canonical_quotient_affected_cone_small(
-        &self,
-        quotient: &CanonicalQuotient,
-        left: TerminalID,
-        right: TerminalID,
-    ) -> SmallVec<[usize; 16]> {
-        let mut cone = SmallVec::<[usize; 16]>::new();
-        for destinations in [
-            &self.finalizer_states_by_terminal[left as usize],
-            &self.future_finalizer_states_by_terminal[left as usize],
-            &self.finalizer_states_by_terminal[right as usize],
-            &self.future_finalizer_states_by_terminal[right as usize],
-        ] {
-            for &destination in destinations {
-                for &source in &self.reverse_predecessors[destination as usize] {
-                    let class = quotient.class_for_state[source as usize] as usize;
-                    if !cone.contains(&class) {
-                        cone.push(class);
-                    }
-                }
-            }
-        }
-        let mut next = 0usize;
-        while next < cone.len() {
-            let class = cone[next];
-            next += 1;
-            for &predecessor in &quotient.reverse_predecessors[class] {
-                let predecessor = predecessor as usize;
-                if !cone.contains(&predecessor) {
-                    cone.push(predecessor);
-                }
-            }
-        }
-        cone
-    }
-
-    fn canonical_sparse_quotient_swapped_signature(
-        &self,
-        quotient: &CanonicalQuotient,
-        class: usize,
-        identity_previous: &[u32],
-        cone_index_by_class: &FxHashMap<usize, usize>,
-        swapped_previous_cone: &[u32],
-        outputs: &mut SwappedOutputIds<'_>,
-    ) -> CanonicalSignature {
-        let state = quotient.representative_by_class[class] as usize;
-        let previous_class_for = |quotient_class: usize| {
-            cone_index_by_class
-                .get(&quotient_class)
-                .map(|&index| swapped_previous_cone[index])
-                .unwrap_or(identity_previous[quotient_class])
-        };
-        let default_class = previous_class_for(
-            quotient.class_for_state[self.dead_state()] as usize,
-        );
-        let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
-        for &(byte, destination) in self.topology.edges_from(state) {
-            let destination = destination as usize;
-            let output = outputs.id(self.output_pair_by_state[destination]);
-            let previous_class = previous_class_for(
-                quotient.class_for_state[destination] as usize,
-            );
-            if previous_class == default_class && output == 0 {
-                continue;
-            }
-            components.push(CanonicalComponent {
-                byte,
-                previous_class,
-                output,
-            });
-        }
-        CanonicalSignature(components)
-    }
-
-    /// Exact sparse quotient evaluation. Outside the backward cone of every
-    /// relabelled frozen output, the swapped characterization is identical to
-    /// the identity at every round. Only the cone needs recomputation.
-    fn canonical_sparse_quotient_interchange_map(
-        &mut self,
-        left: TerminalID,
-        right: TerminalID,
-    ) -> Option<InterchangeMap> {
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let stable_round = self.ensure_canonical_identity_stable_round();
-        self.ensure_canonical_quotient();
-        let pair_started_at = profile_timing.then(Instant::now);
-        let result = {
-            let quotient = self
-                .canonical_quotient
-                .as_ref()
-                .expect("canonical quotient initialized");
-            let cone_started_at = profile_timing.then(Instant::now);
-            let (_in_cone, cone_classes) =
-                self.canonical_quotient_affected_cone(quotient, left, right);
-            let cone_size = cone_classes.len();
-            if let Some(started_at) = cone_started_at {
-                self.sparse_quotient_cone_ns += started_at.elapsed().as_nanos() as u64;
-            }
-            if cone_size == 0 {
-                Some((self.quotient_identity_map(quotient), cone_size))
-            } else {
-                let cone_index_by_class = cone_classes
-                    .iter()
-                    .enumerate()
-                    .map(|(index, &class)| (class, index))
-                    .collect::<FxHashMap<_, _>>();
-                let mut swapped_previous_cone = cone_classes
-                    .iter()
-                    .map(|&class| self.quotient_identity_classes_at_round(quotient, 0)[class])
-                    .collect::<Vec<_>>();
-                let mut outputs = SwappedOutputIds::new(
-                    &self.output_pairs,
-                    &self.output_pair_lookup,
-                    left as usize,
-                    right as usize,
-                );
-                let mut found = None;
-                for round in 1..=stable_round {
-                    let identity_previous =
-                        self.quotient_identity_classes_at_round(quotient, round - 1);
-                    let identity_next = self.quotient_identity_classes_at_round(quotient, round);
-                    let identity_counts = &quotient.identity_class_counts_by_round[round];
-                    let identity = &self.canonical_rounds[round];
-                    let identity_raw_previous = &self.canonical_rounds[round - 1].classes;
-                    let mut local = FxHashMap::<CanonicalSignature, u32>::default();
-                    let local_base = identity.representative_by_class.len() as u32;
-                    let mut swapped_next_cone = Vec::with_capacity(cone_size);
-                    for &source_class in &cone_classes {
-                        let signature = self.canonical_sparse_quotient_swapped_signature(
-                            quotient,
-                            source_class,
-                            identity_previous,
-                            &cone_index_by_class,
-                            &swapped_previous_cone,
-                            &mut outputs,
-                        );
-                        let swapped_class = if let Some(identity_class) = self
-                            .canonical_round_identity_class_for_signature(
-                                identity,
-                                identity_raw_previous,
-                                &signature,
-                            )
-                        {
-                            identity_class
-                        } else {
-                                let next = local_base + local.len() as u32;
-                                *local.entry(signature).or_insert(next)
-                            };
-                        swapped_next_cone.push(swapped_class);
-                    }
-                    if !self.sparse_quotient_rooted_class_set_still_possible(
-                        quotient,
-                        identity_next,
-                        identity_counts,
-                        &swapped_next_cone,
-                        &cone_classes,
-                        &cone_index_by_class,
-                    ) {
-                        return None;
-                    }
-                    // Materialization uses stable identity class labels, so
-                    // accept only at the identity partition fixed point.
-                    if round == stable_round
-                        && self.sparse_quotient_pair_is_stable(
-                            quotient,
-                            &swapped_previous_cone,
-                            &swapped_next_cone,
-                        )
-                    {
-                        let map_started_at = profile_timing.then(Instant::now);
-                        found = self
-                            .sparse_quotient_interchange_map_from_cone(
-                                quotient,
-                                &cone_classes,
-                                &swapped_next_cone,
-                                &cone_index_by_class,
-                            )
-                            .map(|map| (map, cone_size));
-                        if let Some(started_at) = map_started_at {
-                            self.sparse_quotient_map_ns += started_at.elapsed().as_nanos() as u64;
-                        }
-                        break;
-                    }
-                    swapped_previous_cone = swapped_next_cone;
-                }
-                found
-            }
-        };
-        if profile_timing
-            && let Some(started_at) = pair_started_at {
-                self.sparse_quotient_refinement_ns += started_at.elapsed().as_nanos() as u64;
-            }
-        if let Some((map, cone_size)) = result {
-            self.sparse_quotient_certified += 1;
-            self.sparse_quotient_cone_classes_total += cone_size;
-            self.sparse_quotient_cone_classes_max =
-                self.sparse_quotient_cone_classes_max.max(cone_size);
-            return Some(map);
-        }
-        None
-    }
-
-    fn canonical_quotient_interchange_map(
-        &mut self,
-        left: TerminalID,
-        right: TerminalID,
-    ) -> Option<InterchangeMap> {
-        self.canonical_sparse_quotient_interchange_map(left, right)
-            .or_else(|| self.canonical_full_quotient_interchange_map(left, right))
-    }
-
-    fn canonical_full_quotient_interchange_map(
-        &mut self,
-        left: TerminalID,
-        right: TerminalID,
-    ) -> Option<InterchangeMap> {
-        let stable_round = self.ensure_canonical_identity_stable_round();
-        self.ensure_canonical_quotient();
-        let quotient = self
-            .canonical_quotient
-            .as_ref()
-            .expect("canonical quotient initialized");
-        let mut swapped_previous = vec![0u32; quotient.representative_by_class.len()];
-        let mut outputs = SwappedOutputIds::new(
-            &self.output_pairs,
-            &self.output_pair_lookup,
-            left as usize,
-            right as usize,
-        );
-        for round in 1..=stable_round {
-            let identity_previous = self.quotient_identity_classes_at_round(quotient, round - 1);
-            let identity_next = self.quotient_identity_classes_at_round(quotient, round);
-            let identity = &self.canonical_rounds[round];
-            let identity_raw_previous = &self.canonical_rounds[round - 1].classes;
-            let mut local = FxHashMap::<CanonicalSignature, u32>::default();
-            let local_base = identity.representative_by_class.len() as u32;
-            let mut swapped_next = Vec::with_capacity(quotient.representative_by_class.len());
-            for class in 0..quotient.representative_by_class.len() {
-                let signature = self.canonical_quotient_swapped_signature(
-                    quotient,
-                    class,
-                    &swapped_previous,
-                    &mut outputs,
-                );
-                let class = if let Some(identity_class) = self
-                    .canonical_round_identity_class_for_signature(
-                        identity,
-                        identity_raw_previous,
-                        &signature,
-                    )
-                {
-                    identity_class
-                } else {
-                    let next = local_base + local.len() as u32;
-                    *local.entry(signature).or_insert(next)
-                };
-                swapped_next.push(class);
-            }
-            if !self.quotient_rooted_class_set_still_possible(
-                quotient,
-                identity_next,
-                &swapped_next,
-            ) {
-                return None;
-            }
-            if same_equality_partition_pair_u32(
-                identity_previous,
-                &swapped_previous,
-                identity_next,
-                &swapped_next,
-            ) {
-                let map = self.quotient_interchange_map_from_classes(quotient, &swapped_next)?;
-                self.quotient_certified += 1;
-                return Some(map);
-            }
-            swapped_previous = swapped_next;
-        }
-        None
-    }
-
     fn canonical_swapped_round(
         &self,
         previous: &[u32],
@@ -7589,13 +6613,16 @@ impl InterchangeabilityDfa {
     }
 
     fn canonical_identity_map_via_moore_history(&mut self) -> InterchangeMap {
-        self.ensure_canonical_identity_stable_round();
-        self.ensure_canonical_quotient();
-        let quotient = self
-            .canonical_quotient
-            .as_ref()
-            .expect("canonical quotient initialized");
-        self.quotient_identity_map(quotient)
+        let stable_round = self.ensure_canonical_identity_stable_round();
+        let partition = &self.canonical_rounds[stable_round];
+        InterchangeMap {
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                partition.classes.clone().into(),
+                partition.representative_by_class.clone().into(),
+                Box::default(),
+            )
+            .expect("identity TI quotient must retain a raw coordinate for every raw source class"),
+        }
     }
 
     fn canonical_identity_map(&mut self) -> InterchangeMap {
@@ -8322,7 +7349,6 @@ impl InterchangeabilityDfa {
         }
         self.state_count() <= 1024
     }
-
 
     fn support_quotient_fallback_enabled(&self) -> bool {
         if let Ok(value) = std::env::var("GLRMASK_TI_SUPPORT_QUOTIENT_FALLBACK") {
@@ -9880,7 +8906,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} support_quotient_skipped_candidates={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} support_quotient_skipped_candidates={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -9911,14 +8937,6 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                 dfa.support_transposition_verify_ns as f64 / 1_000_000.0,
                 exact_map_ns as f64 / 1_000_000.0,
                 accepted_map_storage_ns as f64 / 1_000_000.0,
-                dfa.quotient_certified,
-                dfa.sparse_quotient_certified,
-                dfa.sparse_quotient_cone_classes_total as f64
-                    / dfa.sparse_quotient_certified.max(1) as f64,
-                dfa.sparse_quotient_cone_classes_max,
-                dfa.sparse_quotient_cone_ns as f64 / 1_000_000.0,
-                dfa.sparse_quotient_refinement_ns as f64 / 1_000_000.0,
-                dfa.sparse_quotient_map_ns as f64 / 1_000_000.0,
                 accepted_representative_members,
                 started_at
                     .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -9943,7 +8961,6 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
             maps: accepted_maps,
         }
     }
-
 
 /// Return the singleton-inclusive one-round partition for the current active
 /// terminal mask. Inactive terminals are deliberately absent: this same mask
@@ -12057,7 +11074,6 @@ fn restore_raw_follow_constraints_impl(
     }
 }
 
-
 /// Return a topological state order when every in-range transition is acyclic.
 ///
 /// This small local helper intentionally mirrors the minimizer's Kahn pass
@@ -13051,7 +12067,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_sparse_quotient_matches_hash_reference_for_all_pairs() {
+    fn canonical_refinement_matches_hash_reference_for_all_pairs() {
         let tokenizer = tokenizer(vec![Expr::U8Seq(b"same".to_vec()), Expr::U8Seq(b"same".to_vec()), Expr::U8Seq(b"sample".to_vec()), Expr::U8Seq(b"simple".to_vec()), Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ab".to_vec()), Expr::U8Seq(b"b".to_vec()), Expr::U8Seq(b"ba".to_vec())]);
         let active = vec![true; 8];
         for left in 0..active.len() as TerminalID {
