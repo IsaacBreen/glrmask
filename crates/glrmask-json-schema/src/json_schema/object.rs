@@ -42,6 +42,28 @@ struct ObjectItem {
     exclusive_group: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixedObjectSelection {
+    OrderedDense,
+    OrderedSparse,
+    Unordered,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FixedObjectPhase {
+    First,
+    After,
+    Select,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FixedObjectObligations {
+    cursor: usize,
+    seen: u64,
+    groups: u8,
+    phase: FixedObjectPhase,
+}
+
 const ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES: usize = 4096;
 const PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES: usize = 12;
 
@@ -267,270 +289,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn schema_contains_any_ref(schema: &Schema) -> bool {
-        match &schema.kind {
-            SchemaKind::Ref(_) => true,
-            SchemaKind::Any | SchemaKind::Never => false,
-            SchemaKind::Assertions(assertions) => {
-                assertions.object.as_ref().is_some_and(|object| {
-                    object.properties.iter().any(|property| Self::schema_contains_any_ref(&property.schema))
-                        || object.pattern_properties.iter().any(|property| {
-                            Self::schema_contains_any_ref(&property.schema)
-                        })
-                        || object.property_names.as_ref().is_some_and(Self::schema_contains_any_ref)
-                        || matches!(
-                            &object.additional_properties,
-                            AdditionalProperties::Schema(schema) if Self::schema_contains_any_ref(schema)
-                        )
-                }) || assertions.array.as_ref().is_some_and(|array| {
-                    Self::schema_contains_any_ref(&array.items)
-                        || array.prefix_items.iter().any(Self::schema_contains_any_ref)
-                }) || assertions.any_of.iter().any(Self::schema_contains_any_ref)
-                    || assertions.one_of.iter().any(Self::schema_contains_any_ref)
-                    || assertions.all_of.iter().any(Self::schema_contains_any_ref)
-                    || assertions.not.as_ref().is_some_and(Self::schema_contains_any_ref)
-            }
-        }
+        schema.descendants().any(|node| matches!(node.kind, SchemaKind::Ref(_)))
     }
-
-    pub fn try_lower_closed_object_any_of_variants(
-        &mut self,
-        branches: &[Schema],
-        suppress_untyped_non_object_alts: bool,
-    ) -> ImportResult<Option<GrammarExpr>> {
-        let profile_enabled = branches.len() >= 32
-            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
-        let profile_started_at = profile_enabled.then(std::time::Instant::now);
-        if branches.len() < 2 {
-            return Ok(None);
-        }
-        if self.has_duplicate_recursive_ref_branches(branches)? {
-            return Ok(None);
-        }
-
-        if let Some(expr) = self.try_lower_ordered_string_discriminator_closed_anyof(branches)? {
-            return Ok(Some(expr));
-        }
-
-        let collect_started_at = profile_enabled.then(std::time::Instant::now);
-        let mut variants = Vec::with_capacity(branches.len());
-        let mut collection_profile = profile_enabled.then(ClosedAnyOfCollectionProfile::default);
-        let mut include_untyped_non_object_alts = false;
-        for branch in branches {
-            let Some((variant, branch_requires_untyped_non_object_alts)) =
-                self.collect_closed_any_of_object_variant(branch, collection_profile.as_mut())?
-            else {
-                return Ok(None);
-            };
-            include_untyped_non_object_alts |=
-                branch_requires_untyped_non_object_alts && !suppress_untyped_non_object_alts;
-            variants.push(variant);
-        }
-
-        let collect_ms = collect_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
-        let build_started_at = profile_enabled.then(std::time::Instant::now);
-        let result = self.lower_closed_any_of_object_variants_expr_nfa(
-            &variants,
-            include_untyped_non_object_alts,
-        )?;
-        if let (Some(profile_started_at), Some(collect_ms), Some(build_started_at), Some(collection_profile)) =
-            (profile_started_at, collect_ms, build_started_at, collection_profile)
-        {
-            eprintln!(
-                "[glrmask/profile][json_schema_closed_anyof] branches={} variants={} outcome={} collect_ms={:.3} property_lower_ms={:.3} identity_ms={:.3} schema_clone_ms={:.3} nfa_build_ms={:.3} elapsed_ms={:.3}",
-                branches.len(),
-                variants.len(),
-                result.is_some(),
-                collect_ms,
-                collection_profile.lower_property_ms,
-                collection_profile.identity_ms,
-                collection_profile.schema_clone_ms,
-                build_started_at.elapsed().as_secs_f64() * 1000.0,
-                profile_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        Ok(result)
-    }
-
-    /// Fast path for a closed object union whose first, required property is a
-    /// unique singleton string discriminator in every branch.  The generic
-    /// closed-union builder initially creates one NFA state per branch and
-    /// discovers this shared key only during determinization.  Here the shared
-    /// key is represented directly, while the discriminator value selects the
-    /// branch-specific remainder.  This is the same language, including the
-    /// declaration-order restriction used by the ordinary closed-object path.
-    pub(super) fn try_lower_ordered_string_discriminator_closed_anyof(
-        &mut self,
-        branches: &[Schema],
-    ) -> ImportResult<Option<GrammarExpr>> {
-        let profile_enabled = branches.len() >= 32
-            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
-        let profile_started_at = profile_enabled.then(std::time::Instant::now);
-        if branches.len() < 2 {
-            return Ok(None);
-        }
-
-        let mut discriminator_key: Option<&str> = None;
-        let mut payload_key: Option<&str> = None;
-        let mut cases: Vec<(String, &Schema)> = Vec::with_capacity(branches.len());
-        let mut seen_values = BTreeSet::new();
-
-        for branch in branches {
-            let SchemaKind::Assertions(assertions) = &branch.kind else {
-                return Ok(None);
-            };
-            if assertions.const_value.is_some()
-                || assertions.enum_values.is_some()
-                || assertions.array.is_some()
-                || assertions.string.is_some()
-                || assertions.number.is_some()
-                || !assertions.any_of.is_empty()
-                || !assertions.one_of.is_empty()
-                || !assertions.all_of.is_empty()
-                || assertions.not.is_some()
-            {
-                return Ok(None);
-            }
-            let Some(types) = assertions.types.as_ref() else {
-                return Ok(None);
-            };
-            if types.is_empty() || !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
-                return Ok(None);
-            }
-            let Some(object) = assertions.object.as_ref() else {
-                return Ok(None);
-            };
-            if !matches!(object.additional_properties, AdditionalProperties::Deny)
-                || !object.pattern_properties.is_empty()
-                || object.property_names.is_some()
-                || !object.property_dependencies.is_empty()
-                || object.min_properties != 0
-                || object.max_properties.is_some()
-                || object.properties.len() != 2
-                || object.required.len() != 2
-            {
-                return Ok(None);
-            }
-
-            let discriminator = &object.properties[0];
-            let payload = &object.properties[1];
-            if !object.required.contains(&discriminator.name)
-                || !object.required.contains(&payload.name)
-            {
-                return Ok(None);
-            }
-            let Some(discriminator_value) = plain_singleton_string_enum_value(&discriminator.schema) else {
-                return Ok(None);
-            };
-            match discriminator_key {
-                Some(key) if key != discriminator.name => return Ok(None),
-                None => discriminator_key = Some(&discriminator.name),
-                _ => {}
-            }
-            match payload_key {
-                Some(key) if key != payload.name => return Ok(None),
-                None => payload_key = Some(&payload.name),
-                _ => {}
-            }
-            if !seen_values.insert(discriminator_value.clone()) {
-                return Ok(None);
-            }
-            cases.push((discriminator_value, &payload.schema));
-        }
-
-        let discriminator_key = discriminator_key.expect("nonempty branch set has a discriminator key");
-        let payload_key = payload_key.expect("nonempty branch set has a payload key");
-        let validation_ms = profile_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
-        let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
-        let after_discriminator_key = builder.add_state();
-        builder.add_transition(
-            builder.start_state(),
-            self.lower_literal_key_colon(discriminator_key),
-            after_discriminator_key,
-        );
-        let payload_key_prefix = self.lower_literal_key_colon_with_prefix(b", ", payload_key);
-        let payload_lower_started_at = profile_enabled.then(std::time::Instant::now);
-        let mut slow_payloads = profile_enabled.then(Vec::new);
-        let payload_exprs = self.lower_discriminator_payloads(&cases)?;
-        debug_assert_eq!(cases.len(), payload_exprs.len());
-
-        for ((discriminator_value, payload_schema), payload_expr) in
-            cases.into_iter().zip(payload_exprs)
-        {
-            let after_discriminator_value = builder.add_state();
-            builder.add_transition(
-                after_discriminator_key,
-                self.lower_string_literal(&discriminator_value),
-                after_discriminator_value,
-            );
-            let payload_started_at = profile_enabled.then(std::time::Instant::now);
-            if let (Some(payload_started_at), Some(slow_payloads)) =
-                (payload_started_at, slow_payloads.as_mut())
-            {
-                let shape = match &payload_schema.kind {
-                    SchemaKind::Assertions(assertions) => assertions.object.as_ref().map(|object| {
-                        (object.properties.len(), object.required.len())
-                    }),
-                    _ => None,
-                };
-                slow_payloads.push((
-                    payload_started_at.elapsed().as_secs_f64() * 1000.0,
-                    discriminator_value.clone(),
-                    shape,
-                ));
-            }
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                after_discriminator_value,
-                vec![
-                    payload_key_prefix.clone(),
-                    payload_expr,
-                ],
-                accept,
-            );
-        }
-
-        let payload_lower_ms = payload_lower_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
-        let nfa_finalize_started_at = profile_enabled.then(std::time::Instant::now);
-        let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        self.add_nonterminal_rule(
-            &rule_name,
-            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
-        );
-        if let (Some(profile_started_at), Some(validation_ms), Some(payload_lower_ms), Some(nfa_finalize_started_at)) =
-            (
-                profile_started_at,
-                validation_ms,
-                payload_lower_ms,
-                nfa_finalize_started_at,
-            )
-        {
-            eprintln!(
-                "[glrmask/profile][ordered_discriminator] branches={} validation_ms={:.3} payload_lower_ms={:.3} nfa_finalize_ms={:.3} elapsed_ms={:.3}",
-                branches.len(),
-                validation_ms,
-                payload_lower_ms,
-                nfa_finalize_started_at.elapsed().as_secs_f64() * 1000.0,
-                profile_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        if let Some(slow_payloads) = &mut slow_payloads {
-            slow_payloads.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
-            slow_payloads.truncate(20);
-            eprintln!(
-                "[glrmask/profile][ordered_discriminator_slowest_payloads] payloads={:?}",
-                slow_payloads,
-            );
-        }
-        Ok(Some(seq(vec![lit("{"), r(&rule_name), lit("}")])) )
-    }
-
     fn lower_discriminator_payloads(
         &mut self,
         cases: &[(String, &Schema)],
@@ -1286,105 +1046,7 @@ impl<'a> Lowerer<'a> {
         any_group_required: bool,
         exclusive_require_one: bool,
     ) -> ImportResult<GrammarExpr> {
-        if items.iter().all(|item| !item.satisfies_any_group && !item.exclusive_group) {
-            return self.lower_fixed_object_body_exprnfa_without_group(items, tail_pair);
-        }
-
-        let mut builder = ExprNfaBuilder::new();
-        let mut states = vec![[[[0u32; 2]; 2]; 2]; items.len() + 1];
-        for state_set in &mut states {
-            for separator in state_set.iter_mut() {
-                for group in separator.iter_mut() {
-                    for slot in group.iter_mut() {
-                        *slot = builder.add_state();
-                    }
-                }
-            }
-        }
-        states[0][0][0][0] = builder.start_state();
-
-        for (index, item) in items.iter().enumerate() {
-            let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
-            for separator_seen in 0..=1 {
-                for any_group_seen in 0..=1 {
-                    for exclusive_seen in 0..=1 {
-                        if !item.required {
-                            builder.add_epsilon(
-                                states[index][separator_seen][any_group_seen][exclusive_seen],
-                                states[index + 1][separator_seen][any_group_seen][exclusive_seen],
-                            );
-                        }
-                        if item.exclusive_group && exclusive_seen == 1 {
-                            continue;
-                        }
-                        let next_any_group_seen =
-                            usize::from(any_group_seen == 1 || item.satisfies_any_group);
-                        let next_exclusive_seen =
-                            usize::from(exclusive_seen == 1 || item.exclusive_group);
-                        let transition_expr = if separator_seen == 0 {
-                            item.pair.clone()
-                        } else {
-                            separator_pair.clone()
-                        };
-                        builder.add_transition(
-                            states[index][separator_seen][any_group_seen][exclusive_seen],
-                            transition_expr,
-                            states[index + 1][1][next_any_group_seen][next_exclusive_seen],
-                        );
-                    }
-                }
-            }
-        }
-
-        let final_state_set = states[items.len()];
-        for (separator_seen, separator) in final_state_set.iter().enumerate() {
-            for (any_group_seen, group) in separator.iter().enumerate() {
-                if any_group_required && any_group_seen == 0 {
-                    continue;
-                }
-                for (exclusive_seen, &state_id) in group.iter().enumerate() {
-                    if exclusive_require_one && exclusive_seen == 0 {
-                        continue;
-                    }
-                    builder.set_accepting(state_id);
-                }
-            }
-        }
-
-        if let Some(tail_pair_expr) = tail_pair {
-            let tail_state_set = states[items.len()];
-            for (any_group_seen, group) in tail_state_set[0].iter().enumerate() {
-                for (exclusive_seen, &tail_source) in group.iter().enumerate() {
-                    let tail_state = builder.add_state();
-                    if (!any_group_required || any_group_seen == 1)
-                        && (!exclusive_require_one || exclusive_seen == 1)
-                    {
-                        builder.set_accepting(tail_state);
-                    }
-                    builder.add_transition(
-                        tail_source,
-                        tail_pair_expr.clone(),
-                        tail_state,
-                    );
-                    builder.add_transition(
-                        tail_state_set[1][any_group_seen][exclusive_seen],
-                        seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
-                        tail_state,
-                    );
-                    builder.add_transition(
-                        tail_state,
-                        seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
-                        tail_state,
-                    );
-                }
-            }
-        }
-
-        let rule_name = self.fresh_rule_name("json_closed_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&rule_name, body);
-
-        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+        self.lower_fixed_object_plan(items, tail_pair, any_group_required, exclusive_require_one, None)
     }
 
     fn lower_fixed_object_body_exprnfa_with_property_dependencies(
@@ -1397,115 +1059,8 @@ impl<'a> Lowerer<'a> {
                 "resource limit: property dependencies support at most {PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES} fixed properties"
             )));
         }
-
-        let mut key_indexes = BTreeMap::new();
-        let mut item_symbols = Vec::with_capacity(items.len());
-        let mut required_mask = 0u64;
-        for (index, item) in items.iter().enumerate() {
-            key_indexes.insert(item.key.as_str(), index);
-            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
-            if item.required {
-                required_mask |= 1u64 << index;
-            }
-        }
-
-        let mut dependency_masks = vec![0u64; items.len()];
-        let mut impossible_trigger_mask = 0u64;
-        for (trigger, dependents) in property_dependencies {
-            let Some(&trigger_index) = key_indexes.get(trigger.as_str()) else {
-                continue;
-            };
-            for dependent in dependents {
-                if let Some(&dependent_index) = key_indexes.get(dependent.as_str()) {
-                    dependency_masks[trigger_index] |= 1u64 << dependent_index;
-                } else {
-                    impossible_trigger_mask |= 1u64 << trigger_index;
-                }
-            }
-        }
-
-        let accepts = |seen_mask: u64| {
-            if (seen_mask & required_mask) != required_mask {
-                return false;
-            }
-            if seen_mask & impossible_trigger_mask != 0 {
-                return false;
-            }
-            dependency_masks.iter().enumerate().all(|(index, dependency_mask)| {
-                seen_mask & (1u64 << index) == 0 || (seen_mask & dependency_mask) == *dependency_mask
-            })
-        };
-
-        let mut builder = ExprNfaBuilder::new();
-        if !self.llguidance_compat_enabled()
-            && (2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len())
-        {
-            self.build_unordered_small_fixed_object_dfa(
-                &mut builder,
-                items,
-                &item_symbols,
-                |seen| accepts(seen as u64),
-            );
-            let rule_name = self.fresh_rule_name("json_closed_object_body");
-            let body = GrammarExpr::ExprNFA(Box::new(
-                builder.build().into_determinized_and_minimized(),
-            ));
-            self.add_nonterminal_rule(&rule_name, body);
-            return Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]));
-        }
-        let mut states = Vec::with_capacity(items.len() + 1);
-        for index in 0..=items.len() {
-            let prefix_masks = 1usize << index;
-            let mut mask_states = Vec::with_capacity(prefix_masks);
-            for _ in 0..prefix_masks {
-                mask_states.push([builder.add_state(), builder.add_state()]);
-            }
-            states.push(mask_states);
-        }
-        states[0][0][0] = builder.start_state();
-
-        for (index, item) in items.iter().enumerate() {
-            let item_bit = 1usize << index;
-            for seen_mask in 0..(1usize << index) {
-                for has_content in 0..=1 {
-                    let state_id = states[index][seen_mask][has_content];
-                    if !item.required {
-                        builder.add_epsilon(state_id, states[index + 1][seen_mask][has_content]);
-                    }
-                    let next_mask = seen_mask | item_bit;
-                    let mut transition_symbols = Vec::new();
-                    if has_content == 1 {
-                        transition_symbols.push(self.item_separator_expr());
-                    }
-                    transition_symbols.extend(item_symbols[index].iter().cloned());
-                    Self::add_expr_nfa_symbol_path(
-                        &mut builder,
-                        state_id,
-                        transition_symbols,
-                        states[index + 1][next_mask][1],
-                    );
-                }
-            }
-        }
-
-        for (seen_mask, state_pair) in states[items.len()]
-            .iter()
-            .enumerate()
-            .take(1usize << items.len())
-        {
-            if accepts(seen_mask as u64) {
-                builder.set_accepting(state_pair[0]);
-                builder.set_accepting(state_pair[1]);
-            }
-        }
-
-        let rule_name = self.fresh_rule_name("json_closed_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&rule_name, body);
-
-        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+        self.lower_fixed_object_plan(items, None, false, false, Some(property_dependencies))
     }
-
     fn collect_closed_any_of_object_variant(
         &mut self,
         branch: &Schema,
@@ -2824,148 +2379,153 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    // Exact subset construction for very small closed objects. JSON Schema
-    // never constrains the order of distinct object member names. The usual
-    // linear-size ordered lowering conservatively restricts that order; this
-    // bitmask DFA restores all permutations without permitting duplicate keys.
-    // The 2^n bound is deliberately small to protect cold-start latency.
-    fn build_unordered_small_fixed_object_dfa<F: Fn(usize) -> bool>(
+    /// The state is the remaining property obligations and whether the next
+    /// member requires a separator. Epsilon skips are an encoding of ordered
+    /// optional selection, not a different object language.
+    fn emit_fixed_object_plan(
         &self,
         builder: &mut ExprNfaBuilder,
         items: &[ObjectItem],
-        item_symbols: &[[GrammarExpr; 2]],
-        accepts: F,
-    ) {
-        debug_assert!((2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len()));
+        symbols: &[[GrammarExpr; 2]],
+        tail: Option<&GrammarExpr>,
+        any_required: bool,
+        exclusive_required: bool,
+        dependencies: Option<&BTreeMap<String, BTreeSet<String>>>,
+        mode: FixedObjectSelection,
+    ) -> ImportResult<()> {
+        let unordered = mode == FixedObjectSelection::Unordered;
+        let sparse = mode == FixedObjectSelection::OrderedSparse;
+        let track_seen = unordered || dependencies.is_some();
         let separator = self.item_separator_expr();
-        // Preserve the symbol ordering expected by fixed-object templates.
-        for item in item_symbols {
-            builder.add_symbol(item[0].clone());
-            builder.add_symbol(item[1].clone());
-            builder.add_symbol(separator.clone());
+        let n = items.len();
+        let mut next_required = vec![n; n + 1];
+        for i in (0..n).rev() {
+            next_required[i] = if items[i].required { i } else { next_required[i + 1] };
         }
-        let state_count = 1usize << items.len();
-        let mut states = Vec::with_capacity(state_count);
-        states.push(builder.start_state());
-        for _ in 1..state_count {
-            states.push(builder.add_state());
-        }
-        for seen in 0..state_count {
-            if accepts(seen) {
-                builder.set_accepting(states[seen]);
+        let required = if track_seen {
+            items.iter().enumerate().fold(0u64, |mask, (i, item)| {
+                mask | if item.required { 1u64 << i } else { 0 }
+            })
+        } else {
+            0
+        };
+        let mut dependency_masks = vec![0u64; n];
+        let mut impossible = 0u64;
+        if let Some(dependencies) = dependencies {
+            let indexes: BTreeMap<_, _> = items.iter().enumerate()
+                .map(|(i, item)| (item.key.as_str(), i)).collect();
+            for (trigger, dependents) in dependencies {
+                let Some(&i) = indexes.get(trigger.as_str()) else { continue };
+                for dependent in dependents {
+                    if let Some(&j) = indexes.get(dependent.as_str()) {
+                        dependency_masks[i] |= 1u64 << j;
+                    } else {
+                        impossible |= 1u64 << i;
+                    }
+                }
             }
-            if seen == state_count - 1 {
+        }
+        let can_close = |state: FixedObjectObligations| {
+            (if unordered { state.seen & required == required }
+                else { next_required[state.cursor] == n })
+                && (!any_required || state.groups & 1 != 0)
+                && (!exclusive_required || state.groups & 2 != 0)
+                && state.seen & impossible == 0
+                && (dependencies.is_none() || dependency_masks.iter().enumerate().all(|(i, &mask)| {
+                    state.seen & (1u64 << i) == 0 || state.seen & mask == mask
+                }))
+        };
+        // Preserve the abstract symbol numbering used by dense templates.
+        if !sparse {
+            for pair in symbols {
+                builder.add_symbol(pair[0].clone());
+                builder.add_symbol(pair[1].clone());
+                builder.add_symbol(separator.clone());
+            }
+        }
+        let initial = FixedObjectObligations { cursor: 0, seen: 0, groups: 0, phase: FixedObjectPhase::First };
+        let mut ids = HashMap::from([(initial, builder.start_state())]);
+        let mut pending = VecDeque::from([initial]);
+        let mut continuations = HashMap::<(usize, u32), u32>::new();
+        let tail_symbols = tail.map(Self::split_object_pair_symbols).transpose()?;
+        let tail_states = if let Some(pair) = &tail_symbols {
+            let after = builder.add_state();
+            let select = builder.add_state();
+            builder.set_accepting(after);
+            builder.add_transition(after, separator.clone(), select);
+            Self::add_expr_nfa_symbol_path(builder, select, pair.to_vec(), after);
+            Some((select, after))
+        } else { None };
+        while let Some(state) = pending.pop_front() {
+            let id = ids[&state];
+            let close = can_close(state);
+            let mut intern = |builder: &mut ExprNfaBuilder, next| {
+                *ids.entry(next).or_insert_with(|| {
+                    pending.push_back(next);
+                    builder.add_state()
+                })
+            };
+            if state.phase != FixedObjectPhase::Select && close {
+                builder.set_accepting(id);
+            }
+            if state.phase == FixedObjectPhase::After {
+                if state.cursor < n || unordered && state.seen.count_ones() < n as u32 || close && tail_states.is_some() {
+                    let next = intern(builder, FixedObjectObligations { phase: FixedObjectPhase::Select, ..state });
+                    builder.add_transition(id, separator.clone(), next);
+                }
                 continue;
             }
-            let before_key = if seen == 0 {
-                states[seen]
+            if close && (!sparse || state.cursor == n) {
+                if let Some((select, _)) = tail_states {
+                    builder.add_epsilon(id, select);
+                }
+            }
+            if sparse && state.cursor < n && !items[state.cursor].required {
+                let next = intern(builder, FixedObjectObligations { cursor: state.cursor + 1, ..state });
+                builder.add_epsilon(id, next);
+            }
+            let end = if unordered { n } else if sparse {
+                (state.cursor + 1).min(n)
             } else {
-                let sep_state = builder.add_state();
-                builder.add_transition(states[seen], separator.clone(), sep_state);
-                sep_state
+                (next_required[state.cursor] + 1).min(n)
             };
-            for (index, item) in item_symbols.iter().enumerate() {
-                if seen & (1usize << index) != 0 {
+            for i in state.cursor..end {
+                let item = &items[i];
+                if unordered && state.seen & (1u64 << i) != 0
+                    || item.exclusive_group && state.groups & 2 != 0
+                {
                     continue;
                 }
-                let key_state = builder.add_state();
-                builder.add_transition(before_key, item[0].clone(), key_state);
-                builder.add_transition(
-                    key_state,
-                    item[1].clone(),
-                    states[seen | (1usize << index)],
-                );
+                let next = intern(builder, FixedObjectObligations {
+                    cursor: if unordered { 0 } else { i + 1 },
+                    seen: if track_seen { state.seen | (1u64 << i) } else { 0 },
+                    groups: state.groups | u8::from(any_required && item.satisfies_any_group)
+                        | (u8::from(item.exclusive_group) << 1),
+                    phase: FixedObjectPhase::After,
+                });
+                if sparse {
+                    Self::add_expr_nfa_symbol_path(builder, id, symbols[i].to_vec(), next);
+                } else {
+                    // All sources selecting this property with the same
+                    // remaining obligations can share its value continuation.
+                    let key_state = *continuations.entry((i, next)).or_insert_with(|| {
+                        let key_state = builder.add_state();
+                        builder.add_transition(key_state, symbols[i][1].clone(), next);
+                        key_state
+                    });
+                    builder.add_transition(id, symbols[i][0].clone(), key_state);
+                }
             }
         }
+        Ok(())
     }
-    fn build_ordered_fixed_object_dfa(
-        &self,
-        builder: &mut ExprNfaBuilder,
-        items: &[ObjectItem],
-        item_symbols: &[[GrammarExpr; 2]],
-    ) {
-        let item_count = items.len();
-        let mut before_item = Vec::with_capacity(item_count + 1);
-        let mut after_item = Vec::with_capacity(item_count + 1);
-        for index in 0..=item_count {
-            before_item.push(if index == 0 {
-                builder.start_state()
-            } else {
-                builder.add_state()
-            });
-            after_item.push(builder.add_state());
-        }
-
-        // Keep the symbol table byte-for-byte compatible with the existing
-        // template builder. The direct graph below reaches separator edges at
-        // a different time from the former epsilon NFA, but callers cache the
-        // minimized graph together with this symbol ordering.
-        let separator = self.item_separator_expr();
-        for item in item_symbols {
-            builder.add_symbol(item[0].clone());
-            builder.add_symbol(item[1].clone());
-            builder.add_symbol(separator.clone());
-        }
-
-        let mut next_required = vec![item_count; item_count + 1];
-        let mut required_index = item_count;
-        for index in (0..item_count).rev() {
-            if items[index].required {
-                required_index = index;
-            }
-            next_required[index] = required_index;
-        }
-        for index in 0..=item_count {
-            let first_required = next_required[index];
-            if first_required == item_count {
-                builder.set_accepting(before_item[index]);
-                builder.set_accepting(after_item[index]);
-            }
-            if index == item_count {
-                continue;
-            }
-            let last_selectable = if first_required == item_count {
-                item_count - 1
-            } else {
-                first_required
-            };
-
-            for item_index in index..=last_selectable {
-                let key_state = builder.add_state();
-                builder.add_transition(
-                    before_item[index],
-                    item_symbols[item_index][0].clone(),
-                    key_state,
-                );
-                builder.add_transition(
-                    key_state,
-                    item_symbols[item_index][1].clone(),
-                    after_item[item_index + 1],
-                );
-            }
-
-            let separator_state = builder.add_state();
-            builder.add_transition(after_item[index], separator.clone(), separator_state);
-            for item_index in index..=last_selectable {
-                let key_state = builder.add_state();
-                builder.add_transition(
-                    separator_state,
-                    item_symbols[item_index][0].clone(),
-                    key_state,
-                );
-                builder.add_transition(
-                    key_state,
-                    item_symbols[item_index][1].clone(),
-                    after_item[item_index + 1],
-                );
-            }
-        }
-    }
-
-    fn lower_fixed_object_body_exprnfa_without_group(
+    fn lower_fixed_object_plan(
         &mut self,
         items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
+        any_required: bool,
+        exclusive_required: bool,
+        dependencies: Option<&BTreeMap<String, BTreeSet<String>>>,
     ) -> ImportResult<GrammarExpr> {
         let profile_started_at = self
             .fixed_object_profile
@@ -2980,7 +2540,21 @@ impl<'a> Lowerer<'a> {
         let item_symbol_ms = item_symbols_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        let template_symbols = tail_pair.is_none().then(|| {
+        let grouped = any_required || exclusive_required || items.iter().any(|item| item.exclusive_group);
+        let ordinary = !grouped && dependencies.is_none();
+        let sparse_direct_nfa = ordinary && self.config.sparse_large_optional_objects
+            && items.len() - required_count >= SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES;
+        let mode = if !grouped && tail_pair.is_none() && !sparse_direct_nfa
+            && !self.llguidance_compat_enabled()
+            && (2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len())
+        {
+            FixedObjectSelection::Unordered
+        } else if grouped || dependencies.is_some() || tail_pair.is_some() || sparse_direct_nfa {
+            FixedObjectSelection::OrderedSparse
+        } else {
+            FixedObjectSelection::OrderedDense
+        };
+        let template_symbols = (ordinary && mode != FixedObjectSelection::OrderedSparse).then(|| {
             Self::fixed_object_template_symbols(
                 items,
                 &item_symbols,
@@ -3012,156 +2586,10 @@ impl<'a> Lowerer<'a> {
         }
         let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut builder = ExprNfaBuilder::new();
-        let optional_count = items.iter().filter(|item| !item.required).count();
-        let sparse_direct_nfa = self.config.sparse_large_optional_objects
-            && optional_count >= SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES;
-        if tail_pair.is_none() && !sparse_direct_nfa {
-            if !self.llguidance_compat_enabled()
-                && (2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len())
-            {
-                let required_mask = items.iter().enumerate().fold(0usize, |bits, (idx, item)| {
-                    if item.required {
-                        bits | (1usize << idx)
-                    } else {
-                        bits
-                    }
-                });
-                self.build_unordered_small_fixed_object_dfa(
-                    &mut builder,
-                    items,
-                    &item_symbols,
-                    |seen| seen & required_mask == required_mask,
-                );
-            } else {
-                self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
-            }
-        } else {
-        let mut states = vec![[0u32; 2]; items.len() + 1];
-        states[0][0] = builder.start_state();
-        states[0][1] = builder.add_state();
-        for state_pair in states.iter_mut().skip(1) {
-            state_pair[0] = builder.add_state();
-            state_pair[1] = builder.add_state();
-        }
-
-        let use_separator_states = tail_pair.is_some() && items.iter().any(|item| !item.required);
-        let post_separator_states = if use_separator_states {
-            Some((0..=items.len()).map(|_| builder.add_state()).collect::<Vec<_>>())
-        } else {
-            None
-        };
-        let tail_symbols = tail_pair
-            .as_ref()
-            .map(Self::split_object_pair_symbols)
-            .transpose()?;
-
-
-        for (index, item) in items.iter().enumerate() {
-            if !item.required {
-                builder.add_epsilon(states[index][0], states[index + 1][0]);
-                builder.add_epsilon(states[index][1], states[index + 1][1]);
-                if let Some(post_separator_states) = &post_separator_states {
-                    builder.add_epsilon(post_separator_states[index], post_separator_states[index + 1]);
-                }
-            }
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                states[index][0],
-                item_symbols[index].to_vec(),
-                states[index + 1][1],
-            );
-            if let Some(post_separator_states) = &post_separator_states {
-                builder.add_transition(
-                    states[index][1],
-                    self.item_separator_expr(),
-                    post_separator_states[index],
-                );
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    post_separator_states[index],
-                    item_symbols[index].to_vec(),
-                    states[index + 1][1],
-                );
-            } else {
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    states[index][1],
-                    vec![
-                        self.item_separator_expr(),
-                        item_symbols[index][0].clone(),
-                        item_symbols[index][1].clone(),
-                    ],
-                    states[index + 1][1],
-                );
-            }
-        }
-
-        builder.set_accepting(states[items.len()][0]);
-        builder.set_accepting(states[items.len()][1]);
-
-        if let Some(tail_pair_expr) = tail_pair {
-            let tail_state = builder.add_state();
-            builder.set_accepting(tail_state);
-            let tail_symbols = tail_symbols
-                .as_ref()
-                .expect("tail pair must lower as key-colon/value sequence");
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                states[items.len()][0],
-                tail_symbols.to_vec(),
-                tail_state,
-            );
-            if let Some(post_separator_states) = &post_separator_states {
-                builder.add_transition(
-                    states[items.len()][1],
-                    self.item_separator_expr(),
-                    post_separator_states[items.len()],
-                );
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    post_separator_states[items.len()],
-                    tail_symbols.to_vec(),
-                    tail_state,
-                );
-
-                let tail_post_separator_state = builder.add_state();
-                builder.add_transition(
-                    tail_state,
-                    self.item_separator_expr(),
-                    tail_post_separator_state,
-                );
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    tail_post_separator_state,
-                    tail_symbols.to_vec(),
-                    tail_state,
-                );
-            } else {
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    states[items.len()][1],
-                    vec![
-                        self.item_separator_expr(),
-                        tail_symbols[0].clone(),
-                        tail_symbols[1].clone(),
-                    ],
-                    tail_state,
-                );
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    tail_state,
-                    vec![
-                        self.item_separator_expr(),
-                        tail_symbols[0].clone(),
-                        tail_symbols[1].clone(),
-                    ],
-                    tail_state,
-                );
-            }
-        }
-
-        }
-
+        self.emit_fixed_object_plan(
+            &mut builder, items, &item_symbols, tail_pair.as_ref(),
+            any_required, exclusive_required, dependencies, mode,
+        )?;
         let graph_build_ms = graph_build_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -4343,113 +3771,8 @@ fn singleton_string_identity_literal_expr(identity: &str) -> Option<GrammarExpr>
 }
 
 fn schemas_structurally_equal(lhs: &Schema, rhs: &Schema) -> bool {
-    match (&lhs.kind, &rhs.kind) {
-        (SchemaKind::Any, SchemaKind::Any) | (SchemaKind::Never, SchemaKind::Never) => true,
-        (SchemaKind::Ref(left), SchemaKind::Ref(right)) => left == right,
-        (SchemaKind::Assertions(left), SchemaKind::Assertions(right)) => {
-            left.types == right.types
-                && left.const_value == right.const_value
-                && left.enum_values == right.enum_values
-                && object_schemas_structurally_equal(left.object.as_ref(), right.object.as_ref())
-                && array_schemas_structurally_equal(left.array.as_ref(), right.array.as_ref())
-                && left.string == right.string
-                && left.number == right.number
-                && schema_slices_structurally_equal(&left.any_of, &right.any_of)
-                && schema_slices_structurally_equal(&left.one_of, &right.one_of)
-                && schema_slices_structurally_equal(&left.all_of, &right.all_of)
-                && optional_schemas_structurally_equal(left.not.as_ref(), right.not.as_ref())
-        }
-        _ => false,
-    }
+    super::shape::schemas_shape_equivalent(lhs, rhs)
 }
-
-fn optional_schemas_structurally_equal(lhs: Option<&Schema>, rhs: Option<&Schema>) -> bool {
-    match (lhs, rhs) {
-        (Some(left), Some(right)) => schemas_structurally_equal(left, right),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn schema_slices_structurally_equal(lhs: &[Schema], rhs: &[Schema]) -> bool {
-    lhs.len() == rhs.len()
-        && lhs
-            .iter()
-            .zip(rhs)
-            .all(|(left, right)| schemas_structurally_equal(left, right))
-}
-
-fn object_schemas_structurally_equal(lhs: Option<&ObjectSchema>, rhs: Option<&ObjectSchema>) -> bool {
-    match (lhs, rhs) {
-        (Some(left), Some(right)) => {
-            left.required == right.required
-                && left.property_dependencies == right.property_dependencies
-                && left.min_properties == right.min_properties
-                && left.max_properties == right.max_properties
-                && left.properties.len() == right.properties.len()
-                && left
-                    .properties
-                    .iter()
-                    .zip(&right.properties)
-                    .all(|(lprop, rprop)| {
-                        lprop.name == rprop.name
-                            && schemas_structurally_equal(&lprop.schema, &rprop.schema)
-                    })
-                && left.pattern_properties.len() == right.pattern_properties.len()
-                && left
-                    .pattern_properties
-                    .iter()
-                    .zip(&right.pattern_properties)
-                    .all(|(lpat, rpat)| {
-                        lpat.pattern == rpat.pattern
-                            && schemas_structurally_equal(&lpat.schema, &rpat.schema)
-                    })
-                && optional_schemas_structurally_equal(
-                    left.property_names.as_ref(),
-                    right.property_names.as_ref(),
-                )
-                && additional_properties_structurally_equal(
-                    &left.additional_properties,
-                    &right.additional_properties,
-                )
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn array_schemas_structurally_equal(lhs: Option<&super::ast::ArraySchema>, rhs: Option<&super::ast::ArraySchema>) -> bool {
-    match (lhs, rhs) {
-        (Some(left), Some(right)) => {
-            schemas_structurally_equal(&left.items, &right.items)
-                && left.prefix_items.len() == right.prefix_items.len()
-                && left
-                    .prefix_items
-                    .iter()
-                    .zip(&right.prefix_items)
-                    .all(|(litem, ritem)| schemas_structurally_equal(litem, ritem))
-                && left.min_items == right.min_items
-                && left.max_items == right.max_items
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn additional_properties_structurally_equal(
-    lhs: &AdditionalProperties,
-    rhs: &AdditionalProperties,
-) -> bool {
-    match (lhs, rhs) {
-        (AdditionalProperties::AllowAny, AdditionalProperties::AllowAny)
-        | (AdditionalProperties::Deny, AdditionalProperties::Deny) => true,
-        (AdditionalProperties::Schema(left), AdditionalProperties::Schema(right)) => {
-            schemas_structurally_equal(left, right)
-        }
-        _ => false,
-    }
-}
-
 fn shareable_property_schemas_match(lhs: &AnyOfFixedObjectItem, rhs: &AnyOfFixedObjectItem) -> bool {
     match (lhs.value_identity.as_ref(), rhs.value_identity.as_ref()) {
         (Some(left), Some(right)) => left == right,
