@@ -723,22 +723,14 @@ struct Lowerer<'a> {
     /// Hash borrowed expressions on lookup and clone only first-seen structures so
     /// repeated subtrees share one already-lowered parser symbol.
     lowered_expr_cache: FxHashMap<u64, Vec<(GrammarExpr, Symbol)>>,
-    /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
-    repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
-    /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
-    /// Only used for Left/Right shapes (bucket-based decomposition).
-    repeat_range_cache: BTreeMap<(Symbol, usize, usize), NonterminalID>,
-    /// Shared cache for repeat-max nonterminals, keyed by (symbol, max).
-    /// Used by LeftBalanced/Balanced shapes for O(log N) range decomposition.
-    repeat_max_cache: BTreeMap<(Symbol, usize), NonterminalID>,
-    /// Shared cache for repeat-min1-max nonterminals, keyed by (symbol, max).
-    /// repeat_min1_max_N matches exactly 1..N elements (N >= 1).
-    repeat_min1_max_cache: BTreeMap<(Symbol, usize), NonterminalID>,
+    /// Immutable helper language: symbol repeated min..=max times (or unbounded).
+    /// Include the requested shape because CFG clients expose recursion direction.
+    repetition_cache: BTreeMap<(Symbol, usize, Option<usize>, RepeatTreeShape), NonterminalID>,
     parser_cfg_shape: Option<(RepeatTreeShape, CommaSepShape, bool)>,
     direct_regular_automaton: Option<DirectRegularAutomaton>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RepeatTreeShape {
     Balanced,
     Left,
@@ -793,20 +785,6 @@ fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
     }
 }
 
-fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize, usize) {
-    debug_assert!(min < max);
-    let width = max - min + 1;
-    match shape {
-        RepeatTreeShape::Balanced | RepeatTreeShape::Countdown | RepeatTreeShape::LeftBalanced => {
-            let left_width = width / 2;
-            let split = min + left_width - 1;
-            (split, width - left_width)
-        }
-        RepeatTreeShape::Left => (max - 1, 1),
-        RepeatTreeShape::Right => (min, width - 1),
-    }
-}
-
 fn highest_power_of_two_le(n: usize) -> usize {
     debug_assert!(n > 0);
     1usize << ((usize::BITS - 1 - n.leading_zeros()) as usize)
@@ -845,10 +823,7 @@ impl<'a> Lowerer<'a> {
             literal_choice_nonterminal_cache: FxHashMap::default(),
             cache_compound_exprs: false,
             lowered_expr_cache: FxHashMap::default(),
-            repeat_exact_cache: BTreeMap::new(),
-            repeat_range_cache: BTreeMap::new(),
-            repeat_max_cache: BTreeMap::new(),
-            repeat_min1_max_cache: BTreeMap::new(),
+            repetition_cache: BTreeMap::new(),
             direct_regular_automaton: None,
             parser_cfg_shape: None,
         }
@@ -1317,24 +1292,10 @@ impl<'a> Lowerer<'a> {
                 let Some(symbol) = self.lower_nonnullable_expr_symbol(expr)? else {
                     return Ok(());
                 };
-                let adjusted_min = (*min).max(1);
-                if let Some(max) = max {
-                    if adjusted_min > *max {
-                        return Ok(());
-                    }
-                    let shape = self.repeat_shape();
-                    let range_nonterminal = self.repeat_range_nonterminal(
-                        &symbol,
-                        adjusted_min,
-                        *max,
-                        shape,
-                    );
-                    self.rules.push(Rule {
-                        lhs,
-                        rhs: vec![Symbol::Nonterminal(range_nonterminal)],
-                    });
-                } else {
-                    self.emit_repeat_range(lhs, expr, adjusted_min, None)?;
+                let min = if self.expr_is_nullable(expr) { 1 } else { (*min).max(1) };
+                if max.is_none_or(|max| min <= max) {
+                    let nt = self.repetition(&symbol, min, *max, self.repeat_shape());
+                    self.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(nt)] });
                 }
             }
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -1430,321 +1391,126 @@ impl<'a> Lowerer<'a> {
     }
 
     fn repeat_exact_nonterminal(
-        &mut self,
-        symbol: &Symbol,
-        count: usize,
-        shape: RepeatTreeShape,
+        &mut self, symbol: &Symbol, count: usize, shape: RepeatTreeShape,
     ) -> NonterminalID {
-        let key = (symbol.clone(), count);
-        if let Some(&nonterminal) = self.repeat_exact_cache.get(&key) {
-            return nonterminal;
-        }
-
-        let nonterminal = self.fresh_nonterminal();
-        self.repeat_exact_cache.insert(key, nonterminal);
-        match count {
-            0 => self.rules.push(Rule {
-                lhs: nonterminal,
-                rhs: Vec::new(),
-            }),
-            1 => self.rules.push(Rule {
-                lhs: nonterminal,
-                rhs: vec![symbol.clone()],
-            }),
-            _ => {
-                let (left, right) = exact_repeat_split(count, shape);
-                let left_nonterminal =
-                    self.repeat_exact_nonterminal(symbol, left, shape);
-                let right_nonterminal =
-                    self.repeat_exact_nonterminal(symbol, right, shape);
-                self.rules.push(Rule {
-                    lhs: nonterminal,
-                    rhs: vec![
-                        Symbol::Nonterminal(left_nonterminal),
-                        Symbol::Nonterminal(right_nonterminal),
-                    ],
-                });
-            }
-        }
-        nonterminal
-    }
-
-    fn repeat_max_nonterminal(
-        &mut self,
-        symbol: &Symbol,
-        max: usize,
-    ) -> NonterminalID {
-        let key = (symbol.clone(), max);
-        if let Some(&nt) = self.repeat_max_cache.get(&key) {
-            return nt;
-        }
-
-        if max == 0 {
-            let nt = self.fresh_nonterminal();
-            self.repeat_max_cache.insert(key, nt);
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: Vec::new(),
-            });
-            return nt;
-        }
-
-        let nt = self.fresh_nonterminal();
-        self.repeat_max_cache.insert(key, nt);
-
-        if let Some(span) = max.checked_add(1).filter(|span| span.is_power_of_two()) {
-            let high = span / 2;
-            debug_assert!(high > 0);
-
-            let low_nt = self.repeat_max_nonterminal(symbol, high - 1);
-            let exact_high_nt =
-                self.repeat_exact_nonterminal(symbol, high, RepeatTreeShape::LeftBalanced);
-
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![Symbol::Nonterminal(low_nt)],
-            });
-
-            let rhs = if high == 1 {
-                vec![Symbol::Nonterminal(exact_high_nt)]
-            } else {
-                vec![
-                    Symbol::Nonterminal(exact_high_nt),
-                    Symbol::Nonterminal(low_nt),
-                ]
-            };
-            self.rules.push(Rule { lhs: nt, rhs });
-        } else {
-            let high = highest_power_of_two_le(max);
-            debug_assert!(high > 0);
-            debug_assert!(high <= max);
-
-            let below_nt = self.repeat_max_nonterminal(symbol, high - 1);
-            let exact_high_nt =
-                self.repeat_exact_nonterminal(symbol, high, RepeatTreeShape::LeftBalanced);
-
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![Symbol::Nonterminal(below_nt)],
-            });
-
-            if max == high {
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![Symbol::Nonterminal(exact_high_nt)],
-                });
-            } else {
-                let tail_nt = self.repeat_max_nonterminal(symbol, max - high);
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![
-                        Symbol::Nonterminal(exact_high_nt),
-                        Symbol::Nonterminal(tail_nt),
-                    ],
-                });
-            }
-        }
-
-        nt
-    }
-
-    /// Returns a nonterminal matching exactly 1..=max occurrences of `symbol`.
-    /// Defined as: `symbol repeat_max_{max-1}` â€” the first element is mandatory,
-    /// the rest (0..max-1) are handled by `repeat_max`.
-    fn repeat_min1_max_nonterminal(&mut self, symbol: &Symbol, max: usize) -> NonterminalID {
-        debug_assert!(max >= 1);
-        let key = (symbol.clone(), max);
-        if let Some(&nt) = self.repeat_min1_max_cache.get(&key) {
-            return nt;
-        }
-
-        let nt = self.fresh_nonterminal();
-        self.repeat_min1_max_cache.insert(key, nt);
-
-        if max == 1 {
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![symbol.clone()],
-            });
-            return nt;
-        }
-
-        let tail_nt = self.repeat_max_nonterminal(symbol, max - 1);
-        self.rules.push(Rule {
-            lhs: nt,
-            rhs: vec![symbol.clone(), Symbol::Nonterminal(tail_nt)],
-        });
-        nt
+        self.repetition(symbol, count, Some(count), shape)
     }
 
     fn repeat_range_nonterminal(
-        &mut self,
-        symbol: &Symbol,
-        min: usize,
-        max: usize,
-        shape: RepeatTreeShape,
+        &mut self, symbol: &Symbol, min: usize, max: usize, shape: RepeatTreeShape,
     ) -> NonterminalID {
-        debug_assert!(min <= max);
-        if min == max {
-            return self.repeat_exact_nonterminal(symbol, min, shape);
-        }
-
-        let key = (symbol.clone(), min, max);
-        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
-            return nonterminal;
-        }
-
-        if shape == RepeatTreeShape::Countdown {
-            return self.repeat_range_nonterminal_countdown(symbol, min, max, shape);
-        }
-
-        match shape {
-            RepeatTreeShape::LeftBalanced | RepeatTreeShape::Balanced => {
-                return self.repeat_range_nonterminal_balanced(symbol, min, max, shape);
-            }
-            _ => {}
-        }
-
-        let nonterminal = self.fresh_nonterminal();
-        self.repeat_range_cache.insert(key, nonterminal);
-
-        match shape {
-            RepeatTreeShape::Right if (max - min + 1) > right_repeat_range_front_bucket() => {
-                let cutoff = (min + right_repeat_range_front_bucket() - 1).min(max);
-                for count in min..=cutoff {
-                    let exact_nonterminal =
-                        self.repeat_exact_nonterminal(symbol, count, shape);
-                    self.rules.push(Rule {
-                        lhs: nonterminal,
-                        rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
-                    });
-                }
-                if cutoff < max {
-                    let tail_nonterminal = self.repeat_range_nonterminal(
-                        symbol,
-                        cutoff + 1,
-                        max,
-                        shape,
-                    );
-                    self.rules.push(Rule {
-                        lhs: nonterminal,
-                        rhs: vec![Symbol::Nonterminal(tail_nonterminal)],
-                    });
-                }
-                return nonterminal;
-            }
-            RepeatTreeShape::Left if (max - min + 1) > left_repeat_range_back_bucket() => {
-                let cutoff = max.saturating_sub(left_repeat_range_back_bucket() - 1).max(min);
-                if min < cutoff {
-                    let head_nonterminal = self.repeat_range_nonterminal(
-                        symbol,
-                        min,
-                        cutoff - 1,
-                        shape,
-                    );
-                    self.rules.push(Rule {
-                        lhs: nonterminal,
-                        rhs: vec![Symbol::Nonterminal(head_nonterminal)],
-                    });
-                }
-                for count in cutoff..=max {
-                    let exact_nonterminal =
-                        self.repeat_exact_nonterminal(symbol, count, shape);
-                    self.rules.push(Rule {
-                        lhs: nonterminal,
-                        rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
-                    });
-                }
-                return nonterminal;
-            }
-            _ => {}
-        }
-        let (split, _) = range_repeat_split(min, max, shape);
-        let left_nonterminal = self.repeat_range_nonterminal(
-            symbol,
-            min,
-            split,
-            shape,
-        );
-        let right_nonterminal = self.repeat_range_nonterminal(
-            symbol,
-            split + 1,
-            max,
-            shape,
-        );
-        self.rules.push(Rule {
-            lhs: nonterminal,
-            rhs: vec![Symbol::Nonterminal(left_nonterminal)],
-        });
-        self.rules.push(Rule {
-            lhs: nonterminal,
-            rhs: vec![Symbol::Nonterminal(right_nonterminal)],
-        });
-        nonterminal
+        self.repetition(symbol, min, Some(max), shape)
     }
 
-    fn repeat_range_nonterminal_countdown(
-        &mut self,
-        symbol: &Symbol,
-        min: usize,
-        max: usize,
-        shape: RepeatTreeShape,
+    /// Construct the count language with immutable, interned sublanguages.
+    /// Finite interval union and interval addition are the only operations.
+    /// The unbounded tail has its own key and is never a mutated optional.
+    fn repetition(
+        &mut self, symbol: &Symbol, min: usize, max: Option<usize>, shape: RepeatTreeShape,
     ) -> NonterminalID {
-        let key = (symbol.clone(), min, max);
-        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
-            return nonterminal;
+        debug_assert!(max.is_none_or(|max| min <= max));
+        let key = (symbol.clone(), min, max, shape);
+        if let Some(&nt) = self.repetition_cache.get(&key) {
+            return nt;
         }
 
-        let nonterminal = self.fresh_nonterminal();
-        self.repeat_range_cache.insert(key, nonterminal);
-
-        if min == 0 {
-            self.rules.push(Rule {
-                lhs: nonterminal,
-                rhs: Vec::new(),
-            });
-        }
-
-        let tail_nonterminal = if min > 0 {
-            self.repeat_range_nonterminal(symbol, min - 1, max - 1, shape)
-        } else {
-            self.repeat_range_nonterminal(symbol, 0, max - 1, shape)
+        let nt = self.fresh_nonterminal();
+        self.repetition_cache.insert(key, nt);
+        let Some(max) = max else {
+            if min == 0 {
+                self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
+                self.rules.push(Rule { lhs: nt, rhs: self.repeat_rhs(nt, symbol.clone()) });
+            } else {
+                let prefix = self.repeat_exact_nonterminal(symbol, min, shape);
+                let suffix = self.repetition(symbol, 0, None, shape);
+                self.rules.push(Rule {
+                    lhs: nt, rhs: vec![Symbol::Nonterminal(prefix), Symbol::Nonterminal(suffix)],
+                });
+            }
+            return nt;
         };
-        self.rules.push(Rule {
-            lhs: nonterminal,
-            rhs: vec![symbol.clone(), Symbol::Nonterminal(tail_nonterminal)],
-        });
-        nonterminal
-    }
 
-    fn repeat_range_nonterminal_balanced(
-        &mut self,
-        symbol: &Symbol,
-        min: usize,
-        max: usize,
-        shape: RepeatTreeShape,
-    ) -> NonterminalID {
-        debug_assert!(min <= max);
-        debug_assert!(matches!(shape, RepeatTreeShape::LeftBalanced | RepeatTreeShape::Balanced));
         if min == max {
-            return self.repeat_exact_nonterminal(symbol, min, shape);
+            let rhs = match min {
+                0 => Vec::new(),
+                1 => vec![symbol.clone()],
+                count => {
+                    let (left, right) = exact_repeat_split(count, shape);
+                    let left = self.repeat_exact_nonterminal(symbol, left, shape);
+                    let right = self.repeat_exact_nonterminal(symbol, right, shape);
+                    vec![Symbol::Nonterminal(left), Symbol::Nonterminal(right)]
+                }
+            };
+            self.rules.push(Rule { lhs: nt, rhs });
+            return nt;
         }
-        let delta = max - min;
-        let max_nt = self.repeat_max_nonterminal(symbol, delta);
-        if min == 0 {
-            max_nt
-        } else {
-            let exact_nt = self.repeat_exact_nonterminal(symbol, min, shape);
-            let result_nt = self.fresh_nonterminal();
-            self.rules.push(Rule {
-                lhs: result_nt,
-                rhs: vec![
-                    Symbol::Nonterminal(exact_nt),
-                    Symbol::Nonterminal(max_nt),
-                ],
-            });
-            result_nt
+
+        match shape {
+            RepeatTreeShape::Countdown => {
+                if min == 0 {
+                    self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
+                }
+                let tail = self.repeat_range_nonterminal(symbol, min.saturating_sub(1), max - 1, shape);
+                self.rules.push(Rule { lhs: nt, rhs: vec![symbol.clone(), Symbol::Nonterminal(tail)] });
+            }
+            RepeatTreeShape::Balanced | RepeatTreeShape::LeftBalanced => {
+                if min != 0 {
+                    // [min,max] = {min} + [0,max-min].
+                    let prefix = self.repeat_exact_nonterminal(symbol, min, shape);
+                    let suffix = self.repeat_range_nonterminal(symbol, 0, max - min, shape);
+                    self.rules.push(Rule {
+                        lhs: nt, rhs: vec![Symbol::Nonterminal(prefix), Symbol::Nonterminal(suffix)],
+                    });
+                } else {
+                    // Split at the highest power of two; each count belongs
+                    // to precisely one arm. All recursive bounds decrease.
+                    let high = highest_power_of_two_le(max);
+                    let below = self.repeat_range_nonterminal(symbol, 0, high - 1, shape);
+                    let prefix = self.repeat_exact_nonterminal(symbol, high, shape);
+                    self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(below)] });
+                    let mut rhs = vec![Symbol::Nonterminal(prefix)];
+                    if high < max {
+                        let tail = self.repeat_range_nonterminal(symbol, 0, max - high, shape);
+                        rhs.push(Symbol::Nonterminal(tail));
+                    }
+                    self.rules.push(Rule { lhs: nt, rhs });
+                }
+            }
+            RepeatTreeShape::Left | RepeatTreeShape::Right => {
+                // Preserve the explicitly selected linear CFG shape and
+                // the bucket policy without a second interval constructor.
+                let bucket = match shape {
+                    RepeatTreeShape::Left => left_repeat_range_back_bucket(),
+                    _ => right_repeat_range_front_bucket(),
+                }.max(1);
+                let width = max - min;
+                if width >= bucket {
+                    let (front, back) = if shape == RepeatTreeShape::Left {
+                        let cutoff = max - (bucket - 1);
+                        let head = self.repeat_range_nonterminal(symbol, min, cutoff - 1, shape);
+                        self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(head)] });
+                        (cutoff, max)
+                    } else {
+                        (min, min + bucket - 1)
+                    };
+                    for count in front..=back {
+                        let exact = self.repeat_exact_nonterminal(symbol, count, shape);
+                        self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(exact)] });
+                    }
+                    if back < max {
+                        let tail = self.repeat_range_nonterminal(symbol, back + 1, max, shape);
+                        self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(tail)] });
+                    }
+                } else {
+                    let split = if shape == RepeatTreeShape::Left { max - 1 } else { min };
+                    for (lo, hi) in [(min, split), (split + 1, max)] {
+                        let child = self.repeat_range_nonterminal(symbol, lo, hi, shape);
+                        self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(child)] });
+                    }
+                }
+            }
         }
+        nt
     }
 
     fn emit_repeat_range(
@@ -1755,34 +1521,8 @@ impl<'a> Lowerer<'a> {
         max: Option<usize>,
     ) -> Result<(), GlrMaskError> {
         let symbol = self.lower_expr_terminalish(inner)?;
-        let shape = self.repeat_shape();
-        if let Some(max) = max {
-            debug_assert!(min <= max);
-            let range_nonterminal = self.repeat_range_nonterminal(&symbol, min, max, shape);
-            self.rules.push(Rule {
-                lhs,
-                rhs: vec![Symbol::Nonterminal(range_nonterminal)],
-            });
-            return Ok(());
-        }
-
-        let suffix_nt = self.repeat_range_nonterminal(&symbol, 0, 1, shape);
-        // Replace the finite optional suffix with a proper Kleene tail.
-        self.rules.push(Rule { lhs: suffix_nt, rhs: Vec::new() });
-        self.rules.push(Rule {
-            lhs: suffix_nt,
-            rhs: self.repeat_rhs(suffix_nt, symbol.clone()),
-        });
-
-        if min == 0 {
-            self.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(suffix_nt)] });
-        } else {
-            let prefix_nt = self.repeat_exact_nonterminal(&symbol, min, shape);
-            self.rules.push(Rule {
-                lhs,
-                rhs: vec![Symbol::Nonterminal(prefix_nt), Symbol::Nonterminal(suffix_nt)],
-            });
-        }
+        let nt = self.repetition(&symbol, min, max, self.repeat_shape());
+        self.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(nt)] });
         Ok(())
     }
 
@@ -2708,66 +2448,19 @@ impl<'a> Lowerer<'a> {
         let pair_symbol = Symbol::Nonterminal(pair_nt);
         let shape = self.repeat_shape();
 
-        if max.is_none() {
-            let min = min.max(1);
-            let prefix_sym = if min == 1 {
-                item_sym.clone()
-            } else {
-                let prefix_nt = self.fresh_nonterminal();
-                let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
-                self.rules.push(Rule {
-                    lhs: prefix_nt,
-                    rhs: vec![item_sym.clone(), Symbol::Nonterminal(prefix_tail_nt)],
-                });
-                Symbol::Nonterminal(prefix_nt)
-            };
-            let tail_nt = self.fresh_nonterminal();
-            self.rules.push(Rule { lhs: tail_nt, rhs: Vec::new() });
-            self.rules.push(Rule {
-                lhs: tail_nt,
-                rhs: self.repeat_rhs(tail_nt, pair_symbol),
-            });
-            let result_nt = self.fresh_nonterminal();
-            self.rules.push(Rule {
-                lhs: result_nt,
-                rhs: vec![prefix_sym, Symbol::Nonterminal(tail_nt)],
-            });
-            return Ok(Some(Symbol::Nonterminal(result_nt)));
-        }
-
-        let max = max.expect("finite bound expected when max.is_none() is false");
-        if min > max {
-            return Ok(None);
-        }
-        if max == 0 {
-            return Ok(None);
-        }
-
         let min = min.max(1);
-
-        let prefix_sym = if min == 1 {
-            item_sym.clone()
-        } else {
-            let prefix_nt = self.fresh_nonterminal();
-            let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
-            self.rules.push(Rule {
-                lhs: prefix_nt,
-                rhs: vec![item_sym.clone(), Symbol::Nonterminal(prefix_tail_nt)],
-            });
-            Symbol::Nonterminal(prefix_nt)
-        };
-
-        if min == max {
-            return Ok(Some(prefix_sym));
+        if max.is_some_and(|max| min > max) {
+            return Ok(None);
         }
-
-        let extra_nt = self.repeat_range_nonterminal(&pair_symbol, 0, max - min, shape);
-        let result_nt = self.fresh_nonterminal();
+        if max == Some(1) {
+            return Ok(Some(item_sym));
+        }
+        let tail = self.repetition(&pair_symbol, min - 1, max.map(|max| max - 1), shape);
+        let result = self.fresh_nonterminal();
         self.rules.push(Rule {
-            lhs: result_nt,
-            rhs: vec![prefix_sym, Symbol::Nonterminal(extra_nt)],
+            lhs: result, rhs: vec![item_sym, Symbol::Nonterminal(tail)],
         });
-        Ok(Some(Symbol::Nonterminal(result_nt)))
+        Ok(Some(Symbol::Nonterminal(result)))
     }
 
     fn lower_sepseq_item_nonempty_symbol(
@@ -4191,6 +3884,20 @@ mod tests {
         assert_eq!(repeated_first_id, first_id);
         assert_eq!(lowerer.terminal_ids_by_name.get(&lossy_name), Some(&first_id));
         assert_eq!(lowerer.terminals.len(), 2);
+    }
+
+    #[test]
+    fn repetition_helpers_do_not_mutate_finite_languages() {
+        let mut lowerer = Lowerer::new();
+        let symbol = Symbol::Terminal(0);
+        let shape = RepeatTreeShape::Balanced;
+        let optional = lowerer.repetition(&symbol, 0, Some(1), shape);
+        let before = lowerer.rules.iter().filter(|rule| rule.lhs == optional).cloned().collect::<Vec<_>>();
+        let star = lowerer.repetition(&symbol, 0, None, shape);
+        assert_ne!(optional, star);
+        assert_eq!(optional, lowerer.repetition(&symbol, 0, Some(1), shape));
+        assert_eq!(star, lowerer.repetition(&symbol, 0, None, shape));
+        assert_eq!(before, lowerer.rules.iter().filter(|rule| rule.lhs == optional).cloned().collect::<Vec<_>>());
     }
 
     #[test]
