@@ -8918,23 +8918,23 @@ fn prepare_recursive_mask_roots<T: FullWalkTransitionTable>(
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             for &lexer_state in &lanes {
                 roots.push(DynamicBranch {
-                // Scoped provider coordinates already own their parser/lexer
-                // coupling. Ordinary flattened-root optimizations must not
-                // infer a separate projection from the coordinator shell.
-                parser_filtered_root: false,
-                parser_filtered_transparent: false,
-                residual_continuation_terminal: None,
-                tokenizer_config: transitions.root_state_for_parser(lexer_state, &stacks)?,
-                // Scoped recursive states are not source states of the outer
-                // tokenizer. Keeping this None also disables ordinary-only
-                // residual/slice proofs until provider-native proofs exist.
-                exact_tokenizer_state: None,
-                gss: stacks.clone(),
-                shared_root_admission: None,
-                initial_prune_guard: InitialPruneGuard::new_recursive(
-                    &terminals_disallowed,
-                ),
-            });
+                    // Scoped provider coordinates already own their parser/lexer
+                    // coupling. Ordinary flattened-root optimizations must not
+                    // infer a separate projection from the coordinator shell.
+                    parser_filtered_root: false,
+                    parser_filtered_transparent: false,
+                    residual_continuation_terminal: None,
+                    tokenizer_config: transitions.root_state_for_parser(lexer_state, &stacks)?,
+                    // Scoped recursive states are not source states of the outer
+                    // tokenizer. Keeping this None also disables ordinary-only
+                    // residual/slice proofs until provider-native proofs exist.
+                    exact_tokenizer_state: None,
+                    gss: stacks.clone(),
+                    shared_root_admission: None,
+                    initial_prune_guard: InitialPruneGuard::new_recursive(
+                        &terminals_disallowed,
+                    ),
+                });
             }
         }
     }
@@ -9637,21 +9637,8 @@ fn fill_mask_dynamic_impl(
                 // Keep diagnostic parser-signature queries out of the live
                 // full-walk parser cache. They must not prime or otherwise
                 // alter the mask walk whose interaction transcript is measured.
-                let admitted_for = |stacks: &ParserStacks| {
-                    let parser_gss = with_empty_accumulators(stacks);
-                    state
-                        .constraint
-                        .direct_regular_admissible_terminals(&parser_gss)
-                        .unwrap_or_else(|| {
-                            let candidates =
-                                BitSet::all(state.constraint.parser_terminal_count() as usize);
-                            super::commit::exact_admitted_terminals_for_candidates(
-                                &state.constraint,
-                                &parser_gss,
-                                &candidates,
-                            )
-                        })
-                };
+                let admitted_for = |stacks: &ParserStacks|
+                    exact_parser_admission_for_stacks(&state.constraint, stacks);
                 let bitset_fingerprint = |bits: &BitSet| {
                     bits.words().iter().fold(0xcbf29ce484222325u64, |hash, &word| {
                         (hash ^ word).wrapping_mul(0x100000001b3)
