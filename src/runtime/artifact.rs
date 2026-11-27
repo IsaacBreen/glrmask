@@ -3725,14 +3725,49 @@ pub(crate) struct DynamicLazyUnionMetadata {
 }
 
 #[derive(Debug)]
-pub(crate) enum DynamicLazyUnionRow {
+pub(crate) enum AdaptiveByteMemo {
     Sparse(SmallVec<[(u8, u32); 8]>),
     Dense(Box<[u32; 256]>),
 }
 
-impl Default for DynamicLazyUnionRow {
+impl Default for AdaptiveByteMemo {
     fn default() -> Self {
         Self::Sparse(SmallVec::new())
+    }
+}
+
+impl AdaptiveByteMemo {
+    const UNKNOWN: u32 = u32::MAX - 1;
+
+    #[inline]
+    pub(crate) fn get(&self, byte: u8) -> Option<u32> {
+        match self {
+            Self::Sparse(cells) => cells.iter().find_map(|&(b, value)| (b == byte).then_some(value)),
+            Self::Dense(row) => {
+                let value = row[byte as usize];
+                (value != Self::UNKNOWN).then_some(value)
+            }
+        }
+    }
+
+    pub(crate) fn insert(&mut self, byte: u8, value: u32) {
+        match self {
+            Self::Sparse(cells) => {
+                if let Some((_, existing)) = cells.iter_mut().find(|(b, _)| *b == byte) {
+                    *existing = value;
+                } else if cells.len() < 8 {
+                    cells.push((byte, value));
+                } else {
+                    let mut dense = Box::new([Self::UNKNOWN; 256]);
+                    for &(b, v) in cells.iter() {
+                        dense[b as usize] = v;
+                    }
+                    dense[byte as usize] = value;
+                    *self = Self::Dense(dense);
+                }
+            }
+            Self::Dense(row) => row[byte as usize] = value,
+        }
     }
 }
 
@@ -3740,7 +3775,7 @@ impl Default for DynamicLazyUnionRow {
 #[derive(Debug)]
 pub(crate) struct DynamicLazyUnionState {
     pub(crate) members: SmallVec<[u32; 8]>,
-    pub(crate) row: DynamicLazyUnionRow,
+    pub(crate) row: AdaptiveByteMemo,
     pub(crate) metadata: Option<DynamicLazyUnionMetadata>,
 }
 

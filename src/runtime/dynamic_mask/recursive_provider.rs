@@ -4,6 +4,7 @@
 //! traversal, exact lexer execution, guard advancement and product caching are
 //! the ordinary masking implementations, not another composition mask walk.
 use super::*;
+use crate::runtime::artifact::AdaptiveByteMemo;
 
 #[derive(Clone, Copy)]
 struct ScopedConfig {
@@ -11,15 +12,20 @@ struct ScopedConfig {
     local: u32,
 }
 
+struct ScopedState {
+    coordinate: ScopedConfig,
+    finalizer: u32,
+    row: AdaptiveByteMemo,
+}
+
 struct RecursiveConfigTransitions<'scan, 'constraint> {
     pre_admitted_original_mask: Option<&'scan [u32]>,
     routing: RecursiveFullWalkTransitions<'constraint>,
     tables: Vec<FullWalkConfigTransitions<'scan, 'constraint>>,
-    states: Vec<ScopedConfig>,
+    states: Vec<ScopedState>,
     ids: FxHashMap<(usize, u32), u32>,
     roots: FxHashMap<u32, u32>,
     resets: Vec<Option<u32>>,
-    rows: Vec<Option<Box<[u64; 256]>>>,
     boundary: FxHashMap<(u32, u32), bool>,
     support_enabled: bool,
     support_cache: FxHashMap<u32, Option<super::super::constraint::ScopedAdmissionMemo<'constraint>>>,
@@ -45,9 +51,18 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         let id = u32::try_from(self.states.len())
             .ok().filter(|&id| id < u32::MAX - 4)
             .ok_or_else(|| "recursive config namespace exhausted".to_owned())?;
-        self.states.push(ScopedConfig { leaf, local });
+        let code = self.tables[leaf].finalizer_code(local);
+        let finalizer = if code >= u32::MAX - 1 {
+            code
+        } else {
+            self.routing.leaves[leaf].terminal_offset + code
+        };
+        self.states.push(ScopedState {
+            coordinate: ScopedConfig { leaf, local },
+            finalizer,
+            row: AdaptiveByteMemo::default(),
+        });
         self.ids.insert((leaf, local), id);
-        self.rows.push(None);
         Ok(id)
     }
 
@@ -56,7 +71,7 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
     }
 
     fn projected_reset(&mut self, lexer: u32, parser: u32, cache: &FullWalkParserCache) -> u32 {
-        let ScopedConfig { leaf, local } = self.states[lexer as usize];
+        let ScopedConfig { leaf, local } = self.states[lexer as usize].coordinate;
         if !self.project_resets || !self.tables[leaf].parser_projection_enabled() { return lexer; }
         if let Some(&cached) = self.projected_resets.get(&(leaf, parser)) { return cached; }
         let source = self.routing.leaves[leaf].constraint;
@@ -127,7 +142,7 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
     /// Borrow that set and carry only its terminal IDs into a mutable query;
     /// no global-coordinate copy is retained for every scoped config.
     fn candidate_local_terminals(&self, state: u32) -> SmallVec<[u32; 8]> {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         let table = &self.tables[leaf];
         let config = table.generic_config_for_state(local);
         let futures = if table.cache.deterministic || table.cache.raw_state_for_config(config).is_some() {
@@ -148,29 +163,26 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
 
     #[inline]
     fn cell(&mut self, state: u32, byte: u8) -> Self::Cell {
-        const UNKNOWN: u64 = u64::MAX;
-        if let Some(row) = self.rows[state as usize].as_ref() {
-            let packed = row[byte as usize];
-            if packed != UNKNOWN {
-                return FullWalkConfigCell {
-                    target: packed as u32,
-                    has_finalizer: (packed >> 32) != 0,
-                };
-            }
-        }
-        let ScopedConfig { leaf, local } = self.states[state as usize];
-        let cell = self.tables[leaf].cell(local, byte);
-        let target = if cell.target == u32::MAX {
-            u32::MAX
+        let target = if let Some(target) = self.states[state as usize].row.get(byte) {
+            target
         } else {
-            match self.intern(leaf, cell.target) {
-                Ok(target) => target,
-                Err(error) => { self.fail(error); u32::MAX }
-            }
+            let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
+            let cell = self.tables[leaf].cell(local, byte);
+            let target = if cell.target == u32::MAX {
+                u32::MAX
+            } else {
+                match self.intern(leaf, cell.target) {
+                    Ok(target) => target,
+                    Err(error) => { self.fail(error); u32::MAX }
+                }
+            };
+            self.states[state as usize].row.insert(byte, target);
+            target
         };
-        let row = self.rows[state as usize].get_or_insert_with(|| Box::new([UNKNOWN; 256]));
-        row[byte as usize] = u64::from(target) | (u64::from(cell.has_finalizer) << 32);
-        FullWalkConfigCell { target, has_finalizer: cell.has_finalizer }
+        FullWalkConfigCell {
+            target,
+            has_finalizer: target != u32::MAX && self.states[target as usize].finalizer != u32::MAX,
+        }
     }
 
     #[inline(always)]
@@ -283,7 +295,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
             if is_reset { cache.fresh_reset_config(config)? } else { config }
         } else {
             let root = normal_root.expect("reference root was prepared");
-            let local = self.states[root as usize].local;
+            let local = self.states[root as usize].coordinate.local;
             self.tables[leaf].parser_initial_state(local, &admitted)
         };
         static PROFILE: OnceLock<bool> = OnceLock::new();
@@ -302,31 +314,29 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
     }
 
     fn finalizer_code(&self, state: u32) -> u32 {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
-        let code = self.tables[leaf].finalizer_code(local);
-        if code >= u32::MAX - 1 { code } else { self.routing.leaves[leaf].terminal_offset + code }
+        self.states[state as usize].finalizer
     }
 
     fn single_finalizer_continues(&mut self, state: u32) -> bool {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         self.tables[leaf].single_finalizer_continues(local)
     }
 
     fn matched_terminals(&self, state: u32) -> SmallVec<[TerminalID; 4]> {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         let base = self.routing.leaves[leaf].terminal_offset;
         self.tables[leaf].matched_terminals(local).into_iter().map(|t| base + t).collect()
     }
 
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         let descriptor = self.routing.leaves[leaf];
         let Some(local_terminal) = terminal.checked_sub(descriptor.terminal_offset) else { return false; };
         local_terminal < descriptor.terminal_count && self.tables[leaf].future_contains(local, local_terminal)
     }
 
     fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         let base = self.routing.leaves[leaf].terminal_offset;
         let candidates = self.candidate_local_terminals(state);
         candidates.into_iter().any(|terminal| {
@@ -341,10 +351,10 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         // The driver proves equal parser languages and discharged guards.
         // Within one scoped leaf, use the ordinary exact lazy-subset union
         // instead of carrying equivalent lexical lanes as separate branches.
-        let leaf = self.states.get(first as usize)?.leaf;
+        let leaf = self.states.get(first as usize)?.coordinate.leaf;
         let mut locals = SmallVec::<[u32; 4]>::new();
         for &state in states {
-            let state = self.states.get(state as usize)?;
+            let state = self.states.get(state as usize)?.coordinate;
             if state.leaf != leaf { return None; }
             locals.push(state.local);
         }
@@ -405,7 +415,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         &mut self, parser_cache: &mut FullWalkParserCache, constraint: &Constraint,
         _: u32, lexer_state: u32, parser_node: u32,
     ) -> bool {
-        let ScopedConfig { leaf, local } = self.states[lexer_state as usize];
+        let ScopedConfig { leaf, local } = self.states[lexer_state as usize].coordinate;
         if self.resets[leaf] == Some(lexer_state) { return true; }
         let config = self.tables[leaf].generic_config_for_state(local);
         if !self.tables[leaf].cache.deterministic
@@ -532,7 +542,7 @@ fn with_provider_and_baseline(
     let mut provider = RecursiveConfigTransitions {
         pre_admitted_original_mask: already,
         routing, tables, states: Vec::new(), ids: FxHashMap::default(),
-        roots: FxHashMap::default(), resets: vec![None; reset_count], rows: Vec::new(),
+        roots: FxHashMap::default(), resets: vec![None; reset_count],
         boundary: FxHashMap::default(),
         support_enabled: {
             static ENABLED: OnceLock<bool> = OnceLock::new();

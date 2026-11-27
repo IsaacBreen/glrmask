@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(test)]
 use super::boundary_cache::FullWalkBoundaryDirectCache;
-use crate::runtime::artifact::{DynamicLazyUnionRow, DynamicLazyUnionState};
+use crate::runtime::artifact::{AdaptiveByteMemo, DynamicLazyUnionState};
 use rustc_hash::FxHashSet;
 
 #[inline(always)]
@@ -373,7 +373,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         }
         cache.states.push(DynamicLazyUnionState {
             members: states,
-            row: DynamicLazyUnionRow::default(),
+            row: AdaptiveByteMemo::default(),
             metadata: None,
         });
         Some(id)
@@ -513,43 +513,13 @@ impl<'a> FullWalkLazyUnion<'a> {
     #[inline(always)]
     fn cached_virtual_cell(&self, index: usize, byte: u8) -> Option<u32> {
         let cache = unsafe { &*self.cache.get() };
-        match &cache.states.get(index)?.row {
-            DynamicLazyUnionRow::Sparse(cells) => cells
-                .iter()
-                .find_map(|&(cached_byte, value)| (cached_byte == byte).then_some(value)),
-            DynamicLazyUnionRow::Dense(row) => {
-                let value = unsafe { *row.get_unchecked(byte as usize) };
-                (value != Self::UNBUILT).then_some(value)
-            }
-        }
+        cache.states.get(index)?.row.get(byte)
     }
 
     #[inline(always)]
     fn cache_virtual_cell(&self, index: usize, byte: u8, value: u32) {
-        const SPARSE_CELL_LIMIT: usize = 8;
         let cache = unsafe { &mut *self.cache.get() };
-        let row = unsafe { &mut cache.states.get_unchecked_mut(index).row };
-        match row {
-            DynamicLazyUnionRow::Sparse(cells) => {
-                if let Some((_, existing)) = cells.iter_mut().find(|(cached_byte, _)| *cached_byte == byte) {
-                    *existing = value;
-                    return;
-                }
-                if cells.len() < SPARSE_CELL_LIMIT {
-                    cells.push((byte, value));
-                    return;
-                }
-                let mut dense = Box::new([Self::UNBUILT; 256]);
-                for &(cached_byte, cached_value) in cells.iter() {
-                    dense[cached_byte as usize] = cached_value;
-                }
-                dense[byte as usize] = value;
-                *row = DynamicLazyUnionRow::Dense(dense);
-            }
-            DynamicLazyUnionRow::Dense(dense) => unsafe {
-                *dense.get_unchecked_mut(byte as usize) = value;
-            },
-        }
+        unsafe { cache.states.get_unchecked_mut(index) }.row.insert(byte, value);
     }
 
     /// After a wide virtual subset has already paid for several independent
@@ -564,7 +534,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         }
         let members = {
             let cache = unsafe { &*self.cache.get() };
-            let Some(DynamicLazyUnionState { row: DynamicLazyUnionRow::Sparse(cells), members, .. }) = cache.states.get(index) else {
+            let Some(DynamicLazyUnionState { row: AdaptiveByteMemo::Sparse(cells), members, .. }) = cache.states.get(index) else {
                 return false;
             };
             if cells.len() < PROBE_AMORTIZATION {
@@ -642,7 +612,7 @@ impl<'a> FullWalkLazyUnion<'a> {
                 };
         }
         unsafe {
-            (&mut *self.cache.get()).states[index].row = DynamicLazyUnionRow::Dense(row);
+            (&mut *self.cache.get()).states[index].row = AdaptiveByteMemo::Dense(row);
         }
         true
     }
