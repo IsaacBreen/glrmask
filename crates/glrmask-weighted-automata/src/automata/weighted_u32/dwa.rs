@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, OnceLock};
@@ -10,12 +9,10 @@ use range_set_blaze::{
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHasher};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 use super::nwa::Label;
 use crate::ds::weight::{
-    finalize_weight_map, finalize_weight_map_artifact_local, shared_rangeset,
-    shared_rangeset_artifact_local, Weight,
+    finalize_weight_map, shared_rangeset, Weight,
 };
 
 #[derive(Debug)]
@@ -275,16 +272,6 @@ pub struct DwaStats {
     pub transitions: usize,
     pub transition_pairs: usize,
     pub interned_ranges: usize,
-}
-
-/// Token-set identities observed cheaply while decoding the compact DWA.
-/// Runtime finalization can consume this once instead of rescanning every
-/// expanded transition solely to rebuild the same inventory.
-#[derive(Default)]
-pub struct PackedDwaTokenSetInventory {
-    pub transition_sets: FxHashMap<usize, std::sync::Arc<RangeSetBlaze<u32>>>,
-    pub final_sets: FxHashMap<usize, std::sync::Arc<RangeSetBlaze<u32>>>,
-    pub transition_word_spans: FxHashMap<usize, u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6195,47 +6182,6 @@ struct DWASerde {
     start_state: u32,
 }
 
-thread_local! {
-    /// Constraint artifact v13+ uses a packed, uncompressed DWA wire format.
-    /// Older artifact versions leave this disabled and continue to decode the
-    /// historical serde representation byte-for-byte.
-    static PACKED_DWA_SERDE: Cell<bool> = const { Cell::new(false) };
-    /// v14+ sectioned constraint artifacts serialize parser_dwa in its own
-    /// section. The Constraint core therefore carries only a one-byte DWA
-    /// placeholder, allowing DWA and core decoding to proceed independently.
-    static EXTERNAL_DWA_SERDE: Cell<bool> = const { Cell::new(false) };
-    static PACKED_DWA_TOKEN_SET_INVENTORY: RefCell<Option<PackedDwaTokenSetInventory>> =
-        const { RefCell::new(None) };
-}
-
-/// Enable or disable the packed DWA wire format on this thread, returning the
-/// previous setting. Constraint serialization uses this as a version-scoped
-/// switch so old artifact formats remain readable.
-pub fn set_packed_serde(enabled: bool) -> bool {
-    PACKED_DWA_SERDE.with(|mode| mode.replace(enabled))
-}
-
-pub fn set_external_serde(enabled: bool) -> bool {
-    EXTERNAL_DWA_SERDE.with(|mode| mode.replace(enabled))
-}
-
-fn packed_serde_enabled() -> bool {
-    PACKED_DWA_SERDE.with(Cell::get)
-}
-
-
-fn external_serde_enabled() -> bool {
-    EXTERNAL_DWA_SERDE.with(Cell::get)
-}
-
-pub fn take_packed_decode_token_set_inventory() -> Option<PackedDwaTokenSetInventory> {
-    PACKED_DWA_TOKEN_SET_INVENTORY.with(|slot| slot.borrow_mut().take())
-}
-
-pub fn install_packed_decode_token_set_inventory(inventory: PackedDwaTokenSetInventory) {
-    PACKED_DWA_TOKEN_SET_INVENTORY.with(|slot| *slot.borrow_mut() = Some(inventory));
-}
-
 #[inline]
 fn put_var_u32(out: &mut Vec<u8>, mut value: u32) {
     while value >= 0x80 {
@@ -6372,64 +6318,6 @@ fn var_u64_len(mut value: u64) -> usize {
 #[inline]
 fn zigzag_i64(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
-}
-
-fn decode_packed_label_sequence(body: &[u8]) -> Result<Vec<Label>, String> {
-    let mut pos = 0usize;
-    let count = take_var_u32(body, &mut pos)? as usize;
-    let mut labels = Vec::with_capacity(count);
-    let mut previous = 0i64;
-    for _ in 0..count {
-        let delta = take_var_i64(body, &mut pos)?;
-        let label64 = previous
-            .checked_add(delta)
-            .ok_or_else(|| "overflowing packed DWA label sequence".to_owned())?;
-        labels.push(
-            i32::try_from(label64)
-                .map_err(|_| "overflowing packed DWA label sequence".to_owned())?,
-        );
-        previous = label64;
-    }
-    if pos != body.len() {
-        return Err("trailing bytes in packed DWA label sequence".to_owned());
-    }
-    Ok(labels)
-}
-
-fn decode_packed_u32_sequence(body: &[u8], label: &str) -> Result<Vec<u32>, String> {
-    let mut pos = 0usize;
-    let mode = *body
-        .get(pos)
-        .ok_or_else(|| format!("truncated packed DWA {label} sequence mode"))?;
-    pos += 1;
-    let count = take_var_u32(body, &mut pos)? as usize;
-    let mut values = Vec::with_capacity(count);
-    match mode {
-        0 => {
-            for _ in 0..count {
-                values.push(take_var_u32(body, &mut pos)?);
-            }
-        }
-        1 => {
-            let mut previous = 0i64;
-            for _ in 0..count {
-                let delta = take_var_i64(body, &mut pos)?;
-                let value = previous
-                    .checked_add(delta)
-                    .ok_or_else(|| format!("overflowing packed DWA {label} sequence"))?;
-                values.push(
-                    u32::try_from(value)
-                        .map_err(|_| format!("overflowing packed DWA {label} sequence"))?,
-                );
-                previous = value;
-            }
-        }
-        _ => return Err(format!("invalid packed DWA {label} sequence mode")),
-    }
-    if pos != body.len() {
-        return Err(format!("trailing bytes in packed DWA {label} sequence"));
-    }
-    Ok(values)
 }
 
 fn decode_packed_runtime_label_pool(
@@ -6654,59 +6542,6 @@ fn decode_packed_runtime_direct_row_pools(
     ))
 }
 
-fn decode_packed_token_set_chunk(
-    body: &[u8],
-) -> Result<Vec<(std::sync::Arc<RangeSetBlaze<u32>>, u32)>, String> {
-    let mut pos = 0usize;
-    let token_set_count = take_var_u32(body, &mut pos)? as usize;
-    let mut out = Vec::with_capacity(token_set_count);
-    let mut previous = EncodedTokenSet::new();
-    let mut prefix_word_spans = Vec::<u32>::new();
-    for _ in 0..token_set_count {
-        let prefix_len = take_var_u32(body, &mut pos)? as usize;
-        if prefix_len > previous.len() {
-            return Err("invalid packed DWA token-set prefix length".to_owned());
-        }
-        let suffix_len = take_var_u32(body, &mut pos)? as usize;
-        // Front coding means the next token set is literally a prefix of the
-        // previous decoded range vector plus a suffix.  Reuse that allocation
-        // in place instead of allocating a new Vec and copying the common
-        // prefix for every set in the chunk.
-        previous.truncate(prefix_len);
-        prefix_word_spans.truncate(prefix_len);
-        previous.reserve(suffix_len);
-        prefix_word_spans.reserve(suffix_len);
-        let mut word_spans = prefix_word_spans.last().copied().unwrap_or(0);
-        let mut previous_end_plus_one = previous
-            .last()
-            .map_or(0u64, |range| range[1] as u64 + 1);
-        for _ in 0..suffix_len {
-            let gap = take_var_u64(body, &mut pos)?;
-            let start64 = previous_end_plus_one
-                .checked_add(gap)
-                .ok_or_else(|| "overflowing packed token-set range".to_owned())?;
-            let start = u32::try_from(start64)
-                .map_err(|_| "overflowing packed token-set start".to_owned())?;
-            let len = take_var_u32(body, &mut pos)?;
-            let end = start
-                .checked_add(len)
-                .ok_or_else(|| "overflowing packed token-set end".to_owned())?;
-            previous_end_plus_one = end as u64 + 1;
-            previous.push([start, end]);
-            word_spans = word_spans.saturating_add(end / 64 - start / 64 + 1);
-            prefix_word_spans.push(word_spans);
-        }
-        let tokens = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(
-            previous.iter().map(|range| range[0]..=range[1]),
-        ));
-        out.push((shared_rangeset_artifact_local(tokens), word_spans));
-    }
-    if pos != body.len() {
-        return Err("invalid packed DWA token-set chunk length".to_owned());
-    }
-    Ok(out)
-}
-
 fn decode_packed_runtime_token_set_chunk(
     body: &[u8],
 ) -> Result<PackedRuntimeTokenSetChunk, String> {
@@ -6864,98 +6699,6 @@ fn decode_packed_weight_geometry(body: &[u8]) -> Result<Vec<(u32, u32)>, String>
     Ok(ranges)
 }
 
-fn decode_packed_weight(
-    body: &[u8],
-    ts_pool: &[std::sync::Arc<RangeSetBlaze<u32>>],
-    geometries: &[Vec<(u32, u32)>],
-) -> Result<Weight, String> {
-    let mut pos = 0usize;
-    let tag = *body
-        .get(pos)
-        .ok_or_else(|| "truncated packed DWA weight tag".to_owned())?;
-    pos += 1;
-    if tag == 1 {
-        if pos != body.len() {
-            return Err("trailing bytes in packed DWA full weight".to_owned());
-        }
-        return Ok(Weight::all());
-    }
-    if tag != 0 {
-        return Err("invalid packed DWA weight tag".to_owned());
-    }
-    let geometry_index = take_var_u32(body, &mut pos)? as usize;
-    let geometry = geometries
-        .get(geometry_index)
-        .ok_or_else(|| "invalid packed DWA weight-geometry index".to_owned())?;
-    if geometry.is_empty() {
-        if pos != body.len() {
-            return Err("trailing bytes in packed DWA empty weight".to_owned());
-        }
-        return Ok(Weight::empty());
-    }
-    // Most parser weights have only a small number of TSID ranges.  Keep just
-    // their token-set indices inline while parsing, then stream the already
-    // sorted shared geometry directly into RangeMapBlaze.  This avoids one
-    // heap Vec of (RangeInclusive, Arc) entries per unique Weight.
-    let mut token_set_ids = SmallVec::<[u32; 16]>::with_capacity(geometry.len());
-    for _ in geometry {
-        let token_set_idx = take_var_u32(body, &mut pos)?;
-        if token_set_idx as usize >= ts_pool.len() {
-            return Err("invalid packed DWA token-set index".to_owned());
-        }
-        token_set_ids.push(token_set_idx);
-    }
-    if pos != body.len() {
-        return Err("trailing bytes in packed DWA weight body".to_owned());
-    }
-    let map = RangeMapBlaze::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
-        geometry
-            .iter()
-            .zip(token_set_ids.iter())
-            .map(|(&(start, end), &token_set_idx)| {
-                (start..=end, &ts_pool[token_set_idx as usize])
-            }),
-    ));
-    Ok(finalize_weight_map_artifact_local(map))
-}
-
-fn decode_packed_transition_row(
-    body: &[u8],
-    w_pool: &[Weight],
-    state_count: usize,
-) -> Result<BTreeMap<Label, (u32, Weight)>, String> {
-    let mut pos = 0usize;
-    let transition_count = take_var_u32(body, &mut pos)? as usize;
-    let mut entries = Vec::with_capacity(transition_count);
-    let mut previous_label = 0i64;
-    for index in 0..transition_count {
-        let delta = take_var_i64(body, &mut pos)?;
-        let label64 = previous_label
-            .checked_add(delta)
-            .ok_or_else(|| "overflowing packed DWA label".to_owned())?;
-        let label = i32::try_from(label64)
-            .map_err(|_| "overflowing packed DWA label".to_owned())?;
-        if index != 0 && label64 <= previous_label {
-            return Err("packed DWA transition labels are not strictly increasing".to_owned());
-        }
-        previous_label = label64;
-        let target = take_var_u32(body, &mut pos)?;
-        if target as usize >= state_count {
-            return Err("invalid packed DWA target state".to_owned());
-        }
-        let weight_idx = take_var_u32(body, &mut pos)? as usize;
-        let weight = w_pool
-            .get(weight_idx)
-            .cloned()
-            .ok_or_else(|| "invalid packed DWA weight index".to_owned())?;
-        entries.push((label, (target, weight)));
-    }
-    if pos != body.len() {
-        return Err("trailing bytes in packed DWA transition-row body".to_owned());
-    }
-    Ok(entries.into_iter().collect())
-}
-
 fn hash_packed_transition_row(row: &[(Label, u32, u32)]) -> u64 {
     let mut hasher = FxHasher::default();
     row.hash(&mut hasher);
@@ -6967,17 +6710,6 @@ impl DWA {
     /// artifacts, without an outer serde/bincode wrapper.
     pub fn artifact_packed_bytes(&self) -> Vec<u8> {
         self.to_packed_bytes()
-    }
-
-    /// Decode a compact parser-DWA section and return the token-set inventory
-    /// observed during decode so a caller on another thread can hand it to
-    /// runtime finalization without rescanning the expanded DWA.
-    pub fn from_artifact_packed_bytes(
-        input: &[u8],
-    ) -> Result<(Self, Option<PackedDwaTokenSetInventory>), String> {
-        let dwa = Self::from_packed_bytes(input)?;
-        let inventory = take_packed_decode_token_set_inventory();
-        Ok((dwa, inventory))
     }
 
     fn pooled_parts(&self) -> (Vec<EncodedTokenSet>, Vec<WeightPoolEntry>, Vec<DWAStateSerde>) {
@@ -7860,390 +7592,11 @@ impl DWA {
         out
     }
 
-    fn from_packed_bytes(input: &[u8]) -> Result<Self, String> {
-        PACKED_DWA_TOKEN_SET_INVENTORY.with(|slot| *slot.borrow_mut() = None);
-        if !input.starts_with(b"DWP6") {
-            return Err("invalid packed DWA header".to_owned());
-        }
-        let mut pos = 4usize;
-        let start_state = take_var_u32(input, &mut pos)?;
-        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION").is_some();
-        let token_sets_started = profile.then(std::time::Instant::now);
 
-        let token_set_count = take_var_u32(input, &mut pos)? as usize;
-        let token_set_chunk_count = take_var_u32(input, &mut pos)? as usize;
-        let token_set_chunks = take_length_prefixed_slices(
-            input,
-            &mut pos,
-            token_set_chunk_count,
-            "token-set chunk",
-        )?;
-        let decoded_chunks: Vec<_> = if token_set_count >= 1024 && rayon::current_num_threads() > 1 {
-            token_set_chunks
-                .par_iter()
-                .map(|body| decode_packed_token_set_chunk(body))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            token_set_chunks
-                .iter()
-                .map(|body| decode_packed_token_set_chunk(body))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let decoded_token_sets = decoded_chunks.into_iter().flatten().collect::<Vec<_>>();
-        let mut ts_pool = Vec::with_capacity(decoded_token_sets.len());
-        let mut token_set_word_spans = Vec::with_capacity(decoded_token_sets.len());
-        for (tokens, word_spans) in decoded_token_sets {
-            ts_pool.push(tokens);
-            token_set_word_spans.push(word_spans);
-        }
-        if ts_pool.len() != token_set_count {
-            return Err("invalid packed DWA token-set count".to_owned());
-        }
-        let token_sets_ms = token_sets_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let geometries_started = profile.then(std::time::Instant::now);
-
-        let geometry_count = take_var_u32(input, &mut pos)? as usize;
-        let geometry_bodies =
-            take_length_prefixed_slices(input, &mut pos, geometry_count, "weight geometry")?;
-        let geometries: Vec<_> = if geometry_count >= 1024 && rayon::current_num_threads() > 1 {
-            geometry_bodies
-                .par_iter()
-                .map(|body| decode_packed_weight_geometry(body))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            geometry_bodies
-                .iter()
-                .map(|body| decode_packed_weight_geometry(body))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let geometries_ms = geometries_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let weights_started = profile.then(std::time::Instant::now);
-
-        let weight_count = take_var_u32(input, &mut pos)? as usize;
-        let weight_bodies =
-            take_length_prefixed_slices(input, &mut pos, weight_count, "weight")?;
-        let w_pool: Vec<_> = if weight_count >= 1024 && rayon::current_num_threads() > 1 {
-            weight_bodies
-                .par_iter()
-                .map(|body| decode_packed_weight(body, &ts_pool, &geometries))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            weight_bodies
-                .iter()
-                .map(|body| decode_packed_weight(body, &ts_pool, &geometries))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let w_pool = Arc::<[Weight]>::from(w_pool);
-        let weights_ms = weights_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let rows_started = profile.then(std::time::Instant::now);
-        let row_mode = *input
-            .get(pos)
-            .ok_or_else(|| "truncated packed DWA row mode".to_owned())?;
-        pos += 1;
-        let (transition_rows, state_count_pos, transition_weight_used) = match row_mode {
-            0 => {
-                let row_count = take_var_u32(input, &mut pos)? as usize;
-                let row_bodies = take_length_prefixed_slices(
-                    input,
-                    &mut pos,
-                    row_count,
-                    "transition row",
-                )?;
-                let state_count_pos = pos;
-                let state_count = take_var_u32(input, &mut pos)? as usize;
-                let rows: Vec<_> =
-                    if row_count >= 1024 && rayon::current_num_threads() > 1 {
-                        row_bodies
-                            .par_iter()
-                            .map(|body| decode_packed_transition_row(body, &w_pool, state_count))
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        row_bodies
-                            .iter()
-                            .map(|body| decode_packed_transition_row(body, &w_pool, state_count))
-                            .collect::<Result<Vec<_>, _>>()?
-                    };
-                (
-                    rows.into_iter()
-                        .map(|row| DwaTransitionMap::Shared(Arc::new(row)))
-                        .collect(),
-                    state_count_pos,
-                    None,
-                )
-            }
-            1 => {
-                let label_count = take_var_u32(input, &mut pos)? as usize;
-                let label_bodies = take_length_prefixed_slices(
-                    input,
-                    &mut pos,
-                    label_count,
-                    "label sequence",
-                )?;
-                let label_pool: Vec<_> = label_bodies
-                    .iter()
-                    .map(|body| decode_packed_label_sequence(body))
-                    .collect::<Result<Vec<_>, _>>()?;
-
-                let target_count = take_var_u32(input, &mut pos)? as usize;
-                let target_bodies = take_length_prefixed_slices(
-                    input,
-                    &mut pos,
-                    target_count,
-                    "target sequence",
-                )?;
-                let weight_id_count = take_var_u32(input, &mut pos)? as usize;
-                let weight_id_bodies = take_length_prefixed_slices(
-                    input,
-                    &mut pos,
-                    weight_id_count,
-                    "weight-id sequence",
-                )?;
-                let decode_targets = || {
-                    if target_count >= 1024 && rayon::current_num_threads() > 1 {
-                        target_bodies
-                            .par_iter()
-                            .map(|body| decode_packed_u32_sequence(body, "target"))
-                            .collect::<Result<Vec<_>, _>>()
-                    } else {
-                        target_bodies
-                            .iter()
-                            .map(|body| decode_packed_u32_sequence(body, "target"))
-                            .collect::<Result<Vec<_>, _>>()
-                    }
-                };
-                let decode_weight_ids = || {
-                    if weight_id_count >= 1024 && rayon::current_num_threads() > 1 {
-                        weight_id_bodies
-                            .par_iter()
-                            .map(|body| decode_packed_u32_sequence(body, "weight-id"))
-                            .collect::<Result<Vec<_>, _>>()
-                    } else {
-                        weight_id_bodies
-                            .iter()
-                            .map(|body| decode_packed_u32_sequence(body, "weight-id"))
-                            .collect::<Result<Vec<_>, _>>()
-                    }
-                };
-                let (target_pool, weight_id_pool) = if rayon::current_num_threads() > 1 {
-                    let (targets, weights) = rayon::join(decode_targets, decode_weight_ids);
-                    (targets?, weights?)
-                } else {
-                    (decode_targets()?, decode_weight_ids()?)
-                };
-                let mut transition_weight_used = vec![false; w_pool.len()];
-                for sequence in &weight_id_pool {
-                    for &weight in sequence {
-                        let Some(used) = transition_weight_used.get_mut(weight as usize) else {
-                            return Err("invalid packed DWA weight index".to_owned());
-                        };
-                        *used = true;
-                    }
-                }
-
-                let row_count = take_var_u32(input, &mut pos)? as usize;
-                let mut row_components = Vec::with_capacity(row_count);
-                for _ in 0..row_count {
-                    let labels = take_var_u32(input, &mut pos)? as usize;
-                    let targets = take_var_u32(input, &mut pos)? as usize;
-                    let weights = take_var_u32(input, &mut pos)? as usize;
-                    if labels >= label_pool.len()
-                        || targets >= target_pool.len()
-                        || weights >= weight_id_pool.len()
-                    {
-                        return Err("invalid packed DWA row-component index".to_owned());
-                    }
-                    row_components.push((labels, targets, weights));
-                }
-                let state_count_pos = pos;
-                let state_count = take_var_u32(input, &mut pos)? as usize;
-                for labels in &label_pool {
-                    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
-                        return Err(
-                            "packed DWA transition labels are not strictly increasing".to_owned(),
-                        );
-                    }
-                }
-                for targets in &target_pool {
-                    if targets.iter().any(|&target| target as usize >= state_count) {
-                        return Err("invalid packed DWA target state".to_owned());
-                    }
-                }
-                for &(label_id, target_id, weight_id) in &row_components {
-                    let labels = &label_pool[label_id];
-                    let targets = &target_pool[target_id];
-                    let weights = &weight_id_pool[weight_id];
-                    if labels.len() != targets.len() || labels.len() != weights.len() {
-                        return Err("mismatched packed DWA row-component lengths".to_owned());
-                    }
-                }
-                let pool = Arc::new(PackedDwaRowPool {
-                    labels: label_pool,
-                    targets: target_pool,
-                    weight_ids: weight_id_pool,
-                    weights: Arc::clone(&w_pool),
-                });
-                let rows: Vec<DwaTransitionMap> = row_components
-                    .into_iter()
-                    .map(|(label_id, target_id, weight_id)| {
-                        DwaTransitionMap::Packed(Arc::new(PackedDwaTransitionRow {
-                            pool: Arc::clone(&pool),
-                            label_id,
-                            target_id,
-                            weight_id,
-                            materialized: OnceLock::new(),
-                        }))
-                    })
-                    .collect();
-                (rows, state_count_pos, Some(transition_weight_used))
-            }
-            _ => return Err("invalid packed DWA row mode".to_owned()),
-        };
-        let rows_ms = rows_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-        // Rewind to the state-count varint and decode compact row/final refs.
-        pos = state_count_pos;
-        let state_count = take_var_u32(input, &mut pos)? as usize;
-        let state_refs_started = profile.then(std::time::Instant::now);
-        let mut state_refs = Vec::with_capacity(state_count);
-        let mut final_weight_used = vec![false; w_pool.len()];
-        for _ in 0..state_count {
-            let row = take_var_u32(input, &mut pos)? as usize;
-            if row >= transition_rows.len() {
-                return Err("invalid packed DWA transition-row index".to_owned());
-            }
-            let final_encoded = take_var_u32(input, &mut pos)?;
-            let final_weight = if final_encoded == 0 {
-                None
-            } else {
-                let index = (final_encoded - 1) as usize;
-                if index >= w_pool.len() {
-                    return Err("invalid packed DWA final-weight index".to_owned());
-                }
-                final_weight_used[index] = true;
-                Some(index)
-            };
-            state_refs.push((row, final_weight));
-        }
-        if pos != input.len() {
-            return Err("trailing bytes in packed DWA".to_owned());
-        }
-        let build_inventory = || {
-            let transition_weight_used = transition_weight_used.as_deref()?;
-            let mut transition_token_used = vec![false; ts_pool.len()];
-            let mut final_token_used = vec![false; ts_pool.len()];
-            // The Weight bodies were already fully validated while w_pool was
-            // decoded.  Rescan only their compact token-set IDs here instead
-            // of retaining per-Weight ID vectors or walking reconstructed
-            // RangeMapBlaze values and hashing the same pointers repeatedly.
-            for (weight_index, body) in weight_bodies.iter().enumerate() {
-                let mark_transition = transition_weight_used[weight_index];
-                let mark_final = final_weight_used[weight_index];
-                if !mark_transition && !mark_final {
-                    continue;
-                }
-                let mut body_pos = 0usize;
-                let tag = body[body_pos];
-                body_pos += 1;
-                if tag == 1 {
-                    continue;
-                }
-                debug_assert_eq!(tag, 0);
-                let geometry_index = take_var_u32(body, &mut body_pos)
-                    .expect("packed Weight body was validated during decode")
-                    as usize;
-                for _ in &geometries[geometry_index] {
-                    let token_set = take_var_u32(body, &mut body_pos)
-                        .expect("packed Weight body was validated during decode")
-                        as usize;
-                    if mark_transition {
-                        transition_token_used[token_set] = true;
-                    }
-                    if mark_final {
-                        final_token_used[token_set] = true;
-                    }
-                }
-            }
-            let transition_set_count = transition_token_used.iter().filter(|&&used| used).count();
-            let final_set_count = final_token_used.iter().filter(|&&used| used).count();
-            let mut transition_sets = FxHashMap::default();
-            transition_sets.reserve(transition_set_count);
-            let mut transition_word_spans = FxHashMap::default();
-            transition_word_spans.reserve(transition_set_count);
-            let mut final_sets = FxHashMap::default();
-            final_sets.reserve(final_set_count);
-            for (index, token_set) in ts_pool.iter().enumerate() {
-                let key = Arc::as_ptr(token_set) as usize;
-                if transition_token_used[index] {
-                    transition_sets.insert(key, Arc::clone(token_set));
-                    transition_word_spans.insert(key, token_set_word_spans[index]);
-                }
-                if final_token_used[index] {
-                    final_sets.insert(key, Arc::clone(token_set));
-                }
-            }
-            Some(PackedDwaTokenSetInventory {
-                transition_sets,
-                final_sets,
-                transition_word_spans,
-            })
-        };
-        let build_state = |&(row, final_weight): &(usize, Option<usize>)| DWAState {
-            transitions: transition_rows[row].clone(),
-            final_weight: final_weight.map(|index| w_pool[index].clone()),
-        };
-        let build_states = || {
-            if state_count >= 1024 && rayon::current_num_threads() > 1 {
-                state_refs.par_iter().map(build_state).collect()
-            } else {
-                state_refs.iter().map(build_state).collect()
-            }
-        };
-        let (states, inventory): (Vec<_>, _) = if transition_weight_used.is_some()
-            && state_count >= 1024
-            && rayon::current_num_threads() > 1
-        {
-            rayon::join(build_states, build_inventory)
-        } else {
-            (build_states(), build_inventory())
-        };
-        if let Some(inventory) = inventory {
-            PACKED_DWA_TOKEN_SET_INVENTORY.with(|slot| {
-                *slot.borrow_mut() = Some(inventory);
-            });
-        }
-        let state_refs_ms = state_refs_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        if start_state as usize >= states.len() && !states.is_empty() {
-            return Err("invalid packed DWA start state".to_owned());
-        }
-        if profile {
-            eprintln!(
-                "[glrmask/profile][dwa_packed_load] bytes={} token_sets_ms={token_sets_ms:.3} geometries_ms={geometries_ms:.3} weights_ms={weights_ms:.3} rows_ms={rows_ms:.3} state_refs_ms={state_refs_ms:.3}",
-                input.len(),
-            );
-        }
-        Ok(Self {
-            states,
-            start_state,
-            shared_transition_rows: true,
-            transition_count_cache: OnceLock::new(),
-            acyclic_cache: OnceLock::new(),
-        })
-    }
 }
 
 impl Serialize for DWA {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if external_serde_enabled() {
-            return 0u8.serialize(serializer);
-        }
-        if packed_serde_enabled() {
-            return self.to_packed_bytes().serialize(serializer);
-        }
         let (token_set_pool, weight_pool, states) = self.pooled_parts();
 
         let serde_repr = DWASerde {
@@ -8272,17 +7625,6 @@ impl Serialize for DWA {
 
 impl<'de> Deserialize<'de> for DWA {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if external_serde_enabled() {
-            let marker = u8::deserialize(deserializer)?;
-            if marker != 0 {
-                return Err(serde::de::Error::custom("invalid external DWA placeholder"));
-            }
-            return Ok(Self::new(0, 0));
-        }
-        if packed_serde_enabled() {
-            let bytes = Vec::<u8>::deserialize(deserializer)?;
-            return Self::from_packed_bytes(&bytes).map_err(serde::de::Error::custom);
-        }
         let serde_repr = DWASerde::deserialize(deserializer)?;
 
         // Reconstruct token set pool (shared Arcs)

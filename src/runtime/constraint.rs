@@ -9450,8 +9450,6 @@ impl Constraint {
         preserve_packed_dwa_dense_masks: bool,
         prepared_template_indices: Option<FastTemplateDfasByTerminal>,
     ) {
-        let mut packed_weight_token_sets =
-            crate::automata::weighted::dwa::take_packed_decode_token_set_inventory();
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if !self.has_template_parser() { self.table.rebuild_unconditional_advance_rows(); }
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -9664,7 +9662,7 @@ impl Constraint {
                     (dense_masks, DirectSparseWeightBufCaches::default(), 0.0, 0.0)
                 } else {
                     let weight_token_sets = self
-                        .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
+                        .weight_token_set_inventory();
                     let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                         &weight_token_sets.final_sets,
                         &internal_token_buf_masks,
@@ -9772,7 +9770,7 @@ impl Constraint {
                             (dense_masks, DirectSparseWeightBufCaches::default(), 0.0, 0.0)
                         } else {
                             let weight_token_sets = self
-                                .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
+                                .weight_token_set_inventory();
                             let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                                 &weight_token_sets.final_sets,
                                 &internal_token_buf_masks,
@@ -10744,10 +10742,7 @@ impl Constraint {
         true
     }
 
-    fn weight_token_set_inventory_with_packed(
-        &self,
-        packed: Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
-    ) -> WeightTokenSetInventory {
+    fn weight_token_set_inventory(&self) -> WeightTokenSetInventory {
         if self.non_dwa_weights.pooled().is_some()
             && self.parser_dwa.packed()
                 .is_some_and(|dwa| dwa.materialized_token_sets_with_word_spans().is_none())
@@ -10820,14 +10815,6 @@ impl Constraint {
                 // pointer-keyed dense caches.
                 (InventoryBatch::default(), None)
             }
-        } else if let Some(packed) = packed {
-            (
-                InventoryBatch {
-                    final_sets: packed.final_sets,
-                    transition_sets: packed.transition_sets,
-                },
-                Some(packed.transition_word_spans),
-            )
         } else if rayon::current_num_threads() > 1 && self.parser_dwa.owned().expect("owned parser DWA").states().len() >= 4_096 {
             (
                 self.parser_dwa.owned().expect("owned parser DWA").states()
@@ -10886,10 +10873,6 @@ impl Constraint {
             transition_sets: inventory.transition_sets,
             transition_word_spans,
         }
-    }
-
-    fn weight_token_set_inventory(&self) -> WeightTokenSetInventory {
-        self.weight_token_set_inventory_with_packed(None)
     }
 
     /// Classify final-weight token sets for the direct runtime-intersection
