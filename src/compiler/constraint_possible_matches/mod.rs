@@ -3249,7 +3249,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     });
 
     let word_len = vocab.all_original_token_words().len();
-    let mut safe_words = vec![0u32; word_len];
+    let mut exact_safe_words = vec![vec![0u32; word_len]];
     let mut whitespace_words = vec![0u32; word_len];
     let mut ascii_word_words = vec![0u32; word_len];
     let mut whitespace_token_bytes = U8Set::empty();
@@ -3260,8 +3260,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     let mut ascii_word_residual_entries =
         Vec::<(u16, usize, &[u8])>::with_capacity(ordered_vocab.ordered_token_bytes.len());
     let mut entries = Vec::<(u16, usize, &[u8])>::with_capacity(ordered_vocab.ordered_token_bytes.len());
-    let mut max_safe_chars = 0u16;
-
+    
     for (canonical, bytes) in ordered_vocab.ordered_token_bytes.iter().enumerate() {
         let bytes = bytes.as_slice();
         let is_safe = safe_plus.is_match(bytes);
@@ -3276,7 +3275,9 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
         };
         let is_whitespace = whitespace.is_match(bytes);
         let is_ascii_word = ascii_word.as_ref().is_some_and(|slice| slice.is_match(bytes));
-        max_safe_chars = max_safe_chars.max(safe_chars);
+        if exact_safe_words.len() <= usize::from(safe_chars) {
+            exact_safe_words.resize_with(usize::from(safe_chars) + 1, || vec![0u32; word_len]);
+        }
         entries.push((
             dynamic_mask_llg_master_layout_class(safe_chars, is_whitespace),
             canonical,
@@ -3310,7 +3311,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
             }
             let bit = 1u32 << (token % 32);
             if is_safe {
-                safe_words[word] |= bit;
+                exact_safe_words[usize::from(safe_chars)][word] |= bit;
             }
             if is_whitespace {
                 whitespace_words[word] |= bit;
@@ -3337,48 +3338,15 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     let ascii_word_residual_trie =
         DynamicMaskTrie::from_partitioned_token_refs(&ascii_word_residual_entries);
 
-    // Build cumulative exact-safe-length masks once per model vocabulary. A
-    // runtime radius r then initializes all safe tokens of lengths <= r in one
-    // dense copy; no fixed length thresholds are encoded here.
-    let mut exact_safe_words = vec![vec![0u32; word_len]; usize::from(max_safe_chars) + 1];
-    for &(class, canonical, _) in &entries {
-        let safe_chars = dynamic_mask_llg_master_safe_chars(class);
-        if safe_chars == 0 {
-            continue;
-        }
-        let Some(originals) = ordered_vocab.ordered_to_originals.get(canonical) else {
-            continue;
-        };
-        for &token in originals {
-            let word = token as usize / 32;
-            if word < word_len {
-                exact_safe_words[usize::from(safe_chars)][word] |= 1u32 << (token % 32);
-            }
-        }
-    }
-    let mut admitted_words = Vec::<Vec<u32>>::with_capacity((usize::from(max_safe_chars) + 1) * 2);
-    let mut safe_prefix = vec![0u32; word_len];
-    for radius in 0..=usize::from(max_safe_chars) {
-        if radius != 0 {
-            for (target, &source) in safe_prefix.iter_mut().zip(&exact_safe_words[radius]) {
-                *target |= source;
-            }
-        }
-        admitted_words.push(safe_prefix.clone());
-        let mut with_whitespace = safe_prefix.clone();
-        for (target, &source) in with_whitespace.iter_mut().zip(&whitespace_words) {
-            *target |= source;
-        }
-        admitted_words.push(with_whitespace);
-    }
-    vocab.set_llg_master_admitted_words(max_safe_chars, admitted_words);
+    let whitespace_words = Arc::new(whitespace_words);
+    let safe_words = vocab.set_llg_master_admitted_words(exact_safe_words, Arc::clone(&whitespace_words));
 
     let mut slices = vec![
         (
             SAFE_PLUS_CACHE_ID,
             Arc::clone(&safe_plus),
             Arc::new(DynamicMaskTrie::new()),
-            Arc::new(safe_words),
+            safe_words,
             safe_token_bytes,
             safe_max_token_byte_len,
         ),
@@ -3386,7 +3354,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
             WHITESPACE_CACHE_ID,
             Arc::clone(&whitespace),
             Arc::new(DynamicMaskTrie::new()),
-            Arc::new(whitespace_words),
+            whitespace_words,
             whitespace_token_bytes,
             whitespace_max_token_byte_len,
         ),

@@ -3352,13 +3352,8 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         && vocab.residual_original_token_words_for(trie).is_none();
 
     let mut positive_rebuild = if let Some(decision) = llg_master_decision {
-        let admitted_words = vocab
-            .llg_master_admitted_words(decision.safe_radius, decision.whitespace)
-            .ok_or_else(|| "dynamic-radius LLG master trie is missing admitted-token words".to_owned())?;
-        let copy_len = buf.len().min(admitted_words.len());
-        buf[..copy_len].copy_from_slice(&admitted_words[..copy_len]);
-        if copy_len < buf.len() {
-            buf[copy_len..].fill(0);
+        if !vocab.copy_llg_master_admitted_words(decision.safe_radius, decision.whitespace, buf) {
+            return Err("dynamic-radius LLG master trie is missing admitted-token words".to_owned());
         }
         true
     } else if !deferred_output

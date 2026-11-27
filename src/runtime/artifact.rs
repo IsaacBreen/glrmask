@@ -2025,32 +2025,6 @@ impl DynamicMaskTrie {
         &self.full_walk_ops
     }
 
-    /// Exact strict-walk operation count after skipping structural root classes
-    /// accepted by `admitted`.  Each admitted class still costs its one
-    /// zero-byte structural root op; the remainder of that root subtree is
-    /// skipped in O(1) by the runtime walker.
-    pub(crate) fn full_walk_ops_after_root_class_skips(
-        &self,
-        mut admitted: impl FnMut(u16) -> bool,
-    ) -> Option<usize> {
-        if self.root_layout_classes.is_empty() {
-            return None;
-        }
-        let mut root_slot = 0usize;
-        let mut work = 0usize;
-        for (edge_index, edge) in self.walk_edges.iter().copied().enumerate() {
-            if edge.parent_depth != 0 {
-                continue;
-            }
-            let class = *self.root_layout_classes.get(root_slot)?;
-            root_slot += 1;
-            let start = *self.full_walk_edge_op_starts.get(edge_index)? as usize;
-            let end = *self.full_walk_edge_op_starts.get(edge.subtree_end as usize)? as usize;
-            work = work.saturating_add(if admitted(class) { 1 } else { end.saturating_sub(start) });
-        }
-        (root_slot == self.root_layout_classes.len()).then_some(work)
-    }
-
     /// Every full-walk op consumes one byte iff there are no synthetic
     /// empty-edge ops. Non-empty radix edges contribute exactly one op per
     /// byte; empty edges contribute one op and zero bytes.
@@ -3950,6 +3924,34 @@ impl MaskProjection {
     }
 }
 
+/// Cumulative safe-string masks and one orthogonal whitespace mask. The
+/// complete safe/whitespace slice masks share these same allocations.
+#[derive(Debug)]
+struct MasterAdmissionWords {
+    safe_prefixes: Vec<Arc<Vec<u32>>>,
+    whitespace: Arc<Vec<u32>>,
+}
+
+impl MasterAdmissionWords {
+    fn from_exact(mut exact_safe: Vec<Vec<u32>>, whitespace: Arc<Vec<u32>>) -> Self {
+        debug_assert!(!exact_safe.is_empty());
+        for radius in 1..exact_safe.len() {
+            let (before, after) = exact_safe.split_at_mut(radius);
+            for (word, &previous) in after[0].iter_mut().zip(&before[radius - 1]) {
+                *word |= previous;
+            }
+        }
+        Self {
+            safe_prefixes: exact_safe.into_iter().map(Arc::new).collect(),
+            whitespace,
+        }
+    }
+
+    fn max_radius(&self) -> u16 {
+        (self.safe_prefixes.len() - 1) as u16
+    }
+}
+
 #[derive(Debug, Clone)]
 enum VocabAliasState {
     Empty,
@@ -3976,17 +3978,10 @@ pub(crate) struct DynamicMaskVocab {
     pub(crate) trie: Arc<DynamicMaskTrie>,
     alias_state: VocabAliasState,
     llg_slice_leftovers: Arc<Vec<Arc<DynamicMaskSliceTrie>>>,
-    /// Cumulative admitted-token bitsets for the dynamic-radius master trie.
-    /// Index = `safe_radius * 2 + whitespace_proved`; each row contains exactly
-    /// the whole tokens that can be accepted without walking the trie. Shared by
-    /// every constraint using the same model vocabulary.
-    llg_master_admitted_words: Arc<Vec<Vec<u32>>>,
-    /// Exact strict-walk operation count remaining after admitting each master
-    /// `(safe_radius, whitespace)` class combination. Indexed identically to
-    /// `llg_master_admitted_words`. This is runtime-only derived metadata and
-    /// is rebuilt from the master trie after construction/load.
-    llg_master_residual_ops: Arc<Vec<u32>>,
-    llg_master_max_safe_chars: u16,
+    /// Shared vocabulary-only acceleration; no duplicated whitespace variant.
+    llg_master_admission: Option<Arc<MasterAdmissionWords>>,
+    /// Exact remaining strict-walk work for (safe radius, whitespace).
+    llg_master_residual_ops: Arc<Vec<[u32; 2]>>,
     /// One immutable inventory of exact parser-independent master proofs.
     /// Slot = exact source TSID * 2 + slice (safe+ or whitespace).
     prepared_master_proofs: Option<Arc<PreparedMasterProofs>>,
@@ -4333,9 +4328,8 @@ impl DynamicMaskVocab {
             trie: Arc::clone(&self.trie),
             alias_state: self.alias_state.clone(),
             llg_slice_leftovers: Arc::clone(&self.llg_slice_leftovers),
-            llg_master_admitted_words: Arc::clone(&self.llg_master_admitted_words),
+            llg_master_admission: self.llg_master_admission.clone(),
             llg_master_residual_ops: Arc::clone(&self.llg_master_residual_ops),
-            llg_master_max_safe_chars: self.llg_master_max_safe_chars,
             grammar_quotiented: self.grammar_quotiented,
             source_vocab_digest: self.source_vocab_digest,
             ..Self::default()
@@ -4407,13 +4401,10 @@ impl DynamicMaskVocab {
             trie.as_ref(), canonical_original_token_offsets, canonical_original_tokens,
             false, None, Some((canonical_original_word_offsets, canonical_original_word_masks)),
         );
-        let (llg_master_max_safe_chars, llg_master_admitted_words) =
-            fused_master_admission.unwrap_or_else(|| (0, Arc::new(Vec::new())));
         Self {
             trie,
             alias_state: VocabAliasState::Runtime(Arc::new(indexes)),
-            llg_master_admitted_words,
-            llg_master_max_safe_chars,
+            llg_master_admission: fused_master_admission.map(Arc::new),
             ..Self::default()
         }
     }
@@ -4535,7 +4526,7 @@ impl DynamicMaskVocab {
     ) -> (
         Arc<Vec<u32>>,
         Arc<Vec<(u32, u32)>>,
-        Option<(u16, Arc<Vec<Vec<u32>>>)>,
+        Option<MasterAdmissionWords>,
     ) {
         let canonical_count = canonical_offsets.len().saturating_sub(1);
         if master_layout_classes.len() != canonical_count {
@@ -4599,26 +4590,10 @@ impl DynamicMaskVocab {
             offsets.push(masks.len() as u32);
         }
 
-        let mut admitted_words =
-            Vec::<Vec<u32>>::with_capacity((usize::from(max_safe_chars) + 1) * 2);
-        let mut safe_prefix = vec![0u32; word_len];
-        for radius in 0..=usize::from(max_safe_chars) {
-            if radius != 0 {
-                for (target, &source) in safe_prefix.iter_mut().zip(&exact_safe_words[radius]) {
-                    *target |= source;
-                }
-            }
-            admitted_words.push(safe_prefix.clone());
-            let mut with_whitespace = safe_prefix.clone();
-            for (target, &source) in with_whitespace.iter_mut().zip(&whitespace_words) {
-                *target |= source;
-            }
-            admitted_words.push(with_whitespace);
-        }
         (
             Arc::new(offsets),
             Arc::new(masks),
-            Some((max_safe_chars, Arc::new(admitted_words))),
+            Some(MasterAdmissionWords::from_exact(exact_safe_words, Arc::new(whitespace_words))),
         )
     }
 
@@ -4734,9 +4709,8 @@ impl DynamicMaskVocab {
                 .cloned()
                 .collect(),
         );
-        self.llg_master_admitted_words = Arc::clone(&source.llg_master_admitted_words);
+        self.llg_master_admission = source.llg_master_admission.clone();
         self.llg_master_residual_ops = Arc::new(Vec::new());
-        self.llg_master_max_safe_chars = source.llg_master_max_safe_chars;
     }
 
     pub(crate) fn set_llg_slice_leftovers(
@@ -4787,29 +4761,37 @@ impl DynamicMaskVocab {
         self.rebuild_llg_master_residual_ops_from_master_trie();
     }
 
+    /// Publish cumulative safe masks in place, sharing the complete masks
+    /// with the ordinary safe and whitespace slice acceleration.
     pub(crate) fn set_llg_master_admitted_words(
         &mut self,
-        max_safe_chars: u16,
-        admitted_words: Vec<Vec<u32>>,
-    ) {
-        debug_assert_eq!(admitted_words.len(), (usize::from(max_safe_chars) + 1) * 2);
-        self.llg_master_max_safe_chars = max_safe_chars;
-        self.llg_master_admitted_words = Arc::new(admitted_words);
+        exact_safe_words: Vec<Vec<u32>>,
+        whitespace_words: Arc<Vec<u32>>,
+    ) -> Arc<Vec<u32>> {
+        let admission = MasterAdmissionWords::from_exact(exact_safe_words, whitespace_words);
+        let complete_safe = Arc::clone(admission.safe_prefixes.last().expect("radius zero exists"));
+        self.llg_master_admission = Some(Arc::new(admission));
+        complete_safe
     }
 
     #[inline(always)]
-    pub(crate) fn llg_master_admitted_words(
+    pub(crate) fn copy_llg_master_admitted_words(
         &self,
         safe_radius: u16,
         whitespace: bool,
-    ) -> Option<&[u32]> {
-        if self.llg_master_admitted_words.is_empty() {
-            return None;
+        output: &mut [u32],
+    ) -> bool {
+        let Some(admission) = &self.llg_master_admission else { return false; };
+        let words = &admission.safe_prefixes[safe_radius.min(admission.max_radius()) as usize];
+        let copy_len = output.len().min(words.len());
+        output[..copy_len].copy_from_slice(&words[..copy_len]);
+        output[copy_len..].fill(0);
+        if whitespace {
+            for (target, &word) in output.iter_mut().zip(admission.whitespace.iter()) {
+                *target |= word;
+            }
         }
-        let radius = safe_radius.min(self.llg_master_max_safe_chars) as usize;
-        self.llg_master_admitted_words
-            .get(radius * 2 + usize::from(whitespace))
-            .map(Vec::as_slice)
+        true
     }
 
     #[inline(always)]
@@ -4818,19 +4800,14 @@ impl DynamicMaskVocab {
         safe_radius: u16,
         whitespace: bool,
     ) -> Option<usize> {
-        if self.llg_master_residual_ops.is_empty() {
-            return None;
-        }
-        let radius = safe_radius.min(self.llg_master_max_safe_chars) as usize;
-        self.llg_master_residual_ops
-            .get(radius * 2 + usize::from(whitespace))
-            .copied()
-            .map(|ops| ops as usize)
+        let radius = usize::from(safe_radius.min(self.llg_master_max_safe_chars()));
+        self.llg_master_residual_ops.get(radius)
+            .map(|row| row[usize::from(whitespace)] as usize)
     }
 
     #[inline(always)]
     pub(crate) fn llg_master_max_safe_chars(&self) -> u16 {
-        self.llg_master_max_safe_chars
+        self.llg_master_admission.as_ref().map_or(0, |words| words.max_radius())
     }
 
     fn rebuild_llg_master_residual_ops_from_master_trie(&mut self) {
@@ -4838,29 +4815,67 @@ impl DynamicMaskVocab {
             self.llg_master_residual_ops = Arc::new(Vec::new());
             return;
         };
-        let max_safe_chars = master
-            .trie()
-            .children(0)
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, _)| master.trie().root_layout_class(slot))
+        let trie = master.trie();
+        let max_safe_chars = trie.children(0).iter().enumerate()
+            .filter_map(|(slot, _)| trie.root_layout_class(slot))
             .map(dynamic_mask_llg_master_safe_chars)
-            .max()
-            .unwrap_or(0);
-        let mut rows = Vec::with_capacity((usize::from(max_safe_chars) + 1) * 2);
-        for radius in 0..=max_safe_chars {
-            for whitespace in [false, true] {
-                let work = master
-                    .trie()
-                    .full_walk_ops_after_root_class_skips(|class| {
-                        let safe_chars = dynamic_mask_llg_master_safe_chars(class);
-                        (safe_chars != 0 && safe_chars <= radius)
-                            || (whitespace && dynamic_mask_llg_master_is_whitespace(class))
-                    })
-                    .unwrap_or_else(|| master.trie().full_walk_ops().len());
-                rows.push(u32::try_from(work).unwrap_or(u32::MAX));
+            .max().unwrap_or(0);
+        let mut saved_by_radius = vec![[0usize; 2]; usize::from(max_safe_chars) + 1];
+        let mut root_slot = 0;
+        let mut total = 0usize;
+        let mut whitespace_saved = 0usize;
+        let mut complete = true;
+        // Visit the root edges directly: their subtree boundaries jump over
+        // every interior edge. A skipped class still costs its root op.
+        let mut edge_index = 0;
+        while edge_index < trie.walk_edges.len() {
+            let edge = trie.walk_edges[edge_index];
+            let Some(class) = trie.root_layout_class(root_slot) else {
+                complete = false;
+                break;
+            };
+            root_slot += 1;
+            let Some((&start, &end)) = trie.full_walk_edge_op_starts.get(edge_index)
+                .zip(trie.full_walk_edge_op_starts.get(edge.subtree_end as usize))
+                else { complete = false; break; };
+            if edge.parent_depth != 0 || edge.subtree_end as usize <= edge_index || end <= start {
+                complete = false;
+                break;
             }
+            let work = (end - start) as usize;
+            total = total.saturating_add(work);
+            let saved = work - 1;
+            let safe_chars = dynamic_mask_llg_master_safe_chars(class);
+            let whitespace = dynamic_mask_llg_master_is_whitespace(class);
+            if whitespace {
+                whitespace_saved = whitespace_saved.saturating_add(saved);
+            }
+            if safe_chars != 0 {
+                let entry = &mut saved_by_radius[usize::from(safe_chars)];
+                entry[0] = entry[0].saturating_add(saved);
+                if !whitespace {
+                    entry[1] = entry[1].saturating_add(saved);
+                }
+            }
+            edge_index = edge.subtree_end as usize;
         }
+        complete &= !trie.root_layout_classes.is_empty()
+            && root_slot == trie.root_layout_classes.len();
+        let rows = if complete {
+            let mut saved = [0usize; 2];
+            saved_by_radius.into_iter().map(|delta| {
+                saved[0] = saved[0].saturating_add(delta[0]);
+                saved[1] = saved[1].saturating_add(delta[1]);
+                [
+                    u32::try_from(total.saturating_sub(saved[0])).unwrap_or(u32::MAX),
+                    u32::try_from(total.saturating_sub(whitespace_saved).saturating_sub(saved[1]))
+                        .unwrap_or(u32::MAX),
+                ]
+            }).collect()
+        } else {
+            vec![[u32::try_from(trie.full_walk_ops().len()).unwrap_or(u32::MAX); 2];
+                usize::from(max_safe_chars) + 1]
+        };
         self.llg_master_residual_ops = Arc::new(rows);
     }
 
@@ -4870,9 +4885,8 @@ impl DynamicMaskVocab {
     /// small number of cumulative rows and avoids serializing those dense rows.
     fn rebuild_llg_master_admitted_words_from_master_trie(&mut self) {
         let Some(master) = self.llg_master_trie() else {
-            self.llg_master_admitted_words = Arc::new(Vec::new());
+            self.llg_master_admission = None;
             self.llg_master_residual_ops = Arc::new(Vec::new());
-            self.llg_master_max_safe_chars = 0;
             return;
         };
         let root_children = master.trie().children(0);
@@ -4910,24 +4924,7 @@ impl DynamicMaskVocab {
                 }
             }
         }
-        let mut admitted_words =
-            Vec::<Vec<u32>>::with_capacity((usize::from(max_safe_chars) + 1) * 2);
-        let mut safe_prefix = vec![0u32; word_len];
-        for radius in 0..=usize::from(max_safe_chars) {
-            if radius != 0 {
-                for (target, &source) in safe_prefix.iter_mut().zip(&exact_safe_words[radius]) {
-                    *target |= source;
-                }
-            }
-            admitted_words.push(safe_prefix.clone());
-            let mut with_whitespace = safe_prefix.clone();
-            for (target, &source) in with_whitespace.iter_mut().zip(&whitespace_words) {
-                *target |= source;
-            }
-            admitted_words.push(with_whitespace);
-        }
-        self.llg_master_max_safe_chars = max_safe_chars;
-        self.llg_master_admitted_words = Arc::new(admitted_words);
+        self.set_llg_master_admitted_words(exact_safe_words, Arc::new(whitespace_words));
         self.rebuild_llg_master_residual_ops_from_master_trie();
     }
 
@@ -5914,7 +5911,7 @@ impl DynamicMaskVocab {
         let entry_count = rows.iter().map(|row| row.positive.len()).sum::<usize>();
         let proofs = MasterProofRows::intern(rows, MasterProofCoverage::Explicit(Box::new([])));
         let radii = if include_safe_radii {
-            let max_radius = self.llg_master_max_safe_chars;
+            let max_radius = self.llg_master_max_safe_chars();
             let radius_jobs = quotients
                 .par_iter()
                 .map(|(terminal, quotient)| {
@@ -7987,7 +7984,7 @@ impl DynamicMaskVocab {
             );
         } else {
             result.llg_slice_leftovers = Arc::new(llg_slice_leftovers);
-            if result.llg_master_admitted_words.is_empty() {
+            if result.llg_master_admission.is_none() {
                 result.rebuild_llg_master_admitted_words_from_master_trie();
             } else {
                 result.rebuild_llg_master_residual_ops_from_master_trie();
@@ -8260,9 +8257,8 @@ impl Default for DynamicMaskVocab {
             trie: Arc::clone(EMPTY_TRIE.get_or_init(|| Arc::new(DynamicMaskTrie::new()))),
             alias_state: VocabAliasState::Empty,
             llg_slice_leftovers: Arc::new(Vec::new()),
-            llg_master_admitted_words: Arc::new(Vec::new()),
+            llg_master_admission: None,
             llg_master_residual_ops: Arc::new(Vec::new()),
-            llg_master_max_safe_chars: 0,
             prepared_master_proofs: None,
             grammar_quotiented: false,
             source_vocab_digest: None,
