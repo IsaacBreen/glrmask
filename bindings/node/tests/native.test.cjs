@@ -331,3 +331,27 @@ test('removed record bind and null mask strategy are rejected',()=>{
   for(const obj of [g,m]) assert.throws(()=>obj.bind({A:simple()}),TypeError);
   assert.throws(()=>simple().compileSync(vocab(),{maskStrategy:null}),TypeError);
 });
+
+
+test('commit outcome reports post-state viability',()=>{
+  const v=new Vocab([[0,b('a')],[1,b('b')],[2,b('z')],[3,b('')]]);
+  const empty=new Module(Grammar.fromGlrm('extern token T start root nt root=T'));
+  empty.bind('T',new TokenSet([]));
+  for(const {options} of strategies){
+    for(const [m,isEmpty] of [[new Module(simple()),false],[empty,true]]){
+      const c=m.compileSync(v,options);
+      assert.equal(c.start().isTerminated(),isEmpty);
+      for(const prefix of ['','a','ab','z']){
+        for(const [method,inputs] of [['commitToken',[0,1,2,3,999,0xffffffff]],['commitBytes',['','a','b','z','ab'].map(b)]]){
+          for(const data of inputs){
+            const s=c.start();s.commitBytes(b(prefix));
+            const result=s[method](data);
+            assert.equal(result,!(s.isTerminated()&&!s.isAccepting()));
+            s.dispose();
+          }
+        }
+      }
+      c.dispose();
+    }
+  }
+});

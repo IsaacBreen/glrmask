@@ -295,7 +295,31 @@ void commit_contract() {
         auto moved_closed = std::move(closed); (void)moved_closed;
         throws([&]{ (void)closed.commit_token(0); }, GLRMASK_CLOSED);
     }
-    // A rejected commit is OK with accepted=0; null state is an error.
+    // Outcome is the viability of the post-state, including empty input and language.
+    {
+        auto ordinary = Module(simple());
+        auto empty = Module(Grammar::from_glrm("extern token T start root nt root=T"));
+        empty.bind("T", TokenSet(std::vector<TokenId>{}));
+        for (auto* module : {&ordinary, &empty}) {
+            for (unsigned mode : {0u, 3u, 4u}) {
+                auto c = module->compile(v, strategy_options(mode));
+                CHECK(c.start().is_terminated() == (module == &empty));
+                for (const char* prefix : {"", "a", "ab", "z"}) {
+                    for (TokenId id : {0u, 1u, 65u, 999u, UINT32_MAX}) {
+                        auto s = c.start(); (void)s.commit_bytes(prefix);
+                        bool result = s.commit_token(id);
+                        CHECK(result == !(s.is_terminated() && !s.is_accepting()));
+                    }
+                    for (const char* input : {"", "a", "b", "z", "ab"}) {
+                        auto s = c.start(); (void)s.commit_bytes(prefix);
+                        bool result = s.commit_bytes(input);
+                        CHECK(result == !(s.is_terminated() && !s.is_accepting()));
+                    }
+                }
+            }
+        }
+    }
+    // A negative outcome is OK with accepted=0; null state is an error.
     uint32_t accepted=99;
     CHECK(glrmask_state_commit_token(nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);
     CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);

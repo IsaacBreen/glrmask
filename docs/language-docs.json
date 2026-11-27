@@ -47,8 +47,8 @@
     "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. May release the GIL.",
     "ConstraintState.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
-    "ConstraintState.commit_token": "Advances the state by the token. Returns True on acceptance and False on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.",
-    "ConstraintState.commit_bytes": "Advances the state by the bytes. Returns True on acceptance and False on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.",
+    "ConstraintState.commit_token": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.",
+    "ConstraintState.commit_bytes": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.",
     "ConstraintState.forced_bytes": "The bytes that must come next.",
     "ConstraintState.is_accepting": "Whether the output so far could end here.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
@@ -169,8 +169,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "4ef7c3b11685963836870a12ca325a0d6cd09c4608a69933b5681cce36b98938",
-    "bindings/node/README.md": "eff1cd3e1f467c14c3b846a4b15725547311cacc4cc35fef980b7b37f5ea62d3",
+    "bindings/cpp/README.md": "5eeb88fd064683380faeaa39fd75fa29cb5c4037349de9c61e5d91fba9f62437",
+    "bindings/node/README.md": "7454bc94658a1561e16c7f12d1437c26fa395792adf4525c59243a84fdafc4b5",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -178,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "4d5c800fadbd572a23e5741fbda32c51d28a01ac42f14b0c5efd40f2010b6175"
+  "content_sha256": "7cd9b5f26d217d1063f731cb2b3900fcfc178339ad00683f923433f1c1aa3fb4"
 }
