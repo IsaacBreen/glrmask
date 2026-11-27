@@ -2477,13 +2477,7 @@ pub(crate) fn prepare_bounded_code_mask_component(
 pub struct VirtualResidualMaskProjection {
     runtime: Arc<VirtualResidualRuntime>,
     state_offset: u32,
-    pattern_states: usize,
-    body_states: usize,
-    prefix_len: usize,
-    suffix_len: usize,
-    min: usize,
-    full_max: usize,
-    mask_max: usize,
+    layout: FiniteMaskLayout,
     crossed_boundaries: usize,
     local_to_mask_state: Arc<[u32]>,
 }
@@ -2697,13 +2691,7 @@ impl VirtualResidualMaskProjection {
         Some(Self {
             runtime,
             state_offset: self.state_offset,
-            pattern_states: self.pattern_states,
-            body_states: self.body_states,
-            prefix_len: self.prefix_len,
-            suffix_len: self.suffix_len,
-            min: self.min,
-            full_max: self.full_max,
-            mask_max: self.mask_max,
+            layout: self.layout,
             crossed_boundaries: self.crossed_boundaries,
             local_to_mask_state: Arc::clone(&self.local_to_mask_state),
         })
@@ -2724,8 +2712,8 @@ impl VirtualResidualMaskProjection {
     #[doc(hidden)]
     pub fn observation_descriptor(&self) -> Vec<u8> {
         bincode::serialize(&(self.runtime.terminal(), self.state_offset,
-            self.pattern_states, self.body_states, self.prefix_len, self.suffix_len,
-            self.min, self.full_max, self.mask_max, self.crossed_boundaries,
+            self.layout.pattern_states, self.layout.body_states, self.layout.prefix_len, self.layout.suffix_len,
+            self.layout.min, self.layout.full_max, self.layout.mask_max, self.crossed_boundaries,
             self.local_to_mask_state.as_ref()))
             .expect("finite residual descriptor serialization")
     }
@@ -2737,60 +2725,12 @@ impl VirtualResidualMaskProjection {
             self.state_offset,
             self.local_to_mask_state.as_ref(),
             self.runtime.serialized_bounded_code_oracle(),
-            self.mask_max,
+            self.layout.mask_max,
             self.crossed_boundaries,
         )
     }
 
-    fn local_state_for_coordinate(&self, coordinate: BoundedCodeOracleCoordinate) -> Option<u32> {
-        let pattern = coordinate.pattern_state as usize;
-        if pattern >= self.pattern_states {
-            return None;
-        }
-        let prefix_block = self.prefix_len.checked_mul(self.pattern_states)?;
-        let body_layer = self.body_states.checked_mul(self.pattern_states)?;
-        let body_block = self.mask_max.checked_add(1)?.checked_mul(body_layer)?;
-        let suffix_slots = self.suffix_len.saturating_sub(1);
-        let suffix_block = suffix_slots.checked_mul(self.pattern_states)?;
-        let local = match coordinate.envelope {
-            BoundedCodeEnvelopeState::Prefix { next } => {
-                if next >= self.prefix_len { return None; }
-                next.checked_mul(self.pattern_states)?.checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Body { completed, body_state } => {
-                let body_state = body_state as usize;
-                if body_state >= self.body_states || completed > self.full_max {
-                    return None;
-                }
-                let distance_to_upper = self.full_max - completed;
-                let mapped_completed = if completed < self.min {
-                    completed
-                } else if distance_to_upper <= self.crossed_boundaries {
-                    self.mask_max.checked_sub(distance_to_upper)?
-                } else {
-                    self.min
-                };
-                if mapped_completed > self.mask_max { return None; }
-                prefix_block
-                    .checked_add(mapped_completed.checked_mul(body_layer)?)?
-                    .checked_add(body_state.checked_mul(self.pattern_states)?)?
-                    .checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Suffix { next } => {
-                if next == 0 || next >= self.suffix_len { return None; }
-                prefix_block
-                    .checked_add(body_block)?
-                    .checked_add((next - 1).checked_mul(self.pattern_states)?)?
-                    .checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Done => prefix_block
-                .checked_add(body_block)?
-                .checked_add(suffix_block)?
-                .checked_add(pattern)?,
-        };
-        u32::try_from(local).ok()
-    }
-
++
     #[inline]
     pub fn project(&self, full_state: u32) -> Option<u32> {
         if !self.runtime.handles_state(full_state) {
@@ -2898,6 +2838,8 @@ struct FiniteMaskLayout {
     body_states: usize,
     prefix_len: usize,
     suffix_len: usize,
+    min: usize,
+    full_max: usize,
     mask_max: usize,
     prefix_block: usize,
     body_layer: usize,
@@ -2931,6 +2873,8 @@ impl FiniteMaskLayout {
             body_states,
             prefix_len,
             suffix_len,
+            min: oracle.min,
+            full_max: oracle.max,
             mask_max,
             prefix_block,
             body_layer,
@@ -2938,6 +2882,28 @@ impl FiniteMaskLayout {
             suffix_block,
             dense_state_count,
         })
+    }
+
+    /// Collapse only the unobservable interior of the repetition interval.
+    /// Construction, static projection and direct token keys use the same
+    /// checked layout and count transport.
+    fn projected_local_state(
+        &self,
+        mut coordinate: BoundedCodeOracleCoordinate,
+        crossed_boundaries: usize,
+    ) -> Option<u32> {
+        if let BoundedCodeEnvelopeState::Body { completed, body_state } = coordinate.envelope {
+            let distance = self.full_max.checked_sub(completed)?;
+            let completed = if completed < self.min {
+                completed
+            } else if distance <= crossed_boundaries {
+                self.mask_max.checked_sub(distance)?
+            } else {
+                self.min
+            };
+            coordinate.envelope = BoundedCodeEnvelopeState::Body { completed, body_state };
+        }
+        self.coordinate_local_state(coordinate)
     }
 
     #[inline]
@@ -4905,65 +4871,8 @@ impl VirtualResidualRuntime {
             .checked_add(1)?;
         let mask_max = oracle.max.min(desired_mask_max);
 
-        let pattern_states = oracle.pattern.num_states();
-        let body_states = oracle.body.num_states();
-        let prefix_len = oracle.prefix.len();
-        let suffix_len = oracle.suffix.len();
-        let pattern = source.coordinate.pattern_state as usize;
-        if pattern >= pattern_states {
-            return None;
-        }
-        let prefix_block = prefix_len.checked_mul(pattern_states)?;
-        let body_layer = body_states.checked_mul(pattern_states)?;
-        let body_block = mask_max.checked_add(1)?.checked_mul(body_layer)?;
-        let suffix_slots = suffix_len.saturating_sub(1);
-        let suffix_block = suffix_slots.checked_mul(pattern_states)?;
-        let local = match source.coordinate.envelope {
-            BoundedCodeEnvelopeState::Prefix { next } => {
-                if next >= prefix_len {
-                    return None;
-                }
-                next.checked_mul(pattern_states)?.checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Body {
-                completed,
-                body_state,
-            } => {
-                let body_state = body_state as usize;
-                if body_state >= body_states || completed > oracle.max {
-                    return None;
-                }
-                let distance_to_upper = oracle.max - completed;
-                let mapped_completed = if completed < oracle.min {
-                    completed
-                } else if distance_to_upper <= crossed_boundaries {
-                    mask_max.checked_sub(distance_to_upper)?
-                } else {
-                    oracle.min
-                };
-                if mapped_completed > mask_max {
-                    return None;
-                }
-                prefix_block
-                    .checked_add(mapped_completed.checked_mul(body_layer)?)?
-                    .checked_add(body_state.checked_mul(pattern_states)?)?
-                    .checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Suffix { next } => {
-                if next == 0 || next >= suffix_len {
-                    return None;
-                }
-                prefix_block
-                    .checked_add(body_block)?
-                    .checked_add((next - 1).checked_mul(pattern_states)?)?
-                    .checked_add(pattern)?
-            }
-            BoundedCodeEnvelopeState::Done => prefix_block
-                .checked_add(body_block)?
-                .checked_add(suffix_block)?
-                .checked_add(pattern)?,
-        };
-        Some((self.runtime_index, u32::try_from(local).ok()?))
+        let layout = FiniteMaskLayout::new(oracle, mask_max)?;
+        Some((self.runtime_index, layout.projected_local_state(source.coordinate, crossed_boundaries)?))
     }
 
     /// Prove that every live string in a finite byte-language slice can be
@@ -6183,13 +6092,7 @@ impl VirtualResidualRuntime {
         Ok(VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
             state_offset: artifact.state_offset,
-            pattern_states: oracle.pattern.num_states(),
-            body_states: oracle.body.num_states(),
-            prefix_len: oracle.prefix.len(),
-            suffix_len: oracle.suffix.len(),
-            min: oracle.min,
-            full_max: oracle.max,
-            mask_max,
+            layout: FiniteMaskLayout::new(oracle, mask_max).ok_or_else(|| "invalid finite mask layout".to_owned())?,
             crossed_boundaries,
             local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
         })
@@ -6281,13 +6184,7 @@ impl VirtualResidualRuntime {
         Ok(VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
             state_offset: artifact.state_offset,
-            pattern_states: oracle.pattern.num_states(),
-            body_states: oracle.body.num_states(),
-            prefix_len: oracle.prefix.len(),
-            suffix_len: oracle.suffix.len(),
-            min: oracle.min,
-            full_max: oracle.max,
-            mask_max,
+            layout: FiniteMaskLayout::new(oracle, mask_max).ok_or_else(|| "invalid finite mask layout".to_owned())?,
             crossed_boundaries,
             local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
         })
@@ -6374,13 +6271,7 @@ impl VirtualResidualRuntime {
         let projection = VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
             state_offset,
-            pattern_states: oracle.pattern.num_states(),
-            body_states: oracle.body.num_states(),
-            prefix_len: oracle.prefix.len(),
-            suffix_len: oracle.suffix.len(),
-            min: oracle.min,
-            full_max: oracle.max,
-            mask_max,
+            layout: FiniteMaskLayout::new(oracle, mask_max)?,
             crossed_boundaries,
             local_to_mask_state: Arc::from(local_to_mask_state.into_boxed_slice()),
         };
@@ -8394,7 +8285,7 @@ mod compact_future_stencil_tests {
             (bincode::serialize(oracle).unwrap(), oracle.max.min(oracle.min + old_crossings + 1))
         };
         let (dfa, segment, _, view) = runtime.build_finite_mask_projection(horizon, 0).unwrap();
-        assert_eq!(view.mask_max < old_max, expect_shrink);
+        assert_eq!(view.layout.mask_max < old_max, expect_shrink);
         assert_eq!(runtime.serialized_bounded_code_oracle(), sparse_before);
         assert_eq!(
             bincode::serialize(runtime.store.lock().unwrap().liveness_oracle.as_ref().unwrap()).unwrap(),
@@ -8425,7 +8316,7 @@ mod compact_future_stencil_tests {
             let legacy: VirtualResidualMaskProjectionArtifact = bincode::deserialize(&wire).unwrap();
             VirtualResidualMaskProjectionArtifact::from_wire(
                 legacy.terminal, legacy.state_offset, legacy.local_to_mask_state,
-                legacy.oracle_bytes, bincode::serialize(&expr).unwrap(), view.mask_max, view.crossed_boundaries,
+                legacy.oracle_bytes, bincode::serialize(&expr).unwrap(), view.layout.mask_max, view.crossed_boundaries,
             )
         };
         let loaded = Arc::new(VirtualResidualRuntime::new_preserving_oracle_coordinate_from_oracle_bytes(
@@ -8488,7 +8379,7 @@ mod compact_future_stencil_tests {
             let old_crossings = runtime.store.lock().unwrap().liveness_oracle.as_ref().unwrap()
                 .finite_mask_stencil_crossings(2).unwrap();
             let (_, _, _, view) = runtime.build_finite_mask_projection(1, 0).unwrap();
-            assert_eq!(view.mask_max, max);
+            assert_eq!(view.layout.mask_max, max);
             assert_eq!(view.crossed_boundaries, old_crossings);
         }
     }
