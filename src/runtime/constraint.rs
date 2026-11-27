@@ -2279,11 +2279,6 @@ impl Constraint {
         &self,
         dwa_state: u32,
     ) -> Option<RuntimeWeightRef<'_>> {
-        if dwa_state == self.runtime_parser_dwa_start_state()
-            && let Some(weight) = self.parser_start_final_override.as_ref()
-        {
-            return (!weight.is_empty()).then_some(RuntimeWeightRef::Materialized(weight));
-        }
         if let Some(dwa) = &self.packed_parser_dwa {
             return dwa
                 .final_weight(dwa_state)
@@ -9527,16 +9522,6 @@ impl Constraint {
             self.serialized_artifact_cache = None;
             self.parser_runtime_caches_prebuilt = false;
             self.packed_dwa_token_dense_masks.clear();
-            self.dwa_fast_transitions = Default::default();
-            self.indexed_dag_dense_transitions.clear();
-            self.indexed_dag_dense_finals.clear();
-        }
-        if let Some(override_weight) = self.parser_start_final_override.take() {
-            let start = self.parser_dwa.start_state() as usize;
-            self.parser_dwa.states_mut()[start].final_weight =
-                (!override_weight.is_empty()).then_some(override_weight);
-            self.serialized_artifact_cache = None;
-            self.parser_runtime_caches_prebuilt = false;
             self.dwa_fast_transitions = Default::default();
             self.indexed_dag_dense_transitions.clear();
             self.indexed_dag_dense_finals.clear();

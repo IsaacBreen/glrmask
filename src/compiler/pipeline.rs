@@ -5867,7 +5867,6 @@ fn compile_prepared_with_profile_and_table_construction(
             pending_special_token_ids: None,
             parser_dwa,
             packed_parser_dwa: None,
-            parser_start_final_override: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,

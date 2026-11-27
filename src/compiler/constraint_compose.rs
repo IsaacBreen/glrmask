@@ -8098,7 +8098,6 @@ fn build_composed_constraint_unfinalized(
         pending_special_token_ids: None,
         parser_dwa,
         packed_parser_dwa: None,
-        parser_start_final_override: None,
         parser_top_accept: BTreeMap::new(),
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
