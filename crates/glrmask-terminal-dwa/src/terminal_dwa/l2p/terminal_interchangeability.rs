@@ -2186,22 +2186,58 @@ struct TiQuotient {
 }
 
 impl TiQuotient {
-    fn new(topology: &RestrictedTopology, output_by_state: &[u32], output_count: usize) -> Self {
+    fn new(
+        topology: &RestrictedTopology, output_by_state: &[u32], output_count: usize,
+        previous: Option<(&TiQuotient, &[u32])>,
+    ) -> Self {
         // First distinguish the one-byte output functions. Empty output on
         // an explicit edge is indistinguishable from a missing byte here.
-        let mut signatures = FxHashMap::<SmallVec<[(u8, u32); 8]>, u32>::default();
-        let initial = (0..topology.state_count()).map(|state| {
-            let row = topology.edges_from(state).iter().filter_map(|&(byte, target)| {
-                let output = output_by_state[target as usize];
-                (output != 0).then_some((byte, output))
+        // Under a smaller active alphabet the previous stable quotient is
+        // still a congruence. Refine the projected graph from its one-byte
+        // outputs (not from its old classes), allowing classes to coalesce.
+        let (classes, mut representatives) = if let Some((old, projected)) = previous {
+            let mut signatures = FxHashMap::<SmallVec<[(u8, u32); 8]>, u32>::default();
+            let mut initial = Vec::with_capacity(old.rows.len());
+            let mut edges = Vec::new();
+            let mut offsets = vec![0usize];
+            for row in &old.rows {
+                let mut outputs = SmallVec::new();
+                for &(byte, target, output) in row.iter() {
+                    let output = projected[output as usize];
+                    if output != 0 { outputs.push((byte, output)); }
+                    if target != old.dead || output != 0 { edges.push((byte, target)); }
+                }
+                let id = signatures.len() as u32;
+                initial.push(*signatures.entry(outputs).or_insert(id));
+                offsets.push(edges.len());
+            }
+            drop(signatures);
+            let (coarser, reps) = refine_partition(
+                initial, |state| &edges[offsets[state]..offsets[state + 1]], Some(old.dead as usize),
+            );
+            let classes = old.class_for_state.iter()
+                .map(|&class| coarser[class as usize]).collect::<Vec<_>>();
+            // Both quotients are canonically ordered by first discovery state.
+            // Recover the first raw discovery state per new class.
+            let mut representatives = vec![u32::MAX; reps.len()];
+            for (state, &class) in classes.iter().enumerate() {
+                let rep = &mut representatives[class as usize];
+                if *rep == u32::MAX { *rep = state as u32; }
+            }
+            (classes, representatives)
+        } else {
+            let mut signatures = FxHashMap::<SmallVec<[(u8, u32); 8]>, u32>::default();
+            let initial = (0..topology.state_count()).map(|state| {
+                let row = topology.edges_from(state).iter().filter_map(|&(byte, target)| {
+                    let output = output_by_state[target as usize];
+                    (output != 0).then_some((byte, output))
+                }).collect();
+                let next = signatures.len() as u32;
+                *signatures.entry(row).or_insert(next)
             }).collect();
-            let next = signatures.len() as u32;
-            *signatures.entry(row).or_insert(next)
-        }).collect();
-        drop(signatures);
-        let (classes, mut representatives) = refine_partition(
-            initial, |state| topology.edges_from(state), Some(topology.dead_state()),
-        );
+            drop(signatures);
+            refine_partition(initial, |state| topology.edges_from(state), Some(topology.dead_state()))
+        };
         let n = representatives.len();
         let dead = classes[topology.dead_state()];
         let mut real = vec![false; n];
