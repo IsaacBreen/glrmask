@@ -2115,20 +2115,18 @@ pub mod artifact_serde {
         }
     }
 
-    fn fast_layout(tokenizer: &Tokenizer, dfa: &DFA) -> FastLayout {
+    fn fast_layout(tokenizer: &Tokenizer) -> FastLayout {
         const HEADER_LEN: usize = 32;
-        let states = dfa.states();
-        let state_count = states.len();
-        let transition_count = states.iter().map(|state| state.transitions.len()).sum::<usize>();
-        let epsilon_count = states.iter().map(|state| state.epsilon_transitions.len()).sum::<usize>();
-        let finalizer_count = states
-            .iter()
-            .map(|state| state.finalizers.iter().count())
-            .sum::<usize>();
-        let future_count = states
-            .iter()
-            .map(|state| state.possible_future_group_ids.iter().count())
-            .sum::<usize>();
+        let state_count = tokenizer.num_states() as usize;
+        let transition_count = tokenizer.transition_count();
+        let mut epsilon_count = 0;
+        let mut finalizer_count = 0;
+        let mut future_count = 0;
+        for state in 0..state_count as u32 {
+            epsilon_count += tokenizer.physical_epsilon_count(state);
+            finalizer_count += tokenizer.physical_finalizers(state).iter().count();
+            future_count += tokenizer.physical_futures(state).iter().count();
+        }
         let terminal_count = tokenizer.num_terminals as usize;
         let state_id_width = if state_count <= u16::MAX as usize + 1 {
             2usize
@@ -2161,59 +2159,13 @@ pub mod artifact_serde {
         }
     }
 
-    /// Estimated eventual TKF2 wire length without materializing compressed
-    /// transition segments. The estimate is exact because compressed segments
-    /// retain their expanded transition counts while all state metadata stays
-    /// resident in the DFA.
+    /// Exact expanded TKF2 length from the authoritative physical rows.
     pub fn estimated_fast_len(tokenizer: &Tokenizer) -> usize {
-        const HEADER_LEN: usize = 32;
-        let states = tokenizer.dfa.states();
-        let state_count = states.len();
-        let transition_count = tokenizer.transition_count();
-        let epsilon_count = states
-            .iter()
-            .map(|state| state.epsilon_transitions.len())
-            .sum::<usize>();
-        let finalizer_count = states
-            .iter()
-            .map(|state| state.finalizers.iter().count())
-            .sum::<usize>();
-        let future_count = states
-            .iter()
-            .map(|state| state.possible_future_group_ids.iter().count())
-            .sum::<usize>();
-        let terminal_count = tokenizer.num_terminals as usize;
-        let state_id_width = if state_count <= u16::MAX as usize + 1 { 2 } else { 4 };
-        let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 { 2 } else { 4 };
-        let offsets_bytes = (state_count + 1) * 4;
-        HEADER_LEN
-            + terminal_count * 32
-            + offsets_bytes
-            + transition_count
-            + transition_count * state_id_width
-            + offsets_bytes
-            + epsilon_count * state_id_width
-            + offsets_bytes
-            + finalizer_count * terminal_id_width
-            + offsets_bytes
-            + future_count * terminal_id_width
+        fast_layout(tokenizer).len()
     }
 
-    /// Exact TKF2 wire length without constructing the wire buffer. Returns
-    /// `None` only for the uncommon compressed-segment representation, whose
-    /// direct writer requires materialized transition rows.
     pub fn fast_layout_for_write(tokenizer: &Tokenizer) -> Option<FastLayout> {
-        if !tokenizer.compressed_transition_segments.is_empty()
-            || !tokenizer.packed_compressed_transition_segments.is_empty()
-        {
-            return None;
-        }
-        if !tokenizer.packed_runtime_transition_segments.is_empty()
-        {
-            let materialized = tokenizer.materialized_dfa();
-            return Some(fast_layout(tokenizer, &materialized));
-        }
-        Some(fast_layout(tokenizer, &tokenizer.dfa))
+        (!tokenizer.has_compressed_transition_segments()).then(|| fast_layout(tokenizer))
     }
 
     pub fn fast_len(tokenizer: &Tokenizer) -> Option<usize> {
@@ -2229,9 +2181,8 @@ pub mod artifact_serde {
             + layout.transition_count * layout.state_id_width
     }
 
-    fn write_fast_bytes_for_dfa(
+    fn write_fast_physical_bytes(
         tokenizer: &Tokenizer,
-        dfa: &DFA,
         layout: FastLayout,
         out: &mut [u8],
         transition_prefix_only: bool,
@@ -2247,7 +2198,7 @@ pub mod artifact_serde {
                 out.len(), expected_len
             ));
         }
-        let states = dfa.states();
+        let states = 0..layout.state_count as u32;
         let mut pos = 0usize;
         let put = |out: &mut [u8], pos: &mut usize, bytes: &[u8]| {
             let end = *pos + bytes.len();
@@ -2289,7 +2240,7 @@ pub mod artifact_serde {
             &[layout.state_id_width as u8, layout.terminal_id_width as u8, 0, 0],
         );
         for terminal in 0..layout.terminal_count {
-            for word in dfa.group_id_to_u8set(terminal as u32).to_words() {
+            for word in tokenizer.dfa.group_id_to_u8set(terminal as u32).to_words() {
                 put(out, &mut pos, &word.to_le_bytes());
             }
         }
@@ -2343,7 +2294,7 @@ pub mod artifact_serde {
                     4,
                 ) => put(out, &mut pos, &backing[*start..*start + *len * 4]),
                 _ => {
-                    for state in 0..states.len() as u32 {
+                    for state in states.clone() {
                         let (_, targets) = packed
                             .row(state)
                             .expect("packed runtime transition rows must cover every state");
@@ -2364,16 +2315,16 @@ pub mod artifact_serde {
             put_offsets(
                 out,
                 &mut pos,
-                &mut states.iter().map(|state| state.transitions.len()),
+                &mut states.clone().map(|state| tokenizer.physical_transitions_from(state).count()),
             );
-            for state in states {
-                for (byte, _) in state.transitions.iter() {
+            for state in states.clone() {
+                for (byte, _) in tokenizer.physical_transitions_from(state) {
                     out[pos] = byte;
                     pos += 1;
                 }
             }
-            for state in states {
-                for &target in state.transitions.values() {
+            for state in states.clone() {
+                for (_, target) in tokenizer.physical_transitions_from(state) {
                     debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
                     put_id(out, &mut pos, target, layout.state_id_width);
                 }
@@ -2386,21 +2337,21 @@ pub mod artifact_serde {
         put_offsets(
             out,
             &mut pos,
-            &mut states.iter().map(|state| state.epsilon_transitions.len()),
+            &mut states.clone().map(|state| tokenizer.physical_epsilon_count(state)),
         );
-        for state in states {
-            for &target in &state.epsilon_transitions {
+        for state in states.clone() {
+            tokenizer.for_each_epsilon_target(state, |target| {
                 debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
                 put_id(out, &mut pos, target, layout.state_id_width);
-            }
+            });
         }
         put_offsets(
             out,
             &mut pos,
-            &mut states.iter().map(|state| state.finalizers.iter().count()),
+            &mut states.clone().map(|state| tokenizer.physical_finalizers(state).iter().count()),
         );
-        for state in states {
-            for terminal in state.finalizers.iter() {
+        for state in states.clone() {
+            for terminal in tokenizer.physical_finalizers(state).iter() {
                 let terminal = terminal as u32;
                 debug_assert!(layout.terminal_id_width == 4 || terminal <= u16::MAX as u32);
                 put_id(out, &mut pos, terminal, layout.terminal_id_width);
@@ -2409,12 +2360,10 @@ pub mod artifact_serde {
         put_offsets(
             out,
             &mut pos,
-            &mut states
-                .iter()
-                .map(|state| state.possible_future_group_ids.iter().count()),
+            &mut states.clone().map(|state| tokenizer.physical_futures(state).iter().count()),
         );
-        for state in states {
-            for terminal in state.possible_future_group_ids.iter() {
+        for state in states.clone() {
+            for terminal in tokenizer.physical_futures(state).iter() {
                 let terminal = terminal as u32;
                 debug_assert!(layout.terminal_id_width == 4 || terminal <= u16::MAX as u32);
                 put_id(out, &mut pos, terminal, layout.terminal_id_width);
@@ -2428,32 +2377,16 @@ pub mod artifact_serde {
     /// constraint serializer to overlap tokenizer encoding with independent
     /// final-section copies.
     pub fn write_fast_bytes(tokenizer: &Tokenizer, out: &mut [u8]) -> Result<(), String> {
-        if !tokenizer.compressed_transition_segments.is_empty() {
-            return Err("direct fast tokenizer write requires materialized transitions".to_owned());
-        }
-        let layout = fast_layout(tokenizer, &tokenizer.dfa);
-        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out, false)
+        write_fast_physical_bytes(tokenizer, fast_layout(tokenizer), out, false)
     }
 
-    /// Write TKF2 using an exact layout already computed by the caller. This
-    /// avoids rescanning every DFA state after `fast_layout_for_write()` was
-    /// used to size the final artifact section.
+    /// Write TKF2 with the caller's already computed exact layout.
     pub fn write_fast_bytes_with_layout(
         tokenizer: &Tokenizer,
         layout: FastLayout,
         out: &mut [u8],
     ) -> Result<(), String> {
-        if !tokenizer.compressed_transition_segments.is_empty()
-            || !tokenizer.packed_compressed_transition_segments.is_empty()
-        {
-            return Err("direct fast tokenizer write requires materialized transitions".to_owned());
-        }
-        if !tokenizer.packed_runtime_transition_segments.is_empty()
-        {
-            let materialized = tokenizer.materialized_dfa();
-            return write_fast_bytes_for_dfa(tokenizer, &materialized, layout, out, false);
-        }
-        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out, false)
+        write_fast_physical_bytes(tokenizer, layout, out, false)
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -2467,26 +2400,19 @@ pub mod artifact_serde {
         epsilon_targets: Vec<u32>,
     }
 
-    fn fast_packed_metadata_artifact(dfa: &DFA) -> FastPackedMetadataArtifact {
-        let states = dfa.states();
+    fn fast_packed_metadata_artifact(tokenizer: &Tokenizer) -> FastPackedMetadataArtifact {
+        let states = 0..tokenizer.num_states();
         let pack_rows = |futures: bool| {
             let mut row_map = FxHashMap::<Box<[u32]>, u32>::default();
             let mut rows = Vec::<Box<[u32]>>::new();
             let mut row_ids = Vec::<u32>::with_capacity(states.len());
-            for state in states {
-                let sparse = if futures {
-                    state
-                        .possible_future_group_ids
-                        .iter()
-                        .map(|terminal| terminal as u32)
-                        .collect::<Vec<_>>()
+            for state in states.clone() {
+                let bits = if futures {
+                    tokenizer.physical_futures(state)
                 } else {
-                    state
-                        .finalizers
-                        .iter()
-                        .map(|terminal| terminal as u32)
-                        .collect::<Vec<_>>()
+                    tokenizer.physical_finalizers(state)
                 };
+                let sparse = bits.iter().map(|terminal| terminal as u32).collect::<Vec<_>>();
                 let row = if let Some(&row) = row_map.get(sparse.as_slice()) {
                     row
                 } else {
@@ -2505,12 +2431,12 @@ pub mod artifact_serde {
         let mut epsilon_states = Vec::new();
         let mut epsilon_offsets = vec![0u32];
         let mut epsilon_targets = Vec::new();
-        for (state_index, state) in states.iter().enumerate() {
-            if state.epsilon_transitions.is_empty() {
+        for state in states {
+            if tokenizer.physical_epsilon_count(state) == 0 {
                 continue;
             }
-            epsilon_states.push(state_index as u32);
-            epsilon_targets.extend_from_slice(&state.epsilon_transitions);
+            epsilon_states.push(state);
+            tokenizer.for_each_epsilon_target(state, |target| epsilon_targets.push(target));
             epsilon_offsets.push(epsilon_targets.len() as u32);
         }
         FastPackedMetadataArtifact {
@@ -2529,26 +2455,16 @@ pub mod artifact_serde {
     /// used for giant finite residual mask tokenizers where rebuilding those
     /// rows on every load is measurable.
     pub fn to_fast_bytes_with_packed_metadata(tokenizer: &Tokenizer) -> Vec<u8> {
-        let materialized;
-        let dfa = if tokenizer.compressed_transition_segments.is_empty()
-            && tokenizer.packed_compressed_transition_segments.is_empty()
-            && tokenizer.packed_runtime_transition_segments.is_empty()
-        {
-            &tokenizer.dfa
-        } else {
-            materialized = tokenizer.materialized_dfa();
-            &materialized
-        };
-        let layout = fast_layout(tokenizer, dfa);
+        let layout = fast_layout(tokenizer);
         let transition_end = fast_transition_prefix_len(layout);
         let mut out = vec![0u8; transition_end];
-        write_fast_bytes_for_dfa(tokenizer, dfa, layout, &mut out, true)
+        write_fast_physical_bytes(tokenizer, layout, &mut out, true)
             .expect("exact TKF3 transition-prefix layout should always write successfully");
         out[..4].copy_from_slice(b"TKF3");
         if tokenizer.scalar_deterministic_dispatch_cache.get() == Some(&true) {
             out[FAST_WIRE_FLAGS_OFFSET] |= FAST_WIRE_FLAG_SCALAR_DETERMINISTIC_DISPATCH;
         }
-        let metadata = fast_packed_metadata_artifact(dfa);
+        let metadata = fast_packed_metadata_artifact(tokenizer);
         bincode::serialize_into(&mut out, &metadata)
             .expect("TKF3 packed metadata serialization should succeed");
         out
@@ -2573,20 +2489,10 @@ pub mod artifact_serde {
     /// fixed-width copy and load reconstructs the existing packed runtime
     /// transition sidecar directly.
     pub fn to_fast_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
-        let materialized;
-        let dfa = if tokenizer.compressed_transition_segments.is_empty()
-            && tokenizer.packed_compressed_transition_segments.is_empty()
-            && tokenizer.packed_runtime_transition_segments.is_empty()
-        {
-            &tokenizer.dfa
-        } else {
-            materialized = tokenizer.materialized_dfa();
-            &materialized
-        };
-        let layout = fast_layout(tokenizer, dfa);
+        let layout = fast_layout(tokenizer);
         let len = layout.len;
         let mut out = vec![0u8; len];
-        write_fast_bytes_for_dfa(tokenizer, dfa, layout, &mut out, false)
+        write_fast_physical_bytes(tokenizer, layout, &mut out, false)
             .expect("exact fast tokenizer layout should always write successfully");
         out
     }
@@ -8626,6 +8532,13 @@ impl Tokenizer {
             original_to_view:mapping,view_to_original:inverse})
     }
 
+    fn physical_epsilon_count(&self, state: u32) -> usize {
+        if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
+            return segment.metadata.epsilon_targets(segment.local_state(state)).len();
+        }
+        self.dfa.states().get(state as usize).map_or(0, |row| row.epsilon_transitions.len())
+    }
+
     fn for_each_epsilon_target(&self, state: u32, mut visit: impl FnMut(u32)) {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
             for &target in segment.metadata.epsilon_targets(segment.local_state(state)) {
@@ -8689,6 +8602,11 @@ impl Tokenizer {
         {
             return finalizers;
         }
+        self.physical_finalizers(state)
+    }
+
+    #[inline]
+    fn physical_finalizers(&self, state: u32) -> &BitSet {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
             return segment
                 .metadata
@@ -8719,6 +8637,11 @@ impl Tokenizer {
         {
             return futures;
         }
+        self.physical_futures(state)
+    }
+
+    #[inline]
+    fn physical_futures(&self, state: u32) -> &BitSet {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
             return segment
                 .metadata
@@ -12938,6 +12861,11 @@ impl Tokenizer {
                 },
             };
         }
+        self.physical_transitions_from(state)
+    }
+
+    #[inline]
+    fn physical_transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
         if let Some(segment) = self.packed_runtime_transition_segment_for_state(state)
             && let Some((bytes, targets)) = segment.row(state)
         {
