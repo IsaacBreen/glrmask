@@ -4247,7 +4247,7 @@ impl Constraint {
                 Some(state)
             }
 
-            fn mark_token_ids(mask: &mut [u32], token_ids: &[u32]) {
+            fn mark_token_ids<'a>(mask: &mut [u32], token_ids: impl IntoIterator<Item = &'a u32>) {
                 for &token_id in token_ids {
                     let word = token_id as usize / 32;
                     if let Some(mask_word) = mask.get_mut(word) {

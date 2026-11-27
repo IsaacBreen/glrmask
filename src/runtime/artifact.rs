@@ -4004,6 +4004,55 @@ enum VocabAliasState {
     Runtime(Arc<RuntimeVocabIndexes>),
 }
 
+/// Exact subtree alias iterator: a contiguous slice for identity order and
+/// wire-owned slices, or a concatenation of borrowed canonical alias rows.
+pub(crate) enum SubtreeOriginalTokens<'a> {
+    Flat(std::slice::Iter<'a, u32>),
+    Mapped {
+        canonical: std::slice::Iter<'a, u32>,
+        offsets: &'a [u32],
+        originals: &'a [u32],
+        current: std::slice::Iter<'a, u32>,
+        remaining: usize,
+    },
+}
+
+impl<'a> SubtreeOriginalTokens<'a> {
+    pub(crate) fn is_empty(&self) -> bool { self.len() == 0 }
+}
+
+impl<'a> Iterator for SubtreeOriginalTokens<'a> {
+    type Item = &'a u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Flat(iter) => iter.next(),
+            Self::Mapped { canonical, offsets, originals, current, remaining } => {
+                loop {
+                    if let Some(token) = current.next() {
+                        *remaining -= 1;
+                        return Some(token);
+                    }
+                    let id = *canonical.next()? as usize;
+                    let originals: &'a [u32] = *originals;
+                    *current = originals[offsets[id] as usize..offsets[id + 1] as usize].iter();
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = match self {
+            Self::Flat(iter) => iter.len(),
+            Self::Mapped { remaining, .. } => *remaining,
+        };
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for SubtreeOriginalTokens<'_> {}
+
 #[derive(Debug)]
 struct RuntimeVocabIndexes {
     canonical_original_token_offsets: Arc<Vec<u32>>,
@@ -4011,8 +4060,7 @@ struct RuntimeVocabIndexes {
     canonical_original_word_offsets: Arc<Vec<u32>>,
     canonical_original_word_masks: Arc<Vec<(u32, u32)>>,
     full_walk_token_markers: Arc<Vec<u64>>,
-    subtree_original_token_offsets: Arc<Vec<u32>>,
-    subtree_original_tokens: Arc<Vec<u32>>,
+    permuted_subtree_alias_offsets: Option<Vec<u32>>,
     all_original_token_words: Arc<Vec<u32>>,
 }
 
@@ -4304,33 +4352,41 @@ impl DynamicMaskVocab {
         let build_markers = || Self::build_full_walk_token_markers(
             trie, &canonical_original_token_offsets, &canonical_original_tokens,
         );
-        let build_subtree = || {
-            let subtree_tokens = trie.all_subtree_tokens();
-            if subtree_tokens.len() == canonical_original_token_offsets.len().saturating_sub(1)
-                && subtree_tokens.iter().copied().enumerate()
-                    .all(|(index, canonical)| index as u32 == canonical)
-            {
-                (Arc::clone(&canonical_original_token_offsets), Arc::clone(&canonical_original_tokens))
-            } else {
-                Self::flatten_subtree_original_tokens(
-                    trie, &canonical_original_token_offsets, &canonical_original_tokens,
-                )
-            }
-        };
         let build_subtree_and_words = || {
-            let (offsets, tokens) = build_subtree();
+            let subtree_tokens = trie.all_subtree_tokens();
+            let identity = subtree_tokens.len() == canonical_original_token_offsets.len().saturating_sub(1)
+                && subtree_tokens.iter().copied().enumerate()
+                    .all(|(index, canonical)| index as u32 == canonical);
+            let offsets = if identity {
+                None
+            } else {
+                let mut counts = Vec::with_capacity(subtree_tokens.len() + 1);
+                counts.push(0u32);
+                for &canonical in subtree_tokens {
+                    let index = canonical as usize;
+                    let count = canonical_original_token_offsets[index + 1]
+                        - canonical_original_token_offsets[index];
+                    counts.push(counts.last().copied().unwrap() + count);
+                }
+                Some(counts)
+            };
             let words = prepared_all_original_token_words.unwrap_or_else(|| {
-                Self::build_all_original_token_words(if ordered {
-                    &canonical_original_tokens
+                if ordered || identity {
+                    Self::build_all_original_token_words(canonical_original_tokens.iter().copied())
                 } else {
-                    &tokens
-                })
+                    Self::build_all_original_token_words(subtree_tokens.iter().flat_map(|&canonical| {
+                        let index = canonical as usize;
+                        canonical_original_tokens[
+                            canonical_original_token_offsets[index] as usize..
+                            canonical_original_token_offsets[index + 1] as usize
+                        ].iter().copied()
+                    }))
+                }
             });
-            (offsets, tokens, words)
+            (offsets, words)
         };
         let ((canonical_original_word_offsets, canonical_original_word_masks),
-            full_walk_token_markers, (subtree_original_token_offsets,
-            subtree_original_tokens, all_original_token_words)) =
+            full_walk_token_markers, (permuted_subtree_alias_offsets, all_original_token_words)) =
             if canonical_original_tokens.len() >= 4_096 && rayon::current_num_threads() > 1 {
                 let ((words, markers), subtree) = rayon::join(
                     || rayon::join(build_words, build_markers),
@@ -4346,8 +4402,7 @@ impl DynamicMaskVocab {
             canonical_original_word_offsets,
             canonical_original_word_masks,
             full_walk_token_markers,
-            subtree_original_token_offsets,
-            subtree_original_tokens,
+            permuted_subtree_alias_offsets,
             all_original_token_words,
         }
     }
@@ -4717,14 +4772,11 @@ impl DynamicMaskVocab {
         (Arc::new(offsets), Arc::new(masks))
     }
 
-    fn build_all_original_token_words(originals: &[u32]) -> Arc<Vec<u32>> {
-        let word_len = originals
-            .iter()
-            .copied()
-            .max()
+    fn build_all_original_token_words(originals: impl Iterator<Item = u32> + Clone) -> Arc<Vec<u32>> {
+        let word_len = originals.clone().max()
             .map_or(0, |token| token as usize / 32 + 1);
         let mut words = vec![0u32; word_len];
-        for &token in originals {
+        for token in originals {
             words[token as usize / 32] |= 1u32 << (token % 32);
         }
         Arc::new(words)
@@ -6323,7 +6375,7 @@ impl DynamicMaskVocab {
         &self,
         trie: &DynamicMaskTrie,
         node: u32,
-    ) -> &[u32] {
+    ) -> SubtreeOriginalTokens<'_> {
         if std::ptr::eq(trie, self.trie.as_ref()) {
             return self.subtree_original_tokens(node);
         }
@@ -6332,10 +6384,10 @@ impl DynamicMaskVocab {
             .iter()
             .find(|slice| std::ptr::eq(trie, slice.trie()))
         {
-            return slice.subtree_original_tokens(node);
+            return SubtreeOriginalTokens::Flat(slice.subtree_original_tokens(node).iter());
         }
         debug_assert!(false, "unknown dynamic-mask walk trie");
-        &[]
+        SubtreeOriginalTokens::Flat([].iter())
     }
 
 
@@ -6381,11 +6433,25 @@ impl DynamicMaskVocab {
         }).collect())
     }
     #[inline]
-    pub(crate) fn subtree_original_tokens(&self, node: u32) -> &[u32] {
-        let canonical_range = self.trie.subtree_token_index_range(node);
-        let start = self.indexes().subtree_original_token_offsets[canonical_range.start] as usize;
-        let end = self.indexes().subtree_original_token_offsets[canonical_range.end] as usize;
-        &self.indexes().subtree_original_tokens[start..end]
+    pub(crate) fn subtree_original_tokens(&self, node: u32) -> SubtreeOriginalTokens<'_> {
+        let range = self.trie.subtree_token_index_range(node);
+        let indexes = self.indexes();
+        let offsets = indexes.canonical_original_token_offsets.as_slice();
+        let originals = indexes.canonical_original_tokens.as_slice();
+        if let Some(counts) = &indexes.permuted_subtree_alias_offsets {
+            let remaining = (counts[range.end] - counts[range.start]) as usize;
+            SubtreeOriginalTokens::Mapped {
+                canonical: self.trie.all_subtree_tokens()[range].iter(),
+                offsets,
+                originals,
+                current: [].iter(),
+                remaining,
+            }
+        } else {
+            SubtreeOriginalTokens::Flat(
+                originals[offsets[range.start] as usize..offsets[range.end] as usize].iter(),
+            )
+        }
     }
 
     #[inline]
