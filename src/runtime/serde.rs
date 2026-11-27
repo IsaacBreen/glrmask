@@ -43,9 +43,6 @@ const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 45;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
 const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 46;
-/// External-vocabulary envelope for a table-free constraint that is not a
-/// template parser: the parser DWA is serialized as its own section.
-const EXTERNAL_DWA_CONSTRAINT_VERSION: u16 = 47;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -3223,10 +3220,9 @@ impl Constraint {
             crate::dynamic_constraint::remainder_trace::Session::new("constraint.snapshot_body");
         let artifact_version = if self.has_template_parser() {
             EXTERNAL_TEMPLATE_CONSTRAINT_VERSION
-        } else if self.table.is_present() {
-            EXTERNAL_LR_CONSTRAINT_VERSION
         } else {
-            EXTERNAL_DWA_CONSTRAINT_VERSION
+            assert!(self.table.is_present(), "cannot save an uninstalled parser section");
+            EXTERNAL_LR_CONSTRAINT_VERSION
         };
         if let Some(bytes) = &self.serialized_artifact_cache {
             // Conversion between parser backends must never return the other
@@ -3521,7 +3517,7 @@ impl Constraint {
                         let started = profile.then(std::time::Instant::now);
                         let bytes = if let Some(parser) = self.template_parser() {
                             crate::runtime::parser_backend::wire::encode_external(parser, self.artifact_vocab_digest())
-                        } else if self.table.is_present() {
+                        } else {
                             let rules = self.retained_table_rules()
                                 .expect("validated retained grammar rules must remain readable");
                             let table = crate::compiler::glr::table::artifact_serde::to_compact_bytes_with_rules(&self.table, rules);
@@ -3535,10 +3531,6 @@ impl Constraint {
                             framed.extend_from_slice(&digest);
                             framed.extend_from_slice(&table);
                             framed
-                        } else {
-                            // The packed parser DWA has its own section; a
-                            // table-free constraint needs no table section.
-                            Vec::new()
                         };
                         if let Some(started) = started {
                             eprintln!(
@@ -4139,21 +4131,13 @@ impl Constraint {
                                     } else {
                                         crate::runtime::parser_backend::wire::decode_external_without_vocab(table_section)
                                     };
-                                    return seed.map(|seed| (crate::runtime::parser_backend::ParserExecutable::absent(), None, Some(seed)));
-                                }
-                                if version == EXTERNAL_DWA_CONSTRAINT_VERSION {
-                                    // The parser DWA has its own section.
-                                    return Ok((
-                                        crate::runtime::parser_backend::ParserExecutable::absent(),
-                                        None,
-                                        None,
-                                    ));
+                                    return seed.map(|seed| (crate::runtime::parser_backend::ParserExecutable::section_pending(), None, Some(seed)));
                                 }
                                 // An external LR envelope frames the compact table
                                 // bytes with a leading canonical vocabulary content
                                 // digest. Validate it before trusting the supplied
                                 // vocabulary's token bytes.
-                                let table_section = if version == EXTERNAL_LR_CONSTRAINT_VERSION {
+                                let table_section = {
                                     if table_section.len() < 32 {
                                         return Err("truncated external LR vocabulary digest".to_owned());
                                     }
@@ -4169,8 +4153,6 @@ impl Constraint {
                                         debug_assert!(deferred);
                                     }
                                     table
-                                } else {
-                                    table_section
                                 };
                                 let result = {
                                     let backing = current_backing.as_ref().ok_or_else(|| {
@@ -4558,7 +4540,6 @@ impl Constraint {
             version,
             EXTERNAL_TEMPLATE_CONSTRAINT_VERSION
                 | EXTERNAL_LR_CONSTRAINT_VERSION
-                | EXTERNAL_DWA_CONSTRAINT_VERSION
         ) {
             return Err(crate::Error::Serialization(
                 "they were saved by another GLRMask version".to_owned(),
@@ -4661,12 +4642,9 @@ impl Constraint {
                         crate::dynamic_constraint::DynamicConstraint::dynamic_vocab_from_transfer_artifact(
                             None, external_vocab.expect("checked external Vocab"),
                         )?;
-                } else if matches!(
-                    version,
-                    EXTERNAL_LR_CONSTRAINT_VERSION | EXTERNAL_DWA_CONSTRAINT_VERSION
-                ) && external_vocab.is_some()
+                } else if version == EXTERNAL_LR_CONSTRAINT_VERSION && external_vocab.is_some()
                 {
-                    // Table-backed and table-free DWA envelopes deliberately
+                    // Explicit LR envelopes deliberately
                     // omit the mask vocabulary artifact and reconstruct the
                     // exact full-vocabulary mask coordinate from the supplied
                     // Vocab. The envelope fingerprint already validated it.

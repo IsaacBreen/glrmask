@@ -189,7 +189,7 @@ mod tests {
         assert!(!duplicate.table.is_present());
 
         let mut section_owned = original.clone();
-        section_owned.table = ParserExecutable::absent();
+        section_owned.table = ParserExecutable::section_pending();
         decode(&wire).unwrap().install(&mut section_owned).unwrap();
         assert_eq!(section_owned.start().mask(), original.start().mask());
         let mut state = section_owned.start();

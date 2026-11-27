@@ -108,7 +108,7 @@ fn o2_is_unchanged_table_free() {
 
 #[test]
 fn absent_storage_still_panics_loudly() {
-    let storage = ParserExecutable::absent();
+    let storage = ParserExecutable::section_pending();
     assert!(!storage.is_present());
     assert!(storage.as_lr().is_none());
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| storage.into_lr())).is_err());

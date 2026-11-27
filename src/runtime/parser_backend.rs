@@ -70,7 +70,7 @@ pub(crate) enum ParserExecutable {
 }
 
 impl ParserExecutable {
-    pub(crate) fn absent() -> Self { Self::SectionPending }
+    pub(crate) fn section_pending() -> Self { Self::SectionPending }
     pub(crate) fn explicit(table: GLRTable) -> Self { Self::ExplicitLr(table) }
     pub(crate) fn is_present(&self) -> bool { matches!(self, Self::ExplicitLr(_)) }
     pub(crate) fn as_lr(&self) -> Option<&GLRTable> {
@@ -145,7 +145,7 @@ pub(crate) mod table_serde {
             if marker != 0 {
                 return Err(serde::de::Error::custom("invalid external parser placeholder"));
             }
-            return Ok(ParserExecutable::absent());
+            return Ok(ParserExecutable::section_pending());
         }
         crate::compiler::glr::table::artifact_serde::deserialize(deserializer)
             .map(super::ParserExecutable::explicit)
