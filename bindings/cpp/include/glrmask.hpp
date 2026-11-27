@@ -357,7 +357,7 @@ class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_f
 public:
     /// Starts a new sequence.
     ConstraintState start() const;
-    /// The mask's length in bits (the largest token ID plus one).
+    /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
 
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
@@ -381,7 +381,7 @@ public:
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
     /// Like `mask()`, but writes the words into `output`.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
-    /// The mask's length in bits (the largest token ID plus one).
+    /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.
     [[nodiscard]] bool commit_token(TokenId id) { uint32_t accepted = 0; detail::check(glrmask_state_commit_token(native_handle(), id, &accepted)); return accepted != 0; }

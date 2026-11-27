@@ -185,7 +185,7 @@ GLRMASK_API glrmask_status glrmask_constraint_clone(const glrmask_constraint* co
 GLRMASK_API void glrmask_constraint_free(glrmask_constraint* constraint);
 /// Starts a new sequence.
 GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* constraint,glrmask_state** out);
-/// The mask's length in bits (the largest token ID plus one).
+/// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
 GLRMASK_API glrmask_status glrmask_constraint_mask_bit_len(const glrmask_constraint* constraint,size_t* out);
 
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* constraint,glrmask_bytes** out);
@@ -194,7 +194,7 @@ GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n
 
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmask_state** out);
 GLRMASK_API void glrmask_state_free(glrmask_state* state);
-/// The mask's length in bits (the largest token ID plus one).
+/// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
 GLRMASK_API glrmask_status glrmask_state_mask_bit_len(const glrmask_state* state,size_t* out);
 /// Whether the output so far could end here. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state,uint32_t* out);

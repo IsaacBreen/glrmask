@@ -4,19 +4,30 @@ use std::fmt;
 
 /// A location in grammar source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct SourceSpan {
-    /// Byte offset of the first byte.
-    pub start: usize,
-    /// Byte offset just past the last byte.
-    pub end: usize,
-    /// Line of `start`, counting from 1.
-    pub line: usize,
-    /// Column of `start`, counting characters from 1.
-    pub column: usize,
+    start: usize,
+    end: usize,
+    line: usize,
+    column: usize,
 }
 
 impl SourceSpan {
+    /// Zero-based byte offset of the start in the grammar source.
+    #[must_use]
+    pub const fn start(&self) -> usize { self.start }
+
+    /// Zero-based exclusive end byte offset in the grammar source.
+    #[must_use]
+    pub const fn end(&self) -> usize { self.end }
+
+    /// One-based line number of the start in the grammar source.
+    #[must_use]
+    pub const fn line(&self) -> usize { self.line }
+
+    /// One-based column of the start, counting Unicode scalar values, not bytes.
+    #[must_use]
+    pub const fn column(&self) -> usize { self.column }
+
     #[doc(hidden)]
     pub const fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
         Self { start, end, line, column }
@@ -45,7 +56,7 @@ pub enum ErrorKind {
     InvalidInput,
     /// A valid grammar that GLRMask can't compile.
     Compilation,
-    /// A build exceeded a size or time budget.
+    /// A resource limit, such as a size, memory or work budget, was exceeded.
     ResourceLimit,
     /// The chosen mask strategy can't handle this grammar; another strategy may work.
     StrategyUnsupported,

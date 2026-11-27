@@ -33,7 +33,7 @@ impl From<SlotKind> for ExternKind {
 struct Span { start: usize, end: usize, line: usize, column: usize }
 impl From<glrmask_grammar::SourceSpan> for Span {
     fn from(span: glrmask_grammar::SourceSpan) -> Self {
-        Self { start: span.start, end: span.end, line: span.line, column: span.column }
+        Self { start: span.start(), end: span.end(), line: span.line(), column: span.column() }
     }
 }
 impl From<Span> for glrmask_grammar::SourceSpan {

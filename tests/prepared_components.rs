@@ -77,7 +77,7 @@ fn lark_unterminated_string_reports_its_location() {
     let error = Grammar::from_lark(source).unwrap_err();
     assert_eq!(error.to_string(), "grammar error: unterminated string (line 1, column 8)");
     let span = error.source_span().expect("a Lark lexer error retains a source span");
-    assert_eq!(&source[span.start..span.end], "\"abc");
+    assert_eq!(&source[span.start()..span.end()], "\"abc");
 }
 
 #[test]
@@ -98,8 +98,8 @@ fn requirement_coordinates_survive_preparation_and_save_load() {
     let g=Grammar::from_glrm(source).unwrap();
     let r=g.requirements().unwrap().remove(0);
     let span=r.source_span.unwrap();
-    assert_eq!(&source[span.start..span.end],"MARK");
-    assert_eq!((span.line,span.column),(2,14));
+    assert_eq!(&source[span.start()..span.end()],"MARK");
+    assert_eq!((span.line(),span.column()),(2,14));
     let v=vocab();let p=g.prepare(&v).unwrap();
     assert_eq!(p.requirements().unwrap(),std::slice::from_ref(&r));
     let loaded=PreparedGrammar::load(p.save(),&v).unwrap();
@@ -114,12 +114,12 @@ fn lark_requirements_and_cached_errors_retain_original_locations() {
     let source="// α\nstart: @payload @payload";
     let g=Grammar::from_lark(source).unwrap();
     let r=g.requirements().unwrap().remove(0);let span=r.source_span.unwrap();
-    assert_eq!(&source[span.start..span.end],"@payload");
-    assert_eq!((span.line,span.column),(2,8));
+    assert_eq!(&source[span.start()..span.end()],"@payload");
+    assert_eq!((span.line(),span.column()),(2,8));
     let v=vocab();assert_eq!(g.prepare(&v).unwrap().requirements().unwrap(),[r]);
     let invalid="start root\nnt root = )";
     let span=Grammar::from_glrm(invalid).unwrap_err().source_span().unwrap();
-    assert_eq!(&invalid[span.start..span.end],")");
+    assert_eq!(&invalid[span.start()..span.end()],")");
     let unknown="start: <|unknown|>";
     let g=Grammar::from_lark(unknown).unwrap();
     let externs=g.externs();

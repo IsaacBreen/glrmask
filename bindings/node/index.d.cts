@@ -127,7 +127,7 @@ export declare class Constraint implements Disposable {
   private readonly __constraintBrand: void;
   /** Starts a new sequence. */
   start(): ConstraintState;
-  /** The mask's length in bits (the largest token ID plus one). */
+  /** The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs. */
   readonly maskBitLength: number;
 
   save(): Promise<Uint8Array>;
@@ -151,7 +151,7 @@ export declare class ConstraintState implements Disposable {
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
-  /** The mask's length in bits (the largest token ID plus one). */
+  /** The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs. */
   readonly maskBitLength: number;
   /** Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. */
   commitToken(id: number): boolean;

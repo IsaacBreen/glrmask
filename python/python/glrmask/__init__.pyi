@@ -206,7 +206,7 @@ class Constraint:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits (the largest token ID plus one)."""
+        """The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs."""
         ...
     def save(self) -> bytes:
         ...
@@ -227,7 +227,7 @@ class ConstraintState:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits (the largest token ID plus one)."""
+        """The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs."""
         ...
     def commit_token(self, token_id: SupportsIndex, /) -> bool:
         """Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first."""

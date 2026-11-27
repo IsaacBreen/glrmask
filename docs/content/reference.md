@@ -6,7 +6,7 @@ See the quickstart above for the sampling loop and unpacking the packed mask.
 
 
 Masks indicate which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`.
-Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID plus one, or zero if empty), including gaps.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID in the constraint, including special and end tokens, plus one, or zero if there are no token IDs), including gaps.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask()` returns packed uint32 words. Use `mask().view(np.int32)` for signed packed words without copying.
 The constraint and each state have the same constant mask bit length.
@@ -134,7 +134,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 ## Errors
 
 Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
-Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
+Each error message says what went wrong, with the line and column in the grammar source when that's the cause. Both are one-based, and columns count Unicode scalar values, not bytes.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`. `source_span()` gives its place in the source.
 Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 

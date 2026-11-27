@@ -41,24 +41,35 @@ mod tests {
     fn token_locations_count_scalars_in_one_pass() {
         let source="α\n x";
         let spans=SourceSpan::tokens(source,&[(0,2),(4,5),(5,5)]);
-        assert_eq!((spans[1].line,spans[1].column),(2,2));
-        assert_eq!((spans[2].line,spans[2].column),(2,3));
-        assert_eq!(SourceSpan::at(source,1,2).start,0);
+        assert_eq!((spans[1].line(),spans[1].column()),(2,2));
+        assert_eq!((spans[2].line(),spans[2].column()),(2,3));
+        assert_eq!(SourceSpan::at(source,1,2).start(),0);
+    }
+    #[test]
+    fn byte_offsets_and_scalar_columns() {
+        let source = "\u{e9}\tq\u{301}\n\u{3b2}";
+        let span = SourceSpan::at(source, 3, 6);
+        assert_eq!((span.start(), span.end()), (3, 6));
+        assert_eq!(&source[span.start()..span.end()], "q\u{301}");
+        assert_eq!((span.line(), span.column()), (1, 3));
+        let eof = SourceSpan::at(source, source.len(), source.len());
+        assert_eq!((eof.start(), eof.end()), (source.len(), source.len()));
+        assert_eq!((eof.line(), eof.column()), (2, 2));
     }
     #[test]
     fn native_and_lark_errors_retain_original_spans() {
         let source="start root\nnt root = \"x\"\nnt other = )";
         let e=crate::grammar::glrm::from_glrm(source).unwrap_err();
         let span=e.source_span().expect("native parser has a source coordinate");
-        assert_eq!(&source[span.start..span.end],")");assert_eq!(span.line,3);
+        assert_eq!(&source[span.start()..span.end()],")");assert_eq!(span.line(),3);
         let source="start: \"x\"\n%bogus hello";
         let e=crate::import::lark::parse_lark_to_named(source).unwrap_err();
         let span=e.source_span().expect("directive error has a source coordinate");
-        assert_eq!(&source[span.start..span.end],"%bogus");assert_eq!((span.line,span.column),(2,1));
+        assert_eq!(&source[span.start()..span.end()],"%bogus");assert_eq!((span.line(),span.column()),(2,1));
         let source="start: (\"x\"]";
         let e=crate::import::lark::parse_lark_to_named(source).unwrap_err();
         let span=e.source_span().expect("expected-delimiter error has a source coordinate");
-        assert_eq!(&source[span.start..span.end],"]");
+        assert_eq!(&source[span.start()..span.end()],"]");
     }
 }
 
