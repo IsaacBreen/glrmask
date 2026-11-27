@@ -100,60 +100,80 @@ impl InternalMaskStrategy {
     }
 }
 
-/// A value that can be bound to an extern.
-///
-/// Converted automatically from a [`Module`], [`Grammar`], [`Expr`], or [`TokenSet`].
-#[derive(Debug, Clone)]
-pub struct Binding(pub(crate) BindingKind);
+/// A value accepted by [Module::bind].
+#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Module; use a Grammar, Module, Expr or TokenSet")]
+pub trait IntoBinding: sealed::ModuleValue {}
 
-#[derive(Debug, Clone)]
-pub(crate) enum BindingKind {
-    Module(Module),
-    Grammar(Grammar),
-    Expr(Expr),
-    TokenSet(TokenSet),
+/// A value accepted by [Grammar::bind].
+#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Grammar; bind token sets and modules on a Module")]
+pub trait IntoGrammarBinding: sealed::GrammarValue {}
+
+pub(super) mod sealed {
+    use super::{Expr, Grammar, Module, TokenSet};
+
+    pub enum Binding {
+        Module(Module),
+        Grammar(Grammar),
+        Expr(Expr),
+        TokenSet(TokenSet),
+    }
+
+    pub enum GrammarBinding {
+        Grammar(Grammar),
+        Expr(Expr),
+    }
+
+    pub trait ModuleValue {
+        fn into_binding(self) -> Binding;
+    }
+
+    pub trait GrammarValue {
+        fn into_grammar_binding(self) -> GrammarBinding;
+    }
+
+    macro_rules! module_value {
+        ($ty:ident) => {
+            impl ModuleValue for $ty {
+                fn into_binding(self) -> Binding { Binding::$ty(self) }
+            }
+            impl ModuleValue for &$ty {
+                fn into_binding(self) -> Binding { Binding::$ty(self.clone()) }
+            }
+        };
+    }
+    module_value!(Module);
+    module_value!(Grammar);
+    module_value!(Expr);
+    module_value!(TokenSet);
+
+    macro_rules! grammar_value {
+        ($ty:ident) => {
+            impl GrammarValue for $ty {
+                fn into_grammar_binding(self) -> GrammarBinding { GrammarBinding::$ty(self) }
+            }
+            impl GrammarValue for &$ty {
+                fn into_grammar_binding(self) -> GrammarBinding { GrammarBinding::$ty(self.clone()) }
+            }
+        };
+    }
+    grammar_value!(Grammar);
+    grammar_value!(Expr);
 }
 
-impl From<Module> for Binding { fn from(m: Module) -> Self { Self(BindingKind::Module(m)) } }
-impl From<&Module> for Binding { fn from(m: &Module) -> Self { Self(BindingKind::Module(m.clone())) } }
-impl From<Grammar> for Binding { fn from(g: Grammar) -> Self { Self(BindingKind::Grammar(g)) } }
-impl From<&Grammar> for Binding { fn from(g: &Grammar) -> Self { Self(BindingKind::Grammar(g.clone())) } }
-impl From<Expr> for Binding { fn from(e: Expr) -> Self { Self(BindingKind::Expr(e)) } }
-impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Expr(e.clone())) } }
-impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
-impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingKind::TokenSet(t.clone())) } }
+use sealed::Binding;
 
-/// A value that can be bound to an extern of a `Grammar`: a grammar or expression.
-///
-/// A module cannot be bound to a grammar:
-///
-/// ```compile_fail
-/// use glrmask::{Grammar, Module};
-/// let mut grammar = Grammar::from_glrm("extern grammar CHILD start s nt s = CHILD").unwrap();
-/// let module = Module::new(&Grammar::from_glrm("start s nt s = \"a\"").unwrap());
-/// grammar.bind("CHILD", module).unwrap();
-/// ```
-///
-/// A token set cannot be bound to a grammar either:
-///
-/// ```compile_fail
-/// use glrmask::{Grammar, TokenSet};
-/// let mut grammar = Grammar::from_glrm("extern token T; start s; nt s = T;").unwrap();
-/// grammar.bind("T", TokenSet::new([1])).unwrap();
-/// ```
-#[derive(Debug, Clone)]
-pub struct GrammarBinding(pub(crate) GrammarBindingKind);
-
-#[derive(Debug, Clone)]
-pub(crate) enum GrammarBindingKind {
-    Grammar(Grammar),
-    Expr(Expr),
-}
-
-impl From<Grammar> for GrammarBinding { fn from(g: Grammar) -> Self { Self(GrammarBindingKind::Grammar(g)) } }
-impl From<&Grammar> for GrammarBinding { fn from(g: &Grammar) -> Self { Self(GrammarBindingKind::Grammar(g.clone())) } }
-impl From<Expr> for GrammarBinding { fn from(e: Expr) -> Self { Self(GrammarBindingKind::Expr(e)) } }
-impl From<&Expr> for GrammarBinding { fn from(e: &Expr) -> Self { Self(GrammarBindingKind::Expr(e.clone())) } }
+impl IntoBinding for Module {}
+impl IntoBinding for &Module {}
+impl IntoBinding for Grammar {}
+impl IntoBinding for &Grammar {}
+impl IntoBinding for Expr {}
+impl IntoBinding for &Expr {}
+impl IntoBinding for TokenSet {}
+impl IntoBinding for &TokenSet {}
+impl IntoGrammarBinding for Grammar {}
+impl IntoGrammarBinding for &Grammar {}
+impl IntoGrammarBinding for Expr {}
+impl IntoGrammarBinding for &Expr {}
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
@@ -434,8 +454,8 @@ impl Module {
     }
 
     /// Fails if the extern is undeclared, already bound or the wrong kind.
-    pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
-        let next = self.bound(name, value.into())?;
+    pub fn bind(&mut self, name: &str, value: impl IntoBinding) -> Result<()> {
+        let next = self.bound(name, sealed::ModuleValue::into_binding(value))?;
         *self = next;
         Ok(())
     }
@@ -481,12 +501,12 @@ impl Module {
         if self.node.bindings.contains_key(name) {
             return Err(invalid(format!("extern \"{name}\" is already bound")));
         }
-        let value = match binding.0 {
-            BindingKind::Grammar(grammar) => {
+        let value = match binding {
+            Binding::Grammar(grammar) => {
                 Self::bound_module(name, kind, declared, Module::new(&grammar))?
             }
-            BindingKind::Module(child) => Self::bound_module(name, kind, declared, child)?,
-            BindingKind::Expr(expr) => {
+            Binding::Module(child) => Self::bound_module(name, kind, declared, child)?,
+            Binding::Expr(expr) => {
                 check_binding_kind(name, kind, true)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
                 let unbound = check_expr_unbound(&expr);
@@ -496,7 +516,7 @@ impl Module {
                 let child = Module::from_expr(&expr, true)?;
                 BoundValue::Module(child)
             }
-            BindingKind::TokenSet(tokens) => {
+            Binding::TokenSet(tokens) => {
                 crate::error::check_token_set(&tokens)?;
                 check_binding_kind(name, kind, false)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
@@ -532,7 +552,7 @@ impl Module {
         let (grammar, leaves) = expr.skeleton(allow_modules)?;
         let mut module = Module::new(&grammar);
         for (name, leaf) in leaves {
-            module.bind(&name, leaf)?;
+            module = module.bound(&name, leaf)?;
         }
         Ok(module)
     }

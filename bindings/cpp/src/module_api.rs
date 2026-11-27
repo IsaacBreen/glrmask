@@ -60,15 +60,15 @@ clone_handle!(glrmask_expr_clone, glrmask_expr);
     ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::new(&read(p)?.0)))) })
 }
 
-macro_rules! bind_handle {($name:ident,$child:ty,$wrap:expr)=>{
+macro_rules! bind_handle {($name:ident,$child:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $name(p:*mut glrmask_module,name:*const c_char,n:usize,child:*const $child)->i32 {
-        ffi(||unsafe{let child=read(child)?.0.clone();let name=text(name,n)?;write(p)?.0.bind(name,$wrap(child))?;Ok(())})
+        ffi(||unsafe{let child=read(child)?.0.clone();let name=text(name,n)?;write(p)?.0.bind(name,child)?;Ok(())})
     }
 };}
-bind_handle!(glrmask_module_bind_grammar, glrmask_grammar, |g| g::Binding::from(&g));
-bind_handle!(glrmask_module_bind_module, glrmask_module, |m| g::Binding::from(m));
-bind_handle!(glrmask_module_bind_expr, glrmask_expr, |e| g::Binding::from(e));
-bind_handle!(glrmask_module_bind_tokens, glrmask_token_set, |t| g::Binding::from(t));
+bind_handle!(glrmask_module_bind_grammar, glrmask_grammar);
+bind_handle!(glrmask_module_bind_module, glrmask_module);
+bind_handle!(glrmask_module_bind_expr, glrmask_expr);
+bind_handle!(glrmask_module_bind_tokens, glrmask_token_set);
 
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options) -> i32 {

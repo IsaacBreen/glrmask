@@ -15,8 +15,16 @@ must all match its tag:
 - `python/pyproject.toml` version
 - `bindings/node/package.json` `@glrmask/node` version
 
-The workflow reuses the native C++/Node and Python wheel build/test workflows at that
-tag, and only publishes after their complete validation jobs pass. It releases:
+The published GitHub Release automatically builds and publishes **only Rust (crates.io) and Python (PyPI)**.
+Node and C/C++ are separate, explicit releases on the same stable tag. For each, open
+Actions → Trusted releases (npm, PyPI, crates.io, C++) → Run workflow; choose the
+already-published tag (e.g. `v1.0.0`), enter version `1.0.0`, select
+`native_target: npm` or `native_target: cpp`, leave recovery IDs empty and
+`verify_crates_trust` unchecked. Each dispatch verifies the published release and
+tag on main, builds/tests native artifacts at that exact tag, and publishes only
+the selected channel. A dispatch without a target or recovery input publishes nothing.
+
+The available channels are:
 
 - **npm**: the thin `@glrmask/node` root plus eight prebuilt
   `@glrmask/node-<platform>` optional-dependency packages (Windows x64/arm64,
@@ -125,9 +133,10 @@ A published GitHub Release is the human decision to publish.
 3. Confirm native and wheel CI are green on the source commit.
 4. In GitHub, **Draft a new release**, select or create **`vX.Y.Z`** pointing to the
    desired merged `main` commit, then **Publish release**. The OIDC release workflow
-   builds, checks and publishes all four channels. A PR or tag push alone will not.
-5. Inspect the workflow, then verify install from npm and PyPI, root crate on
-   crates.io crates, and static/shared C++ GitHub assets. An unavailable registry or failed
+   builds, checks and publishes Rust and Python. A PR or tag push alone will not.
+   For npm and C/C++, explicitly dispatch the same workflow on the published tag, one target at a time, after review.
+5. Inspect the workflow, then verify install from PyPI and the root crate on
+   crates.io. After each later native release, verify npm or static/shared C++ GitHub assets. An unavailable registry or failed
    artifact build should fail safely rather than publish unverified binaries.
 
 ## Security and maintenance

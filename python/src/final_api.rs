@@ -94,7 +94,7 @@ fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::RangeInclus
         Ok(id) => check_token_id(id),
         Err(_) => Err(super::glrmask_error("invalid_input", format!(
             "token ID {id} is out of range; token IDs go from 0 to {}",
-            glrmask::MAX_TOKEN_ID
+            glrmask::__private::MAX_TOKEN_ID
         ))),
     };
     // Validate both endpoints before expanding a potentially huge stepped range.

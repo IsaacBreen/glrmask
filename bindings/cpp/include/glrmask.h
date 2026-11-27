@@ -139,7 +139,6 @@ GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* vocab,glrmask_vocab** out);
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* vocab);
 GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t* ids,size_t n,glrmask_token_set** out);
-/// Creates a token set from half-open `ranges`, each including `start` and excluding `end`.
 GLRMASK_API glrmask_status glrmask_token_set_from_ranges(const glrmask_token_range* ranges,size_t n,glrmask_token_set** out);
 GLRMASK_API glrmask_status glrmask_token_set_clone(const glrmask_token_set* token_set,glrmask_token_set** out);
 GLRMASK_API glrmask_status glrmask_token_set_equal(const glrmask_token_set* a,const glrmask_token_set* b,uint32_t* out);

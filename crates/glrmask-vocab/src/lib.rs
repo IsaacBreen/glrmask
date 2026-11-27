@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod error;
 pub use error::{Error, ErrorKind, SourceSpan};
 
-/// The largest token ID GLRMask accepts: 16,777,215 (2^24 - 1).
-pub const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
+const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
-/// A set of token IDs. IDs above [`MAX_TOKEN_ID`] are rejected when the set is used.
+/// A set of token IDs.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
     ranges: Arc<[(u32, u32)]>,
@@ -37,7 +36,6 @@ impl TokenSet {
         Self::from_pairs(ids.into_iter().map(|id| (id, id)))
     }
 
-    /// A range with no end, such as `10..`, ends at [`MAX_TOKEN_ID`].
     pub fn from_ranges<R: RangeBounds<u32>>(
         ranges: impl IntoIterator<Item = R>,
     ) -> Self {
@@ -164,7 +162,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above `MAX_TOKEN_ID`.
+    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above the maximum supported token ID.
     ///
     /// # Examples
     ///
@@ -429,6 +427,7 @@ pub(crate) mod vocab_prefix_tree;
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {
+    pub const MAX_TOKEN_ID: u32 = super::MAX_TOKEN_ID;
     pub use super::derived_artifact::VocabDerivedArtifact;
     pub use super::error::internal::{error_message, new_error, with_source_span};
     pub use super::Vocab;

@@ -147,7 +147,7 @@ token sets. `Grammar.from_expr` makes a grammar from an expression that contains
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
 `TokenSet([1, 2, 3])`, or from ranges, `TokenSet([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
 
-Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
+Token IDs go from 0 to 16,777,215 (2^24 - 1). A larger ID in a vocabulary, token set or binding
 is an error.
 
 Tokens with no bytes, such as tool-call markers, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).

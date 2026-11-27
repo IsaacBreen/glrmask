@@ -173,7 +173,6 @@ class TokenSet : public detail::Owned<glrmask_token_set, glrmask_token_set_free,
     explicit TokenSet(glrmask_token_set* p) : Base(p) {}
 public:
     explicit TokenSet(const std::vector<TokenId>& ids) : Base(create_ids(ids)) {}
-    /// Creates a set from half-open ranges, each including `start` and excluding `end`.
     static TokenSet from_ranges(const std::vector<TokenRange>& ranges) {
         glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_from_ranges(ranges.data(), ranges.size(), &p)); return TokenSet(p);
     }

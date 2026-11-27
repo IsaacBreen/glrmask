@@ -1,5 +1,6 @@
 //! Expression operators have no source, lexical scope or path segment of their own.
 use super::*;
+use super::module::sealed::Binding;
 
 /// A grammar expression.
 #[derive(Debug, Clone)]
@@ -92,18 +93,18 @@ impl Expr {
                 ExprNode::Leaf(leaf) => {
                     let name = format!("leaf{}", leaves.len());
                     let (kind, binding) = match leaf {
-                        ExprLeaf::Grammar(g) => (ExternKind::Grammar, Binding::from(g.clone())),
+                        ExprLeaf::Grammar(g) => (ExternKind::Grammar, Binding::Grammar(g.clone())),
                         ExprLeaf::Module(m) => {
                             if !allow_modules {
                                 return Err(Error::InvalidInput("a Module can't be part of a Grammar; bind it to a Module instead".into()));
                             }
-                            (ExternKind::Grammar, Binding::from(m.clone()))
+                            (ExternKind::Grammar, Binding::Module(m.clone()))
                         },
                         ExprLeaf::TokenSet(t) => {
                             if !allow_modules {
                                 return Err(Error::InvalidInput("token sets can only be bound to a Module".into()));
                             }
-                            (ExternKind::Token, Binding::from(t.clone()))
+                            (ExternKind::Token, Binding::TokenSet(t.clone()))
                         },
                     };
                     externs.push((name.clone(), kind));

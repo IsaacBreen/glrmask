@@ -126,7 +126,7 @@ fn empty_end_token_set_is_the_empty_language() {
     }
 }
 
-fn module_expr(value: impl Into<glrmask::Binding>) -> glrmask::Result<glrmask::Module> {
+fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Module> {
     let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
     let mut module = glrmask::Module::new(&grammar);
     module.bind("VALUE", value)?;

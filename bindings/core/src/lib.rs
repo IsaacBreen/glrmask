@@ -53,12 +53,12 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 }
 
-/// Rejects a token ID above `glrmask::MAX_TOKEN_ID`, as the Rust API does.
+/// Rejects a token ID above the maximum supported token ID, as the Rust API does.
 pub fn token_id(id: u32) -> Result<u32> {
-    if id > glrmask::MAX_TOKEN_ID {
+    if id > glrmask::__private::MAX_TOKEN_ID {
         return Err(Error::invalid(format!(
             "token ID {id} is larger than the maximum token ID, {}",
-            glrmask::MAX_TOKEN_ID
+            glrmask::__private::MAX_TOKEN_ID
         )));
     }
     Ok(id)
@@ -176,11 +176,11 @@ mod tests {
     #[test]
     fn duplicate_ids_and_panics_are_errors() {
         assert!(vocab(vec![(1,vec![]),(1,vec![1])]).is_err());
-        for id in [u32::MAX, 4_000_000_000, glrmask::MAX_TOKEN_ID + 1] {
+        for id in [u32::MAX, 4_000_000_000, glrmask::__private::MAX_TOKEN_ID + 1] {
             assert_eq!(vocab(vec![(id, b"a".to_vec())]).unwrap_err().kind, ErrorKind::InvalidInput);
             assert_eq!(token_id(id).unwrap_err().kind, ErrorKind::InvalidInput);
         }
-        assert_eq!(token_id(glrmask::MAX_TOKEN_ID).unwrap(), glrmask::MAX_TOKEN_ID);
+        assert_eq!(token_id(glrmask::__private::MAX_TOKEN_ID).unwrap(), glrmask::__private::MAX_TOKEN_ID);
         assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Internal);
     }
 }

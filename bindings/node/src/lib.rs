@@ -46,8 +46,8 @@ fn uint(value: f64) -> core::Result<u32> {
     Ok(value as u32)
 }
 fn id(value: f64) -> core::Result<u32> {
-    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=g::MAX_TOKEN_ID as f64).contains(&value) {
-        return Err(core::Error::invalid(format!("token IDs must be integers from 0 to {}", g::MAX_TOKEN_ID)));
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=g::__private::MAX_TOKEN_ID as f64).contains(&value) {
+        return Err(core::Error::invalid(format!("token IDs must be integers from 0 to {}", g::__private::MAX_TOKEN_ID)));
     }
     Ok(value as u32)
 }
@@ -109,8 +109,8 @@ impl NativeTokenSet {
             let mut out = Vec::new();
             for r in ranges {
                 let first = id(r.start)?;
-                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > g::MAX_TOKEN_ID as f64 + 1.0 {
-                    return Err(core::Error::invalid(format!("ranges must have integer endpoints from 0 to {}, with the end excluded", g::MAX_TOKEN_ID as u64 + 1)));
+                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > g::__private::MAX_TOKEN_ID as f64 + 1.0 {
+                    return Err(core::Error::invalid(format!("ranges must have integer endpoints from 0 to {}, with the end excluded", g::__private::MAX_TOKEN_ID as u64 + 1)));
                 }
                 if r.end <= r.start { continue; }
                 out.push(first..=((r.end as u64 - 1) as u32));

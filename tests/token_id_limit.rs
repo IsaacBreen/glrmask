@@ -1,5 +1,7 @@
 //! Token IDs above `MAX_TOKEN_ID` are errors, not huge allocations.
-use glrmask::{Expr, Grammar, Module, TokenSet, Vocab, MAX_TOKEN_ID};
+use glrmask::{Expr, Grammar, Module, TokenSet, Vocab};
+
+const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
 const HUGE_IDS: [u32; 3] = [u32::MAX, 4_000_000_000, MAX_TOKEN_ID + 1];
 

@@ -1,17 +1,22 @@
 name: Trusted releases (npm, PyPI, crates.io, C++)
 
 on:
-  # Manual retry, used only to publish a validated tarball from a real release.
-  # Run on a short-lived v*-prefixed recovery tag after the workflow fix lands.
+  # Later native releases are explicit, on the exact already-published stable tag.
+  # Existing validated-artifact recovery and crates trust checks remain opt-in.
   workflow_dispatch:
     inputs:
       version:
         description: 'Version of the existing GitHub Release (e.g. 0.3.1)'
         required: true
         type: string
+      native_target:
+        description: 'Later release: publish only npm or only C/C++ assets'
+        type: choice
+        options: [none, npm, cpp]
+        default: none
       source_run_id:
-        description: 'Actions run ID for the published GitHub Release and its validated native artifacts'
-        required: true
+        description: 'Optional legacy npm recovery: Actions run ID with validated native artifacts'
+        required: false
         type: string
       python_source_run_id:
         description: 'Optional, previously green Python wheel CI run for this exact release source tree'
@@ -34,7 +39,8 @@ on:
   release:
     types: [published]
 
-# Publishing is enabled ONLY when a maintainer publishes a GitHub Release.
+# Rust/Python publish when a maintainer publishes a GitHub Release.
+# Later native publishing requires a separate explicit dispatch on that release tag.
 # No token or registry credentials are stored in this workflow.
 permissions:
   contents: read
@@ -74,14 +80,24 @@ jobs:
           fi
       - name: Require version-aligned tag on merged main
         id: versions
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.native_target != 'none' && !inputs.verify_crates_trust && inputs.source_run_id == '' && inputs.python_source_run_id == '')
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
+          RELEASE_TAG: ${{ github.event.release.tag_name || format('v{0}', inputs.version) }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" |
+            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false' > /dev/null
+
 
   native-build:
     name: Build and test all native C++/Node targets
-    if: github.event_name == 'release'
+    if: github.event_name == 'workflow_dispatch' && (inputs.native_target == 'npm' || inputs.native_target == 'cpp') && !inputs.verify_crates_trust && inputs.source_run_id == '' && inputs.python_source_run_id == ''
     needs: verify
     permissions:
       contents: read
@@ -97,7 +113,7 @@ jobs:
 
   npm:
     name: npm - @glrmask/node (platforms first, then thin root)
-    if: github.event_name == 'release'
+    if: github.event_name == 'workflow_dispatch' && inputs.native_target == 'npm' && !inputs.verify_crates_trust && inputs.source_run_id == '' && inputs.python_source_run_id == ''
     needs: [verify, native-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -307,7 +323,7 @@ jobs:
 
   cpp:
     name: GitHub Release - C/C++ static and shared libraries
-    if: github.event_name == 'release'
+    if: github.event_name == 'workflow_dispatch' && inputs.native_target == 'cpp' && !inputs.verify_crates_trust && inputs.source_run_id == '' && inputs.python_source_run_id == ''
     needs: [verify, native-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -317,7 +333,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ needs.verify.outputs.version }}
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_TAG: ${{ format('v{0}', needs.verify.outputs.version) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -361,7 +377,7 @@ jobs:
 
   npm-recovery:
     name: npm - recover vetted release via trusted publishing
-    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id == '' && !inputs.verify_crates_trust
+    if: github.event_name == 'workflow_dispatch' && inputs.native_target == 'none' && inputs.source_run_id != '' && inputs.python_source_run_id == '' && !inputs.verify_crates_trust
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: release
@@ -499,7 +515,7 @@ jobs:
 
   pypi-recovery:
     name: PyPI - recover exactly source-matched validated wheels
-    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id != '' && !inputs.verify_crates_trust
+    if: github.event_name == 'workflow_dispatch' && inputs.native_target == 'none' && inputs.source_run_id == '' && inputs.python_source_run_id != '' && !inputs.verify_crates_trust
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: release
@@ -585,7 +601,7 @@ jobs:
 
   crates-trust-check:
     name: crates.io - verify trusted publishing without publishing
-    if: github.event_name == 'workflow_dispatch' && inputs.verify_crates_trust
+    if: github.event_name == 'workflow_dispatch' && inputs.native_target == 'none' && inputs.source_run_id == '' && inputs.python_source_run_id == '' && inputs.verify_crates_trust
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release

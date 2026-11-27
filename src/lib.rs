@@ -107,9 +107,9 @@ pub use runtime::ConstraintInner;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::markers::{MarkerEvent, MarkerId};
-pub use glrmask_vocab::{TokenSet, Vocab, MAX_TOKEN_ID};
+pub use glrmask_vocab::{TokenSet, Vocab};
 pub use error::{Error, ErrorKind, Result};
-pub use public_api::{Grammar, Module, CompileOptions, Binding, GrammarBinding, Expr, MaskStrategy, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, IntoBinding, IntoGrammarBinding, Expr, MaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{InternalMaskStrategy, InternalBoundaryMaskStrategy, ParserBackend, TokenTrie};
@@ -310,6 +310,7 @@ pub mod test_modes {
 #[doc(hidden)]
 pub mod __private {
     use crate::ErrorExt as _;
+    pub use glrmask_vocab::__private::MAX_TOKEN_ID;
     pub use crate::error::compilation_error;
     pub use crate::runtime::boundary_cpu_profile::{
         begin as begin_boundary_cpu_profile, take as take_boundary_cpu_profile, BoundaryCpuReport,

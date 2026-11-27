@@ -316,18 +316,36 @@ impl Drop for PyModule {
     }
 }
 
-fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
+enum ModuleBinding {
+    Module(glrmask::Module),
+    Grammar(glrmask::Grammar),
+    Expr(glrmask::Expr),
+    TokenSet(glrmask::TokenSet),
+}
+
+impl ModuleBinding {
+    fn bind(self, module: &mut glrmask::Module, name: &str) -> glrmask::Result<()> {
+        match self {
+            Self::Module(value) => module.bind(name, value),
+            Self::Grammar(value) => module.bind(name, value),
+            Self::Expr(value) => module.bind(name, value),
+            Self::TokenSet(value) => module.bind(name, value),
+        }
+    }
+}
+
+fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<ModuleBinding> {
     if let Ok(m) = value.extract::<PyRef<'_, PyModule>>() {
-        return Ok(glrmask::Binding::from(m.snapshot()));
+        return Ok(ModuleBinding::Module(m.snapshot()));
     }
     if let Ok(g) = value.extract::<PyRef<'_, PyGrammar>>() {
-        return Ok(glrmask::Binding::from(&g.inner));
+        return Ok(ModuleBinding::Grammar(g.inner.clone()));
     }
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
-        return Ok(glrmask::Binding::from(e.inner.clone()));
+        return Ok(ModuleBinding::Expr(e.inner.clone()));
     }
     if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
-        return Ok(glrmask::Binding::from(et.inner.clone()));
+        return Ok(ModuleBinding::TokenSet(et.inner.clone()));
     }
     Err(PyTypeError::new_err(
         "Module.bind accepts a Grammar, Module, Expr, or TokenSet",
@@ -390,7 +408,7 @@ impl PyModule {
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
         let next = py.detach(move || {
-            next.bind(&name, binding)?;
+            binding.bind(&mut next, &name)?;
             Ok::<_, glrmask::Error>(next)
         }).map_err(api_error)?;
         target.replace(py, next);

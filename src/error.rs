@@ -170,18 +170,18 @@ pub fn compilation_error(message: String) -> Error {
     Error::Compilation(message)
 }
 
-/// Rejects a token ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID).
+/// Rejects a token ID above the maximum supported token ID.
 pub(crate) fn check_token_id(id: u32) -> Result<()> {
-    if id > glrmask_vocab::MAX_TOKEN_ID {
+    if id > glrmask_vocab::__private::MAX_TOKEN_ID {
         return Err(Error::InvalidInput(format!(
             "token ID {id} is larger than the maximum token ID, {}",
-            glrmask_vocab::MAX_TOKEN_ID
+            glrmask_vocab::__private::MAX_TOKEN_ID
         )));
     }
     Ok(())
 }
 
-/// Rejects a token set with an ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID).
+/// Rejects a token set with an ID above the maximum supported token ID.
 pub(crate) fn check_token_set(tokens: &glrmask_vocab::TokenSet) -> Result<()> {
     match tokens.range_pairs().last() {
         Some(&(_, end)) => check_token_id(end),
@@ -189,7 +189,7 @@ pub(crate) fn check_token_set(tokens: &glrmask_vocab::TokenSet) -> Result<()> {
     }
 }
 
-/// Rejects a vocabulary with an ID above [`MAX_TOKEN_ID`](crate::MAX_TOKEN_ID),
+/// Rejects a vocabulary with an ID above the maximum supported token ID,
 /// and checks that this machine can allocate the per-token-ID tables a compile
 /// builds, so a lack of memory is an error rather than an abort.
 pub(crate) fn check_vocab_token_ids(vocab: &glrmask_vocab::Vocab) -> Result<()> {

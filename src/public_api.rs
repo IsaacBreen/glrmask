@@ -27,7 +27,7 @@ mod artifact_limits;
 pub(crate) mod module;
 mod expr;
 mod stack;
-pub use module::{Module, CompileOptions, Binding, GrammarBinding};
+pub use module::{Module, CompileOptions, IntoBinding, IntoGrammarBinding};
 pub use expr::Expr;
 pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
@@ -880,10 +880,27 @@ impl Grammar {
     }
 
     /// Fails if the extern is undeclared, already bound or the wrong kind.
-    pub fn bind(&mut self, name: &str, value: impl Into<GrammarBinding>) -> Result<()> {
-        let value = match value.into().0 {
-            module::GrammarBindingKind::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
-            module::GrammarBindingKind::Expr(expr) => {
+    ///
+    /// A module cannot be bound to a grammar:
+    ///
+    /// ```compile_fail
+    /// use glrmask::{Grammar, Module};
+    /// let mut grammar = Grammar::from_glrm("extern grammar CHILD start s nt s = CHILD").unwrap();
+    /// let module = Module::new(&Grammar::from_glrm("start s nt s = \"a\"").unwrap());
+    /// grammar.bind("CHILD", module).unwrap();
+    /// ```
+    ///
+    /// A token set cannot be bound to a grammar either:
+    ///
+    /// ```compile_fail
+    /// use glrmask::{Grammar, TokenSet};
+    /// let mut grammar = Grammar::from_glrm("extern token T; start s; nt s = T;").unwrap();
+    /// grammar.bind("T", TokenSet::new([1])).unwrap();
+    /// ```
+    pub fn bind(&mut self, name: &str, value: impl IntoGrammarBinding) -> Result<()> {
+        let value = match module::sealed::GrammarValue::into_grammar_binding(value) {
+            module::sealed::GrammarBinding::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
+            module::sealed::GrammarBinding::Expr(expr) => {
                 GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
             }
         };
@@ -1880,58 +1897,58 @@ pub(crate) enum SpecGrammarBinding<'a> {
 
 /// Converts a supported child grammar into an internal binding.
 #[doc(hidden)]
-pub(crate) trait IntoGrammarBinding<'a> {
+pub(crate) trait IntoSpecGrammarBinding<'a> {
     #[doc(hidden)]
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a>;
 }
 
-impl<'a> IntoGrammarBinding<'a> for Grammar {
+impl<'a> IntoSpecGrammarBinding<'a> for Grammar {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> { SpecGrammarBinding::Source(self) }
 }
 
-impl<'a> IntoGrammarBinding<'a> for ConstraintSpec<'a> {
+impl<'a> IntoSpecGrammarBinding<'a> for ConstraintSpec<'a> {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::Spec(Box::new(self))
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for &ConstraintSpec<'a> {
+impl<'a> IntoSpecGrammarBinding<'a> for &ConstraintSpec<'a> {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::Spec(Box::new(self.clone()))
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for RuntimeConstraint {
+impl<'a> IntoSpecGrammarBinding<'a> for RuntimeConstraint {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::StaticOwned(Arc::new(self))
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for &'a RuntimeConstraint {
+impl<'a> IntoSpecGrammarBinding<'a> for &'a RuntimeConstraint {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::StaticBorrowed(self)
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for Arc<RuntimeConstraint> {
+impl<'a> IntoSpecGrammarBinding<'a> for Arc<RuntimeConstraint> {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::StaticOwned(self)
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for DynamicConstraint {
+impl<'a> IntoSpecGrammarBinding<'a> for DynamicConstraint {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::DynamicOwned(Arc::new(self))
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for &'a DynamicConstraint {
+impl<'a> IntoSpecGrammarBinding<'a> for &'a DynamicConstraint {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::DynamicBorrowed(self)
     }
 }
 
-impl<'a> IntoGrammarBinding<'a> for Arc<DynamicConstraint> {
+impl<'a> IntoSpecGrammarBinding<'a> for Arc<DynamicConstraint> {
     fn into_grammar_binding(self) -> SpecGrammarBinding<'a> {
         SpecGrammarBinding::DynamicOwned(self)
     }
@@ -2257,7 +2274,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
     #[allow(private_bounds)]
     pub fn bind_grammar<T>(mut self, name: impl AsRef<str>, realization: T) -> Result<Self>
     where
-        T: IntoGrammarBinding<'a>,
+        T: IntoSpecGrammarBinding<'a>,
     {
         let name = name.as_ref();
         self.require_declared(name)?;
@@ -2712,7 +2729,7 @@ impl RuntimeConstraint {
     #[allow(private_bounds)]
     pub fn bind_grammar<'a, T>(&self, name: impl AsRef<str>, child: T) -> Result<Self>
     where
-        T: IntoGrammarBinding<'a>,
+        T: IntoSpecGrammarBinding<'a>,
     {
         bind_static_parent_grammar(
             self,
@@ -2733,7 +2750,7 @@ impl RuntimeConstraint {
         child: T,
     ) -> Result<Self>
     where
-        T: IntoGrammarBinding<'a>,
+        T: IntoSpecGrammarBinding<'a>,
     {
         bind_static_parent_grammar(
             self,
@@ -2803,7 +2820,7 @@ impl DynamicConstraint {
     #[allow(private_bounds)]
     pub fn bind_grammar<'a, T>(&self, name: impl AsRef<str>, child: T) -> Result<Self>
     where
-        T: IntoGrammarBinding<'a>,
+        T: IntoSpecGrammarBinding<'a>,
     {
         bind_dynamic_parent_grammar(
             self,
@@ -2821,7 +2838,7 @@ impl DynamicConstraint {
         child: T,
     ) -> Result<Self>
     where
-        T: IntoGrammarBinding<'a>,
+        T: IntoSpecGrammarBinding<'a>,
     {
         bind_dynamic_parent_grammar(
             self,
@@ -3352,7 +3369,7 @@ fn prepare_late_child<'a, T>(
     boundary_backend: SegmentedBoundaryBackend,
 ) -> Result<Vec<(String, Arc<RuntimeConstraint>)>>
 where
-    T: IntoGrammarBinding<'a>,
+    T: IntoSpecGrammarBinding<'a>,
 {
     let mut binding = child.into_grammar_binding();
     binding.bind_target(vocab, name)?;
@@ -3375,7 +3392,7 @@ fn bind_static_parent_grammar<'a, T>(
     boundary_backend: SegmentedBoundaryBackend,
 ) -> Result<RuntimeConstraint>
 where
-    T: IntoGrammarBinding<'a>,
+    T: IntoSpecGrammarBinding<'a>,
 {
     let profile = crate::env::var_os("GLRMASK_PROFILE_PUBLIC_BIND").is_some();
     let total_started = Instant::now();
@@ -3422,7 +3439,7 @@ fn bind_dynamic_parent_grammar<'a, T>(
     boundary_backend: SegmentedBoundaryBackend,
 ) -> Result<DynamicConstraint>
 where
-    T: IntoGrammarBinding<'a>,
+    T: IntoSpecGrammarBinding<'a>,
 {
     let parents = parent.clone_constraints();
     require_late_grammar_slot(&parents, name)?;

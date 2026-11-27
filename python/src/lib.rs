@@ -93,12 +93,12 @@ fn kind_name(kind: glrmask::ErrorKind) -> &'static str {
     }
 }
 
-/// Rejects a token ID above `glrmask::MAX_TOKEN_ID`, as the Rust API does.
+/// Rejects a token ID above the maximum supported token ID, as the Rust API does.
 pub(crate) fn check_token_id(id: u32) -> PyResult<u32> {
-    if id > glrmask::MAX_TOKEN_ID {
+    if id > glrmask::__private::MAX_TOKEN_ID {
         return Err(glrmask_error("invalid_input", format!(
             "token ID {id} is larger than the maximum token ID, {}",
-            glrmask::MAX_TOKEN_ID
+            glrmask::__private::MAX_TOKEN_ID
         )));
     }
     Ok(id)

@@ -48,7 +48,7 @@ pub struct NativeModule { inner: Arc<Handle<ModuleSlot>> }
 impl NativeModule {
     pub(super) fn new(module: g::Module) -> Self { Self { inner: Arc::new(Handle::new(ModuleSlot { module, revision: 0 })) } }
     pub(super) fn snapshot(&self) -> core::Result<g::Module> { Ok(live(&self.inner)?.module.clone()) }
-    fn bind_value(&self, name: &str, value: impl Into<g::Binding>) -> core::Result<()> {
+    fn bind_value(&self, name: &str, value: impl g::IntoBinding) -> core::Result<()> {
         let mut target = live(&self.inner)?;
         target.module.bind(name, value)?;
         target.revision += 1;
@@ -71,28 +71,28 @@ impl NativeModule {
     pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();
-            self.bind_value(&name, g::Binding::from(&child))
+            self.bind_value(&name, child)
         })
     }
     #[napi]
     pub fn bind_module(&self, name: String, value: &NativeModule) -> napi::Result<()> {
         call(|| {
             let child = value.snapshot()?;
-            self.bind_value(&name, g::Binding::from(child))
+            self.bind_value(&name, child)
         })
     }
     #[napi]
     pub fn bind_expr(&self, name: String, value: &NativeExpr) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();
-            self.bind_value(&name, g::Binding::from(child))
+            self.bind_value(&name, child)
         })
     }
     #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();
-            self.bind_value(&name, g::Binding::from(child))
+            self.bind_value(&name, child)
         })
     }
 
