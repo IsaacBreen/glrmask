@@ -23,6 +23,7 @@ use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::tokenizer::Lexer;
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 use crate::runtime::Constraint;
+use super::boundary_candidates::outward_terminals;
 
 const DEFAULT_FIXED_POINT_LIMIT: usize = 256;
 const FINITE_EXPR_WORD_CAP: usize = 4096;
@@ -96,25 +97,6 @@ fn finite_literal_words(expr: &Expr, cap: usize) -> Option<Vec<Vec<u8>>> {
         | Expr::Exclude { .. }
         | Expr::Repeat { .. } => None,
     }
-}
-
-fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
-    constraint
-        .unbound_grammar_placeholders
-        .values()
-        .copied()
-        .chain(constraint.late_grammar_slots.iter().map(|slot| slot.terminal_id))
-        .chain(
-            constraint
-                .special_token_terminals
-                .iter()
-                .filter(|special| {
-                    constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
-                })
-                .map(|special| special.terminal_id),
-        )
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1834,7 +1816,7 @@ mod tests {
             match variant {
                 0 => { modified.special_token_terminals.clear(); }
                 1 => { modified.ignore_terminal = Some(0); }
-                2 => { modified.unbound_grammar_placeholders.insert("another".into(), 0); }
+                2 => { modified.late_grammar_slots.push(crate::runtime::LateGrammarSlot { name: "another".into(), terminal_id: 0 }); }
                 3 => {
                     let parser = std::sync::Arc::get_mut(modified.template_parser.as_mut().unwrap()).unwrap();
                     std::sync::Arc::make_mut(parser.embedding.as_mut().unwrap()).nullable = true;
@@ -1896,7 +1878,7 @@ mod tests {
                     std::sync::Arc::make_mut(parser.embedding.as_mut().unwrap()).nullable = true;
                     assert!(component_entry_prefix_cover(&child).is_none());
                 }
-                2 => { child.unbound_grammar_placeholders.insert("later".into(), 0); }
+                2 => { child.late_grammar_slots.push(crate::runtime::LateGrammarSlot { name: "later".into(), terminal_id: 0 }); }
                 3 => {
                     let parser = std::sync::Arc::get_mut(child.template_parser.as_mut().unwrap()).unwrap();
                     let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());

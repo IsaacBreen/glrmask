@@ -561,22 +561,7 @@ fn fingerprint_with_component_queries(
         let mut interface = blake3::Hasher::new();
         interface.update(b"glrmask-boundary-public-interface-v2-composite\0");
         interface.update(&semantics_digest);
-        for (name, terminal) in &constraint.unbound_grammar_placeholders {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
-        let mut late = constraint
-            .late_grammar_slots
-            .iter()
-            .map(|slot| (slot.name.as_str(), slot.terminal_id))
-            .collect::<Vec<_>>();
-        late.sort_unstable();
-        for (name, terminal) in late {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
+        hash_grammar_slots(constraint, &mut interface);
 
         return Ok(BoundaryCandidateFingerprint {
             algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
@@ -618,22 +603,7 @@ fn fingerprint_with_component_queries(
 
         let mut interface = blake3::Hasher::new();
         interface.update(b"glrmask-boundary-public-interface-v2-leaf\0");
-        for (name, terminal) in &constraint.unbound_grammar_placeholders {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
-        let mut late = constraint
-            .late_grammar_slots
-            .iter()
-            .map(|slot| (slot.name.as_str(), slot.terminal_id))
-            .collect::<Vec<_>>();
-        late.sort_unstable();
-        for (name, terminal) in late {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
+        hash_grammar_slots(constraint, &mut interface);
         let mut specials = constraint
             .special_token_terminals
             .iter()
@@ -661,12 +631,26 @@ fn fingerprint_with_component_queries(
     Err(SummaryUnavailable::MissingGrammarMetadata)
 }
 
-fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
+fn hash_grammar_slots(constraint: &Constraint, interface: &mut blake3::Hasher) {
+    let mut slots = constraint
+        .late_grammar_slots
+        .iter()
+        .map(|slot| (slot.name.as_str(), slot.terminal_id))
+        .collect::<Vec<_>>();
+    slots.sort_unstable();
+    for (name, terminal) in slots {
+        interface.update(&(name.len() as u64).to_le_bytes());
+        interface.update(name.as_bytes());
+        interface.update(&terminal.to_le_bytes());
+    }
+}
+
+/// Terminals observable at a component's public exits, rather than model tokens.
+pub(crate) fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
     constraint
-        .unbound_grammar_placeholders
-        .values()
-        .copied()
-        .chain(constraint.late_grammar_slots.iter().map(|slot| slot.terminal_id))
+        .late_grammar_slots
+        .iter()
+        .map(|slot| slot.terminal_id)
         .chain(
             constraint
                 .special_token_terminals
@@ -1191,22 +1175,7 @@ pub(crate) fn persisted_boundary_candidate_ids(
         } else {
             interface.update(b"glrmask-boundary-public-interface-v2-leaf\0");
         }
-        for (name, terminal) in &constraint.unbound_grammar_placeholders {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
-        let mut late = constraint
-            .late_grammar_slots
-            .iter()
-            .map(|slot| (slot.name.as_str(), slot.terminal_id))
-            .collect::<Vec<_>>();
-        late.sort_unstable();
-        for (name, terminal) in late {
-            interface.update(&(name.len() as u64).to_le_bytes());
-            interface.update(name.as_bytes());
-            interface.update(&terminal.to_le_bytes());
-        }
+        hash_grammar_slots(constraint, &mut interface);
         if !composite {
             let mut specials = constraint
                 .special_token_terminals
@@ -1798,11 +1767,12 @@ mod preparation_tests {
         assert!(persisted_boundary_candidate_ids(&source, &vocab).unwrap().is_none());
 
         install(&mut source, original_fingerprint, original_tokens.clone());
-        source
-            .unbound_grammar_placeholders
-            .insert("changed-after-proof".to_owned(), 0);
+        source.late_grammar_slots.push(crate::runtime::LateGrammarSlot {
+            name: "changed-after-proof".to_owned(),
+            terminal_id: 0,
+        });
         assert!(persisted_boundary_candidate_ids(&source, &vocab).unwrap().is_none());
-        source.unbound_grammar_placeholders.remove("changed-after-proof");
+        source.late_grammar_slots.retain(|slot| slot.name != "changed-after-proof");
 
         install(
             &mut source,

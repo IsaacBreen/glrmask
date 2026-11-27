@@ -3587,10 +3587,7 @@ pub(crate) fn build_exact_component_boundary_trigger(
         &merged
     } else { constraint.composition_tokenizer() };
     let mut placeholders = constraint
-        .unbound_grammar_placeholders
-        .values()
-        .copied()
-        .chain(constraint.late_grammar_slots.iter().map(|slot| slot.terminal_id))
+        .late_grammar_slots.iter().map(|slot| slot.terminal_id)
         .collect::<Vec<_>>();
     placeholders.sort_unstable();
     placeholders.dedup();
@@ -8760,7 +8757,6 @@ fn build_composed_constraint_unfinalized(
         internal_tsid_to_states,
         deferred_internal_tsid_to_states: Default::default(),
         composition_reset_tokens_by_terminal: Vec::new(),
-        unbound_grammar_placeholders: BTreeMap::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,

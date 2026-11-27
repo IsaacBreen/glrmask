@@ -1861,8 +1861,9 @@ mod tests {
             (1, b"xy".to_vec()),
             (2, b"y".to_vec()),
         ]);
-        let mut parent = Constraint::from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
+        let mut parent = Constraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
             "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            &[],
             &vocab,
             &[],
             &[],

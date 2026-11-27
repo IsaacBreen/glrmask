@@ -20,7 +20,6 @@ use crate::runtime::artifact::{
 };
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
-use crate::grammar::flat::TerminalID;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -232,14 +231,7 @@ fn decode_current_core(
     Ok((base, exprs))
 }
 
-const PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP1";
-const PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ1";
-const COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP2";
-const COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ2";
-const PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS3";
-const PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS4";
-const COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS5";
-const COMPOSITION_METADATA_HEADER_LEN: usize = 12;
+const COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS6";
 const COMPOSITION_METADATA_SPLIT_HEADER_LEN: usize = 40;
 const COMPOSITION_METADATA_COMPRESS_MIN_BYTES: usize = 64 * 1024;
 const COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED: u32 = 1 << 0;
@@ -455,7 +447,6 @@ fn restore_boundary_candidate_summary(
 #[derive(Serialize)]
 struct ConstraintCompositionLinkMetadataRef<'a> {
     composition_reset_tokens_by_terminal: &'a [Vec<u32>],
-    unbound_grammar_placeholders: &'a BTreeMap<String, TerminalID>,
     composition_grammar_summary:
         &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWireRef<'a>,
@@ -465,25 +456,9 @@ struct ConstraintCompositionLinkMetadataRef<'a> {
 #[derive(Serialize, Deserialize)]
 struct ConstraintCompositionLinkMetadata {
     composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWire,
     boundary_candidate_summary: BoundaryCandidateSummaryWire,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PreviousConstraintCompositionLinkMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
-    boundary_trigger: BoundaryTriggerWire,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PreviousPreviousConstraintCompositionLinkMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
 }
 
 #[derive(Serialize)]
@@ -494,48 +469,12 @@ struct ConstraintCompositionCacheMetadataRef<'a> {
         &'a [Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>],
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct ConstraintCompositionCacheMetadata {
     composition_parser_templates_by_terminal:
         Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
     composition_parser_characterizations_by_terminal:
         Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PreviousConstraintCompositionMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    composition_parser_templates_by_terminal:
-        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
-}
-
-/// CMP2/CMZ2 and CMS3 predate reusable boundary-trigger metadata but already
-/// carried named unresolved grammar slots.
-#[derive(Serialize, Deserialize)]
-struct PreTriggerConstraintCompositionMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
-    composition_parser_templates_by_terminal:
-        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
-}
-
-#[derive(Deserialize)]
-struct ConstraintCompositionMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
-    composition_parser_templates_by_terminal:
-        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
-    boundary_trigger: BoundaryTriggerWire,
-    boundary_candidate_summary: BoundaryCandidateSummaryWire,
 }
 
 struct CompositionMetadataSplitParts<'a> {
@@ -613,9 +552,7 @@ fn split_composition_metadata_parts(
     input: &[u8],
 ) -> Result<CompositionMetadataSplitParts<'_>, String> {
     if input.len() < COMPOSITION_METADATA_SPLIT_HEADER_LEN
-        || !(input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-            || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC))
+        || !input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
     {
         return Err("invalid split composition metadata section".to_owned());
     }
@@ -672,7 +609,6 @@ fn split_composition_metadata_parts(
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     crate::compiler::boundary_candidates::materialize_deferred_composition_boundary_summary(constraint);
     if constraint.composition_reset_tokens_by_terminal.is_empty()
-        && constraint.unbound_grammar_placeholders.is_empty()
         && constraint.composition_parser_templates_by_terminal.is_empty()
         && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
@@ -687,7 +623,6 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     // megabytes of parser-cache decompression/allocation merely to discover B.
     let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
         composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
-        unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
         boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
@@ -741,7 +676,6 @@ fn encode_composition_metadata_base_for_save(constraint: &Constraint) -> Vec<u8>
 
     let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
         composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
-        unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
         boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
@@ -752,254 +686,75 @@ fn encode_composition_metadata_base_for_save(constraint: &Constraint) -> Vec<u8>
 
     let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())
         .expect("retained composition envelope validated at load");
-    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-    {
-        let parts = split_composition_metadata_parts(input)
-            .expect("loaded deferred composition metadata must remain structurally valid");
-        return assemble_composition_metadata_split(
-            link_raw_len,
-            &link_wire,
-            link_compressed,
-            parts.cache_raw_len,
-            parts.cache_wire,
-            parts.cache_compressed,
-        );
+    if input.is_empty() {
+        return encode_composition_metadata(constraint);
     }
-
-    // Pre-split artifacts cannot splice the cache section directly. Decode the
-    // old combined metadata only when a loaded component's link metadata was
-    // actually modified, then re-emit it in the current split format.
-    let old = decode_composition_metadata(input)
-        .expect("loaded deferred composition metadata must remain decodable");
-    let cache_raw = bincode::serialize(&ConstraintCompositionCacheMetadataRef {
-        composition_parser_templates_by_terminal: &old.composition_parser_templates_by_terminal,
-        composition_parser_characterizations_by_terminal:
-            &old.composition_parser_characterizations_by_terminal,
-    })
-    .expect("composition cache metadata serialization should succeed");
-    let (cache_raw_len, cache_wire, cache_compressed) =
-        encode_composition_metadata_part(cache_raw);
+    let parts = split_composition_metadata_parts(input)
+        .expect("loaded deferred composition metadata must remain structurally valid");
     assemble_composition_metadata_split(
         link_raw_len,
         &link_wire,
         link_compressed,
-        cache_raw_len,
-        &cache_wire,
-        cache_compressed,
+        parts.cache_raw_len,
+        parts.cache_wire,
+        parts.cache_compressed,
     )
 }
 
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
-    if input.is_empty() {
-        return Ok(());
-    }
-    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-    {
+    if !input.is_empty() {
         split_composition_metadata_parts(input)?;
-        return Ok(());
     }
-    if input.len() < COMPOSITION_METADATA_HEADER_LEN {
-        return Err("truncated composition metadata section".to_owned());
+    Ok(())
+}
+
+fn empty_composition_link_metadata() -> ConstraintCompositionLinkMetadata {
+    ConstraintCompositionLinkMetadata {
+        composition_reset_tokens_by_terminal: Vec::new(),
+        composition_grammar_summary: None,
+        boundary_trigger: BoundaryTriggerWire::None,
+        boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
     }
-    let raw_len = usize::try_from(u64::from_le_bytes(
-        input[4..12]
-            .try_into()
-            .expect("composition metadata raw length has fixed width"),
-    ))
-    .map_err(|_| "composition metadata raw length does not fit platform".to_owned())?;
-    if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
-    {
-        if input.len() != COMPOSITION_METADATA_HEADER_LEN + raw_len {
-            return Err("invalid raw composition metadata section length".to_owned());
-        }
-        Ok(())
-    } else if input.starts_with(&COMPOSITION_METADATA_ZSTD_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC)
-    {
-        if raw_len == 0 || input.len() == COMPOSITION_METADATA_HEADER_LEN {
-            return Err("invalid compressed composition metadata section".to_owned());
-        }
-        Ok(())
-    } else {
-        Err("invalid composition metadata section magic".to_owned())
-    }
+}
+
+fn decode_composition_link_part(
+    parts: &CompositionMetadataSplitParts<'_>,
+) -> Result<ConstraintCompositionLinkMetadata, String> {
+    let raw = decode_composition_metadata_part(
+        parts.link_wire,
+        parts.link_raw_len,
+        parts.link_compressed,
+    )?;
+    bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())
 }
 
 fn decode_composition_link_metadata(
     input: &[u8],
 ) -> Result<ConstraintCompositionLinkMetadata, String> {
     let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
-    validate_composition_metadata_wire(input)?;
     if input.is_empty() {
-        return Ok(ConstraintCompositionLinkMetadata {
-            composition_reset_tokens_by_terminal: Vec::new(),
-            unbound_grammar_placeholders: BTreeMap::new(),
-            composition_grammar_summary: None,
-            boundary_trigger: BoundaryTriggerWire::None,
-            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-        });
+        return Ok(empty_composition_link_metadata());
     }
-    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-    {
-        let parts = split_composition_metadata_parts(input)?;
-        let raw = decode_composition_metadata_part(
-            parts.link_wire,
-            parts.link_raw_len,
-            parts.link_compressed,
-        )?;
-        if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
-            return bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string());
-        }
-        if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
-            let old: PreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
-            return Ok(ConstraintCompositionLinkMetadata {
-                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
-                composition_grammar_summary: old.composition_grammar_summary,
-                boundary_trigger: old.boundary_trigger,
-                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-            });
-        }
-        let old: PreviousPreviousConstraintCompositionLinkMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
-        return Ok(ConstraintCompositionLinkMetadata {
-            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-            unbound_grammar_placeholders: old.unbound_grammar_placeholders,
-            composition_grammar_summary: old.composition_grammar_summary,
-            boundary_trigger: BoundaryTriggerWire::None,
-            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-        });
-    }
-    // CMP1/CMP2 predate the split and can only be decoded as one object.
-    let metadata = decode_composition_metadata(input)?;
-    Ok(ConstraintCompositionLinkMetadata {
-        composition_reset_tokens_by_terminal: metadata.composition_reset_tokens_by_terminal,
-        unbound_grammar_placeholders: metadata.unbound_grammar_placeholders,
-        composition_grammar_summary: metadata.composition_grammar_summary,
-        boundary_trigger: metadata.boundary_trigger,
-        boundary_candidate_summary: metadata.boundary_candidate_summary,
-    })
+    decode_composition_link_part(&split_composition_metadata_parts(input)?)
 }
 
-fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMetadata, String> {
+fn decode_composition_metadata(
+    input: &[u8],
+) -> Result<(ConstraintCompositionLinkMetadata, ConstraintCompositionCacheMetadata), String> {
     let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
-    validate_composition_metadata_wire(input)?;
     if input.is_empty() {
-        return Ok(ConstraintCompositionMetadata {
-            composition_reset_tokens_by_terminal: Vec::new(),
-            unbound_grammar_placeholders: BTreeMap::new(),
-            composition_parser_templates_by_terminal: Vec::new(),
-            composition_parser_characterizations_by_terminal: Vec::new(),
-            composition_grammar_summary: None,
-            boundary_trigger: BoundaryTriggerWire::None,
-            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-        });
+        return Ok((empty_composition_link_metadata(), ConstraintCompositionCacheMetadata::default()));
     }
-    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-    {
-        let parts = split_composition_metadata_parts(input)?;
-        let link_raw = decode_composition_metadata_part(
-            parts.link_wire,
-            parts.link_raw_len,
-            parts.link_compressed,
-        )?;
-        let cache_raw = decode_composition_metadata_part(
-            parts.cache_wire,
-            parts.cache_raw_len,
-            parts.cache_compressed,
-        )?;
-        let link = if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
-            bincode::deserialize::<ConstraintCompositionLinkMetadata>(link_raw.as_ref())
-                .map_err(|err| err.to_string())?
-        } else if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
-            let old: PreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
-            ConstraintCompositionLinkMetadata {
-                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
-                composition_grammar_summary: old.composition_grammar_summary,
-                boundary_trigger: old.boundary_trigger,
-                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-            }
-        } else {
-            let old: PreviousPreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
-            ConstraintCompositionLinkMetadata {
-                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
-                composition_grammar_summary: old.composition_grammar_summary,
-                boundary_trigger: BoundaryTriggerWire::None,
-                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-            }
-        };
-        let cache: ConstraintCompositionCacheMetadata =
-            bincode::deserialize(cache_raw.as_ref()).map_err(|err| err.to_string())?;
-        return Ok(ConstraintCompositionMetadata {
-            composition_reset_tokens_by_terminal: link.composition_reset_tokens_by_terminal,
-            unbound_grammar_placeholders: link.unbound_grammar_placeholders,
-            composition_parser_templates_by_terminal:
-                cache.composition_parser_templates_by_terminal,
-            composition_parser_characterizations_by_terminal:
-                cache.composition_parser_characterizations_by_terminal,
-            composition_grammar_summary: link.composition_grammar_summary,
-            boundary_trigger: link.boundary_trigger,
-            boundary_candidate_summary: link.boundary_candidate_summary,
-        });
-    }
-    let raw_len = usize::try_from(u64::from_le_bytes(input[4..12].try_into().unwrap()))
-        .map_err(|_| "composition metadata raw length does not fit platform".to_owned())?;
-    let body = &input[COMPOSITION_METADATA_HEADER_LEN..];
-    let previous = input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC);
-    let raw = if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC)
-        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
-    {
-        Cow::Borrowed(body)
-    } else {
-        let raw = zstd::bulk::decompress(body, raw_len).map_err(|err| err.to_string())?;
-        if raw.len() != raw_len {
-            return Err("invalid decompressed composition metadata length".to_owned());
-        }
-        Cow::Owned(raw)
-    };
-    if previous {
-        let old: PreviousConstraintCompositionMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
-        Ok(ConstraintCompositionMetadata {
-            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-            unbound_grammar_placeholders: BTreeMap::new(),
-            composition_parser_templates_by_terminal: old.composition_parser_templates_by_terminal,
-            composition_parser_characterizations_by_terminal:
-                old.composition_parser_characterizations_by_terminal,
-            composition_grammar_summary: old.composition_grammar_summary,
-            boundary_trigger: BoundaryTriggerWire::None,
-            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-        })
-    } else {
-        let old: PreTriggerConstraintCompositionMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
-        Ok(ConstraintCompositionMetadata {
-            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
-            unbound_grammar_placeholders: old.unbound_grammar_placeholders,
-            composition_parser_templates_by_terminal: old.composition_parser_templates_by_terminal,
-            composition_parser_characterizations_by_terminal:
-                old.composition_parser_characterizations_by_terminal,
-            composition_grammar_summary: old.composition_grammar_summary,
-            boundary_trigger: BoundaryTriggerWire::None,
-            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
-        })
-    }
+    let parts = split_composition_metadata_parts(input)?;
+    let link = decode_composition_link_part(&parts)?;
+    let raw = decode_composition_metadata_part(
+        parts.cache_wire,
+        parts.cache_raw_len,
+        parts.cache_compressed,
+    )?;
+    let cache = bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+    Ok((link, cache))
 }
 
 // Decoding finishes before any cache work or recursive component load begins.
@@ -4551,25 +4306,17 @@ impl Constraint {
             return Ok(Cow::Borrowed(&[]));
         };
         let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())?;
-        validate_composition_metadata_wire(input)?;
-        if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-            || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
-        {
-            let parts = split_composition_metadata_parts(input)?;
-            let cache_raw = decode_composition_metadata_part(
-                parts.cache_wire, parts.cache_raw_len, parts.cache_compressed,
-            )?;
-            // This vector is the first field of ConstraintCompositionCacheMetadata
-            // in every split format. Deserialize that field with a bounded slice
-            // reader, leaving its unrelated characterization vector untouched.
-            let templates = bincode::deserialize_from(cache_raw.as_ref())
-                .map_err(|error| error.to_string())?;
-            Ok(Cow::Owned(templates))
-        } else {
-            Ok(Cow::Owned(decode_composition_metadata(input)?
-                .composition_parser_templates_by_terminal))
+        if input.is_empty() {
+            return Ok(Cow::Borrowed(&[]));
         }
+        let parts = split_composition_metadata_parts(input)?;
+        let cache_raw = decode_composition_metadata_part(
+            parts.cache_wire, parts.cache_raw_len, parts.cache_compressed,
+        )?;
+        // Deserialize the first cache field only; characterizations are unrelated.
+        let templates = bincode::deserialize_from(cache_raw.as_ref())
+            .map_err(|error| error.to_string())?;
+        Ok(Cow::Owned(templates))
     }
 
     pub(crate) fn materialize_composition_metadata_for_compilation(
@@ -4578,23 +4325,12 @@ impl Constraint {
         let Some(blob) = self.deferred_composition_metadata_blob.clone() else {
             return Ok(());
         };
-        let metadata = decode_composition_metadata(blob.as_slice())?;
-        self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
-        self.unbound_grammar_placeholders = metadata.unbound_grammar_placeholders;
+        let (metadata, cache) = decode_composition_metadata(blob.as_slice())?;
         self.composition_parser_templates_by_terminal =
-            metadata.composition_parser_templates_by_terminal;
+            cache.composition_parser_templates_by_terminal;
         self.composition_parser_characterizations_by_terminal =
-            metadata.composition_parser_characterizations_by_terminal;
-        self.composition_grammar_summary = metadata.composition_grammar_summary;
-        self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
-        if self.boundary_candidate_summary.get().is_none() {
-            let summary = restore_boundary_candidate_summary(
-                metadata.boundary_candidate_summary,
-                self,
-            )?;
-            let _ = self.boundary_candidate_summary.set(summary);
-        }
-        self.composition_link_metadata_materialized = true;
+            cache.composition_parser_characterizations_by_terminal;
+        self.install_composition_link_metadata(metadata)?;
         self.deferred_composition_metadata_blob = None;
         Ok(())
     }
@@ -4612,8 +4348,15 @@ impl Constraint {
             return Ok(());
         };
         let metadata = decode_composition_link_metadata(blob.as_slice())?;
+        self.install_composition_link_metadata(metadata)?;
+        Ok(())
+    }
+
+    fn install_composition_link_metadata(
+        &mut self,
+        metadata: ConstraintCompositionLinkMetadata,
+    ) -> Result<(), String> {
         self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
-        self.unbound_grammar_placeholders = metadata.unbound_grammar_placeholders;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
         self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
         if self.boundary_candidate_summary.get().is_none() {
@@ -7527,137 +7270,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pre-release: historical artifact compatibility is not a release requirement"]
-    fn previous_composition_metadata_wire_remains_loadable() {
-        let constraint = tiny_constraint();
-        let previous = PreviousConstraintCompositionMetadata {
-            composition_reset_tokens_by_terminal: constraint
-                .composition_reset_tokens_by_terminal
-                .clone(),
-            composition_parser_templates_by_terminal: constraint
-                .composition_parser_templates_by_terminal
-                .clone(),
-            composition_parser_characterizations_by_terminal: constraint
-                .composition_parser_characterizations_by_terminal
-                .clone(),
-            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
-        };
-        let raw = bincode::serialize(&previous).unwrap();
-
-        for compressed in [false, true] {
-            let body = if compressed {
-                zstd::bulk::compress(&raw, 1).unwrap()
-            } else {
-                raw.clone()
-            };
-            let mut wire = Vec::with_capacity(COMPOSITION_METADATA_HEADER_LEN + body.len());
-            wire.extend_from_slice(if compressed {
-                &PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC
-            } else {
-                &PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC
-            });
-            wire.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-            wire.extend_from_slice(&body);
-
-            let decoded = decode_composition_metadata(&wire).unwrap();
-            assert!(decoded.unbound_grammar_placeholders.is_empty());
-            assert_eq!(
-                decoded.composition_parser_templates_by_terminal,
-                previous.composition_parser_templates_by_terminal,
-            );
-            assert_eq!(
-                decoded.composition_parser_characterizations_by_terminal,
-                previous.composition_parser_characterizations_by_terminal,
-            );
-            assert_eq!(
-                decoded.composition_grammar_summary,
-                previous.composition_grammar_summary,
-            );
+    fn historical_composition_metadata_formats_are_rejected() {
+        for magic in [b"CMP1", b"CMZ1", b"CMP2", b"CMZ2", b"CMS3", b"CMS4", b"CMS5"] {
+            let mut wire = vec![0; COMPOSITION_METADATA_SPLIT_HEADER_LEN];
+            wire[..4].copy_from_slice(magic);
+            assert!(validate_composition_metadata_wire(&wire).is_err());
+            assert!(decode_composition_link_metadata(&wire).is_err());
+            assert!(decode_composition_metadata(&wire).is_err());
         }
-    }
-
-    #[test]
-    #[ignore = "pre-release: historical artifact compatibility is not a release requirement"]
-    fn previous_previous_split_composition_metadata_wire_defaults_trigger_to_none() {
-        let constraint = tiny_constraint();
-        let link = PreviousPreviousConstraintCompositionLinkMetadata {
-            composition_reset_tokens_by_terminal: constraint
-                .composition_reset_tokens_by_terminal
-                .clone(),
-            unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
-            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
-        };
-        let cache = ConstraintCompositionCacheMetadata {
-            composition_parser_templates_by_terminal: constraint
-                .composition_parser_templates_by_terminal
-                .clone(),
-            composition_parser_characterizations_by_terminal: constraint
-                .composition_parser_characterizations_by_terminal
-                .clone(),
-        };
-        let link_raw = bincode::serialize(&link).unwrap();
-        let cache_raw = bincode::serialize(&cache).unwrap();
-        let mut wire = Vec::new();
-        wire.extend_from_slice(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC);
-        wire.extend_from_slice(&0u32.to_le_bytes());
-        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&link_raw);
-        wire.extend_from_slice(&cache_raw);
-
-        let decoded = decode_composition_metadata(&wire).unwrap();
-        assert!(matches!(decoded.boundary_trigger, BoundaryTriggerWire::None));
-        assert_eq!(
-            decoded.composition_grammar_summary,
-            constraint.composition_grammar_summary,
-        );
-    }
-
-    #[test]
-    fn previous_split_composition_metadata_wire_preserves_trigger_and_defaults_summary() {
-        let constraint = tiny_constraint();
-        let link = PreviousConstraintCompositionLinkMetadata {
-            composition_reset_tokens_by_terminal: constraint
-                .composition_reset_tokens_by_terminal
-                .clone(),
-            unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
-            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
-            boundary_trigger: BoundaryTriggerWire::TokenSet(vec![1, 3]),
-        };
-        let cache = ConstraintCompositionCacheMetadata {
-            composition_parser_templates_by_terminal: constraint
-                .composition_parser_templates_by_terminal
-                .clone(),
-            composition_parser_characterizations_by_terminal: constraint
-                .composition_parser_characterizations_by_terminal
-                .clone(),
-        };
-        let link_raw = bincode::serialize(&link).unwrap();
-        let cache_raw = bincode::serialize(&cache).unwrap();
-        let mut wire = Vec::new();
-        wire.extend_from_slice(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC);
-        wire.extend_from_slice(&0u32.to_le_bytes());
-        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
-        wire.extend_from_slice(&link_raw);
-        wire.extend_from_slice(&cache_raw);
-
-        let decoded = decode_composition_metadata(&wire).unwrap();
-        assert!(matches!(
-            decoded.boundary_trigger,
-            BoundaryTriggerWire::TokenSet(ref ids) if ids == &[1, 3]
-        ));
-        assert!(matches!(
-            decoded.boundary_candidate_summary,
-            BoundaryCandidateSummaryWire::Unknown { reason }
-                if reason == summary_unavailable_code(
-                    &crate::runtime::SummaryUnavailable::LegacyArtifact
-                )
-        ));
     }
 
     #[test]
@@ -8032,7 +7652,6 @@ mod tests {
         let constraint = tiny_constraint();
         let raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
             composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
-            unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
             composition_grammar_summary: &constraint.composition_grammar_summary,
             boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
             boundary_candidate_summary: boundary_candidate_summary_wire(&constraint),

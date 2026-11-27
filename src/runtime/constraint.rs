@@ -1183,11 +1183,7 @@ impl Constraint {
         let mut relevant = BitSet::new(self.parser_terminal_count() as usize);
         if let Some(summary) = self.composition_grammar_summary.as_ref() {
             relevant.union_with(&summary.root_last);
-            let placeholders = self
-                .unbound_grammar_placeholders
-                .values()
-                .copied()
-                .chain(self.late_grammar_slots.iter().map(|slot| slot.terminal_id));
+            let placeholders = self.late_grammar_slots.iter().map(|slot| slot.terminal_id);
             for placeholder in placeholders {
                 for (terminal, follows) in summary.allowed_follows.iter().enumerate() {
                     if follows.contains(placeholder as usize) {

@@ -10560,10 +10560,6 @@ pub struct ConstraintData {
     /// `Constraint` bincode layout; artifact V13 stores it in the outer
     /// envelope so V12 constraints remain loadable unchanged.
     pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    /// Named unresolved `extern grammar` slots retained by a compiled parent.
-    /// Values are parent-local hidden placeholder terminal IDs. Stored in the
-    /// outer composition metadata so cached parents can be rebound after load.
-    pub(crate) unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     /// Composition-time parser stack-effect templates retained from the
     /// original compile. These are the unspecialized per-terminal DFAs used to
     /// build parser DWAs, so a later linker can transport unchanged component
@@ -10944,11 +10940,6 @@ pub(crate) struct ConstraintSerde {
     /// envelope so V12 constraints remain loadable unchanged.
     #[serde(skip, default)]
     pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    /// Named unresolved `extern grammar` slots retained by a compiled parent.
-    /// Values are parent-local hidden placeholder terminal IDs. Stored in the
-    /// outer composition metadata so cached parents can be rebound after load.
-    #[serde(skip, default)]
-    pub(crate) unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     /// Composition-time parser stack-effect templates retained from the
     /// original compile. These are the unspecialized per-terminal DFAs used to
     /// build parser DWAs, so a later linker can transport unchanged component

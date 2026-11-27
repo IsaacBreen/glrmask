@@ -429,7 +429,7 @@ mod candidate_tests {
         assert!(matches!(loaded.retained_boundary_candidate_summary_for_compilation().unwrap(),
             Some(crate::runtime::BoundaryCandidateSummary::Unknown {
                 reason: crate::runtime::SummaryUnavailable::Disabled })));
-        linked.unbound_grammar_placeholders.insert("changed_interface".into(), 0);
+        linked.late_grammar_slots.push(crate::runtime::LateGrammarSlot { name: "changed_interface".into(), terminal_id: 0 });
         assert!(crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(
             &linked, &vocab).unwrap().is_none(), "captured proof must fail the changed interface check");
     }
