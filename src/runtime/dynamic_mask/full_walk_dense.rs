@@ -2033,7 +2033,7 @@ impl FullWalkOutputScopeCursor {
         markers: &[u64],
         start: usize,
         end: usize,
-        mut is_ignored: impl FnMut(u64) -> bool,
+        mut is_ignored: impl FnMut(usize, u64) -> bool,
     ) -> bool {
         if start > end || end > markers.len() { return false; }
         if start < self.last_start { *self = Self::default(); }
@@ -2044,7 +2044,7 @@ impl FullWalkOutputScopeCursor {
             self.next_required = None;
         }
         for index in start.max(self.ignored_through)..end {
-            if !is_ignored(markers[index]) {
+            if !is_ignored(index, markers[index]) {
                 self.ignored_through = index;
                 self.next_required = Some(index);
                 return false;
@@ -3691,7 +3691,7 @@ mod full_walk_acceleration_tests {
             for start in 0..=markers.len() {
                 for end in (start..=markers.len()).rev() {
                     let expected = markers[start..end].iter().all(|&m| ignored & (1 << m) != 0);
-                    let actual = cursor.covers(&markers, start, end, |m| {
+                    let actual = cursor.covers(&markers, start, end, |_, m| {
                         visits[m as usize] += 1;
                         ignored & (1 << m) != 0
                     });
@@ -3704,14 +3704,14 @@ mod full_walk_acceleration_tests {
             for start in (0..=markers.len()).rev() {
                 for end in start..=markers.len() {
                     let expected = markers[start..end].iter().all(|&m| ignored & (1 << m) != 0);
-                    assert_eq!(cursor.covers(&markers, start, end, |m| ignored & (1 << m) != 0), expected);
+                    assert_eq!(cursor.covers(&markers, start, end, |_, m| ignored & (1 << m) != 0), expected);
                 }
             }
-            assert!(!cursor.covers(&markers, 3, 2, |_| panic!("invalid interval")));
-            assert!(!cursor.covers(&markers, 0, 9, |_| panic!("invalid interval")));
+            assert!(!cursor.covers(&markers, 3, 2, |_, _| panic!("invalid interval")));
+            assert!(!cursor.covers(&markers, 0, 9, |_, _| panic!("invalid interval")));
         }
         let mut cursor = FullWalkOutputScopeCursor::default();
-        assert!(cursor.covers(&[], 0, 0, |_| panic!("empty range")));
+        assert!(cursor.covers(&[], 0, 0, |_, _| panic!("empty range")));
     }
 
     #[test]

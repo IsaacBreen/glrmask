@@ -4124,11 +4124,14 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                 let (child, _) = trie.full_walk_dead_subtree(op_index);
                 let end_token = trie.subtree_token_index_range(child).end
                     .saturating_sub(usize::from(trie.node(0).token_id.is_some()));
-                if output_scope.covers(token_markers, token_marker_index, end_token, |marker| {
+                if output_scope.covers(token_markers.values, token_marker_index, end_token, |ordinal, marker| {
                     full_walk_dense::full_walk_marker_fully_ignored(marker, already, |canonical| {
-                        vocab.token_ids(canonical).is_some_and(|ids| ids.iter().all(|&id| {
-                            already.get(id as usize / 32).is_some_and(|&w| w & (1 << (id % 32)) != 0)
-                        }))
+                        match token_markers.fallback(ordinal, canonical) {
+                            WalkMarkerAliases::Words(words) => !words.is_empty() && words.iter().all(|&(word, bits)|
+                                already.get(word as usize).is_some_and(|&w| w & bits == bits)),
+                            WalkMarkerAliases::Tokens(tokens) => !tokens.is_empty() && tokens.iter().all(|&id|
+                                already.get(id as usize / 32).is_some_and(|&w| w & (1 << (id % 32)) != 0)),
+                        }
                     })
                 }) {
                     #[cfg(test)]
