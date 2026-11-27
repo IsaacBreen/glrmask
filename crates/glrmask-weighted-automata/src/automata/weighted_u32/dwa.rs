@@ -540,15 +540,22 @@ impl OwnedTokenSets {
 #[derive(Debug)]
 pub struct PackedRuntimeDwa {
     start_state: u32,
-    /// Zero-copy DWF3 view used by current-format loads. Compiler-produced
-    /// constraints keep the owned fields below and leave this unset.
-    backed: Option<BackedPackedRuntimeDwa>,
-    /// Owned narrow execution view for compiler-produced DWAs whose row/state/
-    /// weight domains fit the DWF6 widths. Runtime transition/state/weight
-    /// access prefers these arrays, so they are live execution storage rather
-    /// than serialization-only preparation.
-    owned_narrow: Option<OwnedNarrowPackedRuntimeDwa>,
-    token_sets: Option<OwnedTokenSets>,
+    storage: PackedDwaStorage,
+}
+
+#[derive(Debug)]
+enum PackedDwaStorage {
+    Backed(BackedPackedRuntimeDwa),
+    Narrow {
+        graph: OwnedNarrowPackedRuntimeDwa,
+        geometries: Box<[Vec<(u32, u32)>]>,
+    },
+    Wide(OwnedWidePackedRuntimeDwa),
+}
+
+#[derive(Debug)]
+struct OwnedWidePackedRuntimeDwa {
+    token_sets: OwnedTokenSets,
     geometries: Box<[Vec<(u32, u32)>]>,
     weights: Box<[PackedRuntimeWeight]>,
     weight_token_ids: Box<[u32]>,
@@ -1992,98 +1999,123 @@ impl<'a> PackedRuntimeWeightRef<'a> {
 
 impl PackedRuntimeDwa {
     #[inline]
-    fn weight_record(&self, id: u32) -> Option<PackedRuntimeWeight> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.weight(id);
+    fn backed(&self) -> Option<&BackedPackedRuntimeDwa> {
+        match &self.storage {
+            PackedDwaStorage::Backed(backed) => Some(backed),
+            _ => None,
         }
-        self.backed
-            .as_ref()
-            .map_or_else(|| self.weights.get(id as usize).copied(), |backed| backed.weight(id))
+    }
+
+    #[inline]
+    fn narrow(&self) -> Option<&OwnedNarrowPackedRuntimeDwa> {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => Some(graph),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn wide(&self) -> Option<&OwnedWidePackedRuntimeDwa> {
+        match &self.storage {
+            PackedDwaStorage::Wide(wide) => Some(wide),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn owned_geometries(&self) -> Option<&[Vec<(u32, u32)>]> {
+        match &self.storage {
+            PackedDwaStorage::Narrow { geometries, .. } => Some(geometries),
+            PackedDwaStorage::Wide(wide) => Some(&wide.geometries),
+            PackedDwaStorage::Backed(_) => None,
+        }
+    }
+
+    #[inline]
+    fn weight_record(&self, id: u32) -> Option<PackedRuntimeWeight> {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.weight(id),
+            PackedDwaStorage::Backed(backed) => backed.weight(id),
+            PackedDwaStorage::Wide(wide) => wide.weights.get(id as usize).copied(),
+        }
     }
 
     #[inline]
     fn state_record(&self, id: u32) -> Option<PackedRuntimeState> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.state(id);
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.state(id),
+            PackedDwaStorage::Backed(backed) => backed.state(id),
+            PackedDwaStorage::Wide(wide) => wide.states.get(id as usize).copied(),
         }
-        self.backed
-            .as_ref()
-            .map_or_else(|| self.states.get(id as usize).copied(), |backed| backed.state(id))
     }
 
     #[inline]
     fn row_record(&self, id: u32) -> Option<PackedRuntimeRow> {
-        if let Some(narrow) = &self.owned_narrow {
-            if id as usize >= narrow.spans.len() {
-                return None;
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => {
+                ((id as usize) < graph.spans.len()).then_some(PackedRuntimeRow {
+                    labels: id,
+                    targets: id,
+                    weights: id,
+                })
             }
-            return Some(PackedRuntimeRow {
-                labels: id,
-                targets: id,
-                weights: id,
-            });
+            PackedDwaStorage::Backed(backed) => backed.row(id),
+            PackedDwaStorage::Wide(wide) => wide.rows.get(id as usize).copied(),
         }
-        self.backed
-            .as_ref()
-            .map_or_else(|| self.rows.get(id as usize).copied(), |backed| backed.row(id))
     }
 
     #[inline]
     fn geometry_len_at(&self, id: u32) -> Option<usize> {
-        self.backed.as_ref().map_or_else(
-            || self.geometries.get(id as usize).map(Vec::len),
+        self.backed().map_or_else(
+            || self.owned_geometries()?.get(id as usize).map(Vec::len),
             |backed| backed.geometry_len(id),
         )
     }
 
     #[inline]
     fn geometry_pair_at(&self, id: u32, index: usize) -> Option<(u32, u32)> {
-        self.backed.as_ref().map_or_else(
-            || self.geometries.get(id as usize)?.get(index).copied(),
+        self.backed().map_or_else(
+            || self.owned_geometries()?.get(id as usize)?.get(index).copied(),
             |backed| backed.geometry_pair(id, index),
         )
     }
 
     #[inline]
     fn weight_token_id_at(&self, index: usize) -> Option<u32> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.weight_token_ids.get(index).copied().map(u32::from);
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.weight_token_ids.get(index).copied().map(u32::from),
+            PackedDwaStorage::Backed(backed) => backed.weight_token_id(index),
+            PackedDwaStorage::Wide(wide) => wide.weight_token_ids.get(index).copied(),
         }
-        self.backed.as_ref().map_or_else(
-            || self.weight_token_ids.get(index).copied(),
-            |backed| backed.weight_token_id(index),
-        )
     }
 
     #[inline]
     fn pool_span_at(&self, kind: u8, id: u32) -> Option<[u32; 2]> {
-        if let Some(narrow) = &self.owned_narrow {
-            return (kind <= 2).then(|| narrow.span(id)).flatten();
-        }
-        if let Some(backed) = &self.backed {
-            return match kind {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => {
+                (kind <= 2).then(|| graph.span(id)).flatten()
+            }
+            PackedDwaStorage::Backed(backed) => match kind {
                 0 => backed.span(backed.label_spans_start, backed.label_span_count, id),
                 1 => backed.span(backed.target_spans_start, backed.target_span_count, id),
                 2 => backed.span(backed.weight_spans_start, backed.weight_span_count, id),
                 _ => None,
-            };
-        }
-        match kind {
-            0 => self.label_pool.spans.get(id as usize).copied(),
-            1 => self.target_pool.spans.get(id as usize).copied(),
-            2 => self.weight_id_pool.spans.get(id as usize).copied(),
-            _ => None,
+            },
+            PackedDwaStorage::Wide(wide) => match kind {
+                0 => wide.label_pool.spans.get(id as usize).copied(),
+                1 => wide.target_pool.spans.get(id as usize).copied(),
+                2 => wide.weight_id_pool.spans.get(id as usize).copied(),
+                _ => None,
+            },
         }
     }
 
     #[inline]
     fn label_value_at(&self, index: usize) -> Option<i32> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.label(index);
-        }
-        self.backed.as_ref().map_or_else(
-            || self.label_pool.values.get(index).copied(),
-            |backed| {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => graph.label(index),
+            PackedDwaStorage::Wide(wide) => wide.label_pool.values.get(index).copied(),
+            PackedDwaStorage::Backed(backed) => {
                 if backed.narrow {
                     if index >= backed.label_value_count {
                         return None;
@@ -2104,18 +2136,16 @@ impl PackedRuntimeDwa {
                 } else {
                     backed.pool_i32(backed.label_values_start, backed.label_value_count, index)
                 }
-            },
-        )
+            }
+        }
     }
 
     #[inline]
     fn target_value_at(&self, index: usize) -> Option<u32> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.target(index);
-        }
-        self.backed.as_ref().map_or_else(
-            || self.target_pool.values.get(index).copied(),
-            |backed| {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => graph.target(index),
+            PackedDwaStorage::Wide(wide) => wide.target_pool.values.get(index).copied(),
+            PackedDwaStorage::Backed(backed) => {
                 if backed.narrow {
                     if index >= backed.target_value_count {
                         return None;
@@ -2134,18 +2164,16 @@ impl PackedRuntimeDwa {
                 } else {
                     backed.pool_u32(backed.target_values_start, backed.target_value_count, index)
                 }
-            },
-        )
+            }
+        }
     }
 
     #[inline]
     fn weight_value_at(&self, index: usize) -> Option<u32> {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.weight_id(index);
-        }
-        self.backed.as_ref().map_or_else(
-            || self.weight_id_pool.values.get(index).copied(),
-            |backed| {
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph, .. } => graph.weight_id(index),
+            PackedDwaStorage::Wide(wide) => wide.weight_id_pool.values.get(index).copied(),
+            PackedDwaStorage::Backed(backed) => {
                 if backed.narrow {
                     if index >= backed.weight_value_count {
                         return None;
@@ -2166,8 +2194,8 @@ impl PackedRuntimeDwa {
                 } else {
                     backed.pool_u32(backed.weight_values_start, backed.weight_value_count, index)
                 }
-            },
-        )
+            }
+        }
     }
 
     #[inline]
@@ -2189,14 +2217,12 @@ impl PackedRuntimeDwa {
 
 
     fn owned_narrow_fast_wire_len(&self) -> Option<usize> {
-        let narrow = self.owned_narrow.as_ref()?;
+        let narrow = self.narrow()?;
         let spans = narrow.token_spans.as_ref();
-        if spans.len() != self.token_set_count()
-            || narrow.token_range_overflow_starts.len() != spans.len()
-        {
+        if narrow.token_range_overflow_starts.len() != spans.len() {
             return None;
         }
-        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let geometry_range_count = self.owned_geometries()?.iter().map(Vec::len).sum::<usize>();
         Some(
             16usize
                 .saturating_add(spans.len().saturating_mul(3))
@@ -2204,7 +2230,7 @@ impl PackedRuntimeDwa {
                 .saturating_add(spans.len().saturating_mul(2))
                 .saturating_add(narrow.token_ranges.len().saturating_mul(2))
                 .saturating_add(4 + narrow.token_range_overflows.len().saturating_mul(2))
-                .saturating_add(4 + self.geometries.len().saturating_mul(2))
+                .saturating_add(4 + self.owned_geometries()?.len().saturating_mul(2))
                 .saturating_add(geometry_range_count.saturating_mul(4))
                 .saturating_add(4 + narrow.weights.len())
                 .saturating_add(4 + narrow.weight_token_ids.len().saturating_mul(2))
@@ -2215,7 +2241,7 @@ impl PackedRuntimeDwa {
     }
 
     fn write_owned_narrow_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
-        let narrow = self.owned_narrow.as_ref()?;
+        let narrow = self.narrow()?;
         let spans = narrow.token_spans.as_ref();
         if dst.len() != self.owned_narrow_fast_wire_len()? {
             return None;
@@ -2237,8 +2263,8 @@ impl PackedRuntimeDwa {
         wire.queue(&narrow.token_ranges);
         wire.u32(u32::try_from(narrow.token_range_overflows.len()).ok()?);
         wire.queue(&narrow.token_range_overflows);
-        wire.u32(self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
+        wire.u32(self.owned_geometries()?.len() as u32);
+        for geometry in self.owned_geometries()?.iter() {
             wire.u16(geometry.len() as u16);
             for &(start, end) in geometry {
                 wire.u16(start as u16);
@@ -2267,7 +2293,7 @@ impl PackedRuntimeDwa {
     }
 
     pub fn write_direct_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
-        if self.owned_narrow.is_some() {
+        if self.narrow().is_some() {
             return self.write_owned_narrow_fast_wire_bytes(dst);
         }
         self.write_runtime_shaped_fast_wire_bytes(dst)
@@ -2275,35 +2301,36 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn prefer_runtime_shaped_wire(&self) -> bool {
-        self.token_sets.as_ref().and_then(OwnedTokenSets::flat16)
-            .is_some_and(|(ranges, _)| self.states.len() >= 20_000 || ranges.len() >= 262_144)
+        self.wide().is_some_and(|wide| {
+            wide.token_sets.flat16().is_some_and(|(ranges, _)| {
+                wide.states.len() >= 20_000 || ranges.len() >= 262_144
+            })
+        })
     }
 
     pub fn runtime_shaped_fast_wire_len(&self) -> Option<usize> {
+        let wide = self.wide()?;
         if !self.prefer_runtime_shaped_wire() {
             return None;
         }
-        let (ranges, spans) = self.token_sets.as_ref()?.flat16()?;
-        if spans.len() != self.token_set_count() {
-            return None;
-        }
-        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let (ranges, spans) = wide.token_sets.flat16()?;
+        let geometry_range_count = wide.geometries.iter().map(Vec::len).sum::<usize>();
         Some(
             16usize
                 .saturating_add(spans.len().saturating_mul(12))
                 .saturating_add(ranges.len().saturating_mul(4))
-                .saturating_add(4 + self.geometries.len().saturating_mul(4))
+                .saturating_add(4 + wide.geometries.len().saturating_mul(4))
                 .saturating_add(geometry_range_count.saturating_mul(8))
-                .saturating_add(4 + self.weights.len().saturating_mul(12))
-                .saturating_add(4 + self.weight_token_ids.len().saturating_mul(4))
-                .saturating_add(4 + self.label_pool.values.len().saturating_mul(4))
-                .saturating_add(4 + self.label_pool.spans.len().saturating_mul(8))
-                .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
-                .saturating_add(4 + self.target_pool.spans.len().saturating_mul(8))
-                .saturating_add(4 + self.weight_id_pool.values.len().saturating_mul(4))
-                .saturating_add(4 + self.weight_id_pool.spans.len().saturating_mul(8))
-                .saturating_add(4 + self.rows.len().saturating_mul(12))
-                .saturating_add(4 + self.states.len().saturating_mul(8)),
+                .saturating_add(4 + wide.weights.len().saturating_mul(12))
+                .saturating_add(4 + wide.weight_token_ids.len().saturating_mul(4))
+                .saturating_add(4 + wide.label_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + wide.label_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + wide.target_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + wide.target_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + wide.weight_id_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + wide.weight_id_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + wide.rows.len().saturating_mul(12))
+                .saturating_add(4 + wide.states.len().saturating_mul(8)),
         )
     }
 
@@ -2313,10 +2340,11 @@ impl PackedRuntimeDwa {
     /// section. The destination must have exactly
     /// [`Self::runtime_shaped_fast_wire_len`] bytes.
     pub fn write_runtime_shaped_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
+        let wide = self.wide()?;
         if dst.len() != self.runtime_shaped_fast_wire_len()? {
             return None;
         }
-        let (ranges, spans) = self.token_sets.as_ref()?.flat16()?;
+        let (ranges, spans) = wide.token_sets.flat16()?;
         let mut wire = WireCopyPlan::new(dst, false);
         wire.bytes(b"DWF7");
         wire.u32(self.start_state);
@@ -2324,34 +2352,34 @@ impl PackedRuntimeDwa {
         wire.u32(ranges.len() as u32);
         wire.queue(spans);
         wire.queue(ranges);
-        wire.u32(self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
+        wire.u32(wide.geometries.len() as u32);
+        for geometry in wide.geometries.iter() {
             wire.u32(geometry.len() as u32);
             for &(start, end) in geometry {
                 wire.u32(start);
                 wire.u32(end);
             }
         }
-        wire.u32(self.weights.len() as u32);
-        wire.queue(&self.weights);
-        wire.u32(self.weight_token_ids.len() as u32);
-        wire.queue(&self.weight_token_ids);
-        wire.u32(self.label_pool.values.len() as u32);
-        wire.queue(&self.label_pool.values);
-        wire.u32(self.label_pool.spans.len() as u32);
-        wire.queue(&self.label_pool.spans);
-        wire.u32(self.target_pool.values.len() as u32);
-        wire.queue(&self.target_pool.values);
-        wire.u32(self.target_pool.spans.len() as u32);
-        wire.queue(&self.target_pool.spans);
-        wire.u32(self.weight_id_pool.values.len() as u32);
-        wire.queue(&self.weight_id_pool.values);
-        wire.u32(self.weight_id_pool.spans.len() as u32);
-        wire.queue(&self.weight_id_pool.spans);
-        wire.u32(self.rows.len() as u32);
-        wire.queue(&self.rows);
-        wire.u32(self.states.len() as u32);
-        wire.queue(&self.states);
+        wire.u32(wide.weights.len() as u32);
+        wire.queue(&wide.weights);
+        wire.u32(wide.weight_token_ids.len() as u32);
+        wire.queue(&wide.weight_token_ids);
+        wire.u32(wide.label_pool.values.len() as u32);
+        wire.queue(&wide.label_pool.values);
+        wire.u32(wide.label_pool.spans.len() as u32);
+        wire.queue(&wide.label_pool.spans);
+        wire.u32(wide.target_pool.values.len() as u32);
+        wire.queue(&wide.target_pool.values);
+        wire.u32(wide.target_pool.spans.len() as u32);
+        wire.queue(&wide.target_pool.spans);
+        wire.u32(wide.weight_id_pool.values.len() as u32);
+        wire.queue(&wide.weight_id_pool.values);
+        wire.u32(wide.weight_id_pool.spans.len() as u32);
+        wire.queue(&wide.weight_id_pool.spans);
+        wire.u32(wide.rows.len() as u32);
+        wire.queue(&wide.rows);
+        wire.u32(wide.states.len() as u32);
+        wire.queue(&wide.states);
         wire.finish()
     }
 
@@ -2372,11 +2400,12 @@ impl PackedRuntimeDwa {
     /// each transition as u24 target + u16 weight, covering larger parser DWAs
     /// without falling all the way back to DWF3.
     fn try_append_narrow_backed_fast_wire_bytes(&self, out: &mut Vec<u8>) -> Option<usize> {
-        let split_target_weight = self.states.len() > (1usize << 17)
-            || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
-            || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15));
+        let wide = self.wide()?;
+        let split_target_weight = wide.states.len() > (1usize << 17)
+            || wide.target_pool.values.iter().any(|&value| value >= (1 << 17))
+            || wide.weight_id_pool.values.iter().any(|&value| value >= (1 << 15));
         let raw_flat16 = split_target_weight
-            .then(|| self.token_sets.as_ref()?.flat16())
+            .then(|| wide.token_sets.flat16())
             .flatten();
         let raw_u16_ranges = raw_flat16.map(|(ranges, _)| ranges);
         let raw_u16_spans = raw_flat16.map(|(_, spans)| spans);
@@ -2433,7 +2462,7 @@ impl PackedRuntimeDwa {
         let word_spans: &[u32] = if let Some(spans) = raw_u16_spans {
             owned_word_spans = spans.iter().map(|span| span.word_spans).collect::<Vec<_>>();
             &owned_word_spans
-        } else if let Some(spans) = self.token_sets.as_ref().and_then(OwnedTokenSets::materialized).map(|(_, spans)| spans) {
+        } else if let Some(spans) = wide.token_sets.materialized().map(|(_, spans)| spans) {
             spans
         } else {
             owned_word_spans = (0..self.token_set_count())
@@ -2506,28 +2535,28 @@ impl PackedRuntimeDwa {
         const SPAN_START_MAX: u32 = (1 << (32 - SPAN_LEN_BITS)) - 1;
         let span_fits = |span: &[u32; 2]| span[0] <= SPAN_START_MAX && span[1] <= SPAN_LEN_MAX;
 
-        if self.geometries.len() > u16::MAX as usize + 1
-            || self.geometries.iter().any(|geometry| {
+        if wide.geometries.len() > u16::MAX as usize + 1
+            || wide.geometries.iter().any(|geometry| {
                 geometry.len() > u16::MAX as usize
                     || geometry
                         .iter()
                         .any(|&(start, end)| start > u16::MAX as u32 || end > u16::MAX as u32)
             })
-            || self.weights.len() > u16::MAX as usize
-            || self.weights.iter().any(|weight| {
+            || wide.weights.len() > u16::MAX as usize
+            || wide.weights.iter().any(|weight| {
                 weight.geometry > u16::MAX as u32
                     || weight.token_ids_start >= (1 << 24)
                     || weight.full > u8::MAX as u32
             })
-            || self.weight_token_ids.iter().any(|&value| value > u16::MAX as u32)
-            || self.label_pool.values.iter().any(|&label| {
+            || wide.weight_token_ids.iter().any(|&value| value > u16::MAX as u32)
+            || wide.label_pool.values.iter().any(|&label| {
                 label != DEFAULT_LABEL_WIRE && !(0..u16::MAX as i32).contains(&label)
             })
-            || self.label_pool.values.len() != self.target_pool.values.len()
-            || self.label_pool.values.len() != self.weight_id_pool.values.len()
-            || self.label_pool.spans.len() > u16::MAX as usize + 1
-            || self.label_pool.spans.iter().any(|span| !span_fits(span))
-            || self.target_pool.values.iter().any(|&value| {
+            || wide.label_pool.values.len() != wide.target_pool.values.len()
+            || wide.label_pool.values.len() != wide.weight_id_pool.values.len()
+            || wide.label_pool.spans.len() > u16::MAX as usize + 1
+            || wide.label_pool.spans.iter().any(|span| !span_fits(span))
+            || wide.target_pool.values.iter().any(|&value| {
                 value
                     >= if split_target_weight {
                         1u32 << 24
@@ -2535,7 +2564,7 @@ impl PackedRuntimeDwa {
                         1u32 << 17
                     }
             })
-            || self.weight_id_pool.values.iter().any(|&value| {
+            || wide.weight_id_pool.values.iter().any(|&value| {
                 value
                     >= if split_target_weight {
                         1u32 << 16
@@ -2543,23 +2572,22 @@ impl PackedRuntimeDwa {
                         1u32 << 15
                     }
             })
-            || self.label_pool.spans.len() != self.target_pool.spans.len()
-            || self.label_pool.spans.len() != self.weight_id_pool.spans.len()
-            || self
-                .label_pool
+            || wide.label_pool.spans.len() != wide.target_pool.spans.len()
+            || wide.label_pool.spans.len() != wide.weight_id_pool.spans.len()
+            || wide.label_pool
                 .spans
                 .iter()
-                .zip(self.target_pool.spans.iter())
-                .zip(self.weight_id_pool.spans.iter())
+                .zip(wide.target_pool.spans.iter())
+                .zip(wide.weight_id_pool.spans.iter())
                 .any(|((label, target), weight)| label != target || label != weight)
-            || self.rows.len() != self.label_pool.spans.len()
-            || self.rows.iter().enumerate().any(|(index, row)| {
+            || wide.rows.len() != wide.label_pool.spans.len()
+            || wide.rows.iter().enumerate().any(|(index, row)| {
                 row.labels as usize != index
                     || row.targets as usize != index
                     || row.weights as usize != index
             })
-            || self.states.len() > (1usize << 24)
-            || self.states.iter().any(|state| {
+            || wide.states.len() > (1usize << 24)
+            || wide.states.iter().any(|state| {
                 state.row > u16::MAX as u32
                     || (state.final_weight != u32::MAX && state.final_weight >= u16::MAX as u32)
             })
@@ -2575,14 +2603,14 @@ impl PackedRuntimeDwa {
             (Vec::new(), Vec::new(), Vec::new())
         } else {
             let mut label_ids = FxHashMap::<&[Label], u16>::default();
-            label_ids.reserve(self.label_pool.spans.len().min(u16::MAX as usize));
+            label_ids.reserve(wide.label_pool.spans.len().min(u16::MAX as usize));
             let mut unique_label_values = Vec::<Label>::new();
             let mut unique_label_spans = Vec::<[u32; 2]>::new();
-            let mut row_label_ids = Vec::<u16>::with_capacity(self.label_pool.spans.len());
-            for &[start, len] in self.label_pool.spans.iter() {
+            let mut row_label_ids = Vec::<u16>::with_capacity(wide.label_pool.spans.len());
+            for &[start, len] in wide.label_pool.spans.iter() {
                 let start_usize = start as usize;
                 let end = start_usize.checked_add(len as usize)?;
-                let labels = self.label_pool.values.get(start_usize..end)?;
+                let labels = wide.label_pool.values.get(start_usize..end)?;
                 let id = if let Some(&id) = label_ids.get(labels) {
                     id
                 } else {
@@ -2622,30 +2650,30 @@ impl PackedRuntimeDwa {
             put_u32(out, (span[0] << SPAN_LEN_BITS) | span[1]);
         }
 
-        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let geometry_range_count = wide.geometries.iter().map(Vec::len).sum::<usize>();
         let transition_section_len = if split_target_weight {
             4usize
-                .saturating_add(self.label_pool.values.len().saturating_mul(7))
-                .saturating_add(4 + self.label_pool.spans.len().saturating_mul(4))
+                .saturating_add(wide.label_pool.values.len().saturating_mul(7))
+                .saturating_add(4 + wide.label_pool.spans.len().saturating_mul(4))
         } else {
             4usize
                 .saturating_add(unique_label_values.len().saturating_mul(2))
                 .saturating_add(4 + unique_label_spans.len().saturating_mul(4))
                 .saturating_add(4 + row_label_ids.len().saturating_mul(2))
-                .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
-                .saturating_add(4 + self.target_pool.spans.len().saturating_mul(4))
+                .saturating_add(4 + wide.target_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + wide.target_pool.spans.len().saturating_mul(4))
         };
         let expected_len = 16usize
             .saturating_add(token_set_count.saturating_mul(3))
             .saturating_add(token_set_count.saturating_mul(2))
             .saturating_add(token_bytes)
             .saturating_add(4)
-            .saturating_add(self.geometries.len().saturating_mul(2))
+            .saturating_add(wide.geometries.len().saturating_mul(2))
             .saturating_add(geometry_range_count.saturating_mul(4))
-            .saturating_add(4 + self.weights.len().saturating_mul(6))
-            .saturating_add(4 + self.weight_token_ids.len().saturating_mul(2))
+            .saturating_add(4 + wide.weights.len().saturating_mul(6))
+            .saturating_add(4 + wide.weight_token_ids.len().saturating_mul(2))
             .saturating_add(transition_section_len)
-            .saturating_add(4 + self.states.len().saturating_mul(4));
+            .saturating_add(4 + wide.states.len().saturating_mul(4));
         let output_start = out.len();
         out.reserve(expected_len);
         out.extend_from_slice(if split_target_weight { b"DWF6" } else { b"DWF5" });
@@ -2679,44 +2707,44 @@ impl PackedRuntimeDwa {
             }
         }
 
-        put_u32(out, self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
+        put_u32(out, wide.geometries.len() as u32);
+        for geometry in wide.geometries.iter() {
             put_u16(out, geometry.len() as u16);
             for &(start, end) in geometry {
                 put_u16(out, start as u16);
                 put_u16(out, end as u16);
             }
         }
-        put_u32(out, self.weights.len() as u32);
-        for weight in self.weights.iter() {
+        put_u32(out, wide.weights.len() as u32);
+        for weight in wide.weights.iter() {
             put_u16(out, weight.geometry as u16);
             put_u24(out, weight.token_ids_start);
             out.push(weight.full as u8);
         }
-        put_u32(out, self.weight_token_ids.len() as u32);
+        put_u32(out, wide.weight_token_ids.len() as u32);
         let weight_token_ids_start = out.len();
         out.resize(
-            weight_token_ids_start + self.weight_token_ids.len().saturating_mul(2),
+            weight_token_ids_start + wide.weight_token_ids.len().saturating_mul(2),
             0,
         );
-        if self.weight_token_ids.len() >= 4096 && rayon::current_num_threads() > 1 {
+        if wide.weight_token_ids.len() >= 4096 && rayon::current_num_threads() > 1 {
             out[weight_token_ids_start..]
                 .par_chunks_exact_mut(2)
-                .zip(self.weight_token_ids.par_iter())
+                .zip(wide.weight_token_ids.par_iter())
                 .for_each(|(dst, &value)| dst.copy_from_slice(&(value as u16).to_le_bytes()));
         } else {
             for (dst, &value) in out[weight_token_ids_start..]
                 .as_chunks_mut::<2>().0.iter_mut()
-                .zip(self.weight_token_ids.iter())
+                .zip(wide.weight_token_ids.iter())
             {
                 dst.copy_from_slice(&(value as u16).to_le_bytes());
             }
         }
         if split_target_weight {
-            put_u32(out, self.label_pool.values.len() as u32);
+            put_u32(out, wide.label_pool.values.len() as u32);
             let transitions_start = out.len();
             out.resize(
-                transitions_start + self.label_pool.values.len().saturating_mul(7),
+                transitions_start + wide.label_pool.values.len().saturating_mul(7),
                 0,
             );
             let write_transition =
@@ -2732,33 +2760,33 @@ impl PackedRuntimeDwa {
                     dst[4] = (target >> 16) as u8;
                     dst[5..7].copy_from_slice(&(weight_id as u16).to_le_bytes());
                 };
-            if self.label_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
+            if wide.label_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
                 out[transitions_start..]
                     .par_chunks_exact_mut(7)
                     .zip(
-                        self.label_pool
+                        wide.label_pool
                             .values
                             .par_iter()
-                            .zip(self.target_pool.values.par_iter())
-                            .zip(self.weight_id_pool.values.par_iter()),
+                            .zip(wide.target_pool.values.par_iter())
+                            .zip(wide.weight_id_pool.values.par_iter()),
                     )
                     .for_each(|(dst, entry)| write_transition(dst, entry));
             } else {
                 for (dst, entry) in out[transitions_start..]
                     .as_chunks_mut::<7>().0.iter_mut()
                     .zip(
-                        self.label_pool
+                        wide.label_pool
                             .values
                             .iter()
-                            .zip(self.target_pool.values.iter())
-                            .zip(self.weight_id_pool.values.iter()),
+                            .zip(wide.target_pool.values.iter())
+                            .zip(wide.weight_id_pool.values.iter()),
                     )
                 {
                     write_transition(dst, entry);
                 }
             }
-            put_u32(out, self.label_pool.spans.len() as u32);
-            for &span in self.label_pool.spans.iter() {
+            put_u32(out, wide.label_pool.spans.len() as u32);
+            for &span in wide.label_pool.spans.iter() {
                 put_span(out, span);
             }
         } else {
@@ -2781,46 +2809,46 @@ impl PackedRuntimeDwa {
             for &label_id in &row_label_ids {
                 put_u16(out, label_id);
             }
-            put_u32(out, self.target_pool.values.len() as u32);
+            put_u32(out, wide.target_pool.values.len() as u32);
             let transitions_start = out.len();
             out.resize(
-                transitions_start + self.target_pool.values.len().saturating_mul(4),
+                transitions_start + wide.target_pool.values.len().saturating_mul(4),
                 0,
             );
             let write_transition = |dst: &mut [u8], (&target, &weight_id): (&u32, &u32)| {
                 dst.copy_from_slice(&(target | (weight_id << 17)).to_le_bytes());
             };
-            if self.target_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
+            if wide.target_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
                 out[transitions_start..]
                     .par_chunks_exact_mut(4)
                     .zip(
-                        self.target_pool
+                        wide.target_pool
                             .values
                             .par_iter()
-                            .zip(self.weight_id_pool.values.par_iter()),
+                            .zip(wide.weight_id_pool.values.par_iter()),
                     )
                     .for_each(|(dst, pair)| write_transition(dst, pair));
             } else {
                 for (dst, pair) in out[transitions_start..]
                     .as_chunks_mut::<4>().0.iter_mut()
                     .zip(
-                        self.target_pool
+                        wide.target_pool
                             .values
                             .iter()
-                            .zip(self.weight_id_pool.values.iter()),
+                            .zip(wide.weight_id_pool.values.iter()),
                     )
                 {
                     write_transition(dst, pair);
                 }
             }
-            put_u32(out, self.target_pool.spans.len() as u32);
-            for &span in self.target_pool.spans.iter() {
+            put_u32(out, wide.target_pool.spans.len() as u32);
+            for &span in wide.target_pool.spans.iter() {
                 put_span(out, span);
             }
         }
-        put_u32(out, self.states.len() as u32);
+        put_u32(out, wide.states.len() as u32);
         let states_start = out.len();
-        out.resize(states_start + self.states.len().saturating_mul(4), 0);
+        out.resize(states_start + wide.states.len().saturating_mul(4), 0);
         let write_state = |dst: &mut [u8], state: &PackedRuntimeState| {
             dst[..2].copy_from_slice(&(state.row as u16).to_le_bytes());
             let final_weight = if state.final_weight == u32::MAX {
@@ -2830,15 +2858,15 @@ impl PackedRuntimeDwa {
             };
             dst[2..4].copy_from_slice(&final_weight.to_le_bytes());
         };
-        if self.states.len() >= 4096 && rayon::current_num_threads() > 1 {
+        if wide.states.len() >= 4096 && rayon::current_num_threads() > 1 {
             out[states_start..]
                 .par_chunks_exact_mut(4)
-                .zip(self.states.par_iter())
+                .zip(wide.states.par_iter())
                 .for_each(|(dst, state)| write_state(dst, state));
         } else {
             for (dst, state) in out[states_start..]
                 .as_chunks_mut::<4>().0.iter_mut()
-                .zip(self.states.iter())
+                .zip(wide.states.iter())
             {
                 write_state(dst, state);
             }
@@ -2849,41 +2877,41 @@ impl PackedRuntimeDwa {
     }
 
     fn fast_wire_len_for_chunks(&self, chunk_bodies: &[Box<[u8]>]) -> usize {
+        let wide = self.wide().expect("wide wire chunks");
         let token_bytes = chunk_bodies.iter().map(|body| body.len()).sum::<usize>();
-        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let geometry_range_count = wide.geometries.iter().map(Vec::len).sum::<usize>();
         12usize
             .saturating_add(token_bytes)
             // DWF2 token frames carry body length, set count, and range count.
             .saturating_add(chunk_bodies.len().saturating_mul(12))
             .saturating_add(4)
-            .saturating_add(self.geometries.len().saturating_mul(4))
+            .saturating_add(wide.geometries.len().saturating_mul(4))
             .saturating_add(geometry_range_count.saturating_mul(8))
             .saturating_add(4)
-            .saturating_add(self.weights.len().saturating_mul(12))
+            .saturating_add(wide.weights.len().saturating_mul(12))
             .saturating_add(4)
-            .saturating_add(self.weight_token_ids.len().saturating_mul(4))
+            .saturating_add(wide.weight_token_ids.len().saturating_mul(4))
             .saturating_add(4)
-            .saturating_add(self.label_pool.values.len().saturating_mul(4))
+            .saturating_add(wide.label_pool.values.len().saturating_mul(4))
             .saturating_add(4)
-            .saturating_add(self.label_pool.spans.len().saturating_mul(8))
+            .saturating_add(wide.label_pool.spans.len().saturating_mul(8))
             .saturating_add(4)
-            .saturating_add(self.target_pool.values.len().saturating_mul(4))
+            .saturating_add(wide.target_pool.values.len().saturating_mul(4))
             .saturating_add(4)
-            .saturating_add(self.target_pool.spans.len().saturating_mul(8))
+            .saturating_add(wide.target_pool.spans.len().saturating_mul(8))
             .saturating_add(4)
-            .saturating_add(self.weight_id_pool.values.len().saturating_mul(4))
+            .saturating_add(wide.weight_id_pool.values.len().saturating_mul(4))
             .saturating_add(4)
-            .saturating_add(self.weight_id_pool.spans.len().saturating_mul(8))
+            .saturating_add(wide.weight_id_pool.spans.len().saturating_mul(8))
             .saturating_add(4)
-            .saturating_add(self.rows.len().saturating_mul(12))
+            .saturating_add(wide.rows.len().saturating_mul(12))
             .saturating_add(4)
-            .saturating_add(self.states.len().saturating_mul(8))
+            .saturating_add(wide.states.len().saturating_mul(8))
     }
 
     /// Exact wire size for backed or directly sized owned layouts.
     pub fn fast_wire_len(&self) -> Option<usize> {
-        self.backed
-            .as_ref()
+        self.backed()
             .map(|backed| backed.section_len)
             .or_else(|| self.owned_narrow_fast_wire_len())
             .or_else(|| self.runtime_shaped_fast_wire_len())
@@ -2895,7 +2923,7 @@ impl PackedRuntimeDwa {
     /// canonicalized into this representation after runtime caches are built,
     /// so save() can copy actual runtime state rather than re-encode it.
     pub fn backed_fast_wire_bytes(&self) -> Option<&[u8]> {
-        let backed = self.backed.as_ref()?;
+        let backed = self.backed()?;
         let end = backed.section_start.checked_add(backed.section_len)?;
         backed.backing.get(backed.section_start..end)
     }
@@ -2906,7 +2934,7 @@ impl PackedRuntimeDwa {
     /// encoded independently so the expensive millions-of-ranges pass scales
     /// across cores without requiring lexicographic set sorting.
     pub fn fast_wire_bytes(&self) -> Vec<u8> {
-        if self.backed.is_none() && self.owned_narrow.is_none()
+        if let Some(wide) = self.wide()
             && std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some()
         {
             let mut token_range_count = 0usize;
@@ -2917,9 +2945,8 @@ impl PackedRuntimeDwa {
                     set.for_each_range(|_, hi| token_max = token_max.max(hi));
                 }
             }
-            let geometry_ranges = self.geometries.iter().map(Vec::len).sum::<usize>();
-            let geometry_max = self
-                .geometries
+            let geometry_ranges = wide.geometries.iter().map(Vec::len).sum::<usize>();
+            let geometry_max = wide.geometries
                 .iter()
                 .flat_map(|geometry| geometry.iter())
                 .flat_map(|&(start, end)| [start, end])
@@ -2931,41 +2958,41 @@ impl PackedRuntimeDwa {
                     spans.iter().map(|span| span[1]).max().unwrap_or(0),
                 )
             };
-            let (label_span_start, label_span_len) = span_stats(&self.label_pool.spans);
-            let (target_span_start, target_span_len) = span_stats(&self.target_pool.spans);
-            let (weight_span_start, weight_span_len) = span_stats(&self.weight_id_pool.spans);
+            let (label_span_start, label_span_len) = span_stats(&wide.label_pool.spans);
+            let (target_span_start, target_span_len) = span_stats(&wide.target_pool.spans);
+            let (weight_span_start, weight_span_len) = span_stats(&wide.weight_id_pool.spans);
             eprintln!(
                 "[glrmask/profile][packed_runtime_dwa_layout] token_sets={} token_ranges={} token_max={} geometries={} geometry_ranges={} geometry_max={} weights={} weight_token_ids={} weight_token_id_max={} label_values={} label_min={} label_max={} label_spans={} label_span_start_max={} label_span_len_max={} target_values={} target_max={} target_spans={} target_span_start_max={} target_span_len_max={} weight_values={} weight_value_max={} weight_spans={} weight_span_start_max={} weight_span_len_max={} rows={} row_field_max={} states={} state_row_max={} state_final_max={}",
                 self.token_set_count(),
                 token_range_count,
                 token_max,
-                self.geometries.len(),
+                wide.geometries.len(),
                 geometry_ranges,
                 geometry_max,
-                self.weights.len(),
-                self.weight_token_ids.len(),
-                self.weight_token_ids.iter().copied().max().unwrap_or(0),
-                self.label_pool.values.len(),
-                self.label_pool.values.iter().copied().min().unwrap_or(0),
-                self.label_pool.values.iter().copied().max().unwrap_or(0),
-                self.label_pool.spans.len(),
+                wide.weights.len(),
+                wide.weight_token_ids.len(),
+                wide.weight_token_ids.iter().copied().max().unwrap_or(0),
+                wide.label_pool.values.len(),
+                wide.label_pool.values.iter().copied().min().unwrap_or(0),
+                wide.label_pool.values.iter().copied().max().unwrap_or(0),
+                wide.label_pool.spans.len(),
                 label_span_start,
                 label_span_len,
-                self.target_pool.values.len(),
-                self.target_pool.values.iter().copied().max().unwrap_or(0),
-                self.target_pool.spans.len(),
+                wide.target_pool.values.len(),
+                wide.target_pool.values.iter().copied().max().unwrap_or(0),
+                wide.target_pool.spans.len(),
                 target_span_start,
                 target_span_len,
-                self.weight_id_pool.values.len(),
-                self.weight_id_pool.values.iter().copied().max().unwrap_or(0),
-                self.weight_id_pool.spans.len(),
+                wide.weight_id_pool.values.len(),
+                wide.weight_id_pool.values.iter().copied().max().unwrap_or(0),
+                wide.weight_id_pool.spans.len(),
                 weight_span_start,
                 weight_span_len,
-                self.rows.len(),
-                self.rows.iter().flat_map(|row| [row.labels, row.targets, row.weights]).max().unwrap_or(0),
-                self.states.len(),
-                self.states.iter().map(|state| state.row).max().unwrap_or(0),
-                self.states.iter().filter_map(|state| (state.final_weight != u32::MAX).then_some(state.final_weight)).max().unwrap_or(0),
+                wide.rows.len(),
+                wide.rows.iter().flat_map(|row| [row.labels, row.targets, row.weights]).max().unwrap_or(0),
+                wide.states.len(),
+                wide.states.iter().map(|state| state.row).max().unwrap_or(0),
+                wide.states.iter().filter_map(|state| (state.final_weight != u32::MAX).then_some(state.final_weight)).max().unwrap_or(0),
             );
         }
         let mut out = Vec::new();
@@ -2989,12 +3016,13 @@ impl PackedRuntimeDwa {
                 .expect("valid owned narrow DWA wire layout");
             return;
         }
+        let wide = self.wide().expect("wide DWA after backed/narrow dispatch");
         let profile = std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some();
         if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
-            let token_ranges = self.token_sets.as_ref().and_then(OwnedTokenSets::flat16).map_or(0, |(ranges, _)| ranges.len());
+            let token_ranges = wide.token_sets.flat16().map_or(0, |(ranges, _)| ranges.len());
             eprintln!(
                 "[glrmask/profile][packed_runtime_dwa_append_layout] states={} token_sets={} token_ranges_u16={} prefer_runtime_shaped={} direct_len={:?}",
-                self.states.len(),
+                wide.states.len(),
                 self.token_set_count(),
                 token_ranges,
                 self.prefer_runtime_shaped_wire(),
@@ -3194,53 +3222,53 @@ impl PackedRuntimeDwa {
         let token_ms = token_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let geometry_started = profile.then(std::time::Instant::now);
-        put_u32(out, self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
+        put_u32(out, wide.geometries.len() as u32);
+        for geometry in wide.geometries.iter() {
             put_u32(out, geometry.len() as u32);
             for &(start, end) in geometry {
                 put_u32(out, start);
                 put_u32(out, end);
             }
         }
-        put_u32(out, self.weights.len() as u32);
-        for weight in self.weights.iter() {
+        put_u32(out, wide.weights.len() as u32);
+        for weight in wide.weights.iter() {
             put_u32(out, weight.geometry);
             put_u32(out, weight.token_ids_start);
             put_u32(out, weight.full);
         }
-        put_u32(out, self.weight_token_ids.len() as u32);
-        put_u32s(out, &self.weight_token_ids);
+        put_u32(out, wide.weight_token_ids.len() as u32);
+        put_u32s(out, &wide.weight_token_ids);
         let geometry_ms = geometry_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let pools_started = profile.then(std::time::Instant::now);
-        put_u32(out, self.label_pool.values.len() as u32);
-        put_i32s(out, &self.label_pool.values);
-        put_u32(out, self.label_pool.spans.len() as u32);
-        for &[start, len] in self.label_pool.spans.iter() {
+        put_u32(out, wide.label_pool.values.len() as u32);
+        put_i32s(out, &wide.label_pool.values);
+        put_u32(out, wide.label_pool.spans.len() as u32);
+        for &[start, len] in wide.label_pool.spans.iter() {
             put_u32(out, start);
             put_u32(out, len);
         }
-        put_u32(out, self.target_pool.values.len() as u32);
-        put_u32s(out, &self.target_pool.values);
-        put_u32(out, self.target_pool.spans.len() as u32);
-        for &[start, len] in self.target_pool.spans.iter() {
+        put_u32(out, wide.target_pool.values.len() as u32);
+        put_u32s(out, &wide.target_pool.values);
+        put_u32(out, wide.target_pool.spans.len() as u32);
+        for &[start, len] in wide.target_pool.spans.iter() {
             put_u32(out, start);
             put_u32(out, len);
         }
-        put_u32(out, self.weight_id_pool.values.len() as u32);
-        put_u32s(out, &self.weight_id_pool.values);
-        put_u32(out, self.weight_id_pool.spans.len() as u32);
-        for &[start, len] in self.weight_id_pool.spans.iter() {
+        put_u32(out, wide.weight_id_pool.values.len() as u32);
+        put_u32s(out, &wide.weight_id_pool.values);
+        put_u32(out, wide.weight_id_pool.spans.len() as u32);
+        for &[start, len] in wide.weight_id_pool.spans.iter() {
             put_u32(out, start);
             put_u32(out, len);
         }
         let pools_ms = pools_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let rows_started = profile.then(std::time::Instant::now);
-        put_u32(out, self.rows.len() as u32);
-        put_rows(out, &self.rows);
-        put_u32(out, self.states.len() as u32);
-        put_states(out, &self.states);
+        put_u32(out, wide.rows.len() as u32);
+        put_rows(out, &wide.rows);
+        put_u32(out, wide.states.len() as u32);
+        put_states(out, &wide.states);
         let rows_ms = rows_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started) = total_started {
             eprintln!(
@@ -3278,26 +3306,7 @@ impl PackedRuntimeDwa {
             BackedPackedRuntimeDwa::parse(backing, section_start, input.len())?;
         Ok(Self {
             start_state,
-            backed: Some(backed),
-            owned_narrow: None,
-            token_sets: None,
-            geometries: Box::new([]),
-            weights: Box::new([]),
-            weight_token_ids: Box::new([]),
-            label_pool: PackedRuntimeSeqPool {
-                values: Box::new([]),
-                spans: Box::new([]),
-            },
-            target_pool: PackedRuntimeSeqPool {
-                values: Box::new([]),
-                spans: Box::new([]),
-            },
-            weight_id_pool: PackedRuntimeSeqPool {
-                values: Box::new([]),
-                spans: Box::new([]),
-            },
-            rows: Box::new([]),
-            states: Box::new([]),
+            storage: PackedDwaStorage::Backed(backed),
         })
     }
 
@@ -4057,26 +4066,26 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state,
-            backed: None,
-            owned_narrow: None,
-            token_sets: Some(token_sets),
-            geometries: geometries.into_boxed_slice(),
-            weights: weights.into_boxed_slice(),
-            weight_token_ids: weight_token_ids.into_boxed_slice(),
-            label_pool: PackedRuntimeSeqPool {
-                values: label_values.into_boxed_slice(),
-                spans: label_spans.into_boxed_slice(),
-            },
-            target_pool: PackedRuntimeSeqPool {
-                values: target_values.into_boxed_slice(),
-                spans: target_spans.into_boxed_slice(),
-            },
-            weight_id_pool: PackedRuntimeSeqPool {
-                values: weight_values.into_boxed_slice(),
-                spans: weight_spans.into_boxed_slice(),
-            },
-            rows: rows.into_boxed_slice(),
-            states: states.into_boxed_slice(),
+            storage: PackedDwaStorage::Wide(OwnedWidePackedRuntimeDwa {
+                token_sets,
+                geometries: geometries.into_boxed_slice(),
+                weights: weights.into_boxed_slice(),
+                weight_token_ids: weight_token_ids.into_boxed_slice(),
+                label_pool: PackedRuntimeSeqPool {
+                    values: label_values.into_boxed_slice(),
+                    spans: label_spans.into_boxed_slice(),
+                },
+                target_pool: PackedRuntimeSeqPool {
+                    values: target_values.into_boxed_slice(),
+                    spans: target_spans.into_boxed_slice(),
+                },
+                weight_id_pool: PackedRuntimeSeqPool {
+                    values: weight_values.into_boxed_slice(),
+                    spans: weight_spans.into_boxed_slice(),
+                },
+                rows: rows.into_boxed_slice(),
+                states: states.into_boxed_slice(),
+            }),
         })
     }
 
@@ -4441,7 +4450,6 @@ impl PackedRuntimeDwa {
         } else {
             None
         };
-        let owned_narrow_present = owned_narrow.is_some();
 
         if let Some(total_started) = total_started {
             eprintln!(
@@ -4460,38 +4468,43 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state: dwa.start_state(),
-            backed: None,
-            owned_narrow,
-            token_sets: if owned_narrow_present {
-                None
-            } else if narrow_token_ranges {
-                Some(OwnedTokenSets::Flat16 {
-                    ranges: flat_token_ranges_u16.into_boxed_slice(),
-                    spans: flat_token_spans.into_boxed_slice(),
-                })
+            storage: if let Some(graph) = owned_narrow {
+                PackedDwaStorage::Narrow {
+                    graph,
+                    geometries: geometries.into_boxed_slice(),
+                }
             } else {
-                Some(OwnedTokenSets::Materialized {
-                    sets: token_sets.into_boxed_slice(),
-                    word_spans: token_word_spans.into_boxed_slice(),
+                PackedDwaStorage::Wide(OwnedWidePackedRuntimeDwa {
+                    token_sets: if narrow_token_ranges {
+                        OwnedTokenSets::Flat16 {
+                            ranges: flat_token_ranges_u16.into_boxed_slice(),
+                            spans: flat_token_spans.into_boxed_slice(),
+                        }
+                    } else {
+                        OwnedTokenSets::Materialized {
+                            sets: token_sets.into_boxed_slice(),
+                            word_spans: token_word_spans.into_boxed_slice(),
+                        }
+                    },
+                    geometries: geometries.into_boxed_slice(),
+                    weights: weights.into_boxed_slice(),
+                    weight_token_ids: weight_token_ids.into_boxed_slice(),
+                    label_pool: PackedRuntimeSeqPool {
+                        values: label_values.into_boxed_slice(),
+                        spans: label_spans.into_boxed_slice(),
+                    },
+                    target_pool: PackedRuntimeSeqPool {
+                        values: target_values.into_boxed_slice(),
+                        spans: target_spans.into_boxed_slice(),
+                    },
+                    weight_id_pool: PackedRuntimeSeqPool {
+                        values: weight_values.into_boxed_slice(),
+                        spans: weight_spans.into_boxed_slice(),
+                    },
+                    rows: rows.into_boxed_slice(),
+                    states: states.into_boxed_slice(),
                 })
             },
-            geometries: geometries.into_boxed_slice(),
-            weights: if owned_narrow_present { Box::new([]) } else { weights.into_boxed_slice() },
-            weight_token_ids: if owned_narrow_present { Box::new([]) } else { weight_token_ids.into_boxed_slice() },
-            label_pool: PackedRuntimeSeqPool {
-                values: if owned_narrow_present { Box::new([]) } else { label_values.into_boxed_slice() },
-                spans: if owned_narrow_present { Box::new([]) } else { label_spans.into_boxed_slice() },
-            },
-            target_pool: PackedRuntimeSeqPool {
-                values: if owned_narrow_present { Box::new([]) } else { target_values.into_boxed_slice() },
-                spans: if owned_narrow_present { Box::new([]) } else { target_spans.into_boxed_slice() },
-            },
-            weight_id_pool: PackedRuntimeSeqPool {
-                values: if owned_narrow_present { Box::new([]) } else { weight_values.into_boxed_slice() },
-                spans: if owned_narrow_present { Box::new([]) } else { weight_spans.into_boxed_slice() },
-            },
-            rows: if owned_narrow_present { Box::new([]) } else { rows.into_boxed_slice() },
-            states: if owned_narrow_present { Box::new([]) } else { states.into_boxed_slice() },
         })
     }
 
@@ -4720,29 +4733,29 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state: dwa.start_state(),
-            backed: None,
-            owned_narrow: None,
-            token_sets: Some(OwnedTokenSets::Chunked {
+            storage: PackedDwaStorage::Wide(OwnedWidePackedRuntimeDwa {
+                token_sets: OwnedTokenSets::Chunked {
                 chunks: token_set_chunks.into_boxed_slice(),
                 locations: token_set_locations.into_boxed_slice(),
+            },
+                geometries: geometries.into_boxed_slice(),
+                weights: weights.into_boxed_slice(),
+                weight_token_ids: weight_token_ids.into_boxed_slice(),
+                label_pool: PackedRuntimeSeqPool {
+                    values: label_values.into_boxed_slice(),
+                    spans: label_spans.into_boxed_slice(),
+                },
+                target_pool: PackedRuntimeSeqPool {
+                    values: target_values.into_boxed_slice(),
+                    spans: target_spans.into_boxed_slice(),
+                },
+                weight_id_pool: PackedRuntimeSeqPool {
+                    values: weight_values.into_boxed_slice(),
+                    spans: weight_spans.into_boxed_slice(),
+                },
+                rows: rows.into_boxed_slice(),
+                states: states.into_boxed_slice(),
             }),
-            geometries: geometries.into_boxed_slice(),
-            weights: weights.into_boxed_slice(),
-            weight_token_ids: weight_token_ids.into_boxed_slice(),
-            label_pool: PackedRuntimeSeqPool {
-                values: label_values.into_boxed_slice(),
-                spans: label_spans.into_boxed_slice(),
-            },
-            target_pool: PackedRuntimeSeqPool {
-                values: target_values.into_boxed_slice(),
-                spans: target_spans.into_boxed_slice(),
-            },
-            weight_id_pool: PackedRuntimeSeqPool {
-                values: weight_values.into_boxed_slice(),
-                spans: weight_spans.into_boxed_slice(),
-            },
-            rows: rows.into_boxed_slice(),
-            states: states.into_boxed_slice(),
         })
     }
 
@@ -5047,20 +5060,20 @@ impl PackedRuntimeDwa {
 
         let result = Self {
             start_state,
-            backed: None,
-            owned_narrow: None,
-            token_sets: Some(OwnedTokenSets::Chunked {
+            storage: PackedDwaStorage::Wide(OwnedWidePackedRuntimeDwa {
+                token_sets: OwnedTokenSets::Chunked {
                 chunks: token_set_chunks.into_boxed_slice(),
                 locations: token_set_locations.into_boxed_slice(),
+            },
+                geometries: geometries.into_boxed_slice(),
+                weights: weights.into_boxed_slice(),
+                weight_token_ids: weight_token_ids.into_boxed_slice(),
+                label_pool: labels,
+                target_pool: targets,
+                weight_id_pool: weight_ids,
+                rows: rows.into_boxed_slice(),
+                states: states.into_boxed_slice(),
             }),
-            geometries: geometries.into_boxed_slice(),
-            weights: weights.into_boxed_slice(),
-            weight_token_ids: weight_token_ids.into_boxed_slice(),
-            label_pool: labels,
-            target_pool: targets,
-            weight_id_pool: weight_ids,
-            rows: rows.into_boxed_slice(),
-            states: states.into_boxed_slice(),
         };
         if let Some(total_started) = total_started {
             eprintln!(
@@ -5078,33 +5091,29 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn state_count(&self) -> usize {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE;
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE,
+            PackedDwaStorage::Backed(backed) => backed.state_count,
+            PackedDwaStorage::Wide(wide) => wide.states.len(),
         }
-        self.backed
-            .as_ref()
-            .map_or(self.states.len(), |backed| backed.state_count)
     }
 
     #[inline]
     fn row_count(&self) -> usize {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.spans.len();
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.spans.len(),
+            PackedDwaStorage::Backed(backed) => backed.row_count,
+            PackedDwaStorage::Wide(wide) => wide.rows.len(),
         }
-        self.backed
-            .as_ref()
-            .map_or(self.rows.len(), |backed| backed.row_count)
     }
 
     #[inline]
     pub fn token_set_count(&self) -> usize {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.token_spans.len();
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.token_spans.len(),
+            PackedDwaStorage::Backed(backed) => backed.token_set_count,
+            PackedDwaStorage::Wide(wide) => wide.token_sets.len(),
         }
-        if let Some(backed) = &self.backed {
-            return backed.token_set_count;
-        }
-        self.token_sets.as_ref().map_or(0, OwnedTokenSets::len)
     }
 
     /// Return the packed token-set ids referenced by transition weights.
@@ -5173,22 +5182,21 @@ impl PackedRuntimeDwa {
     pub fn materialized_token_sets_with_word_spans(
         &self,
     ) -> Option<(&[Arc<RangeSetBlaze<u32>>], &[u32])> {
-        self.token_sets.as_ref()?.materialized()
+        self.wide()?.token_sets.materialized()
     }
 
     #[inline]
     pub fn weight_count(&self) -> usize {
-        if let Some(narrow) = &self.owned_narrow {
-            return narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE;
+        match &self.storage {
+            PackedDwaStorage::Narrow { graph: narrow, .. } => narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE,
+            PackedDwaStorage::Backed(backed) => backed.weight_count,
+            PackedDwaStorage::Wide(wide) => wide.weights.len(),
         }
-        self.backed
-            .as_ref()
-            .map_or(self.weights.len(), |backed| backed.weight_count)
     }
 
     #[inline]
     pub fn token_set(&self, id: u32) -> Option<PackedRuntimeTokenSetRef<'_>> {
-        if let Some(backed) = &self.backed {
+        if let Some(backed) = self.backed() {
             if backed.direct_token_spans {
                 let index = id as usize;
                 if index >= backed.token_set_count {
@@ -5319,7 +5327,7 @@ impl PackedRuntimeDwa {
                 word_spans,
             });
         }
-        if let Some(narrow) = &self.owned_narrow {
+        if let Some(narrow) = self.narrow() {
             let span = *narrow.token_spans.get(id as usize)?;
             let wide = span.start & 1 != 0;
             let start_bytes = (span.start & !1) as usize;
@@ -5378,7 +5386,7 @@ impl PackedRuntimeDwa {
                 word_spans: span.word_spans,
             });
         }
-        self.token_sets.as_ref()?.get(id)
+        self.wide()?.token_sets.get(id)
     }
 
     #[inline]
@@ -5397,7 +5405,7 @@ impl PackedRuntimeDwa {
             return None;
         }
         if target_start == weight_start
-            && let Some(narrow) = &self.owned_narrow
+            && let Some(narrow) = self.narrow()
         {
             let flat_index = target_start as usize + index;
             let target = narrow.target(flat_index)?;
@@ -5405,7 +5413,7 @@ impl PackedRuntimeDwa {
             return Some((target, self.weight(weight)?));
         }
         if target_start == weight_start
-            && let Some(backed) = &self.backed
+            && let Some(backed) = self.backed()
             && backed.narrow
         {
             let flat_index = target_start as usize + index;
@@ -7591,7 +7599,7 @@ mod cache_tests {
         let dwa = dwa.share_exact_transition_rows_owned();
 
         let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
-        assert!(packed.owned_narrow.is_none());
+        assert!(packed.narrow().is_none());
         let wire = packed.fast_wire_bytes();
         assert!(wire.starts_with(b"DWF5"));
         let loaded = PackedRuntimeDwa::from_fast_wire_bytes(&wire).unwrap();
@@ -7688,12 +7696,8 @@ mod cache_tests {
         let dwa = dwa.share_exact_transition_rows_owned();
 
         let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
-        assert!(packed.owned_narrow.is_some());
-        assert!(packed.states.is_empty() && packed.rows.is_empty());
-        assert!(packed.weights.is_empty() && packed.weight_token_ids.is_empty());
-        assert!(packed.label_pool.values.is_empty() && packed.label_pool.spans.is_empty());
-        assert!(packed.target_pool.values.is_empty() && packed.target_pool.spans.is_empty());
-        assert!(packed.weight_id_pool.values.is_empty() && packed.weight_id_pool.spans.is_empty());
+        assert!(packed.narrow().is_some());
+        assert!(packed.wide().is_none());
         let (owned_target, owned_weight) = packed.transition(0, 7).unwrap();
         assert_eq!(owned_target, large_target);
         assert!(!owned_weight.is_full());
