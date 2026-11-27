@@ -97,7 +97,7 @@ impl SchemaAssertions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum SchemaType {
     Null,
     Boolean,
@@ -240,7 +240,7 @@ impl Default for ArraySchema {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Hash, Serialize)]
 pub struct StringSchema {
     pub min_length: usize,
     pub max_length: Option<usize>,

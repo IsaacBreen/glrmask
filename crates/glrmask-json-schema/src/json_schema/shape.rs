@@ -1,8 +1,7 @@
 //! Complete, borrowed schema observations. Equality and cache hashing use
 //! one typed node representation, with a location policy for lowering.
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::Hasher;
-use serde::Serialize;
+use std::hash::{Hash, Hasher};
 use serde_json::Value;
 
 use super::ast::{AdditionalProperties, NumberSchema, ObjectSchema, Schema, SchemaKind, SchemaType, StringSchema};
@@ -20,7 +19,7 @@ enum LocationPolicy<'a> {
     Absolute,
 }
 
-#[derive(PartialEq, Serialize)]
+#[derive(PartialEq, Hash)]
 enum Location<'a> {
     Ignored,
     Root,
@@ -28,14 +27,14 @@ enum Location<'a> {
     Absolute(&'a str),
 }
 
-#[derive(PartialEq, Serialize)]
+#[derive(PartialEq, Hash)]
 struct Node<'a> {
     location: Location<'a>,
     additional_site: bool,
     kind: Kind<'a>,
 }
 
-#[derive(PartialEq, Serialize)]
+#[derive(PartialEq, Hash)]
 enum Kind<'a> {
     Any,
     Never,
@@ -43,11 +42,11 @@ enum Kind<'a> {
     Assertions(Assertions<'a>),
 }
 
-#[derive(PartialEq, Serialize)]
+#[derive(PartialEq, Hash)]
 struct Assertions<'a> {
     types: Option<&'a [SchemaType]>,
-    constant: Option<&'a Value>,
-    enumeration: Option<&'a [Value]>,
+    constant: Option<LiteralShape<'a>>,
+    enumeration: Option<LiteralList<'a>>,
     object: Option<Object<'a>>,
     array: Option<(usize, Option<usize>, usize)>,
     string: Option<&'a StringSchema>,
@@ -59,7 +58,64 @@ struct Assertions<'a> {
     not: bool,
 }
 
-#[derive(PartialEq, Serialize)]
+/// A literal grammar observes spelling and ordered object entries, not
+/// merely serde_json's map/value equality. The same observations feed hash
+/// and equality, including the distinction between -0.0 and 0.0 spellings.
+#[derive(Clone, Copy)]
+struct LiteralShape<'a>(&'a Value);
+
+#[derive(Clone, Copy)]
+struct LiteralList<'a>(&'a [Value]);
+
+impl PartialEq for LiteralList<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.iter().map(LiteralShape).eq(other.0.iter().map(LiteralShape))
+    }
+}
+
+impl Hash for LiteralList<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.len().hash(state);
+        for value in self.0 { LiteralShape(value).hash(state); }
+    }
+}
+
+impl PartialEq for LiteralShape<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.0, other.0) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => a.to_string() == b.to_string(),
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => LiteralList(a) == LiteralList(b),
+            (Value::Object(a), Value::Object(b)) => a.iter().map(|(k, v)| (k, LiteralShape(v)))
+                .eq(b.iter().map(|(k, v)| (k, LiteralShape(v)))),
+            _ => false,
+        }
+    }
+}
+
+impl Hash for LiteralShape<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self.0).hash(state);
+        match self.0 {
+            Value::Null => {}
+            Value::Bool(value) => value.hash(state),
+            Value::Number(value) => value.to_string().hash(state),
+            Value::String(value) => value.hash(state),
+            Value::Array(values) => LiteralList(values).hash(state),
+            Value::Object(map) => {
+                map.len().hash(state);
+                for (key, value) in map {
+                    key.hash(state);
+                    LiteralShape(value).hash(state);
+                }
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Hash)]
 struct Object<'a> {
     property_keys: Vec<&'a str>,
     pattern_keys: Vec<&'a str>,
@@ -92,7 +148,7 @@ impl<'a> From<&'a ObjectSchema> for Object<'a> {
     }
 }
 
-#[derive(PartialEq, Serialize)]
+#[derive(PartialEq, Hash)]
 struct Number<'a> {
     integer: bool,
     minimum: Option<u64>,
@@ -151,8 +207,8 @@ impl<'a> SchemaShape<'a> {
             SchemaKind::Ref(pointer) => Kind::Ref(pointer),
             SchemaKind::Assertions(a) => Kind::Assertions(Assertions {
                 types: a.types.as_deref(),
-                constant: a.const_value.as_ref(),
-                enumeration: a.enum_values.as_deref(),
+                constant: a.const_value.as_ref().map(LiteralShape),
+                enumeration: a.enum_values.as_deref().map(LiteralList),
                 object: a.object.as_ref().map(Object::from),
                 array: a.array.as_ref().map(|a| (a.min_items, a.max_items, a.prefix_items.len())),
                 string: a.string.as_ref(),
@@ -177,23 +233,11 @@ impl<'a> SchemaShape<'a> {
     }
 
     pub(super) fn fingerprint(self) -> u64 {
-        struct Writer(rustc_hash::FxHasher);
-        impl std::io::Write for Writer {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.write(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
-        }
-        let mut writer = Writer(rustc_hash::FxHasher::default());
+        let mut hasher = rustc_hash::FxHasher::default();
         for node in self.root.descendants() {
-            // bincode is only a bucket selector: arbitrary Value payloads
-            // need not be injectively encoded. Exact typed observations
-            // always establish equality.
-            bincode::serialize_into(&mut writer, &self.observe(node))
-                .expect("schema observations serialize");
+            self.observe(node).hash(&mut hasher);
         }
-        writer.0.finish()
+        hasher.finish()
     }
 }
 
