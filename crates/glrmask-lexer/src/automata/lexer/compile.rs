@@ -6762,6 +6762,7 @@ pub fn extract_augmented_singleton_dispatch_components(
     // outgoing graph remains inside the same singleton component.
     let initially_unowned = owner.iter().filter(|&&owner| owner == usize::MAX).count();
     let mut label_assigned = 0usize;
+    let mut queue = VecDeque::<u32>::new();
     for (state, owner_slot) in owner.iter_mut().enumerate() {
         if *owner_slot != usize::MAX {
             continue;
@@ -6775,19 +6776,11 @@ pub fn extract_augmented_singleton_dispatch_components(
             if component != usize::MAX {
                 *owner_slot = component;
                 label_assigned += 1;
+                queue.push_back(state as u32);
             }
         }
     }
     let mut forward_propagated = 0usize;
-    let mut queue = VecDeque::<u32>::new();
-    for state in 0..state_count {
-        if owner[state] < roots.len()
-            && singleton_terminal_by_component[owner[state]] != usize::MAX
-            && !components[owner[state]].contains(&(state as u32))
-        {
-            queue.push_back(state as u32);
-        }
-    }
     while let Some(state) = queue.pop_front() {
         let component = owner[state as usize];
         let terminal = singleton_terminal_by_component[component];
@@ -6817,46 +6810,93 @@ pub fn extract_augmented_singleton_dispatch_components(
             }
         }
     }
+    // Least fixed point of the backward ownership rule. A state becomes
+    // owned only when every distinct successor has the same eligible owner.
+    // Keep reverse dependencies only for still-unowned states; each is
+    // discharged once, and unseeded cycles stay unowned.
+    let unknown = usize::MAX;
+    let blocked = roots.len();
+    let mut eligible = vec![false; roots.len()];
+    for &component in &terminal_to_singleton_component {
+        if component < roots.len() { eligible[component] = true; }
+    }
+    let merge_owner = |current: usize, target: usize| {
+        if target >= eligible.len() || !eligible[target] {
+            blocked
+        } else if current == unknown || current == target {
+            target
+        } else {
+            blocked
+        }
+    };
+    struct Waiter {
+        source: u32,
+        next: u32,
+    }
+    let mut head = vec![u32::MAX; state_count];
+    let mut waiters = Vec::<Waiter>::new();
+    let mut pending = vec![0u32; state_count];
+    let mut candidate = vec![unknown; state_count];
+    let mut targets = SmallVec::<[u32; 8]>::new();
     let mut propagated = 0usize;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for state in 0..state_count {
-            if owner[state] != usize::MAX {
-                continue;
+    for state in 0..state_count {
+        if owner[state] != unknown { continue; }
+        targets.clear();
+        targets.extend(tokenizer.physical_transitions_from(state as u32).map(|(_, target)| target));
+        targets.extend(tokenizer.physical_epsilon_targets(state as u32));
+        targets.sort_unstable();
+        targets.dedup();
+        let mut current = unknown;
+        for &target in &targets {
+            let target_owner = owner[target as usize];
+            if target_owner != unknown {
+                current = merge_owner(current, target_owner);
+                if current == blocked { break; }
             }
-            let mut candidate = usize::MAX;
-            let mut valid = true;
-            for target in tokenizer.physical_transitions_from(state as u32)
-                .map(|(_, target)| target)
-                .chain(tokenizer.physical_epsilon_targets(state as u32))
-            {
-                let target_owner = owner[target as usize];
-                if target_owner == usize::MAX || target_owner == roots.len() {
-                    valid = false;
-                    break;
-                }
-                if candidate == usize::MAX {
-                    candidate = target_owner;
-                } else if candidate != target_owner {
-                    valid = false;
-                    break;
-                }
-            }
-            if valid
-                && candidate != usize::MAX
-                && terminal_to_singleton_component.contains(&candidate)
-            {
-                owner[state] = candidate;
-                changed = true;
-                propagated += 1;
+        }
+        candidate[state] = current;
+        if current == blocked { continue; }
+        for &target in &targets {
+            if owner[target as usize] != unknown { continue; }
+            let id = u32::try_from(waiters.len()).ok()?;
+            if id == u32::MAX { return None; }
+            waiters.push(Waiter { source: state as u32, next: head[target as usize] });
+            head[target as usize] = id;
+            pending[state] += 1;
+        }
+        if pending[state] == 0 && current != unknown {
+            // Publish only after dependency construction. Thus no waiter can
+            // miss a target that changes owner during the initial scan.
+            queue.push_back(state as u32);
+        }
+    }
+    while let Some(state) = queue.pop_front() {
+        let index = state as usize;
+        if owner[index] != unknown || pending[index] != 0 || candidate[index] >= eligible.len() {
+            continue;
+        }
+        let component = candidate[index];
+        owner[index] = component;
+        propagated += 1;
+        let mut edge = head[index];
+        while edge != u32::MAX {
+            let waiter = &waiters[edge as usize];
+            edge = waiter.next;
+            let source = waiter.source as usize;
+            if candidate[source] == blocked { continue; }
+            candidate[source] = merge_owner(candidate[source], component);
+            if candidate[source] == blocked { continue; }
+            pending[source] -= 1;
+            if pending[source] == 0 {
+                queue.push_back(waiter.source);
             }
         }
     }
-
-    let mut augmented = components;
+    // The owner map already contains root-reachable and added states. Build
+    // the exact partition once instead of searching each component's vector.
+    let mut augmented = vec![Vec::new(); roots.len()];
     for (state, &component) in owner.iter().enumerate() {
-        if component < roots.len() && !augmented[component].contains(&(state as u32)) {
+        if component < roots.len() {
             augmented[component].push(state as u32);
         }
     }
