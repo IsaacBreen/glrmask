@@ -833,7 +833,7 @@ impl TokenProjection {
     /// accepted only with the exact dimensions and canonical group images.
     pub(crate) fn prepare(
         &mut self, mask_words: usize, use_prefix: bool,
-        cached: Option<(Vec<InternalTokenBufMasks>, DenseBufMaskRows)>,
+        cached_prefix: Option<DenseBufMaskRows>,
     ) -> Result<(), String> {
         let count = self.count();
         let build_group = |group: usize| {
@@ -854,18 +854,13 @@ impl TokenProjection {
         } else {
             (0..count.div_ceil(64)).map(build_group).collect()
         };
-        let cached_prefix = if let Some((cached_groups, prefix)) = cached {
-            if cached_groups != groups { return Err("token projection aggregate mismatch".into()); }
-            Some(prefix)
-        } else {
-            None
-        };
         let mut sparse_prefix = Vec::with_capacity(groups.len() + 1);
         sparse_prefix.push(0usize);
         let mut universe = vec![0u32; mask_words];
         let rows = groups.len() + 1;
-        let mut dense = if cached_prefix.is_none() && use_prefix {
-            Some(Vec::with_capacity(rows.checked_mul(mask_words).expect("projection prefix dimensions")))
+        let prefix_words = rows.saturating_mul(mask_words);
+        let mut dense = if cached_prefix.is_none() && use_prefix && prefix_words <= 2 * 1024 * 1024 {
+            Some(Vec::with_capacity(prefix_words))
         } else {
             None
         };

@@ -15,7 +15,7 @@ use crate::test_modes::MaskMode;
 use crate::automata::lexer::Lexer;
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
-    BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows, InternalTokenBufMasks,
+    BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows,
     PackedInternalTokenBufMask,
 };
 use crate::automata::regex::Expr;
@@ -86,7 +86,7 @@ impl NativeSection {
                 let entries_offset = 12usize.saturating_add(group_count.saturating_add(1).saturating_mul(4));
                 (align - ((absolute_start % align + entries_offset % align) % align)) % align
             }
-            Self::MaskCache if bytes.starts_with(b"TMC8") => {
+            Self::MaskCache if bytes.starts_with(b"TMC9") => {
                 (4 - (absolute_start & 3)) & 3
             }
             _ => 0,
@@ -901,99 +901,9 @@ struct TokenMaskCacheTail {
     seed_universe_dense: Vec<u64>,
 }
 
-enum TokenMaskCacheArtifact {
-    Fast {
-        tail: TokenMaskCacheTail,
-        word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-        word_group_prefix_buf_masks: DenseBufMaskRows,
-    },
-    WordSparse(Vec<InternalTokenBufMasks>),
-}
-fn encode_word_sparse_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
-    const MAGIC: &[u8; 4] = b"TWS1";
-    const MAX_BYTES: usize = 512 * 1024;
-    let expected_groups = constraint.internal_token_count().div_ceil(64);
-    if constraint.token_projection.groups().len() != expected_groups {
-        return Vec::new();
-    }
-    let entry_count = constraint
-        .token_projection.groups()
-        .iter()
-        .map(Vec::len)
-        .sum::<usize>();
-    let encoded_len = 12usize
-        .saturating_add((expected_groups + 1).saturating_mul(4))
-        .saturating_add(entry_count.saturating_mul(6));
-    if encoded_len > MAX_BYTES {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(encoded_len);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(expected_groups as u32).to_le_bytes());
-    out.extend_from_slice(&(entry_count as u32).to_le_bytes());
-    let mut end = 0u32;
-    out.extend_from_slice(&end.to_le_bytes());
-    for group in constraint.token_projection.groups() {
-        end = end.saturating_add(group.len() as u32);
-        out.extend_from_slice(&end.to_le_bytes());
-    }
-    for group in constraint.token_projection.groups() {
-        for &(word, bits) in group {
-            out.extend_from_slice(&word.to_le_bytes());
-            out.extend_from_slice(&bits.to_le_bytes());
-        }
-    }
-    debug_assert_eq!(out.len(), encoded_len);
-    out
-}
-
-fn decode_word_sparse_token_mask_cache(input: &[u8]) -> Result<Vec<InternalTokenBufMasks>, String> {
-    const HEADER_LEN: usize = 12;
-    if input.len() < HEADER_LEN || !input.starts_with(b"TWS1") {
-        return Err("invalid sparse word-group cache header".to_owned());
-    }
-    let group_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
-    let entry_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
-    let offsets_bytes = (group_count + 1)
-        .checked_mul(4)
-        .ok_or_else(|| "sparse word-group cache offsets overflow".to_owned())?;
-    let entries_bytes = entry_count
-        .checked_mul(6)
-        .ok_or_else(|| "sparse word-group cache entries overflow".to_owned())?;
-    let expected = HEADER_LEN
-        .checked_add(offsets_bytes)
-        .and_then(|n| n.checked_add(entries_bytes))
-        .ok_or_else(|| "sparse word-group cache length overflow".to_owned())?;
-    if input.len() != expected {
-        return Err("invalid sparse word-group cache length".to_owned());
-    }
-    let offsets_body = &input[HEADER_LEN..HEADER_LEN + offsets_bytes];
-    let mut offsets = Vec::<u32>::with_capacity(group_count + 1);
-    for bytes in offsets_body.as_chunks::<4>().0.iter() {
-        offsets.push(u32::from_le_bytes(*bytes));
-    }
-    if offsets.first().copied() != Some(0)
-        || offsets.last().copied() != Some(entry_count as u32)
-        || offsets.windows(2).any(|pair| pair[0] > pair[1])
-    {
-        return Err("invalid sparse word-group cache offsets".to_owned());
-    }
-    let entries = &input[HEADER_LEN + offsets_bytes..];
-    let mut groups = Vec::with_capacity(group_count);
-    for group in 0..group_count {
-        let start = offsets[group] as usize;
-        let end = offsets[group + 1] as usize;
-        let mut decoded = Vec::with_capacity(end - start);
-        for entry in start..end {
-            let pos = entry * 6;
-            decoded.push((
-                u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap()),
-                u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
-            ));
-        }
-        groups.push(decoded);
-    }
-    Ok(groups)
+struct TokenMaskCacheArtifact {
+    tail: TokenMaskCacheTail,
+    prefix: Option<DenseBufMaskRows>,
 }
 
 #[inline]
@@ -1079,109 +989,45 @@ fn decode_cache_u32_rows(
     DenseBufMaskRows::from_flat(flat.into_boxed_slice(), rows, row_len)
 }
 
+const TOKEN_CACHE_HEADER: usize = 16;
+const TOKEN_CACHE_MAX_PREFIX_BYTES: usize = 2 * 1024 * 1024;
+const TOKEN_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
-    const HEADER_LEN: usize = 24;
-    // JS's exact prefix matrix is ~1.3 MiB. Keeping the old 1 MiB cutoff made
-    // every load throw that useful runtime-native cache away and rebuild it.
-    const MAX_PREFIX_BYTES: usize = 2 * 1024 * 1024;
-    const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
     if !constraint.token_mask_caches_ready() {
         return Vec::new();
     }
-    let mask_words = constraint.body_mask_len();
-    let Some(prefix) = constraint.token_projection.prefix() else { return Vec::new(); };
-    let prefix_rows = prefix.len();
-    if prefix_rows == 0 { return encode_word_sparse_token_mask_cache(constraint); }
-    let word_groups = constraint.token_projection.groups().len();
-    let word_entries = constraint
-        .token_projection.groups()
-        .iter()
-        .map(Vec::len)
-        .sum::<usize>();
-    let prefix_bytes = prefix_rows
-        .saturating_mul(mask_words)
-        .saturating_mul(std::mem::size_of::<u32>());
-    if prefix_bytes > MAX_PREFIX_BYTES {
-        return encode_word_sparse_token_mask_cache(constraint);
-    }
-    if prefix_rows != word_groups.saturating_add(1)
-        || prefix.iter()
-            .any(|row| row.len() != mask_words)
-    {
+    let tail = bincode::serialize(&TokenMaskCacheRef {
+        guarded_shift_index: constraint.table.as_lr()
+            .map_or(&[], |table| table.guarded_shift_index.as_slice()),
+        seed_terminal_dense: SeedTerminalDenseCompact::from_map(&constraint.seed_terminal_dense),
+        seed_universe_dense: &constraint.seed_universe_dense,
+    }).expect("token-mask cache serialization should succeed");
+    let prefix_start = (TOKEN_CACHE_HEADER + tail.len()).next_multiple_of(4);
+    if prefix_start > TOKEN_CACHE_MAX_BYTES {
         return Vec::new();
     }
-    let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
-    let tail_started = profile.then(std::time::Instant::now);
-    let mut tail = Vec::with_capacity(32 * 1024);
-    bincode::serialize_into(
-        &mut tail,
-        &TokenMaskCacheRef {
-            guarded_shift_index: constraint.table.as_lr().map_or(&[], |table| table.guarded_shift_index.as_slice()),
-            seed_terminal_dense: SeedTerminalDenseCompact::from_map(&constraint.seed_terminal_dense),
-            seed_universe_dense: &constraint.seed_universe_dense,
-        },
-    ).expect("token-mask cache serialization should succeed");
-    let tail_ms = tail_started
-        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
-    let word_entries_bytes = word_entries.saturating_mul(6);
-    // TMC6/7 align the dense u32 matrix so an owned load can retain it directly
-    // from the artifact rather than copying ~1.3 MiB merely for alignment.
-    let prefix_unaligned_start = HEADER_LEN
-        .saturating_add(tail.len())
-        .saturating_add(word_offsets_bytes)
-        .saturating_add(word_entries_bytes);
-    let prefix_padding = (4 - (prefix_unaligned_start & 3)) & 3;
-    let total_len = HEADER_LEN
-        .saturating_add(tail.len())
-        .saturating_add(word_offsets_bytes)
-        .saturating_add(word_entries_bytes)
-        .saturating_add(prefix_padding)
-        .saturating_add(prefix_bytes);
-    if total_len > MAX_CACHE_BYTES {
-        return encode_word_sparse_token_mask_cache(constraint);
-    }
-    let prefix_started = profile.then(std::time::Instant::now);
-    let mut out = Vec::with_capacity(total_len);
-    out.extend_from_slice(b"TMC8");
-    for value in [tail.len(), mask_words, word_groups, word_entries, prefix_rows] {
-        out.extend_from_slice(
-            &u32::try_from(value)
-                .expect("token-mask cache dimension fits u32")
-                .to_le_bytes(),
-        );
+    // Sparse group rows are derived from IBM2, not serialized a second time.
+    // Retain only a bounded, optionally borrowed dense accelerator.
+    let prefix = constraint.token_projection.prefix().filter(|p| {
+        !p.is_empty()
+            && p.len().saturating_mul(p.row_len()).saturating_mul(4)
+                <= TOKEN_CACHE_MAX_PREFIX_BYTES.min(TOKEN_CACHE_MAX_BYTES - prefix_start)
+    });
+    let (rows, words) = prefix.map_or((0, 0), |p| (p.len(), p.row_len()));
+    let mut out = Vec::with_capacity(prefix_start + rows * words * 4);
+    out.extend_from_slice(b"TMC9");
+    for value in [tail.len(), rows, words] {
+        out.extend_from_slice(&u32::try_from(value).expect("token-mask cache dimension").to_le_bytes());
     }
     out.extend_from_slice(&tail);
-    let mut end = 0u32;
-    out.extend_from_slice(&end.to_le_bytes());
-    for group in constraint.token_projection.groups() {
-        end = end.saturating_add(group.len() as u32);
-        out.extend_from_slice(&end.to_le_bytes());
-    }
-    for group in constraint.token_projection.groups() {
-        for &(word, bits) in group {
-            out.extend_from_slice(&word.to_le_bytes());
-            out.extend_from_slice(&bits.to_le_bytes());
+    out.resize(prefix_start, 0);
+    if let Some(prefix) = prefix {
+        if let Some(flat) = prefix.as_contiguous() {
+            append_cache_u32s(&mut out, flat);
+        } else {
+            for row in prefix { append_cache_u32s(&mut out, row); }
         }
-    }
-    out.resize(out.len() + prefix_padding, 0);
-    if let Some(flat) = prefix.as_contiguous() {
-        append_cache_u32s(&mut out, flat);
-    } else {
-        for row in prefix {
-            append_cache_u32s(&mut out, row);
-        }
-    }
-    debug_assert_eq!(out.len(), total_len);
-    if let Some(started) = prefix_started {
-        eprintln!(
-            "[glrmask/profile][token_mask_cache_encode] tail_ms={tail_ms:.3} body_ms={:.3} tail_bytes={} word_sparse_bytes={} prefix_bytes={} total_bytes={}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            tail.len(),
-            word_offsets_bytes + word_entries_bytes,
-            prefix_bytes,
-            out.len(),
-        );
     }
     out
 }
@@ -1202,222 +1048,74 @@ fn decode_token_mask_cache_impl(
     input: &[u8],
     backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
 ) -> Result<TokenMaskCacheArtifact, String> {
-    let has_known_magic = |bytes: &[u8]| bytes.starts_with(b"TWS1") || bytes.starts_with(b"TMC8");
-    let leading_padding = if has_known_magic(input) {
-        0
+    let padding = (0..=3).find(|&n| {
+        input.get(..n).is_some_and(|p| p.iter().all(|&b| b == 0))
+            && input.get(n..).is_some_and(|p| p.starts_with(b"TMC9"))
+    }).ok_or("invalid token-mask cache magic")?;
+    let input = &input[padding..];
+    if input.len() < TOKEN_CACHE_HEADER || input.len() > TOKEN_CACHE_MAX_BYTES {
+        return Err("invalid token-mask cache length".into());
+    }
+    let read = |offset| u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap()) as usize;
+    let tail_end = TOKEN_CACHE_HEADER.checked_add(read(4)).ok_or("cache tail overflow")?;
+    let rows = read(8);
+    let words = read(12);
+    if rows == 0 && words != 0 {
+        return Err("invalid absent prefix dimensions".into());
+    }
+    let prefix_start = tail_end.checked_add(3).ok_or("cache padding overflow")? & !3;
+    let prefix_bytes = rows.checked_mul(words).and_then(|n| n.checked_mul(4))
+        .ok_or("cache prefix overflow")?;
+    if prefix_bytes > TOKEN_CACHE_MAX_PREFIX_BYTES
+        || prefix_start.checked_add(prefix_bytes) != Some(input.len())
+        || input.get(tail_end..prefix_start).is_none_or(|p| p.iter().any(|&b| b != 0))
+    {
+        return Err("invalid token-mask cache prefix".into());
+    }
+    let tail = bincode::deserialize(&input[TOKEN_CACHE_HEADER..tail_end])
+        .map_err(|err| err.to_string())?;
+    let prefix = if rows == 0 {
+        None
     } else {
-        (1..=3)
-            .find(|&padding| {
-                input
-                    .get(..padding)
-                    .is_some_and(|prefix| prefix.iter().all(|&byte| byte == 0))
-                    && input.get(padding..).is_some_and(has_known_magic)
+        let borrowed = if crate::env::var_os("GLRMASK_MATERIALIZE_TMC_PREFIX").is_none() {
+            backing.and_then(|(backing, start)| {
+                let absolute = start.checked_add(padding)?.checked_add(prefix_start)?;
+                DenseBufMaskRows::from_backed(backing, absolute, rows, words).ok()
             })
-            .unwrap_or(0)
+        } else {
+            None
+        };
+        Some(match borrowed {
+            Some(prefix) => prefix,
+            None => {
+                let mut pos = prefix_start;
+                decode_cache_u32_rows(input, &mut pos, rows, words)?
+            }
+        })
     };
-    let input = &input[leading_padding..];
-    let backing = backing.map(|(backing, section_start)| {
-        (
-            backing,
-            section_start
-                .checked_add(leading_padding)
-                .expect("token-mask cache section offset cannot overflow"),
-        )
-    });
-    if input.starts_with(b"TWS1") {
-        return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
-    }
-    if input.starts_with(b"TMC8") {
-        let aligned_prefix = true;
-        const FAST_HEADER_LEN: usize = 24;
-        if input.len() < FAST_HEADER_LEN {
-            return Err("invalid fast token-mask cache header".to_owned());
-        }
-        let read = |offset: usize| {
-            u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap()) as usize
-        };
-        let tail_len = read(4);
-        let mask_words = read(8);
-        let word_groups = read(12);
-        let word_entries = read(16);
-        let prefix_rows = read(20);
-        if prefix_rows != word_groups.saturating_add(1) {
-            return Err("fast token-mask prefix row count mismatch".to_owned());
-        }
-        let tail_end = FAST_HEADER_LEN
-            .checked_add(tail_len)
-            .ok_or_else(|| "fast token-mask cache tail overflow".to_owned())?;
-        let offsets_bytes = (word_groups + 1)
-            .checked_mul(4)
-            .ok_or_else(|| "fast token-mask sparse offsets overflow".to_owned())?;
-        let entries_bytes = word_entries
-            .checked_mul(6)
-            .ok_or_else(|| "fast token-mask sparse entries overflow".to_owned())?;
-        let prefix_bytes = prefix_rows
-            .checked_mul(mask_words)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| "fast token-mask prefix bytes overflow".to_owned())?;
-        let prefix_unaligned_start = tail_end
-            .checked_add(offsets_bytes)
-            .and_then(|n| n.checked_add(entries_bytes))
-            .ok_or_else(|| "fast token-mask cache prefix offset overflow".to_owned())?;
-        let prefix_padding = if aligned_prefix {
-            (4 - (prefix_unaligned_start & 3)) & 3
-        } else {
-            0
-        };
-        let prefix_start = prefix_unaligned_start
-            .checked_add(prefix_padding)
-            .ok_or_else(|| "fast token-mask cache prefix padding overflow".to_owned())?;
-        let expected = prefix_start
-            .checked_add(prefix_bytes)
-            .ok_or_else(|| "fast token-mask cache length overflow".to_owned())?;
-        if expected != input.len() {
-            return Err("invalid fast token-mask cache length".to_owned());
-        }
-        let offsets_start = tail_end;
-        let entries_start = offsets_start + offsets_bytes;
-        if aligned_prefix
-            && input
-                .get(prefix_unaligned_start..prefix_start)
-                .is_none_or(|padding| padding.iter().any(|&byte| byte != 0))
-        {
-            return Err("invalid fast token-mask prefix padding".to_owned());
-        }
-        let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
-        let tail_started = profile.then(std::time::Instant::now);
-        let tail_bytes = input
-            .get(FAST_HEADER_LEN..tail_end)
-            .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?;
-        let tail = bincode::deserialize::<TokenMaskCacheTail>(tail_bytes).map_err(|err| err.to_string())?;
-        let tail_ms = tail_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let body_started = profile.then(std::time::Instant::now);
-        let mut offsets = Vec::<u32>::with_capacity(word_groups + 1);
-        for bytes in input[offsets_start..entries_start].as_chunks::<4>().0.iter() {
-            offsets.push(u32::from_le_bytes(*bytes));
-        }
-        if offsets.first().copied() != Some(0)
-            || offsets.last().copied() != Some(word_entries as u32)
-            || offsets.windows(2).any(|pair| pair[0] > pair[1])
-        {
-            return Err("invalid fast token-mask sparse offsets".to_owned());
-        }
-        let entries = &input[entries_start..prefix_start];
-        let decode_group = |group: usize| -> Result<InternalTokenBufMasks, String> {
-            let start = offsets[group] as usize;
-            let end = offsets[group + 1] as usize;
-            let mut decoded = Vec::with_capacity(end - start);
-            if cfg!(target_endian = "little") {
-                // `expected == input.len()` above proves every 6-byte record is
-                // present. Read the packed fields directly instead of doing
-                // two independently bounds-checked slices + `try_into()` per
-                // sparse entry. The wire is intentionally unaligned.
-                let base = entries.as_ptr();
-                for entry in start..end {
-                    let ptr = unsafe { base.add(entry * 6) };
-                    let word = unsafe { std::ptr::read_unaligned(ptr.cast::<u16>()) };
-                    if word as usize >= mask_words {
-                        return Err("fast token-mask sparse word out of range".to_owned());
-                    }
-                    let bits = unsafe { std::ptr::read_unaligned(ptr.add(2).cast::<u32>()) };
-                    decoded.push((word, bits));
-                }
-            } else {
-                for entry in start..end {
-                    let pos = entry * 6;
-                    let word = u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap());
-                    if word as usize >= mask_words {
-                        return Err("fast token-mask sparse word out of range".to_owned());
-                    }
-                    decoded.push((
-                        word,
-                        u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
-                    ));
-                }
-            }
-            Ok(decoded)
-        };
-        let word_group_sparse_masks = if word_groups >= 128 && rayon::current_num_threads() > 1 {
-            (0..word_groups)
-                .into_par_iter()
-                .map(decode_group)
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            (0..word_groups)
-                .map(decode_group)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut pos = prefix_start;
-        let materialize_prefix = crate::env::var_os("GLRMASK_MATERIALIZE_TMC_PREFIX").is_some();
-        let word_group_prefix_buf_masks = if aligned_prefix && !materialize_prefix {
-            if let Some((backing, section_start)) = backing.as_ref() {
-                let absolute_start = section_start
-                    .checked_add(prefix_start)
-                    .ok_or_else(|| "fast token-mask backed prefix offset overflow".to_owned())?;
-                match DenseBufMaskRows::from_backed(
-                    std::sync::Arc::clone(backing),
-                    absolute_start,
-                    prefix_rows,
-                    mask_words,
-                ) {
-                    Ok(rows) => {
-                        pos = pos
-                            .checked_add(prefix_bytes)
-                            .ok_or_else(|| "fast token-mask backed prefix overflow".to_owned())?;
-                        rows
-                    }
-                    Err(_) => decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?,
-                }
-            } else {
-                decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?
-            }
-        } else {
-            decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?
-        };
-        debug_assert_eq!(pos, input.len());
-        if let Some(started) = body_started {
-            eprintln!(
-                "[glrmask/profile][token_mask_cache_decode] tail_ms={tail_ms:.3} body_ms={:.3} tail_bytes={} word_sparse_bytes={} prefix_bytes={}",
-                started.elapsed().as_secs_f64() * 1000.0,
-                tail_len,
-                offsets_bytes + entries_bytes,
-                prefix_bytes,
-            );
-        }
-        return Ok(TokenMaskCacheArtifact::Fast {
-            tail,
-            word_group_sparse_masks,
-            word_group_prefix_buf_masks,
-        });
-    }
-    Err("unknown token-mask cache format".to_owned())
+    Ok(TokenMaskCacheArtifact { tail, prefix })
 }
 
 fn install_token_mask_cache(
     constraint: &mut Constraint,
     cache: TokenMaskCacheArtifact,
 ) -> Result<(), String> {
+    let TokenMaskCacheArtifact { tail, prefix } = cache;
+    if let Some(table) = constraint.table.as_lr_mut() {
+        table.guarded_shift_index = tail.guarded_shift_index;
+    } else if !tail.guarded_shift_index.is_empty() {
+        return Err("table-free artifact contains an LR guarded-shift cache".into());
+    }
+    constraint.seed_terminal_dense = tail.seed_terminal_dense.into_map()?;
+    constraint.seed_universe_dense = tail.seed_universe_dense.into();
     let words = constraint.body_mask_len();
-    let groups = match cache {
-        TokenMaskCacheArtifact::WordSparse(groups) => (groups, DenseBufMaskRows::default()),
-        TokenMaskCacheArtifact::Fast { tail, word_group_sparse_masks, word_group_prefix_buf_masks } => {
-            if let Some(table) = constraint.table.as_lr_mut() {
-                table.guarded_shift_index = tail.guarded_shift_index;
-            } else if !tail.guarded_shift_index.is_empty() {
-                return Err("table-free artifact contains an LR guarded-shift cache".into());
-            }
-            constraint.seed_terminal_dense = tail.seed_terminal_dense.into_map()?;
-            constraint.seed_universe_dense = tail.seed_universe_dense.into();
-            (word_group_sparse_masks, word_group_prefix_buf_masks)
-        }
-    };
-    constraint.token_projection.prepare(words, true, Some(groups))?;
+    constraint.token_projection.prepare(words, true, prefix)?;
     if !constraint.token_mask_caches_ready() {
         return Err("token-mask cache section does not match constraint dimensions".into());
     }
     Ok(())
 }
+
 fn encode_internal_token_buf_masks(constraint: &Constraint) -> Vec<u8> {
     use super::constraint::ProjectionEntries;
     let projection = &constraint.token_projection;
