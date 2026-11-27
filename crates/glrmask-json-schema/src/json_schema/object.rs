@@ -11,7 +11,7 @@ use super::ast::{
     PropertySchema, Schema, SchemaAssertions, SchemaKind, SchemaType,
 };
 use super::combinators::{
-    all_of_schema, merge_two_objects, open_object_any_of_covers_json_object,
+    all_of_schema, open_object_any_of_covers_json_object,
     simplify_finite_string_allof_schema, try_merge_all_of_objects,
     validate_object_all_of_merge_bounds,
 };
@@ -74,19 +74,15 @@ fn discriminator_anyof_fastpath_disabled() -> bool {
 struct AnyOfFixedObjectItem {
     key: String,
     value_expr: GrammarExpr,
-    value_identity: Option<String>,
     schema: Schema,
     required: bool,
 }
 
-struct AnyOfFixedObjectVariant {
-    items: Vec<AnyOfFixedObjectItem>,
-}
+type AnyOfFixedObjectVariant = AnyOfObjectVariant;
 
 #[derive(Default)]
 struct ClosedAnyOfCollectionProfile {
     lower_property_ms: f64,
-    identity_ms: f64,
     schema_clone_ms: f64,
 }
 
@@ -96,13 +92,6 @@ struct AnyOfObjectVariant {
     pattern_pairs: Vec<GrammarExpr>,
     pattern_keys: Vec<String>,
     additional_value_expr: Option<GrammarExpr>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfFixedObjectState {
-    variant_idx: u16,
-    cursor: u16,
-    has_content: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -173,49 +162,6 @@ fn is_unconstrained_open_object_schema(schema: &ObjectSchema) -> bool {
         && schema.property_names.is_none()
         && schema.property_dependencies.is_empty()
         && matches!(schema.additional_properties, AdditionalProperties::AllowAny)
-}
-
-impl AnyOfFixedObjectVariant {
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
-        let idx = self.items[cursor..]
-            .iter()
-            .position(|item| item.key == key)
-            .map(|offset| cursor + offset)?;
-        if self.items[cursor..idx].iter().any(|item| item.required) {
-            return None;
-        }
-        Some(idx + 1)
-    }
-
-    fn close_allowed(&self, cursor: usize) -> bool {
-        !self.items[cursor..].iter().any(|item| item.required)
-    }
-
-    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
-        let mut keys = Vec::new();
-        for item in &self.items[cursor..] {
-            keys.push(item.key.as_str());
-            if item.required {
-                break;
-            }
-        }
-        keys
-    }
-
-    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
-        self.items
-            .iter()
-            .find(|item| item.key == key)
-            .map(|item| item.value_expr.clone())
-    }
-
-    fn item_for_key(&self, key: &str) -> Option<&AnyOfFixedObjectItem> {
-        self.items.iter().find(|item| item.key == key)
-    }
 }
 
 impl AnyOfObjectVariant {
@@ -337,13 +283,12 @@ impl<'a> Lowerer<'a> {
             (profile_started_at, collect_ms, build_started_at, collection_profile)
         {
             eprintln!(
-                "[glrmask/profile][json_schema_closed_anyof] branches={} variants={} outcome={} collect_ms={:.3} property_lower_ms={:.3} identity_ms={:.3} schema_clone_ms={:.3} nfa_build_ms={:.3} elapsed_ms={:.3}",
+                "[glrmask/profile][json_schema_closed_anyof] branches={} variants={} outcome={} collect_ms={:.3} property_lower_ms={:.3} schema_clone_ms={:.3} nfa_build_ms={:.3} elapsed_ms={:.3}",
                 branches.len(),
                 variants.len(),
                 result.is_some(),
                 collect_ms,
                 collection_profile.lower_property_ms,
-                collection_profile.identity_ms,
                 collection_profile.schema_clone_ms,
                 build_started_at.elapsed().as_secs_f64() * 1000.0,
                 profile_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1305,308 +1250,124 @@ impl<'a> Lowerer<'a> {
         branch: &Schema,
         profile: Option<&mut ClosedAnyOfCollectionProfile>,
     ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
-        self.collect_closed_any_of_object_variant_inner(branch, 0, profile)
-    }
-
-    fn collect_closed_any_of_object_variant_inner(
-        &mut self,
-        branch: &Schema,
-        ref_depth: usize,
-        profile: Option<&mut ClosedAnyOfCollectionProfile>,
-    ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
-        let mut profile = profile;
-        if let SchemaKind::Ref(pointer) = &branch.kind {
-            if ref_depth >= 4 {
-                return Ok(None);
-            }
-            let normalized = normalize_local_ref(pointer)?;
-            let target = self.resolve_ref_target(pointer)?;
-            if !self.object_variant_ref_stack.insert(normalized.clone()) {
-                return Ok(None);
-            }
-            let result =
-                self.collect_closed_any_of_object_variant_inner(target, ref_depth + 1, profile);
-            self.object_variant_ref_stack.remove(&normalized);
-            return result;
-        }
-
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            return Ok(None);
-        };
-        if assertions.const_value.is_some()
-            || assertions.enum_values.is_some()
-            || assertions.array.is_some()
-            || assertions.string.is_some()
-            || assertions.number.is_some()
-            || !assertions.any_of.is_empty()
-            || !assertions.one_of.is_empty()
-            || assertions.not.is_some()
-        {
-            return Ok(None);
-        }
-        if let Some(types) = &assertions.types
-            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
-                return Ok(None);
-            }
-        let merged_object;
-        let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
-            if assertions.object.as_ref().is_some_and(|object| {
-                !object.properties.is_empty()
-                    || !object.required.is_empty()
-                    || !object.pattern_properties.is_empty()
-                    || object.property_names.is_some()
-                    || !object.property_dependencies.is_empty()
-                    || object.min_properties != 0
-                    || object.max_properties.is_some()
-                    || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
-            }) {
-                return Ok(None);
-            }
-            merged_object = match self.try_merge_all_of_objects_resolving_refs(&assertions.all_of)?
-            {
-                Some(object) => object,
-                None => return Ok(None),
-            };
-            (
-                &merged_object,
-                assertions.types.is_none()
-                    && !all_of_has_explicit_object_only_type(&assertions.all_of)
-                    && !assertions
-                        .all_of
-                        .iter()
-                        .any(|schema| matches!(schema.kind, SchemaKind::Ref(_))),
-            )
-        } else {
-            match &assertions.object {
-                Some(object) => (object, assertions.types.is_none()),
-                None => return Ok(None),
-            }
-        };
-        if !matches!(object.additional_properties, AdditionalProperties::Deny)
-            || !object.pattern_properties.is_empty()
-            || object.property_names.is_some()
-            || !object.property_dependencies.is_empty()
-            || object.min_properties != 0
-            || object.max_properties.is_some()
-        {
-            return Ok(None);
-        }
-        if object
-            .required
-            .iter()
-            .any(|required_name| !object.properties.iter().any(|property| property.name == *required_name))
-        {
-            return Ok(None);
-        }
-
-        let mut items = Vec::with_capacity(object.properties.len());
-        for property in &object.properties {
-            let simplified_schema = simplify_finite_string_allof_schema(&property.schema);
-            let effective_schema = simplified_schema.as_ref().unwrap_or(&property.schema);
-            let lower_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let value_expr = self.lower_schema(effective_schema)?;
-            if let (Some(lower_started_at), Some(profile)) = (lower_started_at, profile.as_deref_mut()) {
-                let elapsed_ms = lower_started_at.elapsed().as_secs_f64() * 1000.0;
-                profile.lower_property_ms += elapsed_ms;
-            }
-            let identity_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let value_identity = exact_property_value_identity(effective_schema);
-            if let (Some(identity_started_at), Some(profile)) = (identity_started_at, profile.as_deref_mut()) {
-                profile.identity_ms += identity_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            let clone_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let item_schema = effective_schema.clone();
-            if let (Some(clone_started_at), Some(profile)) = (clone_started_at, profile.as_deref_mut()) {
-                profile.schema_clone_ms += clone_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            items.push(AnyOfFixedObjectItem {
-                key: property.name.clone(),
-                value_expr,
-                value_identity,
-                schema: item_schema,
-                required: object.required.contains(&property.name),
-            });
-        }
-
-        Ok(Some((
-            AnyOfFixedObjectVariant { items },
-            include_untyped_non_object_alts,
-        )))
-    }
-
-    fn try_merge_all_of_objects_resolving_refs(
-        &self,
-        branches: &[Schema],
-    ) -> ImportResult<Option<ObjectSchema>> {
-        let mut resolved_branches = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let resolved = match &branch.kind {
-                SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?,
-                _ => branch,
-            };
-            if plain_object_schema_for_closed_any_of(resolved).is_none() {
-                return Ok(None);
-            }
-            resolved_branches.push(resolved.clone());
-        }
-        // Apply the same safety proof as ordinary allOf lowering before a union
-        // fast path can turn an intersection into a merged property union.
-        validate_object_all_of_merge_bounds(&resolved_branches)?;
-        let objects = resolved_branches.iter()
-            .map(|branch| plain_object_schema_for_closed_any_of(branch).unwrap().clone())
-            .collect::<Vec<_>>();
-
-        let mut merged = objects.into_iter();
-        let Some(mut object) = merged.next() else {
-            return Ok(None);
-        };
-        for next in merged {
-            object = merge_two_objects(&object, &next);
-        }
-        Ok(Some(object))
+        self.collect_object_variant(branch, true, 0, profile)
     }
 
     fn collect_open_any_of_object_variant(
         &mut self,
         branch: &Schema,
     ) -> ImportResult<Option<(AnyOfObjectVariant, bool)>> {
-        self.collect_open_any_of_object_variant_inner(branch, 0)
+        self.collect_object_variant(branch, false, 0, None)
     }
 
-    fn collect_open_any_of_object_variant_inner(
+    /// A closed variant is simply one with an empty dynamic tail. Resolve
+    /// aliases and select the object predicate once; the caller chooses the
+    /// applicable shape policy before any property grammar is emitted.
+    fn collect_object_variant(
         &mut self,
         branch: &Schema,
-        ref_depth: usize,
+        closed: bool,
+        depth: usize,
+        mut profile: Option<&mut ClosedAnyOfCollectionProfile>,
     ) -> ImportResult<Option<(AnyOfObjectVariant, bool)>> {
         if let SchemaKind::Ref(pointer) = &branch.kind {
-            if ref_depth >= 4 {
-                return Ok(None);
-            }
+            if depth >= 4 { return Ok(None); }
             let normalized = normalize_local_ref(pointer)?;
             let target = self.resolve_ref_target(pointer)?;
             if !self.object_variant_ref_stack.insert(normalized.clone()) {
                 return Ok(None);
             }
-            let result = self.collect_open_any_of_object_variant_inner(target, ref_depth + 1);
+            let result = self.collect_object_variant(target, closed, depth + 1, profile);
             self.object_variant_ref_stack.remove(&normalized);
             return result;
         }
-
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            return Ok(None);
-        };
-        if assertions.const_value.is_some()
-            || assertions.enum_values.is_some()
-            || assertions.array.is_some()
-            || assertions.string.is_some()
-            || assertions.number.is_some()
-            || !assertions.any_of.is_empty()
-            || !assertions.one_of.is_empty()
-            || assertions.not.is_some()
+        let SchemaKind::Assertions(assertions) = &branch.kind else { return Ok(None); };
+        if assertions.const_value.is_some() || assertions.enum_values.is_some()
+            || assertions.array.is_some() || assertions.string.is_some() || assertions.number.is_some()
+            || !assertions.any_of.is_empty() || !assertions.one_of.is_empty() || assertions.not.is_some()
+            || assertions.types.as_ref().is_some_and(|types| {
+                super::ast::TypeDomain::from_types(types) != super::ast::TypeDomain::of(SchemaType::Object)
+            })
         {
             return Ok(None);
         }
-        if let Some(types) = &assertions.types
-            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+        let merged;
+        let (object, include_nonobjects) = if assertions.all_of.is_empty() {
+            let Some(object) = &assertions.object else { return Ok(None); };
+            (object, assertions.types.is_none())
+        } else {
+            if assertions.object.as_ref().is_some_and(|object| !is_unconstrained_open_object_schema(object)) {
                 return Ok(None);
             }
-        let merged_object;
-        let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
-            if assertions.object.as_ref().is_some_and(|object| {
-                !object.properties.is_empty()
-                    || !object.required.is_empty()
-                    || !object.pattern_properties.is_empty()
-                    || object.property_names.is_some()
-                    || !object.property_dependencies.is_empty()
-                    || object.min_properties != 0
-                    || object.max_properties.is_some()
-                    || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
-            }) {
-                return Ok(None);
+            // Closed variants may inline one reference per conjunct, as
+            // before. Open variants retain their existing plain-shape gate.
+            let mut resolved = Vec::with_capacity(assertions.all_of.len());
+            for child in &assertions.all_of {
+                resolved.push(match &child.kind {
+                    SchemaKind::Ref(pointer) if closed => self.resolve_ref_target(pointer)?.clone(),
+                    _ => child.clone(),
+                });
             }
-            merged_object = match try_merge_all_of_objects(&assertions.all_of) {
+            validate_object_all_of_merge_bounds(&resolved)?;
+            merged = match try_merge_all_of_objects(&resolved) {
                 Some(object) => object,
                 None => return Ok(None),
             };
-            (
-                &merged_object,
-                assertions.types.is_none()
-                    && !all_of_has_explicit_object_only_type(&assertions.all_of)
-                    && !assertions
-                        .all_of
-                        .iter()
-                        .any(|schema| matches!(schema.kind, SchemaKind::Ref(_))),
-            )
-        } else {
-            match &assertions.object {
-                Some(object) => (object, assertions.types.is_none()),
-                None => return Ok(None),
-            }
+            (&merged, assertions.types.is_none() && !all_of_has_explicit_object_only_type(&resolved))
         };
-
-        if object.property_names.is_some()
-            || !object.property_dependencies.is_empty()
-            || object.min_properties != 0
-            || object.max_properties.is_some()
+        if object.property_names.is_some() || !object.property_dependencies.is_empty()
+            || object.min_properties != 0 || object.max_properties.is_some()
+            || closed && (!matches!(object.additional_properties, AdditionalProperties::Deny)
+                || !object.pattern_properties.is_empty()
+                || object.required.iter().any(|name| !object.properties.iter().any(|p| p.name == *name)))
         {
             return Ok(None);
         }
         let normalized = self.object_with_required_synthetic_properties(object)?;
-        let fixed_keys = normalized
-            .properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect::<BTreeSet<_>>();
-
+        if normalized.properties.len() > u16::MAX as usize { return Ok(None); }
+        let fixed_keys = normalized.properties.iter().map(|property| property.name.clone()).collect::<BTreeSet<_>>();
         let mut items = Vec::with_capacity(normalized.properties.len());
         for property in &normalized.properties {
-            let mut effective_schema = property.schema.clone();
-            for pattern_property in &normalized.pattern_properties {
-                if self.property_name_matches_pattern_cached(
-                    &pattern_property.pattern,
-                    &property.name,
-                )? {
-                    let pattern_schema =
-                        pattern_schema_for_property(&effective_schema, &pattern_property.schema);
-                    effective_schema = all_of_schema(effective_schema, pattern_schema);
+            let mut effective = Cow::Borrowed(&property.schema);
+            for pattern in &normalized.pattern_properties {
+                if self.property_name_matches_pattern_cached(&pattern.pattern, &property.name)? {
+                    let extra = pattern_schema_for_property(effective.as_ref(), &pattern.schema);
+                    effective = Cow::Owned(all_of_schema(effective.into_owned(), extra));
                 }
             }
+            if let Some(simplified) = simplify_finite_string_allof_schema(effective.as_ref()) {
+                effective = Cow::Owned(simplified);
+            }
+            let started = profile.as_ref().map(|_| std::time::Instant::now());
+            let value_expr = self.lower_schema(effective.as_ref())?;
+            if let (Some(started), Some(profile)) = (started, profile.as_deref_mut()) {
+                profile.lower_property_ms += started.elapsed().as_secs_f64() * 1000.0;
+            }
+            let started = profile.as_ref().map(|_| std::time::Instant::now());
+            let schema = effective.into_owned();
+            if let (Some(started), Some(profile)) = (started, profile.as_deref_mut()) {
+                profile.schema_clone_ms += started.elapsed().as_secs_f64() * 1000.0;
+            }
             items.push(AnyOfFixedObjectItem {
-                key: property.name.clone(),
-                value_expr: self.lower_schema(&effective_schema)?,
-                value_identity: exact_property_value_identity(&effective_schema),
-                schema: effective_schema,
+                key: property.name.clone(), value_expr, schema,
                 required: normalized.required.contains(&property.name),
             });
         }
-
         let mut pattern_pairs = Vec::with_capacity(normalized.pattern_properties.len());
-        for pattern_property in &normalized.pattern_properties {
-            let key = self.lower_pattern_key_colon_appearance(&pattern_property.pattern, &fixed_keys)?;
-            let value = self.lower_schema(&pattern_property.schema)?;
+        for property in &normalized.pattern_properties {
+            let key = self.lower_pattern_key_colon_appearance(&property.pattern, &fixed_keys)?;
+            let value = self.lower_schema(&property.schema)?;
             pattern_pairs.push(seq(vec![key, value]));
         }
-
         let additional_value_expr = match &normalized.additional_properties {
             AdditionalProperties::AllowAny => Some(r(JSON_VALUE_RULE)),
             AdditionalProperties::Deny => None,
             AdditionalProperties::Schema(value_schema) => Some(self.lower_schema(value_schema)?),
         };
-
-        Ok(Some((
-            AnyOfObjectVariant {
-                items,
-                fixed_keys,
-                pattern_pairs,
-                pattern_keys: normalized
-                    .pattern_properties
-                    .iter()
-                    .map(|pattern_property| pattern_property.pattern.clone())
-                    .collect(),
-                additional_value_expr,
-            },
-            include_untyped_non_object_alts,
-        )))
+        Ok(Some((AnyOfObjectVariant {
+            items, fixed_keys, pattern_pairs, additional_value_expr,
+            pattern_keys: normalized.pattern_properties.iter().map(|p| p.pattern.clone()).collect(),
+        }, include_nonobjects)))
     }
 
     fn add_expr_nfa_symbol_path(
@@ -1716,231 +1477,97 @@ impl<'a> Lowerer<'a> {
         variants: &[AnyOfFixedObjectVariant],
         include_untyped_non_object_alts: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
-        if variants.is_empty() {
+        if variants.is_empty() || variants.len() > u16::MAX as usize {
             return Ok(None);
         }
-        if let Some(expr) = self.try_lower_common_property_closed_any_of_object_variants_expr_nfa(
-            variants,
-            include_untyped_non_object_alts,
-        )? {
-            return Ok(Some(expr));
+        // Sharing exact lowered value observations is a subset construction
+        // on ordered property cursors. If its frontier exceeds the cap, the
+        // same transition algebra can emit singleton alternatives instead.
+        for share in [true, false] {
+            let Some(builder) = self.build_closed_variant_frontier(variants, share)? else { continue; };
+            let rule_name = self.fresh_rule_name("json_anyof_object_body");
+            let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+            self.add_nonterminal_rule(&rule_name, body);
+            return Ok(Some(Self::object_union_result(&rule_name, include_untyped_non_object_alts)));
         }
-
-        let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
-        let mut state_ids = BTreeMap::<AnyOfFixedObjectState, u32>::new();
-        let mut queue = VecDeque::<AnyOfFixedObjectState>::new();
-        for (variant_idx, _) in variants.iter().enumerate() {
-            let state = AnyOfFixedObjectState {
-                variant_idx: variant_idx as u16,
-                cursor: 0,
-                has_content: false,
-            };
-            let state_id = builder.add_state();
-            builder.add_epsilon(builder.start_state(), state_id);
-            state_ids.insert(state, state_id);
-            queue.push_back(state);
-        }
-
-        while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
-                return Ok(None);
-            }
-
-            let state_id = state_ids[&state];
-            let variant = &variants[state.variant_idx as usize];
-            let cursor = state.cursor as usize;
-
-            if variant.close_allowed(cursor) {
-                builder.add_epsilon(state_id, accept);
-            }
-
-            for key in variant.legal_next_keys(cursor) {
-                let Some(next_cursor) = variant.advance_cursor(cursor, key) else {
-                    continue;
-                };
-                let Some(value_expr) = variant.value_expr_for_key(key) else {
-                    continue;
-                };
-
-                let next_state = AnyOfFixedObjectState {
-                    variant_idx: state.variant_idx,
-                    cursor: next_cursor as u16,
-                    has_content: true,
-                };
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-
-                let mut symbols = Vec::new();
-                if state.has_content {
-                    symbols.push(self.lower_literal_key_colon_with_prefix(b", ", key));
-                } else {
-                    symbols.push(self.lower_literal_key_colon(key));
-                }
-                symbols.push(value_expr);
-                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
-            }
-        }
-
-        let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&rule_name, body);
-
-        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
-        if include_untyped_non_object_alts {
-            return Ok(Some(choice(vec![
-                object_expr,
-                r(JSON_ARRAY_RULE),
-                r(JSON_STRING_RULE),
-                r(JSON_NUMBER_RULE),
-                r(JSON_BOOL_RULE),
-                r(JSON_NULL_RULE),
-            ])));
-        }
-
-        Ok(Some(object_expr))
+        Ok(None)
     }
 
-    fn try_lower_common_property_closed_any_of_object_variants_expr_nfa(
+    fn build_closed_variant_frontier(
         &mut self,
-        variants: &[AnyOfFixedObjectVariant],
-        include_untyped_non_object_alts: bool,
-    ) -> ImportResult<Option<GrammarExpr>> {
-        if variants.len() < 2 || !closed_any_of_variants_have_shareable_property(variants) {
-            return Ok(None);
-        }
-
+        variants: &[AnyOfObjectVariant],
+        share: bool,
+    ) -> ImportResult<Option<ExprNfaBuilder>> {
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
         builder.set_accepting(accept);
-        let initial = AnyOfFixedObjectMergedState {
-            cursors: (0..variants.len())
-                .map(|variant_idx| AnyOfFixedObjectCursor {
-                    variant_idx: variant_idx as u16,
-                    cursor: 0,
-                })
-                .collect(),
-            has_content: false,
+        let mut state_ids = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        let cursors = (0..variants.len()).map(|i| AnyOfFixedObjectCursor {
+            variant_idx: i as u16, cursor: 0,
+        }).collect::<Vec<_>>();
+        let starts = if share { vec![cursors] } else {
+            cursors.into_iter().map(|cursor| vec![cursor]).collect()
         };
-        let start = builder.add_state();
-        builder.add_epsilon(builder.start_state(), start);
-
-        let mut state_ids = BTreeMap::<AnyOfFixedObjectMergedState, u32>::new();
-        let mut queue = VecDeque::<AnyOfFixedObjectMergedState>::new();
-        state_ids.insert(initial.clone(), start);
-        queue.push_back(initial);
-
+        for cursors in starts {
+            let start = merged_closed_any_of_state_id(&mut builder, &mut state_ids, &mut queue,
+                AnyOfFixedObjectMergedState { cursors, has_content: false });
+            builder.add_epsilon(builder.start_state(), start);
+        }
         while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
-                return Ok(None);
-            }
-
-            let state_id = state_ids[&state];
-            if state.cursors.iter().any(|cursor| {
-                variants[cursor.variant_idx as usize].close_allowed(cursor.cursor as usize)
-            }) {
-                builder.add_epsilon(state_id, accept);
-            }
-
-            let mut legal_keys = BTreeSet::new();
+            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES { return Ok(None); }
+            let source = state_ids[&state];
+            let mut by_key = BTreeMap::<&str, Vec<(&GrammarExpr, AnyOfFixedObjectCursor)>>::new();
             for cursor in &state.cursors {
                 let variant = &variants[cursor.variant_idx as usize];
-                for key in variant.legal_next_keys(cursor.cursor as usize) {
-                    legal_keys.insert(key.to_owned());
+                let remaining = &variant.items[cursor.cursor as usize..];
+                if remaining.iter().all(|item| !item.required) {
+                    builder.add_epsilon(source, accept);
+                }
+                for (offset, item) in remaining.iter().enumerate() {
+                    by_key.entry(&item.key).or_default().push((&item.value_expr,
+                        AnyOfFixedObjectCursor { variant_idx: cursor.variant_idx,
+                            cursor: cursor.cursor + offset as u16 + 1 }));
+                    if item.required { break; }
                 }
             }
-
-            for key in legal_keys {
-                if let Some((value_expr, next_cursors)) =
-                    shared_closed_any_of_key_transition(variants, &state.cursors, &key)
-                {
-                    let next_state = AnyOfFixedObjectMergedState {
-                        cursors: next_cursors,
-                        has_content: true,
-                    };
-                    let next_state_id = merged_closed_any_of_state_id(
-                        &mut builder,
-                        &mut state_ids,
-                        &mut queue,
-                        next_state,
-                    );
-                    let key_expr = if state.has_content {
-                        self.lower_literal_key_colon_with_prefix(b", ", &key)
+            for (key, edges) in by_key {
+                let mut groups: Vec<(&GrammarExpr, Vec<AnyOfFixedObjectCursor>)> = Vec::new();
+                let mut index = HashMap::new();
+                for (value, cursor) in edges {
+                    if share {
+                        let group = *index.entry(value).or_insert_with(|| {
+                            groups.push((value, Vec::new()));
+                            groups.len() - 1
+                        });
+                        groups[group].1.push(cursor);
                     } else {
-                        self.lower_literal_key_colon(&key)
-                    };
-                    Self::add_expr_nfa_symbol_path(
-                        &mut builder,
-                        state_id,
-                        vec![key_expr, value_expr],
-                        next_state_id,
-                    );
-                    continue;
+                        groups.push((value, vec![cursor]));
+                    }
                 }
-
-                for cursor in &state.cursors {
-                    let variant = &variants[cursor.variant_idx as usize];
-                    let Some(next_cursor) = variant.advance_cursor(cursor.cursor as usize, &key)
-                    else {
-                        continue;
-                    };
-                    let Some(value_expr) = variant.value_expr_for_key(&key) else {
-                        continue;
-                    };
-                    let next_state = AnyOfFixedObjectMergedState {
-                        cursors: vec![AnyOfFixedObjectCursor {
-                            variant_idx: cursor.variant_idx,
-                            cursor: next_cursor as u16,
-                        }],
-                        has_content: true,
-                    };
-                    let next_state_id = merged_closed_any_of_state_id(
-                        &mut builder,
-                        &mut state_ids,
-                        &mut queue,
-                        next_state,
-                    );
-                    let key_expr = if state.has_content {
-                        self.lower_literal_key_colon_with_prefix(b", ", &key)
-                    } else {
-                        self.lower_literal_key_colon(&key)
-                    };
-                    Self::add_expr_nfa_symbol_path(
-                        &mut builder,
-                        state_id,
-                        vec![key_expr, value_expr],
-                        next_state_id,
-                    );
+                let key_expr = if state.has_content {
+                    self.lower_literal_key_colon_with_prefix(b", ", key)
+                } else {
+                    self.lower_literal_key_colon(key)
+                };
+                for (value, mut cursors) in groups {
+                    cursors.sort_unstable();
+                    cursors.dedup();
+                    let target = merged_closed_any_of_state_id(&mut builder, &mut state_ids, &mut queue,
+                        AnyOfFixedObjectMergedState { cursors, has_content: true });
+                    Self::add_expr_nfa_symbol_path(&mut builder, source, vec![key_expr.clone(), value.clone()], target);
                 }
             }
         }
-
-        let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&rule_name, body);
-
-        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
-        if include_untyped_non_object_alts {
-            return Ok(Some(choice(vec![
-                object_expr,
-                r(JSON_ARRAY_RULE),
-                r(JSON_STRING_RULE),
-                r(JSON_NUMBER_RULE),
-                r(JSON_BOOL_RULE),
-                r(JSON_NULL_RULE),
-            ])));
-        }
-
-        Ok(Some(object_expr))
+        Ok(Some(builder))
     }
 
+    fn object_union_result(rule_name: &str, include_nonobjects: bool) -> GrammarExpr {
+        let object = seq(vec![lit("{"), r(rule_name), lit("}")]);
+        if !include_nonobjects { return object; }
+        choice(vec![object, r(JSON_ARRAY_RULE), r(JSON_STRING_RULE),
+            r(JSON_NUMBER_RULE), r(JSON_BOOL_RULE), r(JSON_NULL_RULE)])
+    }
     fn is_json_value_expr(expr: &GrammarExpr) -> bool {
         matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_VALUE_RULE)
     }
@@ -2566,19 +2193,7 @@ impl<'a> Lowerer<'a> {
         }
         self.add_nonterminal_rule(&rule_name, body);
 
-        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
-        if include_untyped_non_object_alts {
-            return Ok(Some(choice(vec![
-                object_expr,
-                r(JSON_ARRAY_RULE),
-                r(JSON_STRING_RULE),
-                r(JSON_NUMBER_RULE),
-                r(JSON_BOOL_RULE),
-                r(JSON_NULL_RULE),
-            ])));
-        }
-
-        Ok(Some(object_expr))
+        Ok(Some(Self::object_union_result(&rule_name, include_untyped_non_object_alts)))
     }
 
     fn fixed_object_template_symbols(
@@ -3969,124 +3584,6 @@ fn plain_singleton_string_enum_value(schema: &Schema) -> Option<String> {
     } else {
         None
     }
-}
-
-fn exact_property_value_identity(schema: &Schema) -> Option<String> {
-    match &schema.kind {
-        SchemaKind::Ref(pointer) => Some(format!("ref:{pointer}")),
-        SchemaKind::Assertions(assertions) => {
-            let literal = match assertions.enum_values.as_deref() {
-                Some([serde_json::Value::String(value)]) => Some(value),
-                _ => None,
-            }?;
-            if assertions.const_value.is_none()
-                && assertions.object.is_none()
-                && assertions.array.is_none()
-                && assertions.string.is_none()
-                && assertions.number.is_none()
-                && assertions.not.is_none()
-                && assertions.any_of.is_empty()
-                && assertions.one_of.is_empty()
-                && assertions.all_of.is_empty()
-                && assertions.types.as_ref().is_none_or(|types| {
-                    types.iter().all(|schema_type| *schema_type == SchemaType::String)
-                })
-            {
-                Some(format!(
-                    "string:{}",
-                    serde_json::to_string(literal).unwrap_or_else(|_| "\"\"".to_string())
-                ))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn singleton_string_identity_literal_expr(identity: &str) -> Option<GrammarExpr> {
-    let encoded = identity.strip_prefix("string:")?;
-    Some(lit_bytes(encoded.as_bytes().to_vec()))
-}
-
-fn schemas_structurally_equal(lhs: &Schema, rhs: &Schema) -> bool {
-    super::shape::schemas_shape_equivalent(lhs, rhs)
-}
-fn shareable_property_schemas_match(lhs: &AnyOfFixedObjectItem, rhs: &AnyOfFixedObjectItem) -> bool {
-    match (lhs.value_identity.as_ref(), rhs.value_identity.as_ref()) {
-        (Some(left), Some(right)) => left == right,
-        _ => schemas_structurally_equal(&lhs.schema, &rhs.schema),
-    }
-}
-
-fn plain_object_schema_for_closed_any_of(schema: &Schema) -> Option<&ObjectSchema> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return None;
-    }
-    if let Some(types) = &assertions.types
-        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
-    {
-        return None;
-    }
-    assertions.object.as_ref()
-}
-
-fn closed_any_of_variants_have_shareable_property(variants: &[AnyOfFixedObjectVariant]) -> bool {
-    let Some(first) = variants.first() else {
-        return false;
-    };
-    first.items.iter().any(|first_item| {
-        variants.iter().skip(1).all(|variant| {
-            variant
-                .item_for_key(&first_item.key)
-                .is_some_and(|candidate| shareable_property_schemas_match(first_item, candidate))
-        })
-    })
-}
-
-fn shared_closed_any_of_key_transition(
-    variants: &[AnyOfFixedObjectVariant],
-    cursors: &[AnyOfFixedObjectCursor],
-    key: &str,
-) -> Option<(GrammarExpr, Vec<AnyOfFixedObjectCursor>)> {
-    let mut identity = None;
-    let mut value_expr = None;
-    let mut next_cursors = Vec::with_capacity(cursors.len());
-
-    for cursor in cursors {
-        let variant = &variants[cursor.variant_idx as usize];
-        let next_cursor = variant.advance_cursor(cursor.cursor as usize, key)?;
-        let item = variant.item_for_key(key)?;
-        if let Some(expected) = identity {
-            if !shareable_property_schemas_match(expected, item) {
-                return None;
-            }
-        } else {
-            identity = Some(item);
-            value_expr = Some(item.value_expr.clone());
-        }
-        next_cursors.push(AnyOfFixedObjectCursor {
-            variant_idx: cursor.variant_idx,
-            cursor: next_cursor as u16,
-        });
-    }
-
-    if next_cursors.len() < 2 {
-        return None;
-    }
-    Some((value_expr?, next_cursors))
 }
 
 fn merged_closed_any_of_state_id(
