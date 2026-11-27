@@ -541,14 +541,6 @@ impl RuntimeTokenSetKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct DenseTokenSetIntersectionKey {
-    tsid: u32,
-    dense: usize,
-    dense_len: usize,
-    token_set: RuntimeTokenSetKey,
-}
-
 type DenseTokenSetIntersectionSmallCache =
     SmallVec<[(Arc<[u64]>, RuntimeTokenSetKey, Option<Arc<[u64]>>); 8]>;
 
@@ -631,41 +623,6 @@ impl DenseMaskAcc {
         high_mask & !low_mask
     }
 
-    fn for_each_token_range_word<F>(tokens: &RangeSetBlaze<u32>, word_limit: usize, mut f: F)
-    where
-        F: FnMut(usize, u64),
-    {
-        if word_limit == 0 {
-            return;
-        }
-
-        let max_token_exclusive = word_limit.saturating_mul(64);
-        if max_token_exclusive == 0 {
-            return;
-        }
-
-        for range in tokens.ranges() {
-            let lo = *range.start() as usize;
-            if lo >= max_token_exclusive {
-                continue;
-            }
-
-            let hi = (*range.end() as usize).min(max_token_exclusive - 1);
-            if lo > hi {
-                continue;
-            }
-
-            let word_lo = lo / 64;
-            let word_hi = hi / 64;
-
-            for word_idx in word_lo..=word_hi {
-                let lo_bit = if word_idx == word_lo { lo % 64 } else { 0 };
-                let hi_bit = if word_idx == word_hi { hi % 64 } else { 63 };
-                f(word_idx, Self::bit_range_mask(lo_bit, hi_bit));
-            }
-        }
-    }
-
     fn for_each_runtime_token_range_word<F>(
         tokens: RuntimeTokenSetRef<'_>,
         word_limit: usize,
@@ -699,32 +656,50 @@ impl DenseMaskAcc {
         });
     }
 
+    /// Intersect a dense row with any runtime token-set representation.
+    /// Preserve the input allocation when the intersection is unchanged.
     fn intersect_dense_with_runtime_token_set(
-        dense: &[u64],
+        dense: &Arc<[u64]>,
         token_set: RuntimeTokenSetRef<'_>,
         precomputed: &WeightTokenMaskCache,
     ) -> Option<Arc<[u64]>> {
+        if dense.is_empty() || token_set.is_empty() {
+            return None;
+        }
         if let Some(key) = token_set.materialized_key()
-            && let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
-                let mut out = vec![0u64; dense.len()];
-                let mut any = false;
-                for i in 0..dense.len() {
-                    let word = dense[i] & mask.get(i).copied().unwrap_or(0);
-                    any |= word != 0;
-                    out[i] = word;
+            && let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense)
+        {
+            let mut any = false;
+            let mut changed: Option<Vec<u64>> = None;
+            for (index, &input) in dense.iter().enumerate() {
+                let word = input & mask.get(index).copied().unwrap_or(0);
+                any |= word != 0;
+                if let Some(out) = changed.as_mut() {
+                    out.push(word);
+                } else if word != input {
+                    let mut out = Vec::with_capacity(dense.len());
+                    out.extend_from_slice(&dense[..index]);
+                    out.push(word);
+                    changed = Some(out);
                 }
-                return any.then(|| out.into());
             }
+            return any.then(|| changed.map_or_else(|| Arc::clone(dense), Arc::from));
+        }
+
         let mut out = vec![0u64; dense.len()];
         let mut any = false;
         Self::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
             let word = dense[word_idx] & token_mask;
-            if word != 0 {
-                out[word_idx] |= word;
-                any = true;
-            }
+            out[word_idx] |= word;
+            any |= word != 0;
         });
-        any.then(|| out.into())
+        any.then(|| {
+            if out.as_slice() == dense.as_ref() {
+                Arc::clone(dense)
+            } else {
+                out.into()
+            }
+        })
     }
 
     fn or_dense_and_runtime_token_set_into(
@@ -752,6 +727,16 @@ impl DenseMaskAcc {
         weight: RuntimeWeightRef<'_>,
         precomputed: &WeightTokenMaskCache,
     ) -> Option<Self> {
+        self.intersect_with_runtime_weight_by(weight, |dense, token_set| {
+            Self::intersect_dense_with_runtime_token_set(dense, token_set, precomputed)
+        })
+    }
+
+    fn intersect_with_runtime_weight_by<'a>(
+        &self,
+        weight: RuntimeWeightRef<'a>,
+        mut intersect: impl FnMut(&Arc<[u64]>, RuntimeTokenSetRef<'a>) -> Option<Arc<[u64]>>,
+    ) -> Option<Self> {
         if self.is_empty() {
             return None;
         }
@@ -763,9 +748,7 @@ impl DenseMaskAcc {
             let Some(token_set) = weight.token_set_for_tsid(*tsid) else {
                 continue;
             };
-            if let Some(intersection) =
-                Self::intersect_dense_with_runtime_token_set(dense, token_set, precomputed)
-            {
+            if let Some(intersection) = intersect(dense, token_set) {
                 entries.push((*tsid, intersection));
             }
         }
@@ -778,404 +761,28 @@ impl DenseMaskAcc {
         precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Self> {
-        if self.is_empty() {
-            return None;
-        }
-        if weight.is_full() {
-            return Some(self.clone());
-        }
-        let mut result = SmallVec::new();
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.token_set_for_tsid(*tsid) else {
-                continue;
-            };
-            let token_key = RuntimeTokenSetKey::from_ref(token_set);
-            let cached = cache.iter().find(|(cached_dense, cached_token_set, _)| {
-                Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_key
-            });
-            let intersection = if let Some((_, _, result)) = cached {
-                result.clone()
-            } else {
-                let result = Self::intersect_dense_with_runtime_token_set(
-                    dense,
-                    token_set,
-                    precomputed,
-                );
-                if cache.len() < cache.inline_size() {
-                    cache.push((Arc::clone(dense), token_key, result.clone()));
-                }
-                result
-            };
-            if let Some(intersection) = intersection {
-                result.push((*tsid, intersection));
-            }
-        }
-        (!result.is_empty()).then_some(Self(result))
+        self.intersect_with_runtime_weight_by(weight, |dense, token_set| {
+            Self::intersect_dense_with_runtime_token_set_cached(dense, token_set, precomputed, cache)
+        })
     }
 
-    fn intersect_dense_with_tokens(
-        dense: &[u64],
-        tokens: &RangeSetBlaze<u32>,
-    ) -> Option<Arc<[u64]>> {
-        if dense.is_empty() || tokens.is_empty() {
-            return None;
-        }
-
-        let mut out = vec![0u64; dense.len()];
-        let mut any = false;
-
-        Self::for_each_token_range_word(tokens, dense.len(), |word_idx, token_mask| {
-            let word = dense[word_idx] & token_mask;
-            if word != 0 {
-                out[word_idx] |= word;
-                any = true;
-            }
-        });
-
-        if any {
-            Some(out.into())
-        } else {
-            None
-        }
-    }
-
-    fn intersect_dense_with_token_set(
-        dense: &[u64],
-        token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &WeightTokenMaskCache,
-    ) -> Option<Arc<[u64]>> {
-        let key = Arc::as_ptr(token_set) as usize;
-
-        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
-            let mut out = vec![0u64; dense.len()];
-            let mut any = false;
-
-            for i in 0..dense.len() {
-                let word = dense[i] & mask.get(i).copied().unwrap_or(0);
-                if word != 0 {
-                    any = true;
-                }
-                out[i] = word;
-            }
-
-            if any {
-                Some(out.into())
-            } else {
-                None
-            }
-        } else {
-            Self::intersect_dense_with_tokens(dense, token_set)
-        }
-    }
-
-    fn or_dense_and_token_set_into(
-        dense: &[u64],
-        token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &WeightTokenMaskCache,
-        merged: &mut [u64],
-    ) {
-        let key = Arc::as_ptr(token_set) as usize;
-
-        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
-            let n = dense.len().min(mask.len()).min(merged.len());
-            for i in 0..n {
-                merged[i] |= dense[i] & mask[i];
-            }
-        } else {
-            let word_limit = dense.len().min(merged.len());
-            Self::for_each_token_range_word(token_set, word_limit, |word_idx, token_mask| {
-                merged[word_idx] |= dense[word_idx] & token_mask;
-            });
-        }
-    }
-
-    fn intersect_with_weight(
-        &self,
-        weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-    ) -> Option<Self> {
-        if self.is_empty() {
-            return None;
-        }
-
-        if weight.is_full() {
-            return Some(self.clone());
-        }
-
-        let mut result = SmallVec::new();
-
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
-                continue;
-            };
-
-            if let Some(intersection) =
-                Self::intersect_dense_with_token_set(dense, token_set, precomputed)
-            {
-                result.push((*tsid, intersection));
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(Self(result))
-        }
-    }
-
-    fn intersect_with_weight_cached(
-        &self,
-        weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-        cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
-    ) -> Option<Self> {
-        if self.is_empty() {
-            return None;
-        }
-        if weight.is_full() {
-            return Some(self.clone());
-        }
-
-        let mut result = SmallVec::new();
-
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
-                continue;
-            };
-            if let Some(intersection) = Self::intersect_dense_with_token_set_cached(
-                *tsid,
-                dense,
-                token_set,
-                precomputed,
-                cache,
-            ) {
-                result.push((*tsid, intersection));
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(Self(result))
-        }
-    }
-
-    fn intersect_dense_with_token_set_cached(
-        tsid: u32,
+    fn intersect_dense_with_runtime_token_set_cached(
         dense: &Arc<[u64]>,
-        token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &WeightTokenMaskCache,
-        cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
-    ) -> Option<Arc<[u64]>> {
-        let key = DenseTokenSetIntersectionKey {
-            tsid,
-            dense: dense.as_ptr() as usize,
-            dense_len: dense.len(),
-            token_set: RuntimeTokenSetKey::Materialized(Arc::as_ptr(token_set) as usize),
-        };
-        if let Some(cached) = cache.get(&key) {
-            return cached.clone();
-        }
-        if let RuntimeTokenSetKey::Materialized(token_set_key) = key.token_set
-            && let Some(mask) = precomputed.get(&token_set_key).and_then(WeightTokenMaskEntry::dense) {
-            let mut any = false;
-            let mut out: Option<Vec<u64>> = None;
-            for i in 0..dense.len() {
-                let word = dense[i] & mask.get(i).copied().unwrap_or(0);
-                any |= word != 0;
-                if let Some(out) = out.as_mut() {
-                    out.push(word);
-                } else if word != dense[i] {
-                    let mut new_out = Vec::with_capacity(dense.len());
-                    new_out.extend_from_slice(&dense[..i]);
-                    new_out.push(word);
-                    out = Some(new_out);
-                }
-            }
-            let result = if !any {
-                None
-            } else if let Some(out) = out {
-                Some(out.into())
-            } else {
-                Some(Arc::clone(dense))
-            };
-            cache.insert(key, result.clone());
-            return result;
-            }
-        let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
-        cache.insert(key, result.clone());
-        result
-    }
-
-    fn intersect_with_weight_small_cached(
-        &self,
-        weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-        cache: &mut DenseTokenSetIntersectionSmallCache,
-    ) -> Option<Self> {
-        if self.is_empty() {
-            return None;
-        }
-        if weight.is_full() {
-            return Some(self.clone());
-        }
-
-        let mut result = SmallVec::new();
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
-                continue;
-            };
-            if let Some(intersection) = Self::intersect_dense_with_token_set_small_cached(
-                dense,
-                token_set,
-                precomputed,
-                cache,
-            ) {
-                result.push((*tsid, intersection));
-            }
-        }
-
-        (!result.is_empty()).then_some(Self(result))
-    }
-
-    fn intersect_dense_with_token_set_small_cached(
-        dense: &Arc<[u64]>,
-        token_set: &Arc<RangeSetBlaze<u32>>,
+        token_set: RuntimeTokenSetRef<'_>,
         precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Arc<[u64]>> {
-        let token_set_key = RuntimeTokenSetKey::Materialized(Arc::as_ptr(token_set) as usize);
+        let token_key = RuntimeTokenSetKey::from_ref(token_set);
         if let Some((_, _, result)) = cache.iter().find(|(cached_dense, cached_token_set, _)| {
-            Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_set_key
+            Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_key
         }) {
             return result.clone();
         }
-
-        let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
+        let result = Self::intersect_dense_with_runtime_token_set(dense, token_set, precomputed);
         if cache.len() < cache.inline_size() {
-            cache.push((Arc::clone(dense), token_set_key, result.clone()));
+            cache.push((Arc::clone(dense), token_key, result.clone()));
         }
         result
-    }
-
-    fn intersect_dense_with_token_set_reuse(
-        dense: &Arc<[u64]>,
-        token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &WeightTokenMaskCache,
-    ) -> Option<Arc<[u64]>> {
-        let key = Arc::as_ptr(token_set) as usize;
-        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
-            let mut any = false;
-            let mut out: Option<Vec<u64>> = None;
-            for index in 0..dense.len() {
-                let word = dense[index] & mask.get(index).copied().unwrap_or(0);
-                any |= word != 0;
-                if let Some(out) = out.as_mut() {
-                    out.push(word);
-                } else if word != dense[index] {
-                    let mut changed = Vec::with_capacity(dense.len());
-                    changed.extend_from_slice(&dense[..index]);
-                    changed.push(word);
-                    out = Some(changed);
-                }
-            }
-            return if !any {
-                None
-            } else if let Some(out) = out {
-                Some(out.into())
-            } else {
-                Some(Arc::clone(dense))
-            };
-        }
-
-        let mut out = vec![0u64; dense.len()];
-        let mut any = false;
-        Self::for_each_token_range_word(token_set, dense.len(), |word_index, token_mask| {
-            let word = dense[word_index] & token_mask;
-            out[word_index] |= word;
-            any |= word != 0;
-        });
-        if !any {
-            return None;
-        }
-        if out.as_slice() == dense.as_ref() {
-            Some(Arc::clone(dense))
-        } else {
-            Some(out.into())
-        }
-    }
-
-    fn intersect_with_weight_reuse(
-        &self,
-        weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-    ) -> Option<Self> {
-        if self.is_empty() {
-            return None;
-        }
-        if weight.is_full() {
-            return Some(self.clone());
-        }
-        let mut entries = SmallVec::new();
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
-                continue;
-            };
-            if let Some(intersection) =
-                Self::intersect_dense_with_token_set_reuse(dense, token_set, precomputed)
-            {
-                entries.push((*tsid, intersection));
-            }
-        }
-        (!entries.is_empty()).then_some(Self(entries))
-    }
-
-    fn intersect_with_weight_in_place(
-        &mut self,
-        weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-    ) -> bool {
-        if self.is_empty() {
-            return false;
-        }
-        if weight.is_full() {
-            return true;
-        }
-
-        let mut idx = 0usize;
-        while idx < self.0.len() {
-            let (tsid, dense) = &mut self.0[idx];
-            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
-                self.0.remove(idx);
-                continue;
-            };
-
-            let key = Arc::as_ptr(token_set) as usize;
-            if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
-                let dense_mut = Arc::make_mut(dense);
-                let mut any = false;
-                for i in 0..dense_mut.len() {
-                    let word = dense_mut[i] & mask.get(i).copied().unwrap_or(0);
-                    any |= word != 0;
-                    dense_mut[i] = word;
-                }
-                if any {
-                    idx += 1;
-                } else {
-                    self.0.remove(idx);
-                }
-                continue;
-            }
-
-            let Some(intersection) = Self::intersect_dense_with_token_set(dense, token_set, precomputed) else {
-                self.0.remove(idx);
-                continue;
-            };
-            *dense = intersection;
-            idx += 1;
-        }
-
-        !self.0.is_empty()
     }
 
     fn merge_in_place(&mut self, other: &Self) {
@@ -1236,25 +843,6 @@ impl DenseMaskAcc {
         }
     }
 
-    fn or_intersection_into_merged(
-        &self,
-        final_weight: &Weight,
-        precomputed: &WeightTokenMaskCache,
-        merged: &mut [u64],
-    ) {
-        if final_weight.is_full() {
-            self.or_into_merged(merged);
-            return;
-        }
-
-        for (tsid, dense) in &self.0 {
-            let Some(token_set) = final_weight.token_set_for_tsid_ref(*tsid) else {
-                continue;
-            };
-
-            Self::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1697,6 +1285,7 @@ mod tests {
         DenseMaskAcc,
         WeightTokenMaskCache,
         DenseTokenSetIntersectionSmallCache,
+        RuntimeTokenSetRef,
         MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY,
         MASK_SINGLE_PATH_DIRECT_MAX_PATHS_PER_GSS,
         MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
@@ -2138,11 +1727,10 @@ mod tests {
         let token_set = Arc::new(RangeSetBlaze::from_iter(std::iter::once(0_u32..=127)));
         let precomputed = precomputed_for(&token_set, Arc::from([!0_u64, !0_u64]));
 
-        let mut cache = FxHashMap::default();
-        let intersected = DenseMaskAcc::intersect_dense_with_token_set_cached(
-            0,
+        let mut cache = DenseTokenSetIntersectionSmallCache::new();
+        let intersected = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
             &dense,
-            &token_set,
+            RuntimeTokenSetRef::Materialized(&token_set),
             &precomputed,
             &mut cache,
         )
@@ -2157,11 +1745,10 @@ mod tests {
         let token_set = Arc::new(RangeSetBlaze::from_iter(std::iter::once(0_u32..=127)));
         let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0000]));
 
-        let mut cache = FxHashMap::default();
-        let intersected = DenseMaskAcc::intersect_dense_with_token_set_cached(
-            0,
+        let mut cache = DenseTokenSetIntersectionSmallCache::new();
+        let intersected = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
             &dense,
-            &token_set,
+            RuntimeTokenSetRef::Materialized(&token_set),
             &precomputed,
             &mut cache,
         )
@@ -2178,16 +1765,16 @@ mod tests {
         let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0100]));
         let mut cache = DenseTokenSetIntersectionSmallCache::new();
 
-        let first = DenseMaskAcc::intersect_dense_with_token_set_small_cached(
+        let first = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
             &dense,
-            &token_set,
+            RuntimeTokenSetRef::Materialized(&token_set),
             &precomputed,
             &mut cache,
         )
         .unwrap();
-        let second = DenseMaskAcc::intersect_dense_with_token_set_small_cached(
+        let second = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
             &dense,
-            &token_set,
+            RuntimeTokenSetRef::Materialized(&token_set),
             &precomputed,
             &mut cache,
         )
@@ -2841,7 +2428,10 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         result: Option<DenseMaskAcc>,
         weight: &Weight,
     ) -> Option<DenseMaskAcc> {
-        result?.intersect_with_weight_reuse(weight, self.precomputed)
+        result?.intersect_with_runtime_weight_reuse(
+            RuntimeWeightRef::Materialized(weight),
+            self.precomputed,
+        )
     }
 
     fn final_for_accumulator(
@@ -2858,7 +2448,10 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .as_ref()
             .and_then(|weight| {
                 self.runtime.accumulators[accumulator_id as usize]
-                    .intersect_with_weight_reuse(weight, self.precomputed)
+                    .intersect_with_runtime_weight_reuse(
+                        RuntimeWeightRef::Materialized(weight),
+                        self.precomputed,
+                    )
             });
         self.runtime.final_memo.insert(key, result.clone());
         result
@@ -2966,9 +2559,11 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             return Self::single_dense_transition_mask(Arc::clone(dense));
         }
         let mut dense = vec![0u64; self.constraint.internal_token_dense_words];
-        DenseMaskAcc::for_each_token_range_word(tokens, dense.len(), |index, mask| {
-            dense[index] |= mask;
-        });
+        DenseMaskAcc::for_each_runtime_token_range_word(
+            RuntimeTokenSetRef::Materialized(tokens),
+            dense.len(),
+            |index, mask| dense[index] |= mask,
+        );
         Self::single_dense_transition_mask(dense.into())
     }
 
@@ -6080,8 +5675,8 @@ impl ConstraintState {
                 root_dense.for_each_acc(|accumulator| {
                     merge_accepted(
                         &mut accepted,
-                        accumulator.intersect_with_weight_small_cached(
-                            final_weight,
+                        accumulator.intersect_with_runtime_weight_small_cached(
+                            RuntimeWeightRef::Materialized(final_weight),
                             precomputed,
                             &mut seed_intersections,
                         ),
@@ -6103,8 +5698,8 @@ impl ConstraintState {
                     dense.for_each_acc(|accumulator| {
                         merge_accepted(
                             &mut accepted,
-                            accumulator.intersect_with_weight_small_cached(
-                                final_weight,
+                            accumulator.intersect_with_runtime_weight_small_cached(
+                                RuntimeWeightRef::Materialized(final_weight),
                                 precomputed,
                                 &mut seed_intersections,
                             ),
@@ -6117,8 +5712,8 @@ impl ConstraintState {
                     dense.for_each_acc(|accumulator| {
                         merge_accepted(
                             &mut accepted,
-                            accumulator.intersect_with_weight_small_cached(
-                                top_weight,
+                            accumulator.intersect_with_runtime_weight_small_cached(
+                                RuntimeWeightRef::Materialized(top_weight),
                                 precomputed,
                                 &mut seed_intersections,
                             ),
@@ -6131,8 +5726,8 @@ impl ConstraintState {
                         dense.for_each_acc(|accumulator| {
                             merge_accepted(
                                 &mut accepted,
-                            accumulator.intersect_with_weight_small_cached(
-                                    top_weight,
+                            accumulator.intersect_with_runtime_weight_small_cached(
+                                RuntimeWeightRef::Materialized(top_weight),
                                     precomputed,
                                     &mut seed_intersections,
                                 ),
@@ -6149,8 +5744,8 @@ impl ConstraintState {
                         dense.for_each_acc(|accumulator| {
                             merge_accepted(
                                 &mut accepted,
-                                accumulator.intersect_with_weight_small_cached(
-                                    top_weight,
+                                accumulator.intersect_with_runtime_weight_small_cached(
+                                RuntimeWeightRef::Materialized(top_weight),
                                     precomputed,
                                     &mut seed_intersections,
                                 ),
@@ -6219,8 +5814,8 @@ impl ConstraintState {
             {
                 let result = evaluator.eval_upper(target, root);
                 let result = result.and_then(|result| {
-                    result.intersect_with_weight_small_cached(
-                        &transition_weight,
+                    result.intersect_with_runtime_weight_small_cached(
+                        RuntimeWeightRef::Materialized(&transition_weight),
                         precomputed,
                         &mut seed_intersections,
                     )
