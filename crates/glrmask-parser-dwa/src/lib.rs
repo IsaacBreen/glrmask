@@ -68,6 +68,7 @@ pub(crate) mod parser_equivalence;
 pub(crate) mod resolve_negatives;
 mod weight_row;
 mod cancellation;
+mod terminal_defaults;
 pub(crate) mod pop_classes;
 pub(crate) mod templates;
 

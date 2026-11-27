@@ -879,70 +879,22 @@ fn grow_terminal_state_set_reference(nwa: &NWA, terminal_states: &mut [bool]) {
 /// terminal. This is linear in eligible default edges rather than in
 /// (states × fixed-point rounds).
 fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
-    let state_count = nwa.states().len();
-    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); state_count];
-    let mut remaining_nonterminal_targets = vec![usize::MAX; state_count];
-    let mut worklist = VecDeque::new();
-
-    for (state_id, &is_terminal) in terminal_states.iter().enumerate() {
-        if is_terminal {
-            worklist.push_back(state_id);
+    crate::terminal_defaults::close(terminal_states, |state_id, dependency| {
+        let state = &nwa.states()[state_id];
+        if !is_terminal_shape_candidate(state) {
+            return false;
         }
-    }
-
-    for (state_id, state) in nwa.states().iter().enumerate() {
-        if terminal_states[state_id] || !is_terminal_shape_candidate(state) {
-            continue;
-        }
-        let Some(final_weight) = state.final_weight.as_ref().filter(|weight| !weight.is_empty()) else {
-            continue;
-        };
-        let Some(targets) = state.transitions.get(&DEFAULT_LABEL) else {
-            terminal_states[state_id] = true;
-            worklist.push_back(state_id);
-            continue;
-        };
-        if targets.iter().any(|(_, edge_weight)| !edge_weight.is_subset(final_weight)) {
-            continue;
-        }
-
-        let mut remaining = 0usize;
-        for (target, _) in targets {
-            let target = *target as usize;
-            // Keep the scan implementation's behavior for malformed edges:
-            // an out-of-range target is never terminal, so this state cannot
-            // enter the terminal closure.
-            if target >= state_count {
-                remaining += 1;
-                continue;
+        let final_weight = state.final_weight.as_ref().unwrap();
+        if let Some(targets) = state.transitions.get(&DEFAULT_LABEL) {
+            if targets.iter().any(|(_, weight)| !weight.is_subset(final_weight)) {
+                return false;
             }
-            if !terminal_states[target] {
-                dependents[target].push(state_id);
-                remaining += 1;
+            for (target, _) in targets {
+                dependency(*target);
             }
         }
-        remaining_nonterminal_targets[state_id] = remaining;
-        if remaining == 0 {
-            terminal_states[state_id] = true;
-            worklist.push_back(state_id);
-        }
-    }
-
-    while let Some(terminal_state) = worklist.pop_front() {
-        for &dependent in &dependents[terminal_state] {
-            if terminal_states[dependent] {
-                continue;
-            }
-            let remaining = &mut remaining_nonterminal_targets[dependent];
-            debug_assert_ne!(*remaining, usize::MAX);
-            debug_assert!(*remaining > 0);
-            *remaining -= 1;
-            if *remaining == 0 {
-                terminal_states[dependent] = true;
-                worklist.push_back(dependent);
-            }
-        }
-    }
+        true
+    });
 }
 
 fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
@@ -950,7 +902,7 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
         let final_weight = state.final_weight.clone();
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
             targets.retain(|(target, edge_weight)| {
-                if !terminal_states[*target as usize] {
+                if !terminal_states.get(*target as usize).copied().unwrap_or(false) {
                     return true;
                 }
                 let Some(final_weight) = final_weight.as_ref() else {

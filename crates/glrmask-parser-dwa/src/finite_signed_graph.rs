@@ -62,51 +62,74 @@ impl SignedGraph for [FastBoundaryNwaState] {
 /// Negative keys are ignored because the eager resolver removes them first.
 /// Zero DEFAULT branches still create dependencies: they cannot be discarded
 /// or ordered using the nonzero-edge DAG certificate.
-pub(super) fn terminal_default_states<G:SignedGraph+?Sized>(
-    graph:&G,pool:&FastBoundaryWeightInterner,
-)->Vec<bool> {
-    let n=graph.len();
-    let mut terminal=(0..n).map(|q| {
-        let row=graph.row(q);
-        row.final_weight()!=0 && row.epsilon_count()==0
-            && !(0..row.transition_count()).any(|e|
-                !is_negative_label(row.label(e)) && row.branch_count(e)!=0)
-    }).collect::<Vec<_>>();
-    let mut dependents=vec![Vec::<usize>::new();n];
-    let mut remaining=vec![usize::MAX;n];
-    let mut queue=VecDeque::new();
-    for(q,&done)in terminal.iter().enumerate(){if done{queue.push_back(q);}}
-    for q in 0..n {
-        if terminal[q]{continue;}
-        let row=graph.row(q);
-        if row.final_weight()==0 || row.epsilon_count()!=0
-            || (0..row.transition_count()).any(|e| {
-                let label=row.label(e);
-                !is_negative_label(label) && label!=DEFAULT_LABEL && row.branch_count(e)!=0
-            }) {continue;}
-        let Some(edge)=row.find_label(DEFAULT_LABEL) else {
-            terminal[q]=true;queue.push_back(q);continue;
-        };
-        if (0..row.branch_count(edge)).any(|b|!pool.is_subset(row.branch(edge,b).1,row.final_weight())) {
-            continue;
+pub(super) fn terminal_default_states<G: SignedGraph + ?Sized>(
+    graph: &G,
+    pool: &FastBoundaryWeightInterner,
+) -> Vec<bool> {
+    let mut terminal = vec![false; graph.len()];
+    crate::terminal_defaults::close(&mut terminal, |state, dependency| {
+        let row = graph.row(state);
+        let final_weight = row.final_weight();
+        if final_weight == 0 || row.epsilon_count() != 0
+            || (0..row.transition_count()).any(|edge| {
+                let label = row.label(edge);
+                !is_negative_label(label) && label != DEFAULT_LABEL && row.branch_count(edge) != 0
+            })
+        {
+            return false;
         }
-        let mut count=0usize;
-        for b in 0..row.branch_count(edge) {
-            let target=row.branch(edge,b).0 as usize;
-            if target>=n {count+=1;}
-            else if !terminal[target] {dependents[target].push(q);count+=1;}
+        if let Some(edge) = row.find_label(DEFAULT_LABEL) {
+            for branch in 0..row.branch_count(edge) {
+                let (target, weight) = row.branch(edge, branch);
+                if !pool.is_subset(weight, final_weight) {
+                    return false;
+                }
+                dependency(target);
+            }
         }
-        remaining[q]=count;
-        if count==0{terminal[q]=true;queue.push_back(q);}
-    }
-    while let Some(done)=queue.pop_front(){
-        for &q in &dependents[done] {
-            if terminal[q] || remaining[q]==usize::MAX || remaining[q]==0 {continue;}
-            remaining[q]-=1;
-            if remaining[q]==0{terminal[q]=true;queue.push_back(q);}
-        }
-    }
+        true
+    });
     terminal
+}
+
+/// Final acceptance is the weighted union of the initial acceptance and
+/// every epsilon, negative, or DEFAULT successor's final acceptance.
+/// Traverse the checked order backwards, leaving structural guards intact.
+pub(super) fn final_weights<G: SignedGraph + ?Sized>(
+    graph: &G,
+    pool: &mut FastBoundaryWeightInterner,
+    order: &[u32],
+) -> Option<Vec<u32>> {
+    let n = graph.len();
+    if order.len() != n {
+        return None;
+    }
+    let mut finals = (0..n).map(|q| graph.row(q).final_weight()).collect::<Vec<_>>();
+    for &q in order.iter().rev() {
+        let row = graph.row(q as usize);
+        let mut value = finals[q as usize];
+        let mut add = |target: u32, weight: u32| {
+            if let Some(&target_final) = finals.get(target as usize) {
+                let contribution = pool.intersection(weight, target_final);
+                value = pool.union(value, contribution);
+            }
+        };
+        for index in 0..row.epsilon_count() {
+            let (target, weight) = row.epsilon(index);
+            add(target, weight);
+        }
+        for edge in 0..row.transition_count() {
+            let label = row.label(edge);
+            if label == DEFAULT_LABEL || is_negative_label(label) {
+                for branch in 0..row.branch_count(edge) {
+                    let (target, weight) = row.branch(edge, branch);
+                    add(target, weight);
+                }
+            }
+        }
+        finals[q as usize] = value;
+    }
+    pool.allow_work(0, n, 0).then_some(finals)
 }
 
 struct FinalizedGraph<'a,G:SignedGraph+?Sized>{graph:&'a G,finals:&'a[u32]}
@@ -462,27 +485,7 @@ impl VirtualSignedGraph {
             owned_order=topological_order(&overlay)?;&owned_order
         };
         let n=self.len();
-        let mut finals=(0..n).map(|q|self.row(q).final_weight()).collect::<Vec<_>>();
-        for &q in order.iter().rev(){
-            let row=overlay.row(q as usize);
-            let mut value=finals[q as usize];
-            for index in 0..row.epsilon_count(){
-                let(target,weight)=row.epsilon(index);
-                let contribution=pool.intersection(weight,finals[target as usize]);
-                value=pool.union(value,contribution);
-            }
-            for edge in 0..row.transition_count(){
-                let label=row.label(edge);
-                if label!=DEFAULT_LABEL && !is_negative_label(label){continue;}
-                for branch in 0..row.branch_count(edge){
-                    let(target,weight)=row.branch(edge,branch);
-                    let contribution=pool.intersection(weight,finals[target as usize]);
-                    value=pool.union(value,contribution);
-                }
-            }
-            finals[q as usize]=value;
-        }
-        if !pool.allow_work(0,n,0){return None;}
+        let finals = final_weights(&overlay, pool, order)?;
         profile.finality_ms=elapsed_ms(phase);
         if let Some(starts)=reachable_starts {
             let finalized=FinalizedGraph{graph:&overlay,finals:&finals};

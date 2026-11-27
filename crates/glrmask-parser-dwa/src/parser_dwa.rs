@@ -3770,54 +3770,7 @@ impl FastBoundaryDerivedRow {
 }
 
 fn fast_boundary_topological_order(states: &[FastBoundaryNwaState]) -> Option<Vec<u32>> {
-    let n = states.len();
-    let mut indegree = vec![0usize; n];
-    for state in states {
-        for (_, branches) in &state.transitions {
-            for (target, weight) in branches {
-                if *weight != 0 && (*target as usize) < n {
-                    indegree[*target as usize] += 1;
-                }
-            }
-        }
-        for (target, weight) in &state.epsilons {
-            if *weight != 0 && (*target as usize) < n {
-                indegree[*target as usize] += 1;
-            }
-        }
-    }
-    let mut queue = VecDeque::new();
-    for (state, degree) in indegree.iter().enumerate() {
-        if *degree == 0 {
-            queue.push_back(state as u32);
-        }
-    }
-    let mut order = Vec::with_capacity(n);
-    while let Some(source) = queue.pop_front() {
-        order.push(source);
-        let state = &states[source as usize];
-        for (_, branches) in &state.transitions {
-            for (target, weight) in branches {
-                if *weight == 0 || (*target as usize) >= n {
-                    continue;
-                }
-                indegree[*target as usize] -= 1;
-                if indegree[*target as usize] == 0 {
-                    queue.push_back(*target);
-                }
-            }
-        }
-        for (target, weight) in &state.epsilons {
-            if *weight == 0 || (*target as usize) >= n {
-                continue;
-            }
-            indegree[*target as usize] -= 1;
-            if indegree[*target as usize] == 0 {
-                queue.push_back(*target);
-            }
-        }
-    }
-    (order.len() == n).then_some(order)
+    finite_signed_graph::topological_order(states)
 }
 
 /// A private permutation/rank certificate. It does not merge states or
@@ -4018,29 +3971,7 @@ fn fast_boundary_resolve_negative_codes_with_topology(
         owned_topo = fast_boundary_topological_order(states)?;
         owned_topo.as_slice()
     };
-    let mut finals = states.iter().map(|state| state.final_weight).collect::<Vec<_>>();
-    for &source in topo.iter().rev() {
-        let mut final_weight = finals[source as usize];
-        for (target, edge_weight) in &states[source as usize].epsilons {
-            if (*target as usize) < n {
-                let contribution = interner.intersection(*edge_weight, finals[*target as usize]);
-                final_weight = interner.union(final_weight, contribution);
-            }
-        }
-        for (label, branches) in &states[source as usize].transitions {
-            if *label != DEFAULT_LABEL && !is_negative_label(*label) {
-                continue;
-            }
-            for (target, edge_weight) in branches {
-                if (*target as usize) < n {
-                    let contribution =
-                        interner.intersection(*edge_weight, finals[*target as usize]);
-                    final_weight = interner.union(final_weight, contribution);
-                }
-            }
-        }
-        finals[source as usize] = final_weight;
-    }
+    let finals = finite_signed_graph::final_weights(states, interner, topo)?;
     for (state, final_weight) in states.iter_mut().zip(finals) {
         state.final_weight = final_weight;
         state.transitions.retain(|(label, _)| !is_negative_label(*label));
