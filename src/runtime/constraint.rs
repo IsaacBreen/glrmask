@@ -55,7 +55,6 @@ use super::artifact::{
     PackedDynamicMaskTokenAliases,
     RecursiveParserLayout, RecursiveParserLeafLayout,
     DynamicMaskTrie,
-    DynamicMaskTrieEdge,
     DynamicMaskVocab,
     FastDwaTransitionRow, FastDwaTransitions,
     FastTokenizerTransitions,
@@ -3482,7 +3481,7 @@ impl Constraint {
                 aliases_ms,
                 trie_ms,
                 trie.nodes.len(),
-                trie.edges.len(),
+                trie.walk_edges().len(),
                 trie.edge_bytes_len(),
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -5576,7 +5575,7 @@ impl Constraint {
                             full_source_state,
                             all_suffix_entries.len(),
                             suffix_trie.nodes.len(),
-                            suffix_trie.edges.len(),
+                            suffix_trie.walk_edges().len(),
                             suffix_trie.edge_bytes_len(),
                             suffix_trie.subtree_max_byte_len(0),
                         );

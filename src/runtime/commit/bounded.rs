@@ -256,8 +256,8 @@ fn probe_dynamic_trie(view:View<'_>,vocab:&crate::runtime::DynamicMaskVocab,buff
     let initial_bound=first_byte_bound(view);
     // (node, next child, endpoint pending, source after this prefix). Only one
     // continuation per live path is retained; rejected siblings allocate none.
-    let mut pending=vec![(0u32,0usize,true,view.state.clone())];
-    while let Some((node,mut child_index,endpoint_pending,source))=pending.pop() {
+    let mut pending=vec![(0u32,trie.children(0),true,view.state.clone())];
+    while let Some((node,mut children,endpoint_pending,source))=pending.pop() {
         if endpoint_pending
             && let Some(canonical)=trie.node(node).token_id
                 && let Some(aliases)=vocab.token_ids(canonical) {
@@ -269,17 +269,16 @@ fn probe_dynamic_trie(view:View<'_>,vocab:&crate::runtime::DynamicMaskVocab,buff
                         }
                     }
                 }
-        let children=trie.children(node);
-        while let Some(edge)=children.get(child_index) {
-            child_index+=1;
+        while let Some(edge)=children.next() {
+
             let bytes=trie.edge_bytes(edge);
             if trie.node(node).prefix_byte_len==0
                 && bytes.first().is_some_and(|&byte|!initial_bound[byte as usize]){continue;}
             let next=if bytes.is_empty(){Some(source.clone())}
                 else{bytes_successor(view.constraint,&source,buffers,bytes,false)?};
             if let Some(next)=next {
-                if child_index<children.len(){pending.push((node,child_index,false,source));}
-                pending.push((edge.child,0,true,next));break;
+                if !children.is_empty(){pending.push((node,children,false,source));}
+                pending.push((edge.child,trie.children(edge.child),true,next));break;
             }
         }
     }

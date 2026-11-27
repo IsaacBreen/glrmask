@@ -1796,7 +1796,7 @@ pub(crate) struct DynamicMaskTrieNode {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DynamicMaskTrieEdge {
+struct DynamicMaskTrieEdge {
     pub(crate) byte_start: u32,
     pub(crate) byte_len: u32,
     pub(crate) child: u32,
@@ -1845,10 +1845,9 @@ impl DynamicMaskTrieFullWalkOp {
     pub(crate) fn child_is_token(&self) -> bool { self.meta & Self::TOKEN != 0 }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
-    pub(crate) edges: Vec<DynamicMaskTrieEdge>,
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
@@ -1863,9 +1862,7 @@ pub(crate) struct DynamicMaskTrie {
     /// directly to the first strict-walk op for its root child. `u32::MAX`
     /// means the vocabulary has no token beginning with that byte. Structural
     /// zero-byte roots deliberately leave this unavailable.
-    #[serde(with = "optional_u32_256_serde")]
     full_walk_root_byte_op_starts: Option<Box<[u32; 256]>>,
-    full_walk_token_nodes: Vec<u32>,
     /// Maximum structural radix-edge parent depth encoded by `full_walk_ops`.
     /// This is deliberately distinct from token byte length: one long
     /// compressed edge consumes many bytes without requiring additional DFS
@@ -1880,35 +1877,31 @@ pub(crate) struct DynamicMaskTrie {
     root_layout_all_valid_utf8: Vec<bool>,
 }
 
-mod optional_u32_256_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S>(
-        value: &Option<Box<[u32; 256]>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        value.as_deref().map(|row| row.as_slice()).serialize(serializer)
+/// Immediate siblings are reached by skipping entire preorder subtrees.
+#[derive(Clone, Copy)]
+pub(crate) struct TrieChildren<'a> {
+    edges: &'a [DynamicMaskTrieWalkEdge],
+    next: usize,
+    remaining: usize,
+}
+impl<'a> Iterator for TrieChildren<'a> {
+    type Item = &'a DynamicMaskTrieWalkEdge;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 { return None; }
+        let edge = &self.edges[self.next];
+        self.next = edge.subtree_end as usize;
+        self.remaining -= 1;
+        Some(edge)
     }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Box<[u32; 256]>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = Option::<Vec<u32>>::deserialize(deserializer)?;
-        value
-            .map(|row| {
-                row.try_into()
-                    .map(Box::new)
-                    .map_err(|row: Vec<u32>| serde::de::Error::custom(format!(
-                        "expected 256 root-byte entries, got {}",
-                        row.len()
-                    )))
-            })
-            .transpose()
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
     }
+}
+impl ExactSizeIterator for TrieChildren<'_> {}
+impl TrieChildren<'_> {
+    pub(crate) fn is_empty(&self) -> bool { self.remaining == 0 }
+    pub(crate) fn iter(&self) -> Self { *self }
 }
 
 /// Stable structural class used by the dynamic-mask radix trie.
@@ -1955,7 +1948,6 @@ impl DynamicMaskTrie {
     pub(crate) fn new() -> Self {
         Self {
             nodes: vec![DynamicMaskTrieNode::default()],
-            edges: Vec::new(),
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
@@ -1963,7 +1955,6 @@ impl DynamicMaskTrie {
             full_walk_op_edges: Vec::new(),
             full_walk_edge_op_starts: Vec::new(),
             full_walk_root_byte_op_starts: None,
-            full_walk_token_nodes: Vec::new(),
             full_walk_max_parent_depth: 0,
             root_layout_classes: Vec::new(),
             root_layout_all_valid_utf8: Vec::new(),
@@ -1994,18 +1985,19 @@ impl DynamicMaskTrie {
     }
 
     #[inline]
-    pub(crate) fn children(&self, node: u32) -> &[DynamicMaskTrieEdge] {
+    pub(crate) fn children(&self, node: u32) -> TrieChildren<'_> {
         let node = self.node(node);
-        let start = node.first_child as usize;
-        let end = start + node.child_len as usize;
-        &self.edges[start..end]
+        TrieChildren {
+            edges: &self.walk_edges,
+            next: node.first_child as usize,
+            remaining: node.child_len as usize,
+        }
     }
 
     #[inline]
-    pub(crate) fn edge_bytes(&self, edge: &DynamicMaskTrieEdge) -> &[u8] {
+    pub(crate) fn edge_bytes(&self, edge: &DynamicMaskTrieWalkEdge) -> &[u8] {
         let start = edge.byte_start as usize;
-        let end = start + edge.byte_len as usize;
-        &self.edge_bytes[start..end]
+        &self.edge_bytes[start..start + edge.byte_len as usize]
     }
 
     #[inline]
@@ -2043,11 +2035,6 @@ impl DynamicMaskTrie {
         let subtree_end_op =
             unsafe { *self.full_walk_edge_op_starts.get_unchecked(subtree_end_edge) };
         (edge.child, subtree_end_op)
-    }
-
-    #[inline]
-    pub(crate) fn full_walk_token_nodes(&self) -> &[u32] {
-        &self.full_walk_token_nodes
     }
 
     #[inline]
@@ -2115,122 +2102,79 @@ impl DynamicMaskTrie {
         node.prefix_byte_len.saturating_add(node.subtree_max_byte_len)
     }
 
-    pub(crate) fn push_edge_bytes(&mut self, bytes: &[u8]) -> (u32, u32) {
-        let start = self.edge_bytes.len() as u32;
-        self.edge_bytes.extend_from_slice(bytes);
-        (start, bytes.len() as u32)
-    }
-
     #[inline]
-    pub(crate) fn edge_bytes_len(&self) -> usize {
-        self.edge_bytes.len()
+    pub(crate) fn edge_bytes_len(&self) -> usize { self.edge_bytes.len() }
+
+    /// Build each node and its incoming edge in preorder. The incoming edge
+    /// of node n > 0 is walk entry n - 1; there is no second adjacency list.
+    fn begin_node(&mut self, parent: Option<u32>, token: Option<u32>, byte_len: usize) -> u32 {
+        let start = u32::try_from(self.subtree_tokens.len()).expect("too many trie tokens");
+        let mut node = DynamicMaskTrieNode {
+            token_id: token, subtree_token_start: start, ..Default::default()
+        };
+        if let Some(token) = token { self.subtree_tokens.push(token); }
+        let Some(parent) = parent else {
+            self.nodes[0] = node;
+            return 0;
+        };
+        let id = u32::try_from(self.nodes.len()).expect("too many trie nodes");
+        let byte_len = u16::try_from(byte_len).expect("dynamic mask trie radix edge exceeds u16 length");
+        let parent_depth = if parent == 0 { 0 } else {
+            self.walk_edges[parent as usize - 1].parent_depth.checked_add(1)
+                .expect("dynamic mask trie depth exceeds u16")
+        };
+        assert!(parent_depth < u16::MAX, "dynamic mask trie depth exceeds u16");
+        let parent = &mut self.nodes[parent as usize];
+        node.prefix_byte_len = parent.prefix_byte_len.checked_add(u32::from(byte_len))
+            .expect("dynamic mask trie token byte length exceeds u32");
+        if parent.child_len == 0 { parent.first_child = id - 1; }
+        parent.child_len += 1;
+        self.nodes.push(node);
+        self.walk_edges.push(DynamicMaskTrieWalkEdge {
+            byte_start: 0, child: id, subtree_end: 0, byte_len, parent_depth,
+        });
+        id
     }
 
-    fn collect_subtree_metadata(
-        &mut self,
-        node_id: u32,
-        prefix_byte_len: u32,
-    ) -> ([u64; 4], [u64; 4], u32) {
-        self.nodes[node_id as usize].prefix_byte_len = prefix_byte_len;
-        let start = self.subtree_tokens.len() as u32;
-        if let Some(token_id) = self.nodes[node_id as usize].token_id {
-            self.subtree_tokens.push(token_id);
+    /// Finish the subtree after all children. Append incoming bytes in
+    /// postorder, matching the legacy radix byte arena layout.
+    fn finish_node(&mut self, id: u32, incoming: &[u8]) {
+        if id != 0 {
+            let edge = &mut self.walk_edges[id as usize - 1];
+            edge.byte_start = u32::try_from(self.edge_bytes.len()).expect("trie bytes exceed u32");
+            edge.subtree_end = u32::try_from(self.nodes.len() - 1).expect("too many trie edges");
+            self.edge_bytes.extend_from_slice(incoming);
         }
-
-        let first_child = self.nodes[node_id as usize].first_child as usize;
-        let child_len = self.nodes[node_id as usize].child_len as usize;
-        let mut subtree_bytes = [0u64; 4];
-        let mut subtree_first_bytes = [0u64; 4];
-        let mut subtree_max_byte_len = 0u32;
-        for edge_index in first_child..first_child + child_len {
-            // Copy the compact edge fields before recursing so no borrow of
-            // `self.edges` remains live across the mutable recursive call.
-            let edge = self.edges[edge_index].clone();
-            let byte_start = edge.byte_start as usize;
-            let byte_end = byte_start + edge.byte_len as usize;
-            for &byte in &self.edge_bytes[byte_start..byte_end] {
-                subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+        let mut bytes = [0u64; 4];
+        let mut first = [0u64; 4];
+        let mut max_len = 0u32;
+        for edge in self.children(id) {
+            let child = self.node(edge.child);
+            let segment = self.edge_bytes(edge);
+            for &byte in segment {
+                bytes[byte as usize >> 6] |= 1 << (byte & 63);
             }
-            let child_prefix_byte_len = prefix_byte_len
-                .checked_add(edge.byte_len)
-                .expect("dynamic mask trie token byte length exceeds u32");
-            let (child_bytes, child_first_bytes, child_max_byte_len) =
-                self.collect_subtree_metadata(edge.child, child_prefix_byte_len);
-            for (target, child) in subtree_bytes.iter_mut().zip(child_bytes) {
-                *target |= child;
-            }
-            if edge.byte_len == 0 {
-                for (target, child) in subtree_first_bytes.iter_mut().zip(child_first_bytes) {
-                    *target |= child;
-                }
+            for (target, value) in bytes.iter_mut().zip(child.subtree_bytes) { *target |= value; }
+            if let Some(&byte) = segment.first() {
+                first[byte as usize >> 6] |= 1 << (byte & 63);
             } else {
-                let first = self.edge_bytes[byte_start];
-                subtree_first_bytes[first as usize >> 6] |= 1u64 << (first & 63);
+                for (target, value) in first.iter_mut().zip(child.subtree_first_bytes) { *target |= value; }
             }
-            subtree_max_byte_len = subtree_max_byte_len.max(
-                edge.byte_len
-                    .checked_add(child_max_byte_len)
-                    .expect("dynamic mask trie token byte length exceeds u32"),
-            );
+            max_len = max_len.max(u32::from(edge.byte_len).checked_add(child.subtree_max_byte_len)
+                .expect("dynamic mask trie token byte length exceeds u32"));
         }
-
-        let end = self.subtree_tokens.len() as u32;
-        let node = &mut self.nodes[node_id as usize];
-        node.subtree_token_start = start;
-        node.subtree_token_end = end;
-        node.subtree_bytes = subtree_bytes;
-        node.subtree_first_bytes = subtree_first_bytes;
-        node.subtree_max_byte_len = subtree_max_byte_len;
-        (subtree_bytes, subtree_first_bytes, subtree_max_byte_len)
+        let node = &mut self.nodes[id as usize];
+        node.subtree_token_end = self.subtree_tokens.len() as u32;
+        node.subtree_bytes = bytes;
+        node.subtree_first_bytes = first;
+        node.subtree_max_byte_len = max_len;
     }
 
-    pub(crate) fn finalize_subtree_metadata(&mut self) {
-        self.subtree_tokens.clear();
-        self.subtree_tokens.reserve(self.nodes.len());
-        if !self.nodes.is_empty() {
-            self.collect_subtree_metadata(0, 0);
-        }
-        self.finalize_walk_edges();
-    }
-
-    fn append_walk_edges(&mut self, node_id: u32, parent_depth: u16) {
-        let first_child = self.nodes[node_id as usize].first_child as usize;
-        let child_len = self.nodes[node_id as usize].child_len as usize;
-        for edge_index in first_child..first_child + child_len {
-            let edge = self.edges[edge_index].clone();
-            let byte_len = u16::try_from(edge.byte_len)
-                .expect("dynamic mask trie radix edge exceeds u16 length");
-            let entry_index = self.walk_edges.len();
-            self.walk_edges.push(DynamicMaskTrieWalkEdge {
-                byte_start: edge.byte_start,
-                child: edge.child,
-                subtree_end: 0,
-                byte_len,
-                parent_depth,
-            });
-            self.append_walk_edges(
-                edge.child,
-                parent_depth
-                    .checked_add(1)
-                    .expect("dynamic mask trie depth exceeds u16"),
-            );
-            self.walk_edges[entry_index].subtree_end = self.walk_edges.len() as u32;
-        }
-    }
-
-    fn finalize_walk_edges(&mut self) {
-        self.walk_edges.clear();
-        self.walk_edges.reserve(self.edges.len());
-        if !self.nodes.is_empty() {
-            self.append_walk_edges(0, 0);
-        }
-        debug_assert_eq!(self.walk_edges.len(), self.edges.len());
-
+    fn finalize_full_walk(&mut self) {
         self.full_walk_ops.clear();
         self.full_walk_op_edges.clear();
         self.full_walk_edge_op_starts.clear();
         self.full_walk_root_byte_op_starts = None;
-        self.full_walk_token_nodes.clear();
         self.full_walk_max_parent_depth = self
             .walk_edges
             .iter()
@@ -2241,7 +2185,6 @@ impl DynamicMaskTrie {
         self.full_walk_op_edges
             .reserve(self.edge_bytes.len().max(self.walk_edges.len()));
         self.full_walk_edge_op_starts.reserve(self.walk_edges.len() + 1);
-        self.full_walk_token_nodes.reserve(self.walk_edges.len());
         for (edge_index, edge) in self.walk_edges.iter().copied().enumerate() {
             self.full_walk_edge_op_starts
                 .push(self.full_walk_ops.len() as u32);
@@ -2257,7 +2200,6 @@ impl DynamicMaskTrie {
                 if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
                 self.full_walk_op_edges.push(edge_index as u32);
-                if child_is_token { self.full_walk_token_nodes.push(edge.child); }
                 continue;
             }
             for (index, &byte) in bytes.iter().enumerate() {
@@ -2270,7 +2212,6 @@ impl DynamicMaskTrie {
                 }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
                 self.full_walk_op_edges.push(edge_index as u32);
-                if last && child_is_token { self.full_walk_token_nodes.push(edge.child); }
             }
         }
         self.full_walk_edge_op_starts
@@ -2309,148 +2250,31 @@ impl DynamicMaskTrie {
         }
     }
 
-    fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
-        let node_id = output.nodes.len() as u32;
-        output.nodes.push(DynamicMaskTrieNode {
-            token_id: node.has_token().then_some(node.token_id() as u32),
-            first_child: 0,
-            child_len: 0,
-            subtree_token_start: 0,
-            subtree_token_end: 0,
-            subtree_bytes: [0; 4],
-            subtree_first_bytes: [0; 4],
-            prefix_byte_len: 0,
-            subtree_max_byte_len: 0,
-        });
-
-        let children = node.children();
-        if children.is_empty() {
-            return node_id;
+    fn append_prefix_tree(&mut self, root: &VocabPrefixTreeNode, parent: Option<u32>, incoming: &[u8]) {
+        enum Task<'a> {
+            Enter(&'a VocabPrefixTreeNode, Option<u32>, &'a [u8]),
+            Finish(u32, &'a [u8]),
         }
-
-        let first_child = output.edges.len() as u32;
-        output
-            .edges
-            .resize_with(output.edges.len() + children.len(), DynamicMaskTrieEdge::default);
-        output.nodes[node_id as usize].first_child = first_child;
-        output.nodes[node_id as usize].child_len = children.len() as u32;
-
-        for (offset, (segment, child)) in node.iter_children().enumerate() {
-            let child_id = Self::flatten_vocab_node(child, output);
-            let (byte_start, byte_len) = output.push_edge_bytes(segment);
-            output.edges[first_child as usize + offset] = DynamicMaskTrieEdge {
-                byte_start,
-                byte_len,
-                child: child_id,
-            };
+        let mut work = vec![Task::Enter(root, parent, incoming)];
+        while let Some(task) = work.pop() {
+            match task {
+                Task::Finish(id, bytes) => self.finish_node(id, bytes),
+                Task::Enter(node, parent, bytes) => {
+                    let id = self.begin_node(parent, node.has_token().then_some(node.token_id() as u32), bytes.len());
+                    work.push(Task::Finish(id, bytes));
+                    let prefix_len = node.prefix().len();
+                    for child in node.children().iter().rev() {
+                        work.push(Task::Enter(child, Some(id), &child.prefix()[prefix_len..]));
+                    }
+                }
+            }
         }
-
-        node_id
-    }
-
-    fn from_vocab_prefix_tree_node(node: &VocabPrefixTreeNode) -> Self {
-        let mut output = Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            edge_bytes: Vec::new(),
-            subtree_tokens: Vec::new(),
-            walk_edges: Vec::new(),
-            full_walk_ops: Vec::new(),
-            full_walk_op_edges: Vec::new(),
-            full_walk_edge_op_starts: Vec::new(),
-            full_walk_root_byte_op_starts: None,
-            full_walk_token_nodes: Vec::new(),
-            full_walk_max_parent_depth: 0,
-            root_layout_classes: Vec::new(),
-            root_layout_all_valid_utf8: Vec::new(),
-        };
-        let root = Self::flatten_vocab_node(node, &mut output);
-        debug_assert_eq!(root, 0);
-        output.finalize_subtree_metadata();
-        output
     }
 
     pub(crate) fn from_vocab_prefix_tree(tree: &VocabPrefixTree) -> Self {
-        // Root children are disjoint lexical subtrees. Flattening them in
-        // parallel is safe, then the compact fragments are stitched with fixed
-        // index offsets. This keeps the runtime representation lean without
-        // making finalization wait on a single 140k-node recursive walk.
-        let root = &tree.root;
-        let root_children = root.children();
-        if rayon::current_num_threads() == 1 || root_children.len() < 8 {
-            return Self::from_vocab_prefix_tree_node(root);
-        }
-
-        let root_prefix_len = root.prefix().len();
-        let mut fragments: Vec<(Box<[u8]>, Self)> = root_children
-            .par_iter()
-            .map(|child| {
-                let edge = child.prefix()[root_prefix_len..].to_vec().into_boxed_slice();
-                (edge, Self::from_vocab_prefix_tree_node(child))
-            })
-            .collect();
-        let node_capacity = 1 + fragments.iter().map(|(_, fragment)| fragment.nodes.len()).sum::<usize>();
-        let edge_capacity = root_children.len()
-            + fragments.iter().map(|(_, fragment)| fragment.edges.len()).sum::<usize>();
-        let byte_capacity = fragments
-            .iter()
-            .map(|(edge, fragment)| edge.len() + fragment.edge_bytes.len())
-            .sum::<usize>();
-        let mut output = Self {
-            nodes: Vec::with_capacity(node_capacity),
-            edges: Vec::with_capacity(edge_capacity),
-            edge_bytes: Vec::with_capacity(byte_capacity),
-            subtree_tokens: Vec::with_capacity(node_capacity),
-            walk_edges: Vec::with_capacity(edge_capacity),
-            full_walk_ops: Vec::with_capacity(byte_capacity.max(edge_capacity)),
-            full_walk_op_edges: Vec::with_capacity(byte_capacity.max(edge_capacity)),
-            full_walk_edge_op_starts: Vec::with_capacity(edge_capacity + 1),
-            full_walk_root_byte_op_starts: None,
-            full_walk_token_nodes: Vec::with_capacity(edge_capacity),
-            full_walk_max_parent_depth: 0,
-            root_layout_classes: Vec::new(),
-            root_layout_all_valid_utf8: Vec::new(),
-        };
-        output.nodes.push(DynamicMaskTrieNode {
-            token_id: root.has_token().then_some(root.token_id() as u32),
-            first_child: 0,
-            child_len: root_children.len() as u32,
-            subtree_token_start: 0,
-            subtree_token_end: 0,
-            subtree_bytes: [0; 4],
-            subtree_first_bytes: [0; 4],
-            prefix_byte_len: 0,
-            subtree_max_byte_len: 0,
-        });
-        output
-            .edges
-            .resize_with(root_children.len(), DynamicMaskTrieEdge::default);
-
-        for (root_slot, (root_edge, mut fragment)) in fragments.drain(..).enumerate() {
-            let node_base = output.nodes.len() as u32;
-            let edge_base = output.edges.len() as u32;
-            let byte_base = output.edge_bytes.len() as u32;
-            output.edge_bytes.extend_from_slice(&fragment.edge_bytes);
-            for node in &mut fragment.nodes {
-                if node.child_len != 0 {
-                    node.first_child += edge_base;
-                }
-            }
-            for edge in &mut fragment.edges {
-                edge.byte_start += byte_base;
-                edge.child += node_base;
-            }
-            output.nodes.append(&mut fragment.nodes);
-            output.edges.append(&mut fragment.edges);
-            let (byte_start, byte_len) = output.push_edge_bytes(&root_edge);
-            output.edges[root_slot] = DynamicMaskTrieEdge {
-                byte_start,
-                byte_len,
-                child: node_base,
-            };
-        }
-
-        output.finalize_subtree_metadata();
+        let mut output = Self::new();
+        output.append_prefix_tree(&tree.root, None, &[]);
+        output.finalize_full_walk();
         output
     }
 
@@ -2494,162 +2318,298 @@ impl DynamicMaskTrie {
             start = 1;
         }
 
-        let mut groups = Vec::<Self>::new();
-        let mut group_classes = Vec::<u16>::new();
-        let mut group_all_valid_utf8 = Vec::<bool>::new();
+        let root_token = output.nodes[0].token_id;
+        output.begin_node(None, root_token, 0);
         let mut index = start;
         while index < entries.len() {
-            let class = entries[index].0;
             let group_start = index;
+            let class = entries[index].0;
             index += 1;
-            while index < entries.len() && entries[index].0 == class {
-                index += 1;
-            }
-            let refs = entries[group_start..index]
-                .iter()
-                .map(|(_, token_id, bytes)| (*token_id, *bytes))
-                .collect::<Vec<_>>();
-            debug_assert!(refs.windows(2).all(|pair| pair[0].1 <= pair[1].1));
-            group_classes.push(class);
-            group_all_valid_utf8.push(
-                entries[group_start..index]
-                    .iter()
-                    .all(|(_, _, bytes)| std::str::from_utf8(bytes).is_ok()),
-            );
+            while index < entries.len() && entries[index].0 == class { index += 1; }
+            let refs: Vec<_> = entries[group_start..index].iter()
+                .map(|(_, id, bytes)| (*id, *bytes)).collect();
+            output.root_layout_classes.push(class);
+            output.root_layout_all_valid_utf8.push(refs.iter().all(|(_, bytes)| std::str::from_utf8(bytes).is_ok()));
             let tree = VocabPrefixTree::build_presorted(&refs);
-            groups.push(Self::from_vocab_prefix_tree_node(&tree.root));
+            output.append_prefix_tree(&tree.root, Some(0), &[]);
         }
-
-        let root_child_count = groups.len();
-        output.edges.resize_with(root_child_count, DynamicMaskTrieEdge::default);
-        output.nodes[0].first_child = 0;
-        output.nodes[0].child_len = root_child_count as u32;
-
-        for (root_slot, mut fragment) in groups.into_iter().enumerate() {
-            let node_base = output.nodes.len() as u32;
-            let edge_base = output.edges.len() as u32;
-            let byte_base = output.edge_bytes.len() as u32;
-
-            output.edge_bytes.extend_from_slice(&fragment.edge_bytes);
-            for node in &mut fragment.nodes {
-                if node.child_len != 0 {
-                    node.first_child += edge_base;
-                }
-            }
-            for edge in &mut fragment.edges {
-                edge.byte_start += byte_base;
-                edge.child += node_base;
-            }
-            output.nodes.append(&mut fragment.nodes);
-            output.edges.append(&mut fragment.edges);
-
-            // Structural class edge: no lexer byte is consumed here.
-            let (byte_start, byte_len) = output.push_edge_bytes(&[]);
-            output.edges[root_slot] = DynamicMaskTrieEdge {
-                byte_start,
-                byte_len,
-                child: node_base,
-            };
-        }
-
-        output.finalize_subtree_metadata();
-        output.root_layout_classes = group_classes;
-        output.root_layout_all_valid_utf8 = group_all_valid_utf8;
+        output.finish_node(0, &[]);
+        output.finalize_full_walk();
         output
     }
-}
 
-impl DynamicMaskTrie {
-    /// Direct flat construction from sorted canonical entries. The iterative
-    /// worklist preserves the reference's preorder nodes/postorder byte ranges
-    /// without transient prefix trees, copied whole prefixes or range-set
-    /// metadata. Existing subtree/walk metadata finalization is unchanged.
     fn from_partitioned_sorted_direct(entries: &[(u16, usize, &[u8])]) -> Self {
         Self::from_sorted_ranges(entries, true)
     }
 
     fn from_sorted_ranges(entries: &[(u16, usize, &[u8])], partitioned: bool) -> Self {
-        enum Task {
-            Node { lo: usize, hi: usize, depth: usize, edge_from: usize, parent_edge: Option<usize> },
-            FinishEdge { entry: usize, from: usize, to: usize, edge: usize, child: u32 },
+        enum Task<'a> {
+            Enter { lo: usize, hi: usize, depth: usize, edge_from: usize, parent: Option<u32> },
+            Finish(u32, &'a [u8]),
         }
         let mut output = Self::new();
         if entries.is_empty() { return output; }
         output.nodes.reserve(entries.len().saturating_mul(2));
-        output.edges.reserve(entries.len().saturating_mul(2));
+        output.walk_edges.reserve(entries.len().saturating_mul(2));
         output.edge_bytes.reserve(entries.iter().map(|e|e.2.len()).sum());
         let mut work = Vec::with_capacity(64);
         if partitioned {
-            let mut index = 0;
-            if entries[0].2.is_empty() {
-                output.nodes[0].token_id = Some(entries[0].1 as u32);
-                index = 1;
-            }
+            let empty = entries[0].2.is_empty();
+            output.begin_node(None, empty.then_some(entries[0].1 as u32), 0);
+            work.push(Task::Finish(0, &[]));
             let mut groups = Vec::new();
+            let mut index = usize::from(empty);
             while index < entries.len() {
                 let start = index;
                 let class = entries[index].0;
                 index += 1;
                 while index < entries.len() && entries[index].0 == class { index += 1; }
+                output.root_layout_classes.push(class);
+                output.root_layout_all_valid_utf8.push(entries[start..index].iter().all(|e|std::str::from_utf8(e.2).is_ok()));
                 groups.push((start,index));
             }
-            output.edges.resize_with(groups.len(), DynamicMaskTrieEdge::default);
-            output.nodes[0].child_len = groups.len() as u32;
-            for &(lo,hi) in &groups {
-                output.root_layout_classes.push(entries[lo].0);
-                output.root_layout_all_valid_utf8.push(
-                    entries[lo..hi].iter().all(|e|std::str::from_utf8(e.2).is_ok()));
-            }
-            for (parent_edge,&(lo,hi)) in groups.iter().enumerate().rev() {
-                work.push(Task::Node {lo,hi,depth:0,edge_from:0,parent_edge:Some(parent_edge)});
+            for (lo,hi) in groups.into_iter().rev() {
+                work.push(Task::Enter {lo,hi,depth:0,edge_from:0,parent:Some(0)});
             }
         } else {
-            work.push(Task::Node {lo:0,hi:entries.len(),depth:0,edge_from:0,parent_edge:None});
+            work.push(Task::Enter {lo:0,hi:entries.len(),depth:0,edge_from:0,parent:None});
         }
         while let Some(task) = work.pop() {
             match task {
-                Task::FinishEdge {entry,from,to,edge,child} => {
-                    let (byte_start,byte_len)=output.push_edge_bytes(&entries[entry].2[from..to]);
-                    output.edges[edge]=DynamicMaskTrieEdge {byte_start,byte_len,child};
-                }
-                Task::Node {mut lo,hi,depth,edge_from,parent_edge} => {
-                    let node = if let Some(edge) = parent_edge {
-                        let node = output.nodes.len() as u32;
-                        output.nodes.push(DynamicMaskTrieNode::default());
-                        work.push(Task::FinishEdge {entry:lo,from:edge_from,to:depth,edge,child:node});
-                        node
-                    } else { 0 };
-                    if entries[lo].2.len()==depth {
-                        output.nodes[node as usize].token_id=Some(entries[lo].1 as u32);
-                        lo+=1;
-                    }
-                    if lo==hi {continue;}
-                    let child_count=1+entries[lo..hi].windows(2)
-                        .filter(|p|p[0].2[depth]!=p[1].2[depth]).count();
-                    let first=output.edges.len();
-                    output.edges.resize_with(first+child_count,DynamicMaskTrieEdge::default);
-                    output.nodes[node as usize].first_child=first as u32;
-                    output.nodes[node as usize].child_len=child_count as u32;
-                    let mut end=hi;let mut slot=child_count;
-                    while end>lo {
-                        let byte=entries[end-1].2[depth];
-                        let mut start=end-1;
-                        while start>lo && entries[start-1].2[depth]==byte {start-=1;}
-                        let a=entries[start].2;let b=entries[end-1].2;
+                Task::Finish(id, bytes) => output.finish_node(id, bytes),
+                Task::Enter {mut lo,hi,depth,edge_from,parent} => {
+                    let incoming = &entries[lo].2[edge_from..depth];
+                    let token = (entries[lo].2.len() == depth).then_some(entries[lo].1 as u32);
+                    let id = output.begin_node(parent, token, incoming.len());
+                    work.push(Task::Finish(id, incoming));
+                    if token.is_some() { lo += 1; }
+                    let mut end = hi;
+                    while end > lo {
+                        let byte = entries[end-1].2[depth];
+                        let mut start = end-1;
+                        while start > lo && entries[start-1].2[depth] == byte { start -= 1; }
+                        let a=entries[start].2; let b=entries[end-1].2;
                         let mut common=depth+1;
-                        while common<a.len().min(b.len()) && a[common]==b[common] {common+=1;}
-                        slot-=1;
-                        work.push(Task::Node {lo:start,hi:end,depth:common,edge_from:depth,parent_edge:Some(first+slot)});
+                        while common<a.len().min(b.len()) && a[common]==b[common] { common+=1; }
+                        work.push(Task::Enter {lo:start,hi:end,depth:common,edge_from:depth,parent:Some(id)});
                         end=start;
                     }
                 }
             }
         }
-        output.finalize_subtree_metadata();
+        output.finalize_full_walk();
         output
+    }
+
+    fn all_token_paths_match(&self, mut verify: impl FnMut(u32, &[u8]) -> bool) -> bool {
+        if let Some(token) = self.node(0).token_id && !verify(token, &[]) { return false; }
+        let mut prefix = Vec::new();
+        let mut lengths = vec![0usize];
+        for edge in &self.walk_edges {
+            let depth = edge.parent_depth as usize;
+            prefix.truncate(lengths[depth]);
+            lengths.truncate(depth + 1);
+            prefix.extend_from_slice(self.edge_bytes(edge));
+            if let Some(token) = self.node(edge.child).token_id && !verify(token, &prefix) {
+                return false;
+            }
+            lengths.push(prefix.len());
+        }
+        true
     }
 }
 
+// The existing artifact encoding contains both adjacency and preorder walks.
+// Keep the wire schema, but emit the legacy adjacency and token-node arrays
+// from the sole retained topology, and rebuild derived indexes on input.
+struct LegacyTrieNodes<'a>(&'a DynamicMaskTrie);
+struct LegacyTrieEdges<'a>(&'a DynamicMaskTrie);
+struct LegacyTrieTokenNodes<'a>(&'a DynamicMaskTrie);
+
+impl serde::Serialize for LegacyTrieNodes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.nodes.len()))?;
+        let mut next = 0u32;
+        for node in &self.0.nodes {
+            let mut wire = node.clone();
+            wire.first_child = if node.child_len == 0 { 0 } else { next };
+            next += node.child_len;
+            seq.serialize_element(&wire)?;
+        }
+        seq.end()
+    }
+}
+
+impl serde::Serialize for LegacyTrieEdges<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.walk_edges.len()))?;
+        for id in 0..self.0.nodes.len() as u32 {
+            for edge in self.0.children(id) {
+                seq.serialize_element(&DynamicMaskTrieEdge {
+                    byte_start: edge.byte_start,
+                    byte_len: u32::from(edge.byte_len),
+                    child: edge.child,
+                })?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl serde::Serialize for LegacyTrieTokenNodes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let root = usize::from(self.0.nodes[0].token_id.is_some());
+        let mut seq = serializer.serialize_seq(Some(self.0.subtree_tokens.len() - root))?;
+        for edge in &self.0.walk_edges {
+            if self.0.nodes[edge.child as usize].token_id.is_some() {
+                seq.serialize_element(&edge.child)?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl serde::Serialize for DynamicMaskTrie {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire = serializer.serialize_struct("DynamicMaskTrie", 13)?;
+        wire.serialize_field("nodes", &LegacyTrieNodes(self))?;
+        wire.serialize_field("edges", &LegacyTrieEdges(self))?;
+        wire.serialize_field("edge_bytes", &self.edge_bytes)?;
+        wire.serialize_field("subtree_tokens", &self.subtree_tokens)?;
+        wire.serialize_field("walk_edges", &self.walk_edges)?;
+        wire.serialize_field("full_walk_ops", &self.full_walk_ops)?;
+        wire.serialize_field("full_walk_op_edges", &self.full_walk_op_edges)?;
+        wire.serialize_field("full_walk_edge_op_starts", &self.full_walk_edge_op_starts)?;
+        wire.serialize_field("full_walk_root_byte_op_starts",
+            &self.full_walk_root_byte_op_starts.as_deref().map(|row| row.as_slice()))?;
+        wire.serialize_field("full_walk_token_nodes", &LegacyTrieTokenNodes(self))?;
+        wire.serialize_field("full_walk_max_parent_depth", &self.full_walk_max_parent_depth)?;
+        wire.serialize_field("root_layout_classes", &self.root_layout_classes)?;
+        wire.serialize_field("root_layout_all_valid_utf8", &self.root_layout_all_valid_utf8)?;
+        wire.end()
+    }
+}
+
+/// Consume an old derived array without retaining a second runtime graph.
+struct LegacyTrieDerived<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for LegacyTrieDerived<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = LegacyTrieDerived<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a legacy derived trie array")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<T>()?.is_some() {}
+                Ok(LegacyTrieDerived(std::marker::PhantomData))
+            }
+        }
+        deserializer.deserialize_seq(Visitor(std::marker::PhantomData))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename = "DynamicMaskTrie")]
+struct LegacyTrieWire {
+    nodes: Vec<DynamicMaskTrieNode>,
+    edges: Vec<DynamicMaskTrieEdge>,
+    edge_bytes: Vec<u8>,
+    #[serde(rename = "subtree_tokens")]
+    _subtree_tokens: LegacyTrieDerived<u32>,
+    #[serde(rename = "walk_edges")]
+    _walk_edges: LegacyTrieDerived<DynamicMaskTrieWalkEdge>,
+    #[serde(rename = "full_walk_ops")]
+    _full_walk_ops: LegacyTrieDerived<DynamicMaskTrieFullWalkOp>,
+    #[serde(rename = "full_walk_op_edges")]
+    _full_walk_op_edges: LegacyTrieDerived<u32>,
+    #[serde(rename = "full_walk_edge_op_starts")]
+    _full_walk_edge_op_starts: LegacyTrieDerived<u32>,
+    #[serde(rename = "full_walk_root_byte_op_starts")]
+    _full_walk_root_byte_op_starts: Option<LegacyTrieDerived<u32>>,
+    #[serde(rename = "full_walk_token_nodes")]
+    _full_walk_token_nodes: LegacyTrieDerived<u32>,
+    #[serde(rename = "full_walk_max_parent_depth")]
+    _full_walk_max_parent_depth: u16,
+    root_layout_classes: Vec<u16>,
+    root_layout_all_valid_utf8: Vec<bool>,
+}
+
+impl<'de> serde::Deserialize<'de> for DynamicMaskTrie {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = <LegacyTrieWire as serde::Deserialize>::deserialize(deserializer)?;
+        let invalid = || serde::de::Error::custom("invalid dynamic mask trie topology");
+        if wire.nodes.is_empty() || wire.nodes.len() != wire.edges.len().saturating_add(1)
+            || wire.nodes.len() > u32::MAX as usize || wire.edge_bytes.len() > u32::MAX as usize {
+            return Err(invalid());
+        }
+        if (!wire.root_layout_classes.is_empty()
+                && wire.root_layout_classes.len() != wire.nodes[0].child_len as usize)
+            || (!wire.root_layout_all_valid_utf8.is_empty()
+                && wire.root_layout_all_valid_utf8.len() != wire.nodes[0].child_len as usize) {
+            return Err(invalid());
+        }
+        enum Task<'a> { Enter(u32, Option<u32>, &'a [u8]), Finish(u32, &'a [u8]) }
+        let mut trie = Self::new();
+        trie.nodes.reserve(wire.nodes.len() - 1);
+        trie.walk_edges.reserve(wire.edges.len());
+        trie.edge_bytes.reserve(wire.edge_bytes.len());
+        let mut work = vec![Task::Enter(0, None, &[])];
+        let mut total_bytes = 0usize;
+        let mut total_ops = 0usize;
+        while let Some(task) = work.pop() {
+            match task {
+                Task::Finish(id, bytes) => trie.finish_node(id, bytes),
+                Task::Enter(old, parent, incoming) => {
+                    let node = wire.nodes.get(old as usize).ok_or_else(invalid)?;
+                    // All historical builders allocate nodes in preorder.
+                    // Preserve IDs: persisted slice metadata refers to them.
+                    let expected = if parent.is_some() { trie.nodes.len() } else { 0 };
+                    if expected != old as usize || incoming.len() > u16::MAX as usize {
+                        return Err(invalid());
+                    }
+                    if let Some(parent) = parent {
+                        if parent != 0 && trie.walk_edges[parent as usize - 1].parent_depth >= u16::MAX - 1
+                            || trie.nodes[parent as usize].prefix_byte_len
+                                .checked_add(incoming.len() as u32).is_none() {
+                            return Err(invalid());
+                        }
+                        total_bytes = total_bytes.checked_add(incoming.len()).ok_or_else(invalid)?;
+                        total_ops = total_ops.checked_add(incoming.len().max(1)).ok_or_else(invalid)?;
+                        if total_bytes > wire.edge_bytes.len() || total_ops > u32::MAX as usize {
+                            return Err(invalid());
+                        }
+                    }
+                    let id = trie.begin_node(parent, node.token_id, incoming.len());
+                    work.push(Task::Finish(id, incoming));
+                    if node.child_len == 0 { continue; }
+                    let first = node.first_child as usize;
+                    let end = first.checked_add(node.child_len as usize).ok_or_else(invalid)?;
+                    for edge in wire.edges.get(first..end).ok_or_else(invalid)?.iter().rev() {
+                        let start = edge.byte_start as usize;
+                        let end = start.checked_add(edge.byte_len as usize).ok_or_else(invalid)?;
+                        let bytes = wire.edge_bytes.get(start..end).ok_or_else(invalid)?;
+                        work.push(Task::Enter(edge.child, Some(id), bytes));
+                    }
+                }
+            }
+        }
+        if trie.nodes.len() != wire.nodes.len() || total_bytes != wire.edge_bytes.len() {
+            return Err(invalid());
+        }
+        trie.root_layout_classes = wire.root_layout_classes;
+        trie.root_layout_all_valid_utf8 = wire.root_layout_all_valid_utf8;
+        if trie.walk_edges.len() != 0 || trie.nodes[0].token_id.is_some() {
+            trie.finalize_full_walk();
+        }
+        Ok(trie)
+    }
+}
 
 impl Default for DynamicMaskTrie {
     fn default() -> Self {
@@ -6340,10 +6300,7 @@ impl DynamicMaskVocab {
         canonical_original_tokens: &[u32],
     ) -> Arc<Vec<u64>> {
         const FALLBACK_TAG: u64 = 1u64 << 63;
-        Arc::new(trie.full_walk_token_nodes().iter().map(|&node| {
-            let Some(canonical_token) = trie.nodes[node as usize].token_id else {
-                return 0;
-            };
+        Arc::new(trie.all_subtree_tokens()[usize::from(trie.node(0).token_id.is_some())..].iter().map(|&canonical_token| {
             let index = canonical_token as usize;
             let start = canonical_offsets[index] as usize;
             let end = canonical_offsets[index + 1] as usize;
@@ -8148,51 +8105,16 @@ impl DynamicMaskVocab {
             return false;
         }
 
-        struct Frame {
-            node: u32,
-            next_child: usize,
-            prefix_len: usize,
-        }
-
         let mut canonical_seen = vec![false; canonical_bytes.len()];
-        let mut prefix = Vec::<u8>::new();
-        let mut frames = vec![Frame {
-            node: 0,
-            next_child: 0,
-            prefix_len: 0,
-        }];
-        while !frames.is_empty() {
-            let frame_index = frames.len() - 1;
-            let node_id = frames[frame_index].node;
-            if frames[frame_index].next_child == 0
-                && let Some(canonical) = self.trie.node(node_id).token_id {
-                    let canonical = canonical as usize;
-                    if canonical >= canonical_seen.len()
-                        || canonical_seen[canonical]
-                        || canonical_bytes[canonical] != prefix.as_slice()
-                    {
-                        return false;
-                    }
-                    canonical_seen[canonical] = true;
-                }
-
-            let children = self.trie.children(node_id);
-            if frames[frame_index].next_child < children.len() {
-                let edge = children[frames[frame_index].next_child].clone();
-                frames[frame_index].next_child += 1;
-                let prefix_len = prefix.len();
-                prefix.extend_from_slice(self.trie.edge_bytes(&edge));
-                frames.push(Frame {
-                    node: edge.child,
-                    next_child: 0,
-                    prefix_len,
-                });
-            } else {
-                let prefix_len = frames[frame_index].prefix_len;
-                frames.pop();
-                prefix.truncate(prefix_len);
+        if !self.trie.all_token_paths_match(|canonical, prefix| {
+            let canonical = canonical as usize;
+            if canonical >= canonical_seen.len() || canonical_seen[canonical]
+                || canonical_bytes[canonical] != prefix {
+                return false;
             }
-        }
+            canonical_seen[canonical] = true;
+            true
+        }) { return false; }
 
         canonical_seen.into_iter().all(|seen| seen)
     }
@@ -8214,58 +8136,20 @@ impl DynamicMaskVocab {
             return false;
         }
 
-        struct Frame {
-            node: u32,
-            next_child: usize,
-            prefix_len: usize,
-        }
         let mut canonical_seen = vec![false; self.canonical_token_count()];
-        let mut prefix = Vec::<u8>::new();
-        let mut frames = vec![Frame {
-            node: 0,
-            next_child: 0,
-            prefix_len: 0,
-        }];
-        while !frames.is_empty() {
-            let frame_index = frames.len() - 1;
-            let node_id = frames[frame_index].node;
-            if frames[frame_index].next_child == 0
-                && let Some(canonical) = self.trie.node(node_id).token_id {
-                    let canonical = canonical as usize;
-                    if canonical >= canonical_seen.len() || canonical_seen[canonical] {
-                        return false;
-                    }
-                    let Some(originals) = self.token_ids(canonical as u32) else {
-                        return false;
-                    };
-                    let Some(representative) = originals.first() else {
-                        return false;
-                    };
-                    if token_bytes
-                        .get(representative)
-                        .is_none_or(|bytes| bytes.as_slice() != prefix.as_slice())
-                    {
-                        return false;
-                    }
-                    canonical_seen[canonical] = true;
-                }
-            let children = self.trie.children(node_id);
-            if frames[frame_index].next_child < children.len() {
-                let edge = children[frames[frame_index].next_child].clone();
-                frames[frame_index].next_child += 1;
-                let prefix_len = prefix.len();
-                prefix.extend_from_slice(self.trie.edge_bytes(&edge));
-                frames.push(Frame {
-                    node: edge.child,
-                    next_child: 0,
-                    prefix_len,
-                });
-            } else {
-                let prefix_len = frames[frame_index].prefix_len;
-                frames.pop();
-                prefix.truncate(prefix_len);
+        if !self.trie.all_token_paths_match(|canonical, prefix| {
+            let index = canonical as usize;
+            if index >= canonical_seen.len() || canonical_seen[index] { return false; }
+            let Some(representative) = self.token_ids(canonical).and_then(|ids| ids.first()) else {
+                return false;
+            };
+            if token_bytes.get(representative).is_none_or(|bytes| bytes.as_slice() != prefix) {
+                return false;
             }
-        }
+            canonical_seen[index] = true;
+            true
+        }) { return false; }
+
         canonical_seen.into_iter().all(|seen| seen)
     }
 }
@@ -9365,19 +9249,10 @@ mod dynamic_mask_vocab_cache_boundary_tests {
     fn full_walk_all_consume_exactly_rejects_empty_edges() {
         fn one_edge(bytes: &[u8]) -> DynamicMaskTrie {
             let mut trie = DynamicMaskTrie::new();
-            trie.nodes.push(DynamicMaskTrieNode {
-                token_id: Some(0),
-                ..DynamicMaskTrieNode::default()
-            });
-            let (byte_start, byte_len) = trie.push_edge_bytes(bytes);
-            trie.edges.push(DynamicMaskTrieEdge {
-                byte_start,
-                byte_len,
-                child: 1,
-            });
-            trie.nodes[0].first_child = 0;
-            trie.nodes[0].child_len = 1;
-            trie.finalize_subtree_metadata();
+            let child = trie.begin_node(Some(0), Some(0), bytes.len());
+            trie.finish_node(child, bytes);
+            trie.finish_node(0, &[]);
+            trie.finalize_full_walk();
             trie
         }
 
@@ -9392,20 +9267,7 @@ mod dynamic_mask_vocab_cache_boundary_tests {
 
     #[test]
     fn vocab_runtime_exactly_checks_original_token_bytes() {
-        let mut trie = DynamicMaskTrie::new();
-        trie.nodes.push(DynamicMaskTrieNode {
-            token_id: Some(0),
-            ..DynamicMaskTrieNode::default()
-        });
-        let (byte_start, byte_len) = trie.push_edge_bytes(b"a");
-        trie.edges.push(DynamicMaskTrieEdge {
-            byte_start,
-            byte_len,
-            child: 1,
-        });
-        trie.nodes[0].first_child = 0;
-        trie.nodes[0].child_len = 1;
-        trie.finalize_subtree_metadata();
+        let trie = DynamicMaskTrie::from_sorted_token_refs(&[(0, 0, b"a")]);
         let vocab = DynamicMaskVocab::from_materialized_ordered(
             Arc::new(trie),
             Arc::new(vec![vec![7]]),
