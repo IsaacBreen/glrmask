@@ -1615,15 +1615,6 @@ impl<'a> ConstraintSpec<'a> {
     fn compile_boxed(&self) -> Result<Box<RuntimeConstraint>> {
         with_deep_stack(|| {
             let mut constraint = self.compile_static_with_trigger_boxed()?;
-            // A constraint with unresolved external grammars is explicitly a
-            // reusable late-bind parent.  Cache its exact tokenizer-reset
-            // terminal -> model-token relation now, while compilation already owns
-            // the vocabulary, instead of rescanning the vocabulary on every later
-            // bind.  The cache is part of composition metadata and therefore
-            // survives ordinary save/load.
-            if !constraint.late_grammar_slots.is_empty() {
-                constraint.ensure_composition_reset_tokens_by_terminal();
-            }
             match self.boundary_summary_policy {
                 BoundarySummaryPolicy::Disabled => {
                     let _ = constraint.boundary_candidate_summary.set(
@@ -5867,19 +5858,6 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        assert!(
-            !parent.composition_reset_tokens_by_terminal.is_empty(),
-            "late-bind parent compilation should precompute reset-token composition metadata",
-        );
-        let mut cached_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
-        cached_parent
-            .materialize_composition_metadata_for_compilation()
-            .unwrap();
-        assert_eq!(
-            cached_parent.composition_reset_tokens_by_terminal,
-            parent.composition_reset_tokens_by_terminal,
-            "late-bind reset-token cache must survive save/load",
-        );
         let monolithic = RuntimeConstraint::compile(
             Grammar::glrm(
                 r#"

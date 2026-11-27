@@ -1649,11 +1649,9 @@ fn build_recursive_coordinator(
         possible_matches_complete: true,
         // No outer TSID quotient is needed by the provider runtime.
         tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
-        composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,
-        terminal_live_states: Vec::new(),
         token_classes: crate::runtime::TokenClasses::mapped(Vec::new(), Vec::new()),
         token_bytes,
         token_projection: Default::default(),
@@ -2437,7 +2435,6 @@ mod tests {
         let mut child = Constraint::from_glrm_grammar(
             r#"start child; t A = "a"; t B = "b"; nt child = A B;"#, &vocab,
         ).unwrap();
-        child.ensure_composition_reset_tokens_by_terminal();
         child.serialized_artifact_cache = None;
         let inner = parent.compose_linked_children_for_test_dynamic(
             &[("SUB", &child)], &vocab,
@@ -3655,10 +3652,8 @@ table: &child_table,
             4,
             "oracle-vs-monolithic",
         );
-        let mut prepared_parent = parent.clone();
-        let mut prepared_child = child.clone();
-        prepared_parent.ensure_composition_reset_tokens_by_terminal();
-        prepared_child.ensure_composition_reset_tokens_by_terminal();
+        let prepared_parent = parent.clone();
+        let prepared_child = child.clone();
         let mut prepared_parent = Constraint::load(prepared_parent.save(), &vocab).unwrap();
         let mut prepared_child = Constraint::load(prepared_child.save(), &vocab).unwrap();
         prepared_parent
@@ -3667,14 +3662,6 @@ table: &child_table,
         prepared_child
             .materialize_composition_metadata_for_compilation()
             .unwrap();
-        assert_eq!(
-            prepared_parent.composition_reset_tokens_by_terminal.len(),
-            prepared_parent.tokenizer.num_terminals() as usize,
-        );
-        assert_eq!(
-            prepared_child.composition_reset_tokens_by_terminal.len(),
-            prepared_child.tokenizer.num_terminals() as usize,
-        );
         let cached_composed = prepared_parent
             .compose_linked_children_for_test(&[("SUB", &prepared_child)], &vocab)
             .unwrap();

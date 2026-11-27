@@ -7170,10 +7170,6 @@ impl Constraint {
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
-        // `terminal_live_states` is a legacy/static derived cache. Dynamic mask
-        // and commit paths do not consume it, so rebuilding it here only adds
-        // dynamic compile/load latency and allocations.
-        self.terminal_live_states.clear();
         let started_at = profile.then(std::time::Instant::now);
         if self.table.is_present() && self.table.guarded_shift_index.len() != self.parser_symbol_count() as usize {
             if self.table.has_guarded_stack_shifts() {
@@ -7974,98 +7970,6 @@ impl Constraint {
         .collect()
     }
 
-    pub(crate) fn compute_composition_reset_tokens_by_terminal(&self) -> Vec<Vec<u32>> {
-        let terminal_count = self.tokenizer.num_terminals() as usize;
-        let empty = || (0..terminal_count).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
-        if terminal_count == 0 || self.token_bytes.is_empty() {
-            return empty();
-        }
-        let start = self.tokenizer.start_state();
-        let mut rows = self
-            .token_bytes
-            .entries()
-            .par_iter()
-            .fold(empty, |mut rows, (&token_id, bytes)| {
-                if bytes.is_empty() {
-                    return rows;
-                }
-                let (_, matches) = self.tokenizer.execute_summary_from_state(bytes, start);
-                for (terminal, width) in matches {
-                    if width == bytes.len()
-                        && let Some(row) = rows.get_mut(terminal as usize) {
-                            row.push(token_id);
-                        }
-                }
-                rows
-            })
-            .reduce(empty, |mut left, mut right| {
-                for (left_row, right_row) in left.iter_mut().zip(&mut right) {
-                    left_row.append(right_row);
-                }
-                left
-            });
-        for row in &mut rows {
-            row.sort_unstable();
-            row.dedup();
-        }
-        rows
-    }
-
-    pub(crate) fn ensure_composition_reset_tokens_by_terminal(&mut self) {
-        if self.composition_reset_tokens_by_terminal.len()
-            != self.tokenizer.num_terminals() as usize
-        {
-            self.composition_reset_tokens_by_terminal =
-                self.compute_composition_reset_tokens_by_terminal();
-        }
-    }
-
-    fn compute_terminal_live_states(&self) -> Vec<Vec<u32>> {
-        let terminal_count = self.tokenizer.num_terminals() as usize;
-        if terminal_count == 0 {
-            return Vec::new();
-        }
-        let closures = self.tokenizer.all_singleton_epsilon_closures();
-        let state_count = self.tokenizer.num_states() as usize;
-        let build_state = |mut rows: Vec<Vec<u32>>, state: usize| {
-            // Rows are sorted and deduplicated once after the parallel transpose.
-            // Stream observations directly instead of sorting/deduplicating a
-            // temporary terminal list for every runtime tokenizer state.
-            for &closure_state in closures[state].iter() {
-                for terminal in self.tokenizer.matched_terminals_iter(closure_state) {
-                    if let Some(row) = rows.get_mut(terminal as usize) {
-                        row.push(state as u32);
-                    }
-                }
-                for terminal in self.tokenizer.possible_future_terminals_iter(closure_state) {
-                    if let Some(row) = rows.get_mut(terminal as usize) {
-                        row.push(state as u32);
-                    }
-                }
-            }
-            rows
-        };
-        let empty = || (0..terminal_count).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
-        let mut rows = if rayon::current_num_threads() == 1 || state_count < 4096 {
-            (0..state_count).fold(empty(), build_state)
-        } else {
-            (0..state_count)
-                .into_par_iter()
-                .fold(empty, build_state)
-                .reduce(empty, |mut left, mut right| {
-                    for (left_row, right_row) in left.iter_mut().zip(&mut right) {
-                        left_row.append(right_row);
-                    }
-                    left
-                })
-        };
-        for row in &mut rows {
-            row.sort_unstable();
-            row.dedup();
-        }
-        rows
-    }
-
     pub(crate) fn token_mask_caches_ready(&self) -> bool {
         self.token_projection.ready(self.internal_token_count(), self.body_mask_len())
     }
@@ -8179,37 +8083,6 @@ impl Constraint {
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
-        let terminal_live_started_at = profile.then(std::time::Instant::now);
-        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
-            self.terminal_live_states = self.compute_terminal_live_states();
-        }
-        let terminal_live_ms = terminal_live_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let prepare_composition_cache = crate::env::var_os(
-            "GLRMASK_EXPERIMENT_COMPONENT_ONLY_BUILD_DELTA_METADATA",
-        )
-        .is_some()
-            || crate::env::var_os("GLRMASK_PREPARE_COMPOSITION_CACHE").is_some();
-        if prepare_composition_cache {
-            let reset_started_at = profile.then(std::time::Instant::now);
-            self.ensure_composition_reset_tokens_by_terminal();
-            if profile {
-                let token_pairs = self
-                    .composition_reset_tokens_by_terminal
-                    .iter()
-                    .map(Vec::len)
-                    .sum::<usize>();
-                eprintln!(
-                    "[glrmask/profile][composition_reset_tokens] terminals={} token_pairs={} ms={:.3}",
-                    self.composition_reset_tokens_by_terminal
-                        .iter()
-                        .filter(|row| !row.is_empty())
-                        .count(),
-                    token_pairs,
-                    reset_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
-                );
-            }
-        }
         if self.uses_sparse_direct_regular_runtime() {
             let support = self
                 .direct_regular_automaton
@@ -8482,8 +8355,8 @@ impl Constraint {
                 }
             }
             eprintln!(
-                "[glrmask/profile][runtime_finalize] terminal_live_ms={:.3} guarded_shift_ms={:.3} projection_ms={:.3} primary_ms={:.3} direct_wide_dense_ms={:.3} direct_parser_dense_ms={:.3} weight_buf_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} total_ms={:.3} final_weight_sets={:?}",
-                terminal_live_ms, guarded_shift_ms, projection_ms, primary_ms,
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} projection_ms={:.3} primary_ms={:.3} direct_wide_dense_ms={:.3} direct_parser_dense_ms={:.3} weight_buf_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} total_ms={:.3} final_weight_sets={:?}",
+                guarded_shift_ms, projection_ms, primary_ms,
                 direct_wide_dense_ms, direct_parser_dense_ms, weight_buf_ms,
                 seed_ms, tokenizer_closures_ms, total_started_at.elapsed().as_secs_f64() * 1000.0,
                 output_counts,

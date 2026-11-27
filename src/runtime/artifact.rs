@@ -2547,19 +2547,29 @@ impl serde::Serialize for DynamicMaskTrie {
 }
 
 /// Consume an old derived array without retaining a second runtime graph.
-struct LegacyTrieDerived<T>(std::marker::PhantomData<T>);
+pub(super) struct DiscardedSequence<T>(std::marker::PhantomData<T>);
 
-impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for LegacyTrieDerived<T> {
+impl<T> Default for DiscardedSequence<T> {
+    fn default() -> Self { Self(std::marker::PhantomData) }
+}
+
+impl<T> serde::Serialize for DiscardedSequence<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::ser::SerializeSeq::end(serializer.serialize_seq(Some(0))?)
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for DiscardedSequence<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor<T>(std::marker::PhantomData<T>);
         impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
-            type Value = LegacyTrieDerived<T>;
+            type Value = DiscardedSequence<T>;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a legacy derived trie array")
+                f.write_str("a legacy derived sequence")
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 while seq.next_element::<T>()?.is_some() {}
-                Ok(LegacyTrieDerived(std::marker::PhantomData))
+                Ok(DiscardedSequence(std::marker::PhantomData))
             }
         }
         deserializer.deserialize_seq(Visitor(std::marker::PhantomData))
@@ -2573,19 +2583,19 @@ struct LegacyTrieWire {
     edges: Vec<DynamicMaskTrieEdge>,
     edge_bytes: Vec<u8>,
     #[serde(rename = "subtree_tokens")]
-    _subtree_tokens: LegacyTrieDerived<u32>,
+    _subtree_tokens: DiscardedSequence<u32>,
     #[serde(rename = "walk_edges")]
-    _walk_edges: LegacyTrieDerived<DynamicMaskTrieWalkEdge>,
+    _walk_edges: DiscardedSequence<DynamicMaskTrieWalkEdge>,
     #[serde(rename = "full_walk_ops")]
-    _full_walk_ops: LegacyTrieDerived<DynamicMaskTrieFullWalkOp>,
+    _full_walk_ops: DiscardedSequence<DynamicMaskTrieFullWalkOp>,
     #[serde(rename = "full_walk_op_edges")]
-    _full_walk_op_edges: LegacyTrieDerived<u32>,
+    _full_walk_op_edges: DiscardedSequence<u32>,
     #[serde(rename = "full_walk_edge_op_starts")]
-    _full_walk_edge_op_starts: LegacyTrieDerived<u32>,
+    _full_walk_edge_op_starts: DiscardedSequence<u32>,
     #[serde(rename = "full_walk_root_byte_op_starts")]
-    _full_walk_root_byte_op_starts: Option<LegacyTrieDerived<u32>>,
+    _full_walk_root_byte_op_starts: Option<DiscardedSequence<u32>>,
     #[serde(rename = "full_walk_token_nodes")]
-    _full_walk_token_nodes: LegacyTrieDerived<u32>,
+    _full_walk_token_nodes: DiscardedSequence<u32>,
     #[serde(rename = "full_walk_max_parent_depth")]
     _full_walk_max_parent_depth: u16,
     root_layout_classes: Vec<u16>,
@@ -3928,7 +3938,7 @@ struct LegacySliceWire {
     dfa: Arc<VocabPartitionDfa>,
     trie: Arc<DynamicMaskTrie>,
     #[serde(rename = "full_walk_token_markers")]
-    _full_walk_token_markers: LegacyTrieDerived<u64>,
+    _full_walk_token_markers: DiscardedSequence<u64>,
     subtree_original_token_offsets: Arc<Vec<u32>>,
     subtree_original_tokens: Arc<Vec<u32>>,
     slice_original_token_words: Arc<Vec<u32>>,
@@ -9068,13 +9078,6 @@ constraint_data_schema! {
     @serde(default)
     pub(crate) possible_matches_complete: bool,
     pub(crate) tokenizer_tsids: crate::runtime::TokenizerTsidMap,
-    /// Composition-preparation cache: row `t` lists original model-token IDs
-    /// which, from this component's lexer reset, complete terminal `t` exactly
-    /// at the end of the model token.  This is not part of the historical inner
-    /// `Constraint` bincode layout; artifact V13 stores it in the outer
-    /// envelope so V12 constraints remain loadable unchanged.
-    @serde(skip, default)
-    pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
     /// Composition-time parser stack-effect templates retained from the
     /// original compile. These are the unspecialized per-terminal DFAs used to
     /// build parser DWAs, so a later linker can transport unchanged component
@@ -9095,11 +9098,6 @@ constraint_data_schema! {
     /// loadable unchanged.
     @serde(skip, default)
     pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
-    /// Runtime-only inverse lexer-metadata index used by compiled-constraint
-    /// composition. Row `t` lists exactly the raw tokenizer states whose
-    /// epsilon closure has terminal `t` matched or still reachable.
-    @serde(skip, default)
-    pub(crate) terminal_live_states: Vec<Vec<u32>>,
     @serde(skip, default)
     pub(crate) token_classes: crate::runtime::TokenClasses,
     @serde(skip, default)

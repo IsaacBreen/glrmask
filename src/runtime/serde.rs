@@ -15,7 +15,7 @@ use crate::test_modes::MaskMode;
 use crate::automata::lexer::Lexer;
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
-    BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows,
+    BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows, DiscardedSequence,
     PackedInternalTokenBufMask,
 };
 use crate::automata::regex::Expr;
@@ -510,7 +510,8 @@ struct ConstraintCompositionLinkMetadataRef<'a> {
 
 #[derive(Serialize, Deserialize)]
 struct ConstraintCompositionLinkMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    #[serde(rename = "composition_reset_tokens_by_terminal")]
+    _obsolete_reset_tokens: DiscardedSequence<DiscardedSequence<u32>>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWire,
     boundary_candidate_summary: BoundaryCandidateSummaryWire,
@@ -663,8 +664,7 @@ fn split_composition_metadata_parts(
 
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     crate::compiler::boundary_candidates::materialize_deferred_composition_boundary_summary(constraint);
-    if constraint.composition_reset_tokens_by_terminal.is_empty()
-        && constraint.composition_parser_templates_by_terminal.is_empty()
+    if constraint.composition_parser_templates_by_terminal.is_empty()
         && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
         && constraint.boundary_trigger.is_none()
@@ -677,7 +677,7 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     // the former; keeping it as a separately decodable section avoids paying
     // megabytes of parser-cache decompression/allocation merely to discover B.
     let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
-        composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
+        composition_reset_tokens_by_terminal: &[],
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
         boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
@@ -730,7 +730,7 @@ fn encode_composition_metadata_base_for_save(constraint: &Constraint) -> Vec<u8>
     }
 
     let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
-        composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
+        composition_reset_tokens_by_terminal: &[],
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
         boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
@@ -766,7 +766,7 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
 
 fn empty_composition_link_metadata() -> ConstraintCompositionLinkMetadata {
     ConstraintCompositionLinkMetadata {
-        composition_reset_tokens_by_terminal: Vec::new(),
+        _obsolete_reset_tokens: Default::default(),
         composition_grammar_summary: None,
         boundary_trigger: BoundaryTriggerWire::None,
         boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
@@ -1769,7 +1769,8 @@ struct ConstraintArtifactCurrentRuntimeRef<'a> {
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
     dynamic_execution_metadata: Option<crate::dynamic_constraint::DynamicExecutionMetadata>,
-    terminal_live_states: Vec<Vec<u32>>,
+    #[serde(rename = "terminal_live_states")]
+    _obsolete_terminal_live_states: DiscardedSequence<DiscardedSequence<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
@@ -1780,7 +1781,6 @@ struct ConstraintArtifactCurrentRuntime {
 
 struct DecodedConstraintRuntime {
     dynamic_execution_metadata: Option<crate::dynamic_constraint::DynamicExecutionMetadata>,
-    terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime_v27: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
@@ -2398,7 +2398,6 @@ impl Constraint {
         &mut self,
         metadata: ConstraintCompositionLinkMetadata,
     ) -> Result<(), String> {
-        self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
         self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
         if self.boundary_candidate_summary.get().is_none() {
@@ -2869,7 +2868,7 @@ impl Constraint {
                             };
                             let metadata = ConstraintArtifactCurrentRuntimeRef {
                                 dynamic_execution_metadata: (self.uses_dynamic_runtime() || self.has_template_parser()).then(|| crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(self)),
-                                terminal_live_states: &self.terminal_live_states,
+                                terminal_live_states: &[],
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
                                 dynamic_mask_vocab: self.uses_dynamic_runtime().then(|| {
                                     // The template-only artifact also preserves its proven
@@ -3540,7 +3539,6 @@ impl Constraint {
                                     };
                                     Ok(DecodedConstraintRuntime {
                                         dynamic_execution_metadata: runtime.dynamic_execution_metadata,
-                                        terminal_live_states: runtime.terminal_live_states,
                                         segmented_runtime_v27: runtime.segmented_runtime,
                                         dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                         virtual_runtimes: runtime.virtual_runtimes,
@@ -3929,7 +3927,6 @@ impl Constraint {
                 dynamic_execution_metadata = runtime.dynamic_execution_metadata;
                 virtual_runtimes = runtime.virtual_runtimes;
                 static_virtual_residual_mask = runtime.static_virtual_residual_mask;
-                constraint.terminal_live_states = runtime.terminal_live_states;
                 if !deferred
                 && let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
@@ -4181,7 +4178,6 @@ mod tests {
     fn omitted_dynamic_runtime(constraint: &Constraint) -> DecodedConstraintRuntime {
         DecodedConstraintRuntime {
             dynamic_execution_metadata: Some(crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(constraint)),
-            terminal_live_states: Vec::new(),
             segmented_runtime_v27: None, dynamic_mask_vocab: None,
             virtual_runtimes: Vec::new(), static_virtual_residual_mask: None,
             packed_dwa_dense_masks: None,
@@ -5047,26 +5043,19 @@ mod tests {
     }
 
     #[test]
-    fn current_constraint_artifact_preserves_composition_reset_tokens() {
-        let mut constraint = tiny_constraint();
-        constraint.ensure_composition_reset_tokens_by_terminal();
-        assert_eq!(
-            constraint.composition_reset_tokens_by_terminal.len(),
-            constraint.parser_terminal_count() as usize,
-        );
-        assert!(constraint
-            .composition_reset_tokens_by_terminal
-            .iter()
-            .any(|row| !row.is_empty()));
-        let expected = constraint.composition_reset_tokens_by_terminal.clone();
+    fn current_constraint_artifact_discards_obsolete_composition_reset_tokens() {
+        let constraint = tiny_constraint();
+        let resets = vec![vec![0u32, 1], vec![2]];
+        let raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
+            composition_reset_tokens_by_terminal: &resets,
+            composition_grammar_summary: &constraint.composition_grammar_summary,
+            boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
+            boundary_candidate_summary: boundary_candidate_summary_wire(&constraint),
+        }).unwrap();
+        let metadata: ConstraintCompositionLinkMetadata = bincode::deserialize(&raw).unwrap();
         let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
-        assert!(loaded.composition_reset_tokens_by_terminal.is_empty());
-        assert!(loaded.deferred_composition_metadata_blob.is_some());
-        assert_eq!(loaded.start().mask(), constraint.start().mask());
-        loaded
-            .materialize_composition_metadata_for_compilation()
-            .unwrap();
-        assert_eq!(loaded.composition_reset_tokens_by_terminal, expected);
+        loaded.install_composition_link_metadata(metadata).unwrap();
+        assert_eq!(loaded.composition_grammar_summary, constraint.composition_grammar_summary);
         let mut actual = loaded.start();
         let mut expected = constraint.start();
         for token in [0, 1] {
@@ -5190,9 +5179,7 @@ mod tests {
 
     #[test]
     fn split_composition_metadata_allows_link_only_materialization() {
-        let mut constraint = tiny_constraint();
-        constraint.ensure_composition_reset_tokens_by_terminal();
-        let expected_resets = constraint.composition_reset_tokens_by_terminal.clone();
+        let constraint = tiny_constraint();
         let expected_summary = constraint.composition_grammar_summary.clone();
         let expected_templates = constraint.composition_parser_templates_by_terminal.clone();
         assert!(expected_summary.is_some());
@@ -5210,7 +5197,6 @@ mod tests {
         loaded
             .materialize_composition_link_metadata_for_compilation()
             .unwrap();
-        assert_eq!(loaded.composition_reset_tokens_by_terminal, expected_resets);
         assert_eq!(loaded.composition_grammar_summary, expected_summary);
         assert!(loaded.composition_link_metadata_materialized);
         assert!(
@@ -5265,7 +5251,7 @@ mod tests {
     fn constraint_envelope_rejects_invalid_compressed_payloads() {
         let constraint = tiny_constraint();
         let raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
-            composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
+            composition_reset_tokens_by_terminal: &[],
             composition_grammar_summary: &constraint.composition_grammar_summary,
             boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
             boundary_candidate_summary: boundary_candidate_summary_wire(&constraint),

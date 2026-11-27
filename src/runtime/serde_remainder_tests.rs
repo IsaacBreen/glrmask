@@ -22,7 +22,7 @@ fn direct_runtime_metadata_writer_preserves_every_byte() {
     let rows = vec![0u64, u64::MAX, 0x1234_5678_9abc_def0];
 
     let metadata = ConstraintArtifactCurrentRuntimeRef {
-        template_dynamic_proofs: None,
+        dynamic_execution_metadata: None,
         terminal_live_states: &terminal_live_states,
         segmented_runtime: None,
         dynamic_mask_vocab: None,
@@ -44,7 +44,7 @@ fn direct_runtime_metadata_writer_preserves_every_byte() {
 #[test]
 fn runtime_writer_still_decodes_with_the_existing_reader() {
     let metadata = ConstraintArtifactCurrentRuntimeRef {
-        template_dynamic_proofs: None,
+        dynamic_execution_metadata: None,
         terminal_live_states: &[],
         segmented_runtime: None,
         dynamic_mask_vocab: None,
@@ -58,8 +58,8 @@ fn runtime_writer_still_decodes_with_the_existing_reader() {
     let backing = Arc::new(bytes);
     let (decoded, residual) =
         decode_current_runtime_wire(backing.as_slice(), Arc::clone(&backing)).unwrap();
-    assert!(decoded.template_dynamic_proofs.is_none());
-    assert!(decoded.terminal_live_states.is_empty());
+    assert!(decoded.dynamic_execution_metadata.is_none());
+    // The legacy inverse live-state rows are consumed, not retained.
     assert!(decoded.virtual_runtimes.is_empty());
     assert!(residual.is_none());
 }
@@ -67,7 +67,7 @@ fn runtime_writer_still_decodes_with_the_existing_reader() {
 #[test]
 fn runtime_section_length_corruption_remains_an_error() {
     let metadata = ConstraintArtifactCurrentRuntimeRef {
-        template_dynamic_proofs: None,
+        dynamic_execution_metadata: None,
         terminal_live_states: &[],
         segmented_runtime: None,
         dynamic_mask_vocab: None,
