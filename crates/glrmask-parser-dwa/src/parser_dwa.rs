@@ -1739,6 +1739,76 @@ fn build_possible_outgoing_ids_by_state(
     )
 }
 
+/// Worklist closure over an idempotent weighted epsilon relation. The two
+/// weight representations retain their own intersection/union operations and
+/// vacant-slot encoding; scheduling and first-touch tracking are identical.
+fn propagate_epsilon_closure<'a, W: Clone, E: 'a>(
+    weight_by_state: &mut [W],
+    queue: &mut VecDeque<u32>,
+    touched: &mut Vec<u32>,
+    edges: impl Fn(u32) -> &'a [(u32, E)],
+    vacant: impl Fn(&W) -> bool,
+    mut grow: impl FnMut(&W, &E, &mut W) -> bool,
+) {
+    while let Some(state) = queue.pop_front() {
+        let current = weight_by_state[state as usize].clone();
+        if vacant(&current) {
+            continue;
+        }
+        for (target, edge) in edges(state) {
+            let slot = &mut weight_by_state[*target as usize];
+            let first_touch = vacant(slot);
+            if grow(&current, edge, slot) {
+                if first_touch {
+                    touched.push(*target);
+                }
+                queue.push_back(*target);
+            }
+        }
+    }
+}
+
+fn propagate_weight_epsilon_closure(
+    nwa: &NWA,
+    weight_by_state: &mut [Option<Weight>],
+    queue: &mut VecDeque<u32>,
+    touched: &mut Vec<u32>,
+    mut cache: Option<&mut ScopedWeightOpCache>,
+) {
+    propagate_epsilon_closure(
+        weight_by_state,
+        queue,
+        touched,
+        |state| nwa.states().get(state as usize)
+            .map_or(&[][..], |row| row.epsilons.as_slice()),
+        Option::is_none,
+        |current, edge, slot| {
+            let current = current.as_ref().expect("queued weight exists");
+            let contribution = if let Some(cache) = cache.as_deref_mut() {
+                cache.intersection(current, edge)
+            } else {
+                current.intersection(edge)
+            };
+            if contribution.is_empty() {
+                return false;
+            }
+            if let Some(existing) = slot.as_ref() {
+                if contribution.is_subset(existing) {
+                    return false;
+                }
+                *slot = Some(if let Some(cache) = cache.as_deref_mut() {
+                    cache.union(existing, &contribution)
+                } else {
+                    existing.union(&contribution)
+                });
+            } else {
+                *slot = Some(contribution);
+            }
+            true
+        },
+    );
+}
+
 fn local_epsilon_closure(
     nwa: &NWA,
     weight_by_state: &mut [Option<Weight>],
@@ -1762,34 +1832,9 @@ fn local_epsilon_closure(
                 return;
             }
     }
-    while let Some(state_id) = closure_queue.pop_front() {
-        let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
-            continue;
-        };
-        let Some(state) = nwa.states().get(state_id as usize) else {
-            continue;
-        };
-        for (target, edge_weight) in &state.epsilons {
-            let contribution = current_weight.intersection(edge_weight);
-            if contribution.is_empty() {
-                continue;
-            }
-            let target_idx = *target as usize;
-            if let Some(existing) = &weight_by_state[target_idx] {
-                if !contribution.is_subset(existing) {
-                    weight_by_state[target_idx] = Some(existing.union(&contribution));
-                    closure_queue.push_back(*target);
-                    if !seed_states.contains(target) {
-                        seed_states.push(*target);
-                    }
-                }
-            } else {
-                weight_by_state[target_idx] = Some(contribution);
-                closure_queue.push_back(*target);
-                seed_states.push(*target);
-            }
-        }
-    }
+    propagate_weight_epsilon_closure(
+        nwa, weight_by_state, closure_queue, &mut seed_states, None,
+    );
     seed.clear();
     for &s in &seed_states {
         if let Some(w) = weight_by_state[s as usize].take() {
@@ -1820,39 +1865,13 @@ fn local_epsilon_closure_canonical(
         touched_states.push(*state_id);
     }
 
-    while let Some(state_id) = closure_queue.pop_front() {
-        let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
-            continue;
-        };
-        let Some(state) = nwa.states().get(state_id as usize) else {
-            continue;
-        };
-        for (target, edge_weight) in &state.epsilons {
-            let contribution = if use_weight_cache {
-                weight_ops.intersection(&current_weight, edge_weight)
-            } else {
-                current_weight.intersection(edge_weight)
-            };
-            if contribution.is_empty() {
-                continue;
-            }
-            let target_idx = *target as usize;
-            if let Some(existing) = &weight_by_state[target_idx] {
-                if !contribution.is_subset(existing) {
-                    weight_by_state[target_idx] = Some(if use_weight_cache {
-                        weight_ops.union(existing, &contribution)
-                    } else {
-                        existing.union(&contribution)
-                    });
-                    closure_queue.push_back(*target);
-                }
-            } else {
-                weight_by_state[target_idx] = Some(contribution);
-                closure_queue.push_back(*target);
-                touched_states.push(*target);
-            }
-        }
-    }
+    propagate_weight_epsilon_closure(
+        nwa,
+        weight_by_state,
+        closure_queue,
+        touched_states,
+        use_weight_cache.then_some(weight_ops),
+    );
 
     touched_states.sort_unstable();
     for &state_id in touched_states.iter() {
@@ -4471,27 +4490,32 @@ fn fast_boundary_epsilon_closure(
             }
         }
     }
-    while let Some(state) = queue.pop_front() {
-        let current = weight_by_state[state as usize];
-        for &(target, edge_weight) in &nwa[state as usize].epsilons {
-            let contribution = interner.intersection(current, edge_weight);
+    propagate_epsilon_closure(
+        weight_by_state,
+        queue,
+        touched,
+        |state| nwa[state as usize].epsilons.as_slice(),
+        |weight| *weight == 0,
+        |current, edge, slot| {
+            let contribution = interner.intersection(*current, *edge);
             if contribution == 0 {
-                continue;
+                return false;
             }
-            let slot = &mut weight_by_state[target as usize];
             if *slot == 0 {
                 *slot = contribution;
-                touched.push(target);
-                queue.push_back(target);
-            } else if !interner.is_subset(contribution, *slot) {
-                let merged = interner.union(*slot, contribution);
-                if merged != *slot {
-                    *slot = merged;
-                    queue.push_back(target);
-                }
+                return true;
             }
-        }
-    }
+            if interner.is_subset(contribution, *slot) {
+                return false;
+            }
+            let merged = interner.union(*slot, contribution);
+            if merged == *slot {
+                return false;
+            }
+            *slot = merged;
+            true
+        },
+    );
     touched.sort_unstable();
     let mut result = Vec::with_capacity(touched.len());
     for &state in touched.iter() {
@@ -10970,6 +10994,36 @@ mod tests {
                     .or_insert(add);
             }
 
+            // Independent least-fixed-point oracle: repeated full scans,
+            // rather than the worklist shared by the production variants.
+            let mut expected = seeds.clone();
+            loop {
+                let mut changed = false;
+                for (source, row) in nwa.states().iter().enumerate() {
+                    let Some(current) = expected.get(&(source as u32)).cloned() else {
+                        continue;
+                    };
+                    for (target, edge) in &row.epsilons {
+                        let contribution = current.intersection(edge);
+                        if contribution.is_empty() {
+                            continue;
+                        }
+                        if let Some(existing) = expected.get_mut(target) {
+                            if !contribution.is_subset(existing) {
+                                *existing = existing.union(&contribution);
+                                changed = true;
+                            }
+                        } else {
+                            expected.insert(*target, contribution);
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+
             let mut reference = seeds.clone();
             let mut reference_weights = vec![None; STATE_COUNT];
             let mut reference_queue = VecDeque::new();
@@ -10979,6 +11033,7 @@ mod tests {
                 &mut reference_queue,
                 &mut reference,
             );
+            assert_eq!(reference, expected, "map closure differs from full-scan oracle");
             let mut reference_canonical = reference.into_iter().collect::<Vec<_>>();
             reference_canonical.sort_unstable_by_key(|(state, _)| *state);
 
