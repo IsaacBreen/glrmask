@@ -95,7 +95,7 @@ fn bytes_successor(c:&Constraint,source:&ParserStateMap,buffers:&mut CommitBuffe
 }
 fn token_successor(c:&Constraint,source:&ParserStateMap,buffers:&mut CommitBuffers,id:u32)
     ->crate::Result<Option<ParserStateMap>> {
-    let bytes=token_bytes_for_id(c,id);let special=c.has_special_token_id(id);
+    let bytes=c.token_bytes_for_id(id);let special=c.has_special_token_id(id);
     if bytes.is_none() && !special{return Ok(None);}
     buffers.reset_all();let mut next=source.clone();
     let event=special.then(||advance_special_token_paths(c,&next,id)).flatten();

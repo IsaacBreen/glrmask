@@ -5098,6 +5098,17 @@ impl PackedRuntimeDwa {
         }
     }
 
+    /// Logical transition count, including repeated shared rows.
+    pub fn transition_count(&self) -> usize {
+        (0..self.state_count())
+            .map(|state| {
+                let state = self.state_record(state as u32).expect("validated state");
+                let row = self.row_record(state.row).expect("validated row");
+                self.pool_span_at(0, row.labels).expect("validated label span")[1] as usize
+            })
+            .sum()
+    }
+
     #[inline]
     fn row_count(&self) -> usize {
         match &self.storage {

@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
+use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 
@@ -272,6 +273,13 @@ impl ParserDwaStorage {
         match self {
             Self::Owned(dwa) => dwa.states().len(),
             Self::Packed(dwa) => dwa.state_count(),
+        }
+    }
+
+    pub(crate) fn transition_count(&self) -> usize {
+        match self {
+            Self::Owned(dwa) => dwa.num_transitions(),
+            Self::Packed(dwa) => dwa.transition_count(),
         }
     }
 

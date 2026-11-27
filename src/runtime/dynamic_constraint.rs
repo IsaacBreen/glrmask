@@ -1001,7 +1001,7 @@ impl DynamicConstraint {
             late_bind_vocab: std::sync::OnceLock::new(),
             pending_vocab_fingerprint: None,
             pending_special_token_ids: None,
-            parser_dwa: crate::runtime::artifact::ParserDwaStorage::Owned(DWA::new(payload.tokenizer.num_states(), max_token_id)),
+            parser_dwa: crate::runtime::ParserDwaStorage::Owned(DWA::new(payload.tokenizer.num_states(), max_token_id)),
             non_dwa_weights: Default::default(),
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),

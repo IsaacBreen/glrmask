@@ -24,7 +24,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(test)]

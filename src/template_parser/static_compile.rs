@@ -619,7 +619,7 @@ pub(super) fn compile(
         );
     inner.runtime_backend = ConstraintRuntimeBackend::Static;
     inner.special_token_terminals = specials.to_vec();
-    inner.parser_dwa = crate::runtime::artifact::ParserDwaStorage::Owned(parser_dwa.share_exact_transition_rows_owned());
+    inner.parser_dwa = crate::runtime::ParserDwaStorage::Owned(parser_dwa.share_exact_transition_rows_owned());
     inner.non_dwa_weights.materialized_mut().possible_matches = possible_matches;
     inner.possible_matches_complete = possible.complete;
     inner.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(

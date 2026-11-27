@@ -5864,9 +5864,9 @@ fn compile_prepared_with_profile_and_table_construction(
             late_bind_vocab: std::sync::OnceLock::from(vocab.clone()),
             pending_vocab_fingerprint: None,
             pending_special_token_ids: None,
-            parser_dwa: crate::runtime::artifact::ParserDwaStorage::Owned(parser_dwa),
-            non_dwa_weights: crate::runtime::artifact::NonDwaWeightStorage::Materialized(
-                crate::runtime::artifact::NonDwaWeights {
+            parser_dwa: crate::runtime::ParserDwaStorage::Owned(parser_dwa),
+            non_dwa_weights: crate::runtime::NonDwaWeightStorage::Materialized(
+                crate::runtime::NonDwaWeights {
                     parser_top_accept,
                     parser_top_accept_parts,
                     direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
@@ -5968,7 +5968,7 @@ fn compile_prepared_with_profile_and_table_construction(
             // directly, but do not pre-encode the serialization wire here.
             // Fresh-save timings must include serialization work rather than
             // shifting it into compile finalization.
-            constraint.parser_dwa = crate::runtime::artifact::ParserDwaStorage::Packed(std::sync::Arc::new(packed));
+            constraint.parser_dwa = crate::runtime::ParserDwaStorage::Packed(std::sync::Arc::new(packed));
         }
         if let Some(caches) = prebuilt_token_mask_caches
             && caches.matches_constraint(&constraint)

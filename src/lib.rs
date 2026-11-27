@@ -954,11 +954,11 @@ pub mod __private {
         }
 
         fn parser_dwa_num_states(&self) -> u32 {
-            Constraint::parser_dwa(self).num_states()
+            self.runtime_parser_dwa_state_count() as u32
         }
 
         fn parser_dwa_num_transitions(&self) -> usize {
-            Constraint::parser_dwa(self).num_transitions()
+            self.parser_dwa.transition_count()
         }
 
         fn compute_forced_minimized_tokenizer_state_count(&self) -> usize {

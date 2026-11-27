@@ -3,12 +3,10 @@ pub(crate) mod queue;
 mod static_dwa_walk;
 use static_dwa_walk::{StackWalkEvent, walk_single_stack};
 
-use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
 use crate::compiler::glr::parser::ParserGSS;
-use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
 };

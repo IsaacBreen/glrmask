@@ -26,7 +26,7 @@ use crate::automata::weighted_u32::dwa::{DWA, DWAState};
 use crate::automata::weighted_u32::nwa::{NWA, NWAState};
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
-use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
+use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
     negative_to_positive_label,
@@ -1271,7 +1271,7 @@ fn add_transition_for_mapped_label(
     Ok(())
 }
 
-fn materialized_top_acceptance(constraint: &Constraint, weights: &crate::runtime::artifact::NonDwaWeights<Weight>) -> BTreeMap<i32, Weight> {
+fn materialized_top_acceptance(constraint: &Constraint, weights: &crate::runtime::NonDwaWeights<Weight>) -> BTreeMap<i32, Weight> {
     let mut result = BTreeMap::new();
     let default_combined = weights.parser_top_accept.get(&DEFAULT_LABEL);
     let default_parts = weights.parser_top_accept_parts.get(&DEFAULT_LABEL);
@@ -8095,9 +8095,9 @@ fn build_composed_constraint_unfinalized(
         late_bind_vocab: OnceLock::from(vocab.clone()),
         pending_vocab_fingerprint: None,
         pending_special_token_ids: None,
-        parser_dwa: crate::runtime::artifact::ParserDwaStorage::Owned(parser_dwa),
-        non_dwa_weights: crate::runtime::artifact::NonDwaWeightStorage::Materialized(
-            crate::runtime::artifact::NonDwaWeights {
+        parser_dwa: crate::runtime::ParserDwaStorage::Owned(parser_dwa),
+        non_dwa_weights: crate::runtime::NonDwaWeightStorage::Materialized(
+            crate::runtime::NonDwaWeights {
                 // Constraint composition is not allowed to rely on the legacy dynamic
                 // possible-matches fallback. This is the exact transported and
                 // reconciled table from every compiled component.
