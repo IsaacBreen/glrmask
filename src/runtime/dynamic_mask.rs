@@ -4667,7 +4667,7 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     #[inline]
     fn config_index(&self, config: u32) -> Option<usize> {
-        Self::raw_config_state(config).is_none().then_some(config as usize)
+        ((config as usize) < self.configs.len()).then_some(config as usize)
     }
 
     #[inline]
@@ -4902,6 +4902,11 @@ impl<'a> DynamicNfaScanCache<'a> {
     ) -> Result<(), String> {
         out.clear();
         let config = self.byte_language(config);
+        if !self.deterministic && self.raw_state_for_config(config).is_none()
+            && self.config_index(config).is_none()
+        {
+            return Err("unknown dynamic lexer config".to_owned());
+        }
         for index in 0..self.config_len(config) {
             out.push(self.config_state(config, index));
         }
@@ -5271,25 +5276,29 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminals: &BitSet,
     ) -> Result<bool, String> {
-        if self.config_filter(config).is_some()
-            && terminals.is_disjoint(self.config_future_bits(config))
-        {
+        let filter = self.config_filter(config)
+            .map(|id| &self.admitted_sets[id as usize]);
+        if terminals.is_disjoint_prefix(self.config_future_bits(config)) {
             return Ok(false);
         }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
-            if let Some(owner_terminal) = self.tokenizer.virtual_residual_terminal_for_state(state) {
-                if !terminals.contains(owner_terminal as usize) {
-                    continue;
+            // A filtered subset's aggregate bits are only an upper bound.
+            // An unrelated live member cannot witness an admitted terminal
+            // whose actual residual is dead. Apply the filter per witness.
+            let relevant = if let Some(owner) = self.tokenizer.virtual_residual_terminal_for_state(state) {
+                terminals.contains(owner as usize)
+                    && filter.is_none_or(|allowed| allowed.contains(owner as usize))
+            } else {
+                let future = self.tokenizer.possible_future_terminals(state);
+                if let Some(allowed) = filter {
+                    terminals.words().iter().zip(future.words()).zip(allowed.words())
+                        .any(|((&requested, &possible), &admitted)| requested & possible & admitted != 0)
+                } else {
+                    !terminals.is_disjoint_prefix(future)
                 }
-                if self.tokenizer.exact_dynamic_state_has_future(state)? {
-                    return Ok(true);
-                }
-                continue;
-            }
-            if !terminals.is_disjoint_prefix(self.tokenizer.possible_future_terminals(state))
-                && self.tokenizer.exact_dynamic_state_has_future(state)?
-            {
+            };
+            if relevant && self.tokenizer.exact_dynamic_state_has_future(state)? {
                 return Ok(true);
             }
         }
