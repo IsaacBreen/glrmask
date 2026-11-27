@@ -287,177 +287,8 @@ pub(crate) struct MaskScratch {
 }
 
 impl MaskScratch {
-    pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
-        let dense_words = constraint.internal_token_dense_words;
-        let mut segmented_component_scratch = Vec::new();
-        if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
-            let authoritative_dynamic_direct = constraint.uses_compact_segmented_parser_runtime()
-                && overlay.segmented_parser_components.iter().all(|component| {
-                    component.boundary.as_ref().is_some_and(|shard| {
-                        matches!(
-                            shard.backend,
-                            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
-                        )
-                    })
-                });
-            if !authoritative_dynamic_direct {
-                segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
-                for component in &overlay.segmented_parser_components {
-                    let source = component.constraint.as_ref();
-                    segmented_component_scratch.push(Arc::new(Mutex::new(
-                        MaskScratch::for_constraint(source),
-                    )));
-                }
-            }
-        }
-        Self {
-            merged_dense: Vec::with_capacity(dense_words),
-            chain_merged_dense: Vec::with_capacity(dense_words),
-            output_buf: Vec::with_capacity(constraint.body_mask_len()),
-            // Allocate and touch these before any timed runtime operation. The
-            // direct kernel clears/reuses them without changing capacity.
-            single_path_aux_dense: vec![0; dense_words],
-            single_path_acc_dense: vec![0; dense_words],
-            indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
-            segmented_component_scratch,
-        }
-    }
-}
-
-/// Exact admission facts retained for one structurally persistent parser GSS.
-///
-/// `gss` is a strong Arc-backed clone, so pointer identity cannot be recycled
-/// while the entry exists. `tested`/`admitted` record pointwise exact terminal
-/// admission. `boolean_queries` caches existential results for the common
-/// single tokenizer-end-state case without forcing a full admitted-set closure.
-#[derive(Debug, Clone)]
-pub(crate) struct ParserAdmissionCacheEntry {
-    pub(crate) gss: ParserGSS,
-    pub(crate) tested: BitSet,
-    pub(crate) admitted: BitSet,
-    pub(crate) boolean_queries: SmallVec<[(BitSet, bool); 8]>,
-}
-
-/// Proven equality of the next-token vocabulary observation for two exact
-/// lexer states under one parser-admitted terminal set. The proof itself is
-/// parser-stack independent once the admitted set is fixed: before the first
-/// finalization only these terminals are observable, and after an equal
-/// admitted finalization both sides advance the same current GSS and reset to
-/// the same lexer state.
-#[derive(Debug, Clone)]
-pub(crate) struct ParserRelativeMaskEqCacheEntry {
-    pub(crate) left: u32,
-    pub(crate) right: u32,
-    pub(crate) admitted: BitSet,
-}
-
-/// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
-/// to avoid repeated heap allocation.
-#[derive(Debug)]
-pub(crate) struct CommitBuffers {
-    pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
-    pub semantic_frontier_keys: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
-    pub admission_cache: SmallVec<[ParserAdmissionCacheEntry; 8]>,
-    pub parser_relative_mask_eq_cache: SmallVec<[ParserRelativeMaskEqCacheEntry; 8]>,
-    pub pending_state: FxHashMap<u32, ParserGSS>,
-    pub seen_matches: FxHashSet<(usize, u32)>,
-    pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
-    pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
-    pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
-    pub reusable_tokenizer_exec:
-        crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
-    pub prune_tokenizer_exec:
-        crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
-    // Read-only mask projections do not need the large commit-only bucket
-    // arrays. Ordinary states still prepare them eagerly at construction;
-    // owning them indirectly also keeps recursive mask/state frames small.
-    pub small_queue: Option<Box<crate::runtime::commit::SmallCommitQueueScratch>>,
-    // The fixed frontier arrays are large enough that embedding them here
-    // makes several nested state-construction frames exceed a native musl
-    // pthread stack. Retain one eagerly prepared allocation across commits.
-    pub flat_frontier: Option<Box<crate::runtime::commit::FlatFrontierScratch>>,
-    pub linear_stack_original: Vec<u32>,
-    pub linear_stack_work: Vec<u32>,
-    pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
-    pub template_advance_runtime: crate::runtime::commit::TemplateAdvanceRuntime,
-}
-
-impl Default for CommitBuffers {
-    fn default() -> Self {
-        Self::with_flat_frontier_preallocation(256)
-    }
-}
-
-impl CommitBuffers {
-    /// Short-lived read-only mask projections never execute a token commit.
-    /// Do not construct the speculative flat-commit GSS pool for each mask.
-    /// Keep ordinary ConstraintState/commit allocation policy unchanged.
-    pub(crate) fn for_mask_only_shadow() -> Self {
-        Self::with_allocation_policy::<true>(0)
-    }
-
-    /// Finite recursive mask probes use exact queue/lexer advancement, not the
-    /// speculative flat-commit pool. Other callers retain their existing pool.
-    pub(crate) fn for_finite_recursive_mask() -> Self {
-        Self::with_flat_frontier_preallocation(0)
-    }
-
-    fn with_flat_frontier_preallocation(preallocated_gss: usize) -> Self {
-        Self::with_allocation_policy::<false>(preallocated_gss)
-    }
-
-    fn with_allocation_policy<const MASK_ONLY: bool>(preallocated_gss: usize) -> Self {
-        Self {
-            advance_result_cache: FxHashMap::default(),
-            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(if MASK_ONLY { 0 } else { 256 }),
-            admission_cache: SmallVec::new(),
-            parser_relative_mask_eq_cache: SmallVec::new(),
-            pending_state: FxHashMap::default(),
-            seen_matches: FxHashSet::default(),
-            terminal_result_cache: FxHashMap::default(),
-            exec_results: FxHashMap::default(),
-            small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult {
-                end_state: crate::automata::lexer::tokenizer::TokenizerStateSet::new(),
-                matches: Vec::with_capacity(if MASK_ONLY { 0 } else { 8 }),
-            },
-            reusable_tokenizer_exec:
-                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
-            prune_tokenizer_exec:
-                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
-            small_queue: if MASK_ONLY { None } else {
-                Some(crate::runtime::commit::SmallCommitQueueScratch::boxed())
-            },
-            flat_frontier: {
-                static LAZY_MASK_STACKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if MASK_ONLY && *LAZY_MASK_STACKS.get_or_init(|| {
-                    crate::env::var("GLRMASK_LAZY_MASK_COMMIT_SCRATCH")
-                        .map_or(true, |v| matches!(v.as_str(), "1" | "true"))
-                }) {
-                    None
-                } else {
-                    Some(crate::runtime::commit::FlatFrontierScratch::boxed_with_preallocated_gss(preallocated_gss))
-                }
-            },
-            linear_stack_original: Vec::with_capacity(if MASK_ONLY { 0 } else { LINEAR_STACK_RESERVE }),
-            linear_stack_work: Vec::with_capacity(if MASK_ONLY { 0 } else { LINEAR_STACK_RESERVE }),
-            processing_queue: Vec::new(),
-            template_advance_runtime:
-                if MASK_ONLY { crate::runtime::commit::TemplateAdvanceRuntime::for_mask_only_shadow() }
-                else { crate::runtime::commit::TemplateAdvanceRuntime::default() },
-        }
-    }
-
-    pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
-        const ORDINARY_DYNAMIC_PREALLOCATED_GSS: usize = 32;
-        let ordinary_dynamic = constraint.uses_dynamic_runtime()
-            && constraint.static_dynamic_overlay.is_none()
-            && !constraint.table_has_ambiguity()
-            && !constraint.tokenizer_has_epsilon_transitions;
-        if ordinary_dynamic {
-            Self::with_flat_frontier_preallocation(ORDINARY_DYNAMIC_PREALLOCATED_GSS)
-        } else {
-            Self::default()
-        }
+    pub(crate) fn for_constraint(_constraint: &Constraint) -> Self {
+        Self::default()
     }
 }
 
@@ -475,17 +306,10 @@ impl CommitBuffers {
         self.pending_state.clear();
         self.seen_matches.clear();
         self.terminal_result_cache.clear();
-        self.exec_results.clear();
         self.small_exec_result.end_state.clear();
         self.small_exec_result.matches.clear();
         self.reusable_tokenizer_exec.states.clear();
         self.reusable_tokenizer_exec.matches.clear();
-        self.prune_tokenizer_exec.states.clear();
-        self.prune_tokenizer_exec.matches.clear();
-        if let Some(queue) = self.small_queue.as_mut() { queue.clear(); }
-        if let Some(frontier) = self.flat_frontier.as_mut() { frontier.clear(); }
-        self.linear_stack_original.clear();
-        self.linear_stack_work.clear();
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }

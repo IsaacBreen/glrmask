@@ -378,10 +378,6 @@ pub(crate) fn execute_tokenizer_reusable_from_states(
     true
 }
 
-pub(super) struct InitialCommitScan {
-	pub exec_results: FxHashMap<u32, TokenizerExecResult>,
-}
-
 pub(super) fn execute_tokenizer_from_state_small(
     constraint: &Constraint,
     bytes: &[u8],
