@@ -550,6 +550,59 @@ impl ParserSingletonSubsetCache {
     }
 }
 
+/// A weighted subset is a sorted list of nonzero state coefficients.
+/// Intern singleton and multi-state subsets separately; address-based keys
+/// are exact because this index retains every distinct operand it observes.
+struct WeightedSubsetIndex {
+    singletons: ParserSingletonSubsetCache,
+    multiple: FxHashMap<Vec<(u32, usize)>, u32>,
+    owners: FxHashMap<usize, Weight>,
+}
+
+impl WeightedSubsetIndex {
+    fn new(input_states: usize) -> Self {
+        Self {
+            singletons: ParserSingletonSubsetCache::new(input_states),
+            multiple: FxHashMap::default(),
+            owners: FxHashMap::default(),
+        }
+    }
+
+    fn retain(&mut self, entries: &[(u32, Weight)]) {
+        for (_, weight) in entries {
+            self.owners.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+        }
+    }
+
+    fn single(&self, state: u32, key: usize) -> Option<u32> {
+        self.singletons.get(state, key)
+    }
+
+    fn insert_single(&mut self, state: u32, weight: &Weight, id: u32) {
+        let key = weight.ptr_key();
+        self.owners.entry(key).or_insert_with(|| weight.clone());
+        self.singletons.insert(state, key, id);
+    }
+
+    fn multiple(&self, key: &[(u32, usize)]) -> Option<u32> {
+        self.multiple.get(key).copied()
+    }
+
+    fn insert_multiple(&mut self, key: Vec<(u32, usize)>, entries: &[(u32, Weight)], id: u32) {
+        self.retain(entries);
+        self.multiple.insert(key, id);
+    }
+
+    fn insert_start(&mut self, entries: &[(u32, Weight)], id: u32) {
+        if let [(state, weight)] = entries {
+            self.insert_single(*state, weight, id);
+        } else {
+            let key = entries.iter().map(|(state, weight)| (*state, weight.ptr_key())).collect();
+            self.insert_multiple(key, entries, id);
+        }
+    }
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -1903,10 +1956,6 @@ fn determinize_with_supports_mode(
     normalize_singletons_override: Option<bool>,
     normalize_subsets_override: Option<bool>,
 ) -> DeterminizedDwaWithSupports {
-    fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
-        entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
-    }
-
       #[derive(Default)]
       struct UnionAllCache {
         entries: FxHashMap<SmallVec<[usize; 16]>, Weight>,
@@ -2022,14 +2071,6 @@ fn determinize_with_supports_mode(
         }
     }
 
-    // A raw Arc address is a canonical key only while the operand is alive.
-    // Keep one owner per distinct long-lived operand, not one per cache entry.
-    fn retain_keys(owners: &mut FxHashMap<usize, Weight>, entries: &[(u32, Weight)]) {
-        for (_, weight) in entries {
-            owners.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
-        }
-    }
-
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -2087,15 +2128,8 @@ fn determinize_with_supports_mode(
             && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_none()
     });
 
-    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut singleton_subsets = ParserSingletonSubsetCache::new(nwa.states().len());
-    let mut key_owners = FxHashMap::<usize, Weight>::default();
-    retain_keys(&mut key_owners, &canon_buf);
-    let start_key = subset_key(&canon_buf);
-    subset_map.insert(start_key, dwa.start_state());
-    if let [(state_id, weight)] = canon_buf.as_slice() {
-        singleton_subsets.insert(*state_id, weight.ptr_key(), dwa.start_state());
-    }
+    let mut subsets = WeightedSubsetIndex::new(nwa.states().len());
+    subsets.insert_start(&canon_buf, dwa.start_state());
     let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
     worklist.push_back((dwa.start_state(), canon_buf.clone()));
 
@@ -2305,7 +2339,7 @@ fn determinize_with_supports_mode(
             let component_rows = &component_row_cache;
             let closure_cache_ref = &closure_cache;
             let singleton_closure_cache_ref = &singleton_closure_cache;
-            let singleton_subsets_ref = &singleton_subsets;
+            let singleton_subsets_ref = &subsets.singletons;
             let aggregate_started = fast_support_profile.then(Instant::now);
             let scanned = wave
                 .into_par_iter()
@@ -2583,7 +2617,7 @@ fn determinize_with_supports_mode(
                         },
                     );
                     let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
-                    let to_state = if let Some(existing) = singleton_subsets.get(singleton_key.0, singleton_key.1) {
+                    let to_state = if let Some(existing) = subsets.single(singleton_key.0, singleton_key.1) {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
                         }
@@ -2599,11 +2633,12 @@ fn determinize_with_supports_mode(
                             fast_subset_misses += 1;
                         }
                         let new_state = dwa.add_state();
-                        if !normalize_singletons {
-                            retain_keys(&mut key_owners, &contribs);
-                        }
-                        subset_map.insert(vec![singleton_key], new_state);
-                        singleton_subsets.insert(singleton_key.0, singleton_key.1, new_state);
+                        let residual = if normalize_singletons {
+                            &normalized_singleton_weight
+                        } else {
+                            only_weight
+                        };
+                        subsets.insert_single(*only_state, residual, new_state);
                         worklist.push_back((
                             new_state,
                             vec![(
@@ -2671,7 +2706,7 @@ fn determinize_with_supports_mode(
                 });
                 return;
             }
-            retain_keys(&mut key_owners, &contribs);
+            subsets.retain(&contribs);
             if let Some(detail) = detail.as_mut() {
                 detail.closure_cache_misses += 1;
             }
@@ -2763,7 +2798,6 @@ fn determinize_with_supports_mode(
                 raw_canon
             };
 
-            retain_keys(&mut key_owners, canon);
             let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
             let to_state = if let [(only_state, only_weight)] = canon {
                 let singleton_key = (
@@ -2779,7 +2813,7 @@ fn determinize_with_supports_mode(
                     // the singleton state itself is canonicalized to `(q, all)`.
                     normalized_closure_edge_weight = Some(only_weight.clone());
                 }
-                if let Some(existing) = singleton_subsets.get(singleton_key.0, singleton_key.1) {
+                if let Some(existing) = subsets.single(singleton_key.0, singleton_key.1) {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
                     }
@@ -2795,8 +2829,12 @@ fn determinize_with_supports_mode(
                         fast_subset_misses += 1;
                     }
                     let new_state = dwa.add_state();
-                    subset_map.insert(vec![singleton_key], new_state);
-                    singleton_subsets.insert(singleton_key.0, singleton_key.1, new_state);
+                    let residual = if normalize_singletons {
+                        &normalized_singleton_weight
+                    } else {
+                        only_weight
+                    };
+                    subsets.insert_single(*only_state, residual, new_state);
                     worklist.push_back((
                         new_state,
                         vec![(
@@ -2821,7 +2859,7 @@ fn determinize_with_supports_mode(
                 if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_key_started) {
                     detail.post_closure_subset_key_ms += elapsed_ms(started_at);
                 }
-                if let Some(existing) = subset_map.get(&key_buf).copied() {
+                if let Some(existing) = subsets.multiple(&key_buf) {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
                     }
@@ -2837,7 +2875,7 @@ fn determinize_with_supports_mode(
                         fast_subset_misses += 1;
                     }
                     let new_state = dwa.add_state();
-                    subset_map.insert(key_buf.clone(), new_state);
+                    subsets.insert_multiple(key_buf.clone(), canon, new_state);
                     worklist.push_back((new_state, canon.to_vec()));
                     supports.push(canon.iter().map(|(sid, _)| *sid).collect());
                     new_state
@@ -6352,10 +6390,6 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
         }
     }
 
-    fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
-        entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
-    }
-
     let dense_label_limit = num_parser_states as usize;
     let fixed_singleton_ids = pop_classes.is_none() && normalize_singletons
         && dwa.states().len() >= std::env::var("GLRMASK_FALLBACK_FIXED_SINGLETON_MIN_STATES")
@@ -6379,30 +6413,15 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
         .collect();
     canon_buf.sort_unstable_by_key(|(state_id, _)| *state_id);
 
-    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    // A singleton weighted subset `(q, w)` denotes `w ∩ L(q)`. The incoming
-    // transition already carries `w`, so the destination can always be the
-    // same canonical state for `L(q)` with residual `all`. Keeping `w` in the
-    // state key duplicates rows for different accumulated token sets and was
-    // the dominant cost of fallback determinization on large grammars.
-    let mut normalized_singleton_subsets: FxHashMap<u32, u32> = FxHashMap::default();
-    let mut weighted_singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    // ALL residual singletons are shared regardless of the incoming weight.
+    // Fixed-ID scheduling is a separate publication policy, not a key type.
+    let mut subsets = WeightedSubsetIndex::new(dwa.states().len());
     let normalized_singleton_weight = Weight::all();
     let normalized_singleton_key = normalized_singleton_weight.ptr_key();
-    let start_key = subset_key(&canon_buf);
-    subset_map.insert(start_key, result.start_state());
-    if let [(state_id, weight)] = canon_buf.as_slice() {
-        if normalize_singletons && weight.is_full() {
-            if fixed_singleton_ids {
-                debug_assert_eq!(*state_id, result.start_state());
-                fixed_singleton_scheduled.as_mut().unwrap()[*state_id as usize] = true;
-            } else {
-                normalized_singleton_subsets.insert(*state_id, result.start_state());
-            }
-        } else {
-            weighted_singleton_subsets
-                .insert((*state_id, weight.ptr_key()), result.start_state());
-        }
+    if fixed_singleton_ids {
+        fixed_singleton_scheduled.as_mut().unwrap()[dwa.start_state() as usize] = true;
+    } else {
+        subsets.insert_start(&canon_buf, result.start_state());
     }
     let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
     worklist.push_back((result.start_state(), canon_buf.clone()));
@@ -6616,7 +6635,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                     }
                     input_target
                 } else if let Some(existing) =
-                    normalized_singleton_subsets.get(&input_target).copied()
+                    subsets.single(input_target, normalized_singleton_key)
                 {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
@@ -6627,8 +6646,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                         detail.subset_intern_misses += 1;
                     }
                     let new_state = result.add_state();
-                    subset_map.insert(vec![(input_target, normalized_singleton_key)], new_state);
-                    normalized_singleton_subsets.insert(input_target, new_state);
+                    subsets.insert_single(input_target, &normalized_singleton_weight, new_state);
                     worklist.push_back((
                         new_state,
                         vec![(input_target, normalized_singleton_weight.clone())],
@@ -6978,7 +6996,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                         }
                         *only_state
                     } else if let Some(existing) =
-                        normalized_singleton_subsets.get(only_state).copied()
+                        subsets.single(*only_state, normalized_singleton_key)
                     {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
@@ -6989,8 +7007,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                             detail.subset_intern_misses += 1;
                         }
                         let new_state = result.add_state();
-                        subset_map.insert(vec![(*only_state, normalized_singleton_key)], new_state);
-                        normalized_singleton_subsets.insert(*only_state, new_state);
+                        subsets.insert_single(*only_state, &normalized_singleton_weight, new_state);
                         worklist.push_back((
                             new_state,
                             vec![(*only_state, normalized_singleton_weight.clone())],
@@ -6999,7 +7016,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                     }
                 } else {
                     let singleton_key = (*only_state, only_weight.ptr_key());
-                    if let Some(existing) = weighted_singleton_subsets.get(&singleton_key).copied() {
+                    if let Some(existing) = subsets.single(singleton_key.0, singleton_key.1) {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
                         }
@@ -7009,8 +7026,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                             detail.subset_intern_misses += 1;
                         }
                         let new_state = result.add_state();
-                        subset_map.insert(vec![singleton_key], new_state);
-                        weighted_singleton_subsets.insert(singleton_key, new_state);
+                        subsets.insert_single(*only_state, only_weight, new_state);
                         worklist.push_back((new_state, contribs.into_iter().collect()));
                         new_state
                     }
@@ -7021,7 +7037,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                 if let Some(detail) = detail.as_mut() {
                     detail.subset_key_constructions += 1;
                 }
-                if let Some(existing) = subset_map.get(&key_buf).copied() {
+                if let Some(existing) = subsets.multiple(&key_buf) {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
                     }
@@ -7031,7 +7047,7 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
                         detail.subset_intern_misses += 1;
                     }
                     let new_state = result.add_state();
-                    subset_map.insert(key_buf.clone(), new_state);
+                    subsets.insert_multiple(key_buf.clone(), &contribs, new_state);
                     let next_entries: Vec<(u32, Weight)> = contribs.into_iter().collect();
                     worklist.push_back((new_state, next_entries));
                     new_state
