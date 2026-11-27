@@ -124,7 +124,11 @@ impl ControlRows {
 pub(crate) struct TemplateComposition {
     pub(crate) control_start: u32,
     pub(crate) views: Vec<ScopedProgram>,
-    pub(crate) outer_views: Vec<ScopedProgram>,
+    // Outer lexical terminals normally alias a leaf-local relation. Keep
+    // only a dispatch ID; genuinely distinct outer descriptors live after
+    // the canonical exact/control inventory.
+    outer_ids: Box<[u32]>,
+    outer_only: Box<[ScopedProgram]>,
     pub(crate) completion_view: ScopedProgram,
     controls_by_top: ControlRows,
 }
@@ -170,7 +174,47 @@ impl TemplateComposition {
             view.validate_coordinate(state_count)?;
         }
         let controls_by_top = ControlRows::build(state_count, control_start, &views);
-        Ok(Self { control_start, views, outer_views, completion_view, controls_by_top })
+        let key = |view: &ScopedProgram| (
+            Arc::as_ptr(&view.relation), view.offset, view.symbols,
+            view.guard_owner, view.append_push,
+        );
+        let mut ids = FxHashMap::default();
+        for (id, view) in views.iter().enumerate() {
+            ids.entry(key(view)).or_insert(u32::try_from(id)
+                .map_err(|_| crate::Error::Compilation("too many scoped programs".into()))?);
+        }
+        let mut outer_ids = Vec::with_capacity(outer_views.len());
+        let mut outer_only = Vec::new();
+        for view in outer_views {
+            let id = match ids.entry(key(&view)) {
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let id = views.len().checked_add(outer_only.len())
+                        .and_then(|id| u32::try_from(id).ok())
+                        .ok_or_else(|| crate::Error::Compilation("too many scoped programs".into()))?;
+                    outer_only.push(view);
+                    entry.insert(id);
+                    id
+                }
+            };
+            outer_ids.push(id);
+        }
+        Ok(Self {
+            control_start, views, outer_ids: outer_ids.into_boxed_slice(),
+            outer_only: outer_only.into_boxed_slice(), completion_view, controls_by_top,
+        })
+    }
+
+    pub(crate) fn outer_len(&self) -> usize { self.outer_ids.len() }
+
+    pub(crate) fn outer_view(&self, terminal: usize) -> Option<&ScopedProgram> {
+        let id = *self.outer_ids.get(terminal)? as usize;
+        if id < self.views.len() { self.views.get(id) }
+        else { self.outer_only.get(id - self.views.len()) }
+    }
+
+    pub(crate) fn outer_views(&self) -> impl Iterator<Item = &ScopedProgram> {
+        (0..self.outer_ids.len()).map(|terminal| self.outer_view(terminal).unwrap())
     }
 
     pub(crate) fn has_controls(&self) -> bool {
@@ -192,7 +236,7 @@ impl TemplateComposition {
 
     pub(crate) fn admits_outer(&self, stack: &ParserGSS, terminal: u32) -> bool {
         if terminal == EOF { self.completion_view.admits(stack) }
-        else { self.outer_views.get(terminal as usize).is_some_and(|view| view.admits(stack)) }
+        else { self.outer_view(terminal as usize).is_some_and(|view| view.admits(stack)) }
     }
 
     fn advance(&self, stack: &ParserGSS, index: u32) -> ParserGSS {
@@ -236,7 +280,7 @@ impl ParserActionProvider for TemplateCompositionProvider<'_> {
     fn advance_relation(&self, stack: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
         self.parser.record_advance();
         Some(if terminal < self.parser.terminal_count {
-            self.composition.outer_views[terminal as usize].advance(stack)
+            self.composition.outer_view(terminal as usize).expect("outer terminal").advance(stack)
         } else if terminal != EOF {
             self.composition.advance(stack, terminal - self.parser.terminal_count)
         } else {
@@ -448,6 +492,8 @@ mod prepared_relation_tests {
         let composition = TemplateComposition::from_views(symbols, terminals,
             vec![view.clone(); terminals as usize], vec![view.clone(); terminals as usize],
             view.clone()).unwrap();
+        assert!(composition.outer_only.is_empty());
+        assert!(std::ptr::eq(composition.outer_view(0).unwrap(), &composition.views[0]));
         let parser = TemplateParser::from_composition(symbols, terminals, composition).unwrap();
         assert!(parser.local_admission().is_none(),
             "scoped queries must not materialize the unused global Cartesian product");

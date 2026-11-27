@@ -156,7 +156,7 @@ impl crate::compiler::glr::parser::ParserActionProvider for RecursiveTemplateRef
     }
     fn advance_relation(&self, stack: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
         let view = if terminal < self.parser.terminal_count {
-            self.composition.outer_views.get(terminal as usize)
+            self.composition.outer_view(terminal as usize)
         } else if terminal != crate::compiler::glr::analysis::EOF {
             self.composition.views.get((terminal - self.parser.terminal_count) as usize)
         } else { None };

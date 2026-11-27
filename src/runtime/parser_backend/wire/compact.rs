@@ -84,7 +84,7 @@ pub(super) fn encode(parser: &TemplateParser) -> Vec<u8> {
             dictionary.entry(Arc::as_ptr(source) as usize).or_insert(id as u32);
         }
         let mut extras = Vec::new();
-        for view in composition.outer_views.iter().chain(&composition.views)
+        for view in composition.outer_views().chain(&composition.views)
             .chain(std::iter::once(&composition.completion_view)) {
             let key = Arc::as_ptr(&view.source) as usize;
             if let std::collections::btree_map::Entry::Vacant(e) = dictionary.entry(key) {
@@ -100,7 +100,7 @@ pub(super) fn encode(parser: &TemplateParser) -> Vec<u8> {
             put(out, u32::from(view.guard_owner));
             put(out, view.append_push.map_or(0, |symbol| symbol + 1));
         };
-        for view in &composition.outer_views { write_view(&mut out, view); }
+        for view in composition.outer_views() { write_view(&mut out, view); }
         count(&mut out, composition.views.len());
         for view in &composition.views { write_view(&mut out, view); }
         write_view(&mut out, &composition.completion_view);

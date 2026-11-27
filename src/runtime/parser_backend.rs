@@ -281,7 +281,7 @@ impl TemplateParser {
         terminal_count: u32,
         composition: composition::TemplateComposition,
     ) -> crate::Result<Self> {
-        if composition.outer_views.len() != terminal_count as usize {
+        if composition.outer_len() != terminal_count as usize {
             return Err(crate::Error::Compilation("outer scoped inventory count mismatch".into()));
         }
 
@@ -336,7 +336,7 @@ impl TemplateParser {
     pub(crate) fn terminal_source(&self, terminal: usize) -> Option<&Arc<CommitTemplateDfas>> {
         match &self.admission {
             TemplateAdmission::Local(local) => local.programs.get(terminal).map(|p| &p.source),
-            TemplateAdmission::Linked(linked) => linked.outer_views.get(terminal).map(|p| &p.source),
+            TemplateAdmission::Linked(linked) => linked.outer_view(terminal).map(|p| &p.source),
         }
     }
 
@@ -522,7 +522,7 @@ impl TemplateParser {
 
     pub(crate) fn marker_top_admission(&self, top: u32, terminal: u32) -> TopAdmission {
         if let Some(composition) = self.composition() {
-            return composition.outer_views.get(terminal as usize)
+            return composition.outer_view(terminal as usize)
                 .map_or(TopAdmission::Never, |view| view.classify_top(top));
         }
         self.local_domain(terminal as usize).map_or(TopAdmission::Never, |domain| domain.classify_top(top))
@@ -619,7 +619,7 @@ impl TemplateParser {
         let mut unique_heap = 0usize;
         let domains: Box<dyn Iterator<Item = &Arc<TemplateDomain>> + '_> = match &self.admission {
             TemplateAdmission::Local(local) => Box::new(local.programs.iter().map(|p| &p.domain)),
-            TemplateAdmission::Linked(linked) => Box::new(linked.outer_views.iter().map(|view| &view.domain)),
+            TemplateAdmission::Linked(linked) => Box::new(linked.outer_views().map(|view| &view.domain)),
         };
         let mut domain_states = 0usize;
         let mut domain_edges = 0usize;
@@ -1085,14 +1085,14 @@ impl Constraint {
                             let local = component.constraint.template_parser()
                                 .expect("native component");
                             for terminal in 0..local.terminal_count as usize {
-                                let view = &composition.outer_views[offset + terminal];
+                                let view = composition.outer_view(offset + terminal).unwrap();
                                 if let Some(nested) = local.composition() {
                                     checked += 1;
                                     sources += usize::from(Arc::ptr_eq(
-                                        &view.source, &nested.outer_views[terminal].source,
+                                        &view.source, &nested.outer_view(terminal).unwrap().source,
                                     ));
                                     domains += usize::from(Arc::ptr_eq(
-                                        &view.domain, &nested.outer_views[terminal].domain,
+                                        &view.domain, &nested.outer_view(terminal).unwrap().domain,
                                     ));
                                 } else if component.constraint.ignore_terminal == Some(terminal as u32)
                                     || local.skip_terminals.contains(&(terminal as u32))

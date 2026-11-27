@@ -105,7 +105,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
         } else { None };
         for terminal in 0..parser.terminal_count as usize {
             let view = if let Some(composition) = parser.composition() {
-                composition.outer_views[terminal].relocated(offset)?
+                composition.outer_view(terminal).expect("outer terminal").relocated(offset)?
             } else if component.ignore_terminal == Some(terminal as u32)
                 || parser.skip_terminals.contains(&(terminal as u32)) {
                 ignore_view.as_ref().unwrap().relocated(offset)?
