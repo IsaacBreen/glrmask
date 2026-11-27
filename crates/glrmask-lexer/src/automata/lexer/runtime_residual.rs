@@ -5362,23 +5362,11 @@ impl VirtualResidualRuntime {
         state_allocator: Arc<VirtualStateAllocator>,
         state_owners: Arc<VirtualRuntimeStateOwners>,
     ) -> Option<Self> {
-        let mut runtime = Self::new_preserving_oracle_coordinate_from_oracle_bytes(
-            expr,
-            oracle_bytes,
-            runtime_index,
-            terminal,
-            num_terminals,
-            physical_state_count,
-            root_state,
-            state_allocator,
-            state_owners,
-        )?;
-        runtime.preserve_oracle_coordinate = false;
-        let store = runtime.store.get_mut().ok()?;
-        store.state_by_residual_coordinate.clear();
-        store.coordinate_by_state.clear();
-        store.oracle_future_by_state.clear();
-        Some(runtime)
+        Self::new_impl(
+            expr, runtime_index, terminal, num_terminals, physical_state_count,
+            root_state, state_allocator, state_owners,
+            false, false, false, Some(Self::decode_liveness_oracle(oracle_bytes)?),
+        )
     }
 
     pub(super) fn new_preserving_oracle_coordinate_from_oracle_bytes(
@@ -5392,14 +5380,14 @@ impl VirtualResidualRuntime {
         state_allocator: Arc<VirtualStateAllocator>,
         state_owners: Arc<VirtualRuntimeStateOwners>,
     ) -> Option<Self> {
-        if terminal >= num_terminals
-            || physical_state_count == 0
-            || root_state >= physical_state_count
-            || state_owners.owner_index(root_state) != Some(runtime_index as usize)
-        {
-            return None;
-        }
-        let (mut arena, root) = ResidualArena::from_expr(expr)?;
+        Self::new_impl(
+            expr, runtime_index, terminal, num_terminals, physical_state_count,
+            root_state, state_allocator, state_owners,
+            true, false, false, Some(Self::decode_liveness_oracle(oracle_bytes)?),
+        )
+    }
+
+    fn decode_liveness_oracle(oracle_bytes: &[u8]) -> Option<BoundedCodeIntersectionOracle> {
         let liveness_oracle: BoundedCodeIntersectionOracle = if let Some(body) =
             oracle_bytes.strip_prefix(&SPARSE_BOUNDED_CODE_ORACLE_MAGIC)
         {
@@ -5409,7 +5397,6 @@ impl VirtualResidualRuntime {
         } else {
             bincode::deserialize(oracle_bytes).ok()?
         };
-        let root_oracle_coordinate = liveness_oracle.root_coordinate();
         // Structural checks sufficient for compiled-artifact restoration. The
         // exact residual derivative remains authoritative for transitions and
         // will fail closed if a coordinate ceases to track it.
@@ -5436,42 +5423,7 @@ impl VirtualResidualRuntime {
         {
             return None;
         }
-        let root_live = arena.conservative_has_future(root);
-        let mut state_by_residual = vec![u32::MAX; root as usize + 1];
-        state_by_residual[root as usize] = root_state;
-        let mut oracle_coordinates = vec![BoundedCodeOracleSlot::Unknown; arena.state_count()];
-        let oracle_futures = vec![None; arena.state_count()];
-        oracle_coordinates[root as usize] = BoundedCodeOracleSlot::Exact(root_oracle_coordinate);
-        let mut state_by_residual_coordinate = FxHashMap::default();
-        let mut coordinate_by_state = FxHashMap::default();
-        state_by_residual_coordinate.insert((root, root_oracle_coordinate), root_state);
-        coordinate_by_state.insert(root_state, root_oracle_coordinate);
-        let mut accepting = BitSet::new(num_terminals as usize);
-        accepting.set(terminal as usize);
-        let live = accepting.clone();
-        let oracle_byte_to_class = Some(liveness_oracle.byte_to_class_map());
-        let oracle_language_finite = Some(dfa_language_is_finite(&liveness_oracle.body));
-        Some(Self {
-            runtime_index, terminal, physical_state_count, root_state, root_has_future: root_live,
-            preserve_oracle_coordinate: true, coordinate_runtime: false,
-            direct_coordinate_stepper: None,
-            state_allocator, state_owners, accepting, live,
-            dead: BitSet::new(num_terminals as usize),
-            accepting_list: vec![terminal].into_boxed_slice(),
-            store: Mutex::new(ResidualRuntimeStore {
-                arena, root, state_by_residual, residual_by_state: FxHashMap::default(),
-                state_by_oracle_coordinate: FxHashMap::default(),
-                state_by_residual_coordinate, coordinate_by_state,
-                oracle_future_by_state: FxHashMap::default(),
-                liveness_oracle: Some(liveness_oracle), oracle_byte_to_class,
-                oracle_language_finite, oracle_coordinates, oracle_futures,
-                parser_transparent_byte_family_cache: FxHashSet::default(),
-                slice_atom_body_exact_cache: FxHashMap::default(),
-                slice_atom_pattern_targets_cache: FxHashMap::default(),
-                body_boundary_future_by_completed: None,
-                transition_rows_by_state: FxHashMap::default(),
-            }),
-        })
+        Some(liveness_oracle)
     }
 
     pub(super) fn root_has_future(&self) -> bool {
