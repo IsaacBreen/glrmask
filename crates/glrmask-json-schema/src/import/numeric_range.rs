@@ -27,109 +27,97 @@ fn negative_regex(pattern: String) -> String {
     format!("-{pattern}")
 }
 
-fn num_digits(n: i64) -> usize {
-    n.abs().to_string().len()
+/// A lexicographic interval of equal-width digit strings. Once both bounds
+/// agree on a prefix, it is emitted once; divergent endpoints and the
+/// unrestricted middle are disjoint. No numeric increment or power-of-ten
+/// conversion is needed, even for the magnitude of i64::MIN.
+fn digit_interval(left: &[u8], right: &[u8]) -> String {
+    debug_assert_eq!(left.len(), right.len());
+    debug_assert!(left <= right);
+    if left.iter().all(|&digit| digit == b'0') && right.iter().all(|&digit| digit == b'9') {
+        return any_digits(left.len());
+    }
+    let common = left.iter().zip(right).take_while(|(a, b)| a == b).count();
+    let prefix = std::str::from_utf8(&left[..common]).expect("decimal digits");
+    if common == left.len() { return prefix.to_owned(); }
+    let lower = left[common];
+    let upper = right[common];
+    let rest = left.len() - common - 1;
+    let mut alternatives = Vec::with_capacity(3);
+    if rest == 0 {
+        return format!("{prefix}[{}-{}]", lower as char, upper as char);
+    }
+    let low_tail = digit_interval(&left[common + 1..], &vec![b'9'; rest]);
+    alternatives.push(format!("{}{low_tail}", lower as char));
+    if lower + 1 < upper {
+        alternatives.push(format!("[{}-{}]{}", (lower + 1) as char,
+            (upper - 1) as char, any_digits(rest)));
+    }
+    let high_tail = digit_interval(&vec![b'0'; rest], &right[common + 1..]);
+    alternatives.push(format!("{}{high_tail}", upper as char));
+    format!("{prefix}{}", mk_or(alternatives))
 }
 
-// Integer range.
+fn any_digits(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "[0-9]".to_owned(),
+        _ => format!("[0-9]{{{count}}}"),
+    }
+}
 
-pub fn rx_int_range(left: Option<i64>, right: Option<i64>) -> Result<String> {
-    match (left, right) {
-        (None, None) => Ok("-?(0|[1-9][0-9]*)".to_string()),
-        (Some(left), None) => {
-            if left < 0 {
-                Ok(mk_or(vec![
-                    rx_int_range(Some(left), Some(-1))?,
-                    rx_int_range(Some(0), None)?,
-                ]))
-            } else {
-                let max_value: i64 = "9"
-                    .repeat(num_digits(left))
-                    .parse()
-                    .map_err(|e| format!("Failed to parse max value for left {}: {}", left, e))?;
-                Ok(mk_or(vec![
-                    rx_int_range(Some(left), Some(max_value))?,
-                    format!("[1-9][0-9]{{{},}}", num_digits(left)),
-                ]))
-            }
-        }
-        (None, Some(right)) => {
-            if right >= 0 {
-                Ok(mk_or(vec![
-                    rx_int_range(Some(0), Some(right))?,
-                    rx_int_range(None, Some(-1))?,
-                ]))
-            } else {
-                Ok(format!("-{}", rx_int_range(Some(-right), None)?))
-            }
-        }
-        (Some(left), Some(right)) => {
-            if left > right {
-                return Err(format!(
-                    "Invalid range: left ({}) > right ({})",
-                    left,
-                    right
-                ));
-            }
-            if left < 0 {
-                if right < 0 {
-                    Ok(format!("(-{})", rx_int_range(Some(-right), Some(-left))?))
-                } else {
-                    Ok(format!(
-                        "(-{}|{})",
-                        rx_int_range(Some(0), Some(-left))?,
-                        rx_int_range(Some(0), Some(right))?
-                    ))
-                }
-            } else if num_digits(left) == num_digits(right) {
-                let l = left.to_string();
-                let r = right.to_string();
-                if left == right {
-                    return Ok(format!("({l})"));
-                }
-
-                let lpref = &l[..l.len() - 1];
-                let lx = &l[l.len() - 1..];
-                let rpref = &r[..r.len() - 1];
-                let rx = &r[r.len() - 1..];
-
-                if lpref == rpref {
-                    return Ok(format!("({lpref}[{lx}-{rx}])"));
-                }
-
-                let mut left_rec = lpref.parse::<i64>().unwrap_or(0);
-                let mut right_rec = rpref.parse::<i64>().unwrap_or(0);
-
-                let mut parts = Vec::new();
-
-                if lx != "0" {
-                    left_rec += 1;
-                    parts.push(format!("{lpref}[{lx}-9]"));
-                }
-
-                if rx != "9" {
-                    right_rec -= 1;
-                    parts.push(format!("{rpref}[0-{rx}]"));
-                }
-
-                if left_rec <= right_rec {
-                    let inner = rx_int_range(Some(left_rec), Some(right_rec))?;
-                    parts.push(format!("{inner}[0-9]"));
-                }
-
-                Ok(mk_or(parts))
-            } else {
-                let break_point = 10_i64
-                    .checked_pow(num_digits(left) as u32)
-                    .ok_or_else(|| "Overflow when calculating break point".to_string())?
-                    - 1;
-                Ok(mk_or(vec![
-                    rx_int_range(Some(left), Some(break_point))?,
-                    rx_int_range(Some(break_point + 1), Some(right))?,
-                ]))
-            }
+fn unsigned_range(lower: u64, upper: Option<u64>) -> String {
+    let left = lower.to_string();
+    let right = upper.map(|value| value.to_string());
+    let last_width = right.as_ref().map_or(left.len(), String::len);
+    let mut parts = Vec::new();
+    for width in left.len()..=last_width {
+        let low = if width == left.len() { left.clone() }
+            else { format!("1{}", "0".repeat(width - 1)) };
+        let high = right.as_ref().filter(|r| r.len() == width)
+            .cloned().unwrap_or_else(|| "9".repeat(width));
+        // Full canonical widths are one compact expression.
+        let first_min = if width == 1 { b'0' } else { b'1' };
+        if low.as_bytes()[0] == first_min
+            && low.as_bytes()[1..].iter().all(|&b| b == b'0')
+            && high.bytes().all(|b| b == b'9')
+        {
+            if width == 1 { parts.push("[0-9]".to_owned()); }
+            else { parts.push(format!("[1-9]{}", any_digits(width - 1))); }
+        } else {
+            parts.push(digit_interval(low.as_bytes(), high.as_bytes()));
         }
     }
+    if right.is_none() {
+        parts.push(format!("[1-9][0-9]{{{},}}", left.len()));
+    }
+    mk_or(parts)
+}
+
+pub fn rx_int_range(left: Option<i64>, right: Option<i64>) -> Result<String> {
+    if let (Some(left), Some(right)) = (left, right) && left > right {
+        return Err(format!("Invalid range: left ({left}) > right ({right})"));
+    }
+    if left.is_none() && right.is_none() {
+        return Ok("-?(0|[1-9][0-9]*)".to_string());
+    }
+    let mut parts = Vec::with_capacity(2);
+    if left.is_none_or(|left| left < 0) {
+        // Preserve the historical signed-zero spelling policy: a finite
+        // interval crossing zero accepts -0; one-sided intervals use only
+        // strictly negative magnitudes on the negative side.
+        let lower_magnitude = match right {
+            Some(right) if right < 0 => right.unsigned_abs(),
+            Some(_) if left.is_some() => 0,
+            _ => 1,
+        };
+        let upper_magnitude = left.map(i64::unsigned_abs);
+        parts.push(format!("-(?:{})", unsigned_range(lower_magnitude, upper_magnitude)));
+    }
+    if right.is_none_or(|right| right >= 0) {
+        parts.push(unsigned_range(left.unwrap_or(0).max(0) as u64, right.map(|right| right as u64)));
+    }
+    Ok(mk_or(parts))
 }
 
 // Float range helpers.
@@ -329,7 +317,8 @@ fn same_integer_float_part(
     );
 
     if mode == FloatRangeMode::AllowIntegers
-        && bounds.left_fraction.parse::<i64>().unwrap_or(0) == 0
+        && left_inclusive
+        && bounds.left_fraction.bytes().all(|digit| digit == b'0')
     {
         Ok(format!("({}({suffix})?)", bounds.left_integer))
     } else {
@@ -364,7 +353,8 @@ fn lower_float_part(
                     lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
                 )
             } else {
-                format!("({}\\.[0-9]+)", bounds.left_integer)
+                format!("({}\\.{})", bounds.left_integer,
+                    if left_inclusive { "[0-9]+".to_owned() } else { lexi_x_to_9("", false)? })
             };
             bounds.left_integer += 1;
             Ok(Some(part))
@@ -428,253 +418,156 @@ fn collect_nonnegative_float_parts(
     Ok(parts)
 }
 
-// Float range.
+// Float range. Both lexical modes use the same signed interval decomposition;
+// the mode controls only whether an integer spelling is allowed at a leaf.
 
 pub fn rx_float_range(
-    left: Option<f64>,
-    right: Option<f64>,
-    left_inclusive: bool,
-    right_inclusive: bool,
+    left: Option<f64>, right: Option<f64>, left_inclusive: bool, right_inclusive: bool,
 ) -> Result<String> {
-    match (left, right) {
-        (None, None) => Ok("-?(0|[1-9][0-9]*)(\\.[0-9]+)?".to_string()),
-        (Some(left), None) => {
-            if left < 0.0 {
-                Ok(mk_or(vec![
-                    rx_float_range(Some(left), Some(0.0), left_inclusive, false)?,
-                    rx_float_range(Some(0.0), None, true, false)?,
-                ]))
-            } else {
-                let left_int_part = left as i64;
-                Ok(mk_or(vec![
-                    rx_float_range(
-                        Some(left),
-                        Some(10f64.powi(num_digits(left_int_part) as i32)),
-                        left_inclusive,
-                        false,
-                    )?,
-                    format!("[1-9][0-9]{{{},}}(\\.[0-9]+)?", num_digits(left_int_part)),
-                ]))
-            }
-        }
-        (None, Some(right)) => {
-            if right == 0.0 {
-                let r = negative_regex(rx_float_range(Some(0.0), None, false, false)?);
-                if right_inclusive {
-                    Ok(mk_or(vec![r, "0".to_string()]))
-                } else {
-                    Ok(r)
-                }
-            } else if right > 0.0 {
-                Ok(mk_or(vec![
-                    negative_regex(rx_float_range(Some(0.0), None, false, false)?),
-                    rx_float_range(Some(0.0), Some(right), true, right_inclusive)?,
-                ]))
-            } else {
-                Ok(negative_regex(rx_float_range(
-                    Some(-right),
-                    None,
-                    right_inclusive,
-                    false,
-                )?))
-            }
-        }
-        (Some(left), Some(right)) => {
-            if left > right {
-                return Err(format!(
-                    "Invalid range: left ({}) > right ({})",
-                    left,
-                    right
-                ));
-            }
-            if left == right {
-                if left_inclusive && right_inclusive {
-                    Ok(exact_float_regex(left))
-                } else {
-                    Err("Empty range when left equals right and not both inclusive".to_string())
-                }
-            } else if left < 0.0 {
-                if right < 0.0 {
-                    Ok(format!(
-                        "(-{})",
-                        rx_float_range(Some(-right), Some(-left), right_inclusive, left_inclusive)?
-                    ))
-                } else {
-                    let mut parts = vec![];
-                    let neg_part =
-                        rx_float_range(Some(0.0), Some(-left), false, left_inclusive)?;
-                    parts.push(format!("(-{neg_part})"));
-
-                    if right > 0.0 || right_inclusive {
-                        let pos_part =
-                            rx_float_range(Some(0.0), Some(right), true, right_inclusive)?;
-                        parts.push(pos_part);
-                    }
-                    Ok(mk_or(parts))
-                }
-            } else {
-                nonneg_float_range(left, right, left_inclusive, right_inclusive)
-            }
-        }
-    }
+    float_range(left, right, left_inclusive, right_inclusive, FloatRangeMode::AllowIntegers)?
+        .ok_or_else(|| "Empty numeric range".to_string())
 }
 
 pub fn rx_noninteger_float_range(
-    left: Option<f64>,
-    right: Option<f64>,
-    left_inclusive: bool,
-    right_inclusive: bool,
+    left: Option<f64>, right: Option<f64>, left_inclusive: bool, right_inclusive: bool,
 ) -> Result<Option<String>> {
-    match (left, right) {
-        (None, None) => Ok(Some("-?(0|[1-9][0-9]*)\\.[0-9]+".to_string())),
-        (Some(left), None) => {
-            if left < 0.0 {
-                let mut parts = Vec::new();
-                if let Some(part) = rx_noninteger_float_range(Some(left), Some(0.0), left_inclusive, false)? {
-                    parts.push(part);
-                }
-                if let Some(part) = rx_noninteger_float_range(Some(0.0), None, true, false)? {
-                    parts.push(part);
-                }
-                Ok(mk_or_opt(parts))
-            } else {
-                let left_int_part = left as i64;
-                let mut parts = Vec::new();
-                if let Some(part) = rx_noninteger_float_range(
-                    Some(left),
-                    Some(10f64.powi(num_digits(left_int_part) as i32)),
-                    left_inclusive,
-                    false,
-                )? {
-                    parts.push(part);
-                }
-                parts.push(format!("[1-9][0-9]{{{},}}\\.[0-9]+", num_digits(left_int_part)));
-                Ok(Some(mk_or(parts)))
-            }
-        }
-        (None, Some(right)) => {
-            if right == 0.0 {
-                let mut parts = Vec::new();
-                push_optional_part(
-                    &mut parts,
-                    rx_noninteger_float_range(Some(0.0), None, false, false)?
-                        .map(negative_regex),
-                );
-                if right_inclusive {
-                    parts.push("0\\.0+".to_string());
-                }
-                Ok(mk_or_opt(parts))
-            } else if right > 0.0 {
-                let mut parts = Vec::new();
-                push_optional_part(
-                    &mut parts,
-                    rx_noninteger_float_range(Some(0.0), None, false, false)?
-                        .map(negative_regex),
-                );
-                push_optional_part(
-                    &mut parts,
-                    rx_noninteger_float_range(Some(0.0), Some(right), true, right_inclusive)?,
-                );
-                Ok(mk_or_opt(parts))
-            } else {
-                Ok(rx_noninteger_float_range(Some(-right), None, right_inclusive, false)?
-                    .map(negative_regex))
-            }
-        }
-        (Some(left), Some(right)) => {
-            if left > right {
-                return Err(format!(
-                    "Invalid range: left ({}) > right ({})",
-                    left,
-                    right
-                ));
-            }
-            if left == right {
-                if !left_inclusive || !right_inclusive {
-                    return Ok(None);
-                }
+    float_range(left, right, left_inclusive, right_inclusive, FloatRangeMode::FractionOnly)
+}
 
-                let rendered = float_to_str(left);
-                if rendered.contains('.') {
-                    Ok(Some(exact_float_regex(left)))
-                } else {
-                    Ok(None)
-                }
-            } else if left < 0.0 {
-                if right < 0.0 {
-                    Ok(rx_noninteger_float_range(Some(-right), Some(-left), right_inclusive, left_inclusive)?
-                        .map(|part| format!("(-{part})")))
-                } else {
-                    let mut parts = Vec::new();
-                    if let Some(part) =
-                        rx_noninteger_float_range(Some(0.0), Some(-left), false, left_inclusive)?
-                    {
-                        parts.push(format!("(-{part})"));
-                    }
+impl FloatRangeMode {
+    fn full_fraction(self) -> &'static str {
+        match self {
+            Self::AllowIntegers => "(\\.[0-9]+)?",
+            Self::FractionOnly => "\\.[0-9]+",
+        }
+    }
 
-                    if (right > 0.0 || right_inclusive)
-                        && let Some(part) =
-                            rx_noninteger_float_range(Some(0.0), Some(right), true, right_inclusive)?
-                        {
-                            parts.push(part);
-                        }
-                    Ok(mk_or_opt(parts))
-                }
-            } else {
-                nonneg_float_range_no_ints(left, right, left_inclusive, right_inclusive)
-            }
+    fn zero_boundary(self) -> &'static str {
+        match self {
+            Self::AllowIntegers => "0",
+            Self::FractionOnly => "0\\.0+",
         }
     }
 }
 
-fn nonneg_float_range(
-    left: f64,
-    right: f64,
-    left_inclusive: bool,
-    right_inclusive: bool,
-) -> Result<String> {
-    let mut bounds = nonnegative_decimal_bounds(left, right)?;
-
-    if bounds.left_integer == bounds.right_integer {
-        same_integer_float_part(
-            &mut bounds,
-            left_inclusive,
-            right_inclusive,
-            FloatRangeMode::AllowIntegers,
-        )
-    } else {
-        Ok(mk_or(collect_nonnegative_float_parts(
-            &mut bounds,
-            left_inclusive,
-            right_inclusive,
-            FloatRangeMode::AllowIntegers,
-        )?))
-    }
-}
-
-fn nonneg_float_range_no_ints(
-    left: f64,
-    right: f64,
-    left_inclusive: bool,
-    right_inclusive: bool,
+fn float_range(
+    left: Option<f64>, right: Option<f64>, left_inclusive: bool,
+    right_inclusive: bool, mode: FloatRangeMode,
 ) -> Result<Option<String>> {
-    let mut bounds = nonnegative_decimal_bounds(left, right)?;
-
-    if bounds.left_integer == bounds.right_integer {
-        return same_integer_float_part(
-            &mut bounds,
-            left_inclusive,
-            right_inclusive,
-            FloatRangeMode::FractionOnly,
-        )
-        .map(Some);
+    if left.is_some_and(|v| !v.is_finite()) || right.is_some_and(|v| !v.is_finite()) {
+        return Err("Infinite numbers not supported".to_string());
     }
-
-    Ok(mk_or_opt(collect_nonnegative_float_parts(
-        &mut bounds,
-        left_inclusive,
-        right_inclusive,
-        FloatRangeMode::FractionOnly,
-    )?))
+    if let (Some(left), Some(right)) = (left, right) {
+        if left > right { return Err(format!("Invalid range: left ({left}) > right ({right})")); }
+        if left == right {
+            return Ok((left_inclusive && right_inclusive
+                && (mode == FloatRangeMode::AllowIntegers || float_to_str(left).contains('.')))
+                .then(|| exact_float_regex(left)));
+        }
+    }
+    if left.is_none() && right.is_none() {
+        return Ok(Some(format!("-?(0|[1-9][0-9]*){}", mode.full_fraction())));
+    }
+    let mut parts = Vec::new();
+    if left.is_none_or(|value| value < 0.0) {
+        let (lower, inclusive) = match right {
+            Some(value) if value < 0.0 => (-value, right_inclusive),
+            _ => (0.0, false),
+        };
+        let upper = left.map(|value| -value);
+        push_optional_part(&mut parts,
+            nonnegative_range(lower, upper, inclusive, left_inclusive, mode)?
+                .map(|part| format!("-(?:{part})")));
+    }
+    match right {
+        Some(value) if value < 0.0 => {}
+        Some(0.0) if left.is_none() => {
+            if right_inclusive { parts.push(mode.zero_boundary().to_owned()); }
+        }
+        _ => {
+            let (lower, inclusive) = match left {
+                Some(value) if value >= 0.0 => (value, left_inclusive),
+                _ => (0.0, true),
+            };
+            push_optional_part(&mut parts,
+                nonnegative_range(lower, right, inclusive, right_inclusive, mode)?);
+        }
+    }
+    Ok(mk_or_opt(parts))
 }
 
+fn nonnegative_range(
+    left: f64, right: Option<f64>, left_inclusive: bool,
+    right_inclusive: bool, mode: FloatRangeMode,
+) -> Result<Option<String>> {
+    if let Some(right) = right {
+        if left == right {
+            return Ok((left_inclusive && right_inclusive
+                && (mode == FloatRangeMode::AllowIntegers || float_to_str(left).contains('.')))
+                .then(|| exact_float_regex(left)));
+        }
+        let mut bounds = nonnegative_decimal_bounds(left, right)?;
+        if bounds.left_integer == bounds.right_integer {
+            return same_integer_float_part(&mut bounds, left_inclusive, right_inclusive, mode).map(Some);
+        }
+        return Ok(mk_or_opt(collect_nonnegative_float_parts(&mut bounds, left_inclusive, right_inclusive, mode)?));
+    }
+    // An unbounded endpoint does not require a fictitious finite power-of-ten
+    // bound. Emit the lower integer's partial fractional band and then all
+    // subsequent integer magnitudes with the requested fraction policy.
+    let rendered = float_to_str(left);
+    let integer = parse_decimal_integer(&rendered, "left")?;
+    let fraction = decimal_fraction(&rendered);
+    let mut parts = Vec::new();
+    let mut first_full = integer as u64;
+    if !fraction.is_empty() || !left_inclusive {
+        let suffix = lexi_x_to_9(&fraction, left_inclusive)?;
+        parts.push(format!("({integer}\\.{suffix})"));
+        first_full += 1;
+    }
+    parts.push(format!("(?:{}){}", unsigned_range(first_full, None), mode.full_fraction()));
+    Ok(mk_or_opt(parts))
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    fn accepts(pattern: &str, text: &str) -> bool {
+        regex::Regex::new(&format!("^(?:{pattern})$")).unwrap().is_match(text)
+    }
+
+    #[test]
+    fn integer_endpoints_do_not_overflow_signed_magnitudes() {
+        let pattern = rx_int_range(Some(i64::MIN), Some(i64::MAX)).unwrap();
+        assert!(accepts(&pattern, &i64::MIN.to_string()));
+        assert!(accepts(&pattern, &i64::MAX.to_string()));
+        assert!(!accepts(&pattern, "-9223372036854775809"));
+        assert!(!accepts(&pattern, "9223372036854775808"));
+        let pattern = rx_int_range(Some(i64::MAX), None).unwrap();
+        assert!(accepts(&pattern, "9223372036854775808"));
+        assert!(!accepts(&pattern, "9223372036854775806"));
+    }
+
+    #[test]
+    fn interval_digit_covers_match_literal_arithmetic() {
+        for (lo, hi) in [(-120, -7), (-13, 24), (0, 100), (8, 111), (120, 129)] {
+            let pattern = rx_int_range(Some(lo), Some(hi)).unwrap();
+            let regex = regex::Regex::new(&format!("^(?:{pattern})$")).unwrap();
+            for value in -200..=200 {
+                assert_eq!(regex.is_match(&value.to_string()), lo <= value && value <= hi);
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_zero_fraction_does_not_accept_integer_alias() {
+        let pattern = rx_float_range(Some(1.0), Some(1.5), false, true).unwrap();
+        assert!(!accepts(&pattern, "1"));
+        assert!(!accepts(&pattern, "1.0"));
+        assert!(accepts(&pattern, "1.1"));
+        let pattern = rx_noninteger_float_range(Some(0.0), None, false, false).unwrap().unwrap();
+        assert!(!accepts(&pattern, "0.0"));
+        assert!(accepts(&pattern, "0.1"));
+    }
+}
