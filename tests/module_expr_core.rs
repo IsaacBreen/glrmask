@@ -364,7 +364,7 @@ fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
         host.bind("child", Expr::from(loaded)).unwrap();
         let saved = Module::load(&host.save()).unwrap();
         let wrong = Vocab::new(vec![(0, b"z".to_vec())]).unwrap();
-        assert!(matches!(saved.compile(&wrong), Err(glrmask::Error::VocabMismatch(_))));
+        assert_eq!(saved.compile(&wrong).unwrap_err().kind(), glrmask::ErrorKind::VocabMismatch);
         for parent_mode in modes {
             for m in [&host, &saved] {
                 let compiled = m.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
