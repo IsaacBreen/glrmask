@@ -32,18 +32,18 @@ impl ScopedProgram {
     pub(crate) fn terminal(component: &Constraint, terminal: usize) -> Self {
         let parser = component.template_parser.as_ref().expect("native component");
         Self { source: Arc::clone(component.template_dfas_by_terminal[terminal].as_ref().unwrap()),
-            domain: Arc::clone(&parser.domains[terminal]),
+            domain: Arc::clone(parser.local_domain(terminal).expect("local domain")),
             fast: component.fast_template_dfas_by_terminal.get(terminal).cloned().flatten(),
             offset: 0, symbols: parser.state_count, guard_owner: true, append_push: None }
     }
 
     pub(crate) fn completion(component: &Constraint) -> Self {
         let parser = component.template_parser.as_ref().expect("native component");
-        if let Some(composition) = &parser.composition {
-            return composition.completion_view.as_ref().unwrap().clone();
+        if let Some(composition) = parser.composition() {
+            return composition.completion_view.clone();
         }
-        Self { source: Arc::clone(&parser.completion_template),
-            domain: Arc::clone(&parser.completion), fast: None, offset: 0,
+        Self { source: Arc::clone(parser.completion_template()),
+            domain: Arc::clone(parser.completion_domain()), fast: None, offset: 0,
             symbols: parser.state_count, guard_owner: false, append_push: None }
     }
 

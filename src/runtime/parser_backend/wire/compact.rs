@@ -71,21 +71,21 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
     for template in templates {
         program(&mut out,template.as_ref().expect("every terminal has an explicit template"),parser.state_count);
     }
-    program(&mut out,&parser.completion_template,parser.state_count);
-    put(&mut out, u32::from(parser.composition.is_some()));
-    if let Some(composition) = &parser.composition {
+    program(&mut out,parser.completion_template(),parser.state_count);
+    put(&mut out, u32::from(parser.composition().is_some()));
+    if let Some(composition) = parser.composition() {
         put(&mut out, composition.control_start);
         // All outer and exact aliases reference the same immutable graph.
         // Only FINISH/new tiny controls absent from the outer inventory add
         // graph records; offsets and CALL outputs are independent descriptors.
         let mut dictionary = BTreeMap::<usize, u32>::new();
         for (id, source) in templates.iter().map(|program| program.as_ref().unwrap())
-            .chain(std::iter::once(&parser.completion_template)).enumerate() {
+            .chain(std::iter::once(parser.completion_template())).enumerate() {
             dictionary.entry(Arc::as_ptr(source) as usize).or_insert(id as u32);
         }
         let mut extras = Vec::new();
         for view in composition.outer_views.iter().chain(&composition.views)
-            .chain(composition.completion_view.iter()) {
+            .chain(std::iter::once(&composition.completion_view)) {
             let key = Arc::as_ptr(&view.source) as usize;
             if let std::collections::btree_map::Entry::Vacant(e) = dictionary.entry(key) {
                 let id = templates.len() as u32 + 1 + extras.len() as u32;
@@ -103,7 +103,7 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
         for view in &composition.outer_views { write_view(&mut out, view); }
         count(&mut out, composition.views.len());
         for view in &composition.views { write_view(&mut out, view); }
-        write_view(&mut out, composition.completion_view.as_ref().expect("scoped completion"));
+        write_view(&mut out, &composition.completion_view);
     }
     put(&mut out, u32::from(parser.embedding.is_some()));
     if let Some(embedding) = &parser.embedding {

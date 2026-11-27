@@ -102,22 +102,22 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let mut exact_views = Vec::new(); let mut control_views = Vec::new();
     for (index, component) in components.iter().enumerate() {
         let parser = component.template_parser.as_ref().unwrap(); let offset = state_offsets[index];
-        let ignore_view = if parser.composition.is_none()
+        let ignore_view = if parser.composition().is_none()
             && (component.ignore_terminal.is_some() || !parser.skip_terminals.is_empty()) {
             Some(ScopedProgram::prepare(Arc::new(identity()), parser.state_count)?)
         } else { None };
         for terminal in 0..component.template_dfas_by_terminal.len() {
-            let view = if let Some(composition) = &parser.composition {
+            let view = if let Some(composition) = parser.composition() {
                 composition.outer_views[terminal].relocated(offset)?
             } else if component.ignore_terminal == Some(terminal as u32)
                 || parser.skip_terminals.contains(&(terminal as u32)) {
                 ignore_view.as_ref().unwrap().relocated(offset)?
             } else { ScopedProgram::terminal(component, terminal).relocated(offset)? };
             outer.push(Some(Arc::clone(&view.source)));
-            if parser.composition.is_none() { exact_views.push(view.clone()); }
+            if parser.composition().is_none() { exact_views.push(view.clone()); }
             outer_views.push(view);
         }
-        if let Some(composition) = &parser.composition {
+        if let Some(composition) = parser.composition() {
             for (terminal, view) in composition.views.iter().enumerate() {
                 let view = view.relocated(offset)?;
                 if terminal < composition.control_start as usize { exact_views.push(view); }
@@ -153,13 +153,13 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let control_start = u32::try_from(exact_views.len()).map_err(|_| fail("too many scoped terminals"))?;
     exact_views.extend(control_views);
     let parent_parser = components[0].template_parser.as_ref().unwrap();
-    let completion = if let Some(composition) = &parent_parser.composition {
-        composition.completion_view.as_ref().expect("native scoped completion").clone()
-    } else { ScopedProgram { source: Arc::clone(&parent_parser.completion_template),
-        domain: Arc::clone(&parent_parser.completion), fast: None, offset: 0,
+    let completion = if let Some(composition) = parent_parser.composition() {
+        composition.completion_view.clone()
+    } else { ScopedProgram { source: Arc::clone(parent_parser.completion_template()),
+        domain: Arc::clone(parent_parser.completion_domain()), fast: None, offset: 0,
         symbols: parent_parser.state_count, guard_owner: true, append_push: None } };
     let mut parser = TemplateParser::from_composition(state_count, terminal_count,
-        TemplateComposition::from_views(state_count, control_start, outer_views, exact_views, Some(completion))?)?;
+        TemplateComposition::from_views(state_count, control_start, outer_views, exact_views, completion)?)?;
     let initial = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
     let nullable = parent_embedding.nullable || parser.finished(&initial);
     // Internal compiled composition can designate a validated entry as a
@@ -206,7 +206,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     // DynamicDirect needs the same necessary root-CALL vocabulary proof as
     // static boundary assembly. Keep its original conservative certificate if
     // scoped ignores, nullable or nested components make that proof unavailable.
-    if components.iter().all(|component| component.template_parser.as_ref().unwrap().composition.is_none())
+    if components.iter().all(|component| component.template_parser.as_ref().unwrap().composition().is_none())
         && links.iter().all(|link| !link.child_start_nullable) {
         let leaves = components.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let global_ignores = crate::compiler::constraint_compose::leaf_ignores_are_globally_erasable(&leaves);

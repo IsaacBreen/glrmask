@@ -2412,7 +2412,7 @@ fn can_reuse_omitted_external_dynamic_vocab(
     external_vocab.is_some()
         && constraint.uses_dynamic_runtime()
         && constraint.has_template_parser()
-        && constraint.template_parser.as_ref().is_some_and(|parser| parser.composition.is_none())
+        && constraint.template_parser.as_ref().is_some_and(|parser| parser.composition().is_none())
         && constraint.static_dynamic_overlay.is_none()
         && constraint.direct_regular_automaton.is_none()
         && !constraint.tokenizer.has_any_virtual_runtime()

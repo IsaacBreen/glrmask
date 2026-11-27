@@ -406,8 +406,8 @@ fn bulk_top_certificates_match_literal_domains_on_shared_and_empty_languages() {
                 if requested & (1 << bit) != 0 { candidates.set(bit); }
             }
             let expected = candidates.iter().filter(|&bit| {
-                let domain = if bit == 5 { Some(&parser.completion) }
-                    else { parser.domains.get(bit) };
+                let domain = if bit == 5 { Some(parser.completion_domain()) }
+                    else { parser.local_domain(bit) };
                 domain.is_some_and(|domain| {
                     literal.iter().any(|(stack, _)| {
                         domain.matches_top_first(stack.iter().rev().copied())
@@ -419,8 +419,8 @@ fn bulk_top_certificates_match_literal_domains_on_shared_and_empty_languages() {
             assert_eq!(parser.admits_any(&input, &candidates), !expected.is_empty());
             for (stack, _) in &literal {
                 let expected = candidates.iter().any(|bit| {
-                    let domain = if bit == 5 { Some(&parser.completion) }
-                        else { parser.domains.get(bit) };
+                    let domain = if bit == 5 { Some(parser.completion_domain()) }
+                        else { parser.local_domain(bit) };
                     domain.is_some_and(|domain| {
                         domain.matches_top_first(stack.iter().rev().copied())
                     })

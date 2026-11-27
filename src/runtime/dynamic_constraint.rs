@@ -1129,7 +1129,7 @@ impl DynamicConstraint {
         let mut inner = Self::constraint_from_runtime_parts(payload, dynamic_vocab, Some(vocab));
         inner.template_dfas_by_terminal = templates;
         inner.template_parser = Some(parser);
-        inner.fast_template_dfas_by_terminal = if inner.template_parser.as_ref().unwrap().composition.is_some() {
+        inner.fast_template_dfas_by_terminal = if inner.template_parser.as_ref().unwrap().composition().is_some() {
             assert!(prepared_views.as_ref().is_none_or(Vec::is_empty),
                 "scoped parser must not install an unrelated standalone view inventory");
             Vec::new() // Scoped providers borrow each component prepared view.

@@ -164,8 +164,7 @@ impl crate::compiler::glr::parser::ParserActionProvider for RecursiveTemplateRef
     }
     fn relation_finished(&self, stack: &ParserGSS, terminal: u32) -> Option<bool> {
         Some(terminal == crate::compiler::glr::analysis::EOF
-            && self.composition.completion_view.as_ref()
-                .is_some_and(|view| !Self::advance_view(view, stack).is_empty()))
+            && !Self::advance_view(&self.composition.completion_view, stack).is_empty())
     }
 }
 
@@ -3301,7 +3300,7 @@ impl Constraint {
             return Ok(None);
         };
         if let Some(parser) = &self.template_parser {
-            let composition = parser.composition.as_deref()
+            let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             return Ok(Some(close_provider_control_stacks(
                 &RecursiveTemplateReference { parser, composition }, stack,
@@ -3338,7 +3337,7 @@ impl Constraint {
             return Ok(None);
         };
         if let Some(parser) = &self.template_parser {
-            let composition = parser.composition.as_deref()
+            let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             let provider = RecursiveTemplateReference { parser, composition };
             return Ok(Some(advance_provider_control_closed_stacks(
@@ -3379,7 +3378,7 @@ impl Constraint {
             return Ok(None);
         };
         if let Some(parser) = &self.template_parser {
-            let composition = parser.composition.as_deref()
+            let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             return Ok(Some(stacks_finished_with_provider(
                 &RecursiveTemplateReference { parser, composition }, stack,

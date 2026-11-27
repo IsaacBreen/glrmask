@@ -139,19 +139,31 @@ pub(crate) mod table_serde {
     }
 }
 
+/// One exact admission relation. Linked programs already carry their own
+/// local domains and completion, and never allocate global certificate rows.
+#[derive(Debug, Clone)]
+enum TemplateAdmission {
+    Local(LocalAdmission),
+    Linked(Arc<composition::TemplateComposition>),
+}
+
+#[derive(Debug, Clone)]
+struct LocalAdmission {
+    domains: Vec<Arc<TemplateDomain>>,
+    completion_template: Arc<CommitTemplateDfas>,
+    completion: Arc<TemplateDomain>,
+    possible: Vec<BitSet>,
+    unconditional: Vec<BitSet>,
+}
+
 #[derive(Debug)]
 pub(crate) struct TemplateParser {
     pub(crate) state_count: u32,
     pub(crate) terminal_count: u32,
     pub(crate) skip_terminals: BTreeSet<TerminalID>,
-    pub(crate) completion_template: Arc<CommitTemplateDfas>,
-    pub(crate) composition: Option<Arc<composition::TemplateComposition>>,
+    admission: TemplateAdmission,
     pub(crate) embedding: Option<Arc<embedding::TemplateEmbedding>>,
     pub(crate) link_grammar: Option<Arc<link_grammar::LinkGrammar>>,
-    domains: Vec<Arc<TemplateDomain>>,
-    completion: Arc<TemplateDomain>,
-    pub(crate) possible: Vec<BitSet>,
-    pub(crate) unconditional: Vec<BitSet>,
     profile: bool,
     advances: AtomicU64,
     admissions: AtomicU64,
@@ -249,27 +261,63 @@ impl TemplateParser {
         if composition.outer_views.len() != terminal_count as usize {
             return Err(crate::Error::Compilation("outer scoped inventory count mismatch".into()));
         }
-        let completion = composition.completion_view.as_ref().ok_or_else(|| {
-            crate::Error::Compilation("missing scoped completion view".into())
-        })?;
+
         Ok(Self {
             state_count,
             terminal_count,
             skip_terminals: BTreeSet::new(),
-            completion_template: Arc::clone(&completion.source),
-            completion: Arc::clone(&completion.domain),
-            domains: composition.outer_views.iter()
-                .map(|view| Arc::clone(&view.domain)).collect(),
-            composition: Some(Arc::new(composition)),
+            admission: TemplateAdmission::Linked(Arc::new(composition)),
             embedding: None,
             link_grammar: None,
-            possible: Vec::new(),
-            unconditional: Vec::new(),
             profile: crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
             advances: AtomicU64::new(0),
             admissions: AtomicU64::new(0),
             completions: AtomicU64::new(0),
         })
+    }
+
+    #[inline]
+    pub(crate) fn composition(&self) -> Option<&composition::TemplateComposition> {
+        match &self.admission {
+            TemplateAdmission::Linked(composition) => Some(composition),
+            TemplateAdmission::Local(_) => None,
+        }
+    }
+
+    #[inline]
+    fn local_admission(&self) -> Option<&LocalAdmission> {
+        match &self.admission {
+            TemplateAdmission::Local(local) => Some(local),
+            TemplateAdmission::Linked(_) => None,
+        }
+    }
+
+    pub(crate) fn completion_template(&self) -> &Arc<CommitTemplateDfas> {
+        match &self.admission {
+            TemplateAdmission::Local(local) => &local.completion_template,
+            TemplateAdmission::Linked(linked) => &linked.completion_view.source,
+        }
+    }
+
+    pub(crate) fn completion_domain(&self) -> &Arc<TemplateDomain> {
+        match &self.admission {
+            TemplateAdmission::Local(local) => &local.completion,
+            TemplateAdmission::Linked(linked) => &linked.completion_view.domain,
+        }
+    }
+
+    pub(crate) fn local_domain(&self, terminal: usize) -> Option<&Arc<TemplateDomain>> {
+        self.local_admission()?.domains.get(terminal)
+    }
+
+    #[inline]
+    fn possible_row(&self, top: u32) -> Option<&BitSet> {
+        self.local_admission()?.possible.get(top as usize)
+    }
+
+    #[inline]
+    fn unconditional_row(&self, top: u32) -> Option<&BitSet> {
+        self.local_admission()?.unconditional.get(top as usize)
     }
 
     #[inline]
@@ -293,37 +341,35 @@ impl TemplateParser {
 
     fn admits_control_closed(&self, stack: &ParserGSS, terminal: TerminalID) -> bool {
         if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
-        if let Some(admitted) = self.composition.as_ref()
-            .and_then(|composition| composition.admits_outer(stack, terminal))
-        {
-            return admitted;
-        }
-        if terminal != EOF && terminal >= self.terminal_count {
-            return self.composition.as_ref().is_some_and(|composition| {
+        if let Some(composition) = self.composition() {
+            return if terminal == EOF || terminal < self.terminal_count {
+                composition.admits_outer(stack, terminal)
+            } else {
                 composition.admits(stack, terminal - self.terminal_count)
-            });
+            };
         }
+        let local = self.local_admission().expect("local admission");
         let (bit, domain) = if terminal == EOF {
-            (self.terminal_count as usize, &self.completion)
+            (self.terminal_count as usize, &local.completion)
         } else {
-            let Some(domain) = self.domains.get(terminal as usize) else { return false; };
+            let Some(domain) = local.domains.get(terminal as usize) else { return false; };
             (terminal as usize, domain)
         };
         if let Some(top) = stack.single_exclusive_top_value() {
-            if self.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
+            if local.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
                 return true;
             }
-            if self.possible.get(top as usize).is_some_and(|row| !row.contains(bit)) {
+            if local.possible.get(top as usize).is_some_and(|row| !row.contains(bit)) {
                 return false;
             }
         } else {
             let tops = stack.peek_values();
             let mut possible = tops.is_empty();
             for top in tops {
-                if self.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
+                if local.unconditional.get(top as usize).is_some_and(|row| row.contains(bit)) {
                     return true;
                 }
-                possible |= self.possible.get(top as usize).is_none_or(|row| row.contains(bit));
+                possible |= local.possible.get(top as usize).is_none_or(|row| row.contains(bit));
             }
             if !possible { return false; }
         }
@@ -336,26 +382,27 @@ impl TemplateParser {
                 &provider, stack, candidates.iter().map(|terminal| terminal as u32),
             );
         }
+        let local = self.local_admission().expect("local admission");
         if let Some(top) = stack.single_exclusive_top_value()
-            && let Some(possible) = self.possible.get(top as usize)
+            && let Some(possible) = local.possible.get(top as usize)
         {
             if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
-            if self.unconditional.get(top as usize).is_some_and(|row| {
+            if local.unconditional.get(top as usize).is_some_and(|row| {
                 row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
             }) {
                 return true;
             }
             return intersecting_bits(possible, candidates).any(|bit| {
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&self.completion)
+                    Some(&local.completion)
                 } else {
-                    self.domains.get(bit)
+                    local.domains.get(bit)
                 };
                 domain.is_some_and(|domain| matches_gss(domain, stack))
             });
         }
         for top in stack.peek_values() {
-            if self.unconditional.get(top as usize).is_some_and(|row| {
+            if local.unconditional.get(top as usize).is_some_and(|row| {
                 row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
             }) {
                 if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
@@ -379,6 +426,7 @@ impl TemplateParser {
             );
             return admitted;
         }
+        let local = self.local_admission().expect("local admission");
         if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
         let mut result = BitSet::new(candidates.len());
         let mut possible = BitSet::new(candidates.len());
@@ -387,7 +435,7 @@ impl TemplateParser {
             possible = candidates.clone();
         }
         for top in tops {
-            match self.possible.get(top as usize) {
+            match local.possible.get(top as usize) {
                 Some(row) => {
                     for ((dst, a), b) in possible.words_mut().iter_mut()
                         .zip(row.words()).zip(candidates.words())
@@ -397,7 +445,7 @@ impl TemplateParser {
                 }
                 None => possible = candidates.clone(),
             }
-            if let Some(row) = self.unconditional.get(top as usize) {
+            if let Some(row) = local.unconditional.get(top as usize) {
                 for ((dst, a), b) in result.words_mut().iter_mut()
                     .zip(row.words()).zip(candidates.words())
                 {
@@ -411,9 +459,9 @@ impl TemplateParser {
                 let bit = word_index * 64 + remaining.trailing_zeros() as usize;
                 remaining &= remaining - 1;
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&self.completion)
+                    Some(&local.completion)
                 } else {
-                    self.domains.get(bit)
+                    local.domains.get(bit)
                 };
                 if domain.is_some_and(|domain| matches_gss(domain, stack)) {
                     result.set(bit);
@@ -425,49 +473,50 @@ impl TemplateParser {
 
     pub(crate) fn marker_top_partition(&self, terminal: u32)
         -> Option<(TopAdmission, impl Iterator<Item = (u32, TopAdmission)> + '_)> {
-        if self.composition.is_some() { return None; }
-        self.domains.get(terminal as usize).map(|domain| domain.top_admission_partition())
+        if self.composition().is_some() { return None; }
+        self.local_domain(terminal as usize).map(|domain| domain.top_admission_partition())
     }
 
     pub(crate) fn marker_top_admission(&self, top: u32, terminal: u32) -> TopAdmission {
-        if let Some(composition) = &self.composition {
+        if let Some(composition) = self.composition() {
             return composition.outer_views.get(terminal as usize)
                 .map_or(TopAdmission::Never, |view| view.classify_top(top));
         }
-        self.domains.get(terminal as usize).map_or(TopAdmission::Never, |domain| domain.classify_top(top))
+        self.local_domain(terminal as usize).map_or(TopAdmission::Never, |domain| domain.classify_top(top))
     }
 
     pub(crate) fn marker_admits_flat(&self, stack: &[u32], terminal: u32) -> bool {
-        if self.composition.is_some() {
+        if self.composition().is_some() {
             let gss = ParserGSS::from_single_stack(stack.to_vec(),
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new());
             return self.admits(&gss, terminal);
         }
-        self.domains.get(terminal as usize)
+        self.local_domain(terminal as usize)
             .is_some_and(|domain| domain.matches_top_first(stack.iter().rev().copied()))
     }
 
     pub(crate) fn admits_flat_any(&self, stack: &[u32], candidates: &BitSet) -> bool {
-        if self.composition.is_some() {
+        if self.composition().is_some() {
             let gss = ParserGSS::from_single_stack(
                 stack.to_vec(),
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
             );
             return self.admits_any(&gss, candidates);
         }
+        let local = self.local_admission().expect("local admission");
         if self.profile { self.admissions.fetch_add(1, Ordering::Relaxed); }
         let top = stack.last().copied();
-        if top.and_then(|top| self.unconditional.get(top as usize)).is_some_and(|row| {
+        if top.and_then(|top| local.unconditional.get(top as usize)).is_some_and(|row| {
             row.words().iter().zip(candidates.words()).any(|(a, b)| a & b != 0)
         }) {
             return true;
         }
-        if let Some(possible) = top.and_then(|top| self.possible.get(top as usize)) {
+        if let Some(possible) = top.and_then(|top| local.possible.get(top as usize)) {
             return intersecting_bits(possible, candidates).any(|bit| {
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&self.completion)
+                    Some(&local.completion)
                 } else {
-                    self.domains.get(bit)
+                    local.domains.get(bit)
                 };
                 domain.is_some_and(|domain| {
                     domain.matches_top_first(stack.iter().rev().copied())
@@ -475,15 +524,15 @@ impl TemplateParser {
             });
         }
         for bit in candidates.iter() {
-            if top.and_then(|top| self.possible.get(top as usize))
+            if top.and_then(|top| local.possible.get(top as usize))
                 .is_some_and(|row| !row.contains(bit))
             {
                 continue;
             }
             let domain = if bit == self.terminal_count as usize {
-                Some(&self.completion)
+                Some(&local.completion)
             } else {
-                self.domains.get(bit)
+                local.domains.get(bit)
             };
             if domain.is_some_and(|domain| {
                 domain.matches_top_first(stack.iter().rev().copied())
@@ -495,18 +544,32 @@ impl TemplateParser {
     }
 
     pub(crate) fn preserve_start_nullable(&mut self) {
-        if self.completion.matches_top_first([0]) { return; }
+        if self.completion_domain().matches_top_first([0]) { return; }
         let completion = link_program::compile(&[
-            link_program::action_nfa(&self.completion_template)
+            link_program::action_nfa(self.completion_template())
                 .expect("validated finite completion relation"),
             link_program::nullable_return(0),
         ]).expect("nullable completion must remain finite");
-        self.completion = Arc::new(
-            compile_domain(&completion).expect("validated nullable completion domain")
+        let source = Arc::new(completion);
+        let domain = Arc::new(
+            compile_domain(&source).expect("validated nullable completion domain")
         );
-        self.completion_template = Arc::new(completion);
-        (self.possible, self.unconditional) =
-            top_certificate_rows(self.state_count, &self.domains, &self.completion);
+        match &mut self.admission {
+            TemplateAdmission::Local(local) => {
+                local.completion = domain;
+                local.completion_template = source;
+                (local.possible, local.unconditional) =
+                    top_certificate_rows(self.state_count, &local.domains, &local.completion);
+            }
+            TemplateAdmission::Linked(linked) => {
+                // The root completion is the authoritative linked relation.
+                // Keep its coordinate/guard semantics, update the program itself.
+                let view = &mut Arc::make_mut(linked).completion_view;
+                view.source = source;
+                view.domain = domain;
+                view.fast = None;
+            }
+        }
     }
 
     pub(crate) fn finished(&self, stack: &ParserGSS) -> bool {
@@ -517,7 +580,17 @@ impl TemplateParser {
     pub(crate) fn report(&self) -> serde_json::Value {
         let mut unique = rustc_hash::FxHashSet::default();
         let mut unique_heap = 0usize;
-        for domain in &self.domains {
+        let domains: Box<dyn Iterator<Item = &Arc<TemplateDomain>> + '_> = match &self.admission {
+            TemplateAdmission::Local(local) => Box::new(local.domains.iter()),
+            TemplateAdmission::Linked(linked) => Box::new(linked.outer_views.iter().map(|view| &view.domain)),
+        };
+        let mut domain_states = 0usize;
+        let mut domain_edges = 0usize;
+        let mut domain_heap = 0usize;
+        for domain in domains {
+            domain_states += domain.state_count();
+            domain_edges += domain.edge_count();
+            domain_heap += domain.heap_payload_bytes();
             if unique.insert(Arc::as_ptr(domain) as usize) {
                 unique_heap += domain.heap_payload_bytes();
             }
@@ -527,13 +600,13 @@ impl TemplateParser {
             "lr_table_present": false,
             "terminal_count": self.terminal_count,
             "stack_symbol_count": self.state_count,
-            "domain_states": self.domains.iter().map(|domain| domain.state_count()).sum::<usize>(),
-            "domain_edges": self.domains.iter().map(|domain| domain.edge_count()).sum::<usize>(),
-            "domain_heap_payload_bytes": self.domains.iter().map(|domain| domain.heap_payload_bytes()).sum::<usize>(),
+            "domain_states": domain_states,
+            "domain_edges": domain_edges,
+            "domain_heap_payload_bytes": domain_heap,
             "unique_terminal_domains": unique.len(),
             "unique_domain_heap_payload_bytes": unique_heap,
-            "completion_domain_states": self.completion.state_count(),
-            "composition": self.composition.as_ref().map(|composition| composition.report()),
+            "completion_domain_states": self.completion_domain().state_count(),
+            "composition": self.composition().map(|composition| composition.report()),
             "finite_embedding": self.embedding.is_some(),
             "counters_enabled": self.profile,
             "template_advances": self.advances.load(Ordering::Relaxed),
@@ -653,7 +726,7 @@ impl Constraint {
     pub(crate) fn parser_has_controls(&self) -> bool {
         self.template_parser.as_ref().map_or_else(
             || !self.table.control_terminals.is_empty(),
-            |parser| parser.composition.as_ref()
+            |parser| parser.composition()
                 .is_some_and(|composition| composition.has_controls()),
         )
     }
@@ -694,7 +767,7 @@ impl Constraint {
         if self.template_composition_provider().is_some() { return None; }
         self.template_parser.as_ref().map_or_else(
             || self.table.advance_row(top),
-            |parser| parser.possible.get(top as usize),
+            |parser| parser.possible_row(top),
         )
     }
 
@@ -709,7 +782,7 @@ impl Constraint {
             } else {
                 terminal as usize
             };
-            parser.possible.get(top as usize).is_some_and(|row| row.contains(bit))
+            parser.possible_row(top).is_some_and(|row| row.contains(bit))
         } else {
             self.table.advance_row_allows(top, terminal)
         }
@@ -721,7 +794,7 @@ impl Constraint {
             return top < self.parser_symbol_count() && !terminals.is_empty();
         }
         if let Some(parser) = &self.template_parser {
-            parser.possible.get(top as usize).is_some_and(|row| {
+            parser.possible_row(top).is_some_and(|row| {
                 row.words().iter().zip(terminals.words()).any(|(a, b)| a & b != 0)
             })
         } else {
@@ -734,7 +807,7 @@ impl Constraint {
         if self.template_composition_provider().is_some() { return None; }
         self.template_parser.as_ref().map_or_else(
             || self.table.unconditional_advance_row(top),
-            |parser| parser.unconditional.get(top as usize),
+            |parser| parser.unconditional_row(top),
         )
     }
 
@@ -844,14 +917,10 @@ impl Constraint {
                     state_count: source.state_count,
                     terminal_count: source.terminal_count,
                     skip_terminals: source.skip_terminals.clone(),
-                    completion_template: source.completion_template.clone(),
-                    composition: source.composition.clone(),
+                    admission: source.admission.clone(),
                     embedding: source.embedding.clone(),
                     link_grammar: source.link_grammar.clone(),
-                    domains: source.domains.clone(),
-                    completion: source.completion.clone(),
-                    possible: source.possible.clone(),
-                    unconditional: source.unconditional.clone(),
+
                     profile: source.profile,
                     advances: AtomicU64::new(source.advances.load(Ordering::Relaxed)),
                     admissions: AtomicU64::new(source.admissions.load(Ordering::Relaxed)),
@@ -943,7 +1012,7 @@ impl Constraint {
                                     .map(|ids| ids.len())
                             })).collect()
                     );
-                    if let Some(composition) = &parser.composition {
+                    if let Some(composition) = parser.composition() {
                         let mut checked = 0usize;
                         let mut sources = 0usize;
                         let mut domains = 0usize;
@@ -954,7 +1023,7 @@ impl Constraint {
                                 .expect("native component");
                             for terminal in 0..local.terminal_count as usize {
                                 let view = &composition.outer_views[offset + terminal];
-                                if let Some(nested) = &local.composition {
+                                if let Some(nested) = local.composition() {
                                     checked += 1;
                                     sources += usize::from(Arc::ptr_eq(
                                         &view.source, &nested.outer_views[terminal].source,
@@ -974,7 +1043,7 @@ impl Constraint {
                                             .as_ref().unwrap(),
                                     ));
                                     domains += usize::from(Arc::ptr_eq(
-                                        &view.domain, &local.domains[terminal],
+                                        &view.domain, local.local_domain(terminal).expect("local domain"),
                                     ));
                                 }
                             }
@@ -986,7 +1055,7 @@ impl Constraint {
                             "shared_retained_domains": domains,
                             "synthetic_ignore_or_skip_relations": identities,
                             "dense_global_certificate_rows":
-                                parser.possible.len() + parser.unconditional.len()
+                                parser.local_admission().map_or(0, |local| local.possible.len() + local.unconditional.len())
                         });
                     }
                 }

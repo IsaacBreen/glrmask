@@ -312,14 +312,15 @@ fn assemble(
         state_count: symbols,
         terminal_count: terminals,
         skip_terminals: skips,
-        completion_template: completion.source,
-        composition: None,
+        admission: super::TemplateAdmission::Local(super::LocalAdmission {
+            completion_template: completion.source,
+            domains: inventory.domains,
+            completion: completion.domain,
+            possible,
+            unconditional,
+        }),
         embedding: None,
         link_grammar: None,
-        domains: inventory.domains,
-        completion: completion.domain,
-        possible,
-        unconditional,
         profile: crate::env::var_os("GLRMASK_PROFILE_TEMPLATE_BACKEND").is_some(),
         advances: AtomicU64::new(0),
         admissions: AtomicU64::new(0),
@@ -427,7 +428,7 @@ pub(super) fn from_compiler_parts(
         )?;
         parser.embedding = Some(Arc::new(
             super::embedding::TemplateEmbedding::from_sparse_regular(
-                &parser.completion_template, parser.state_count,
+                parser.completion_template(), parser.state_count,
                 table.embedded_start_nullable(), 0..table.num_terminals,
             ).map_err(crate::Error::Compilation)?
         ));
@@ -437,7 +438,7 @@ pub(super) fn from_compiler_parts(
         if let Some(grammar) = parser.link_grammar.as_mut() {
             let effects =
                 crate::compiler::boundary_stack_support::CompilerEffects::from_regular_programs(
-                    &templates, &parser.completion_template, symbols,
+                    &templates, parser.completion_template(), symbols,
                 ).ok();
             Arc::make_mut(grammar).set_stack_effects(effects);
         }
@@ -604,7 +605,7 @@ mod tests {
                 built.templates[terminal].as_ref().unwrap(),
             ));
             assert!(Arc::ptr_eq(
-                &built.parser.domains[0], &built.parser.domains[terminal],
+                built.parser.local_domain(0).unwrap(), built.parser.local_domain(terminal).unwrap(),
             ));
             assert!(Arc::ptr_eq(
                 built.runtime[0].as_ref().unwrap(),
@@ -642,12 +643,12 @@ mod tests {
         let reused = from_compiler_parts(&table, None, &retained, None, false, true).unwrap();
         for terminal in 0..2 {
             assert_eq!(
-                rebuilt.parser.domains[terminal].to_bytes().unwrap(),
-                reused.parser.domains[terminal].to_bytes().unwrap(),
+                rebuilt.parser.local_domain(terminal).unwrap().to_bytes().unwrap(),
+                reused.parser.local_domain(terminal).unwrap().to_bytes().unwrap(),
             );
         }
-        assert_eq!(rebuilt.parser.possible, reused.parser.possible);
-        assert_eq!(rebuilt.parser.unconditional, reused.parser.unconditional);
+        assert_eq!(rebuilt.parser.local_admission().unwrap().possible, reused.parser.local_admission().unwrap().possible);
+        assert_eq!(rebuilt.parser.local_admission().unwrap().unconditional, reused.parser.local_admission().unwrap().unconditional);
     }
 
     #[test]

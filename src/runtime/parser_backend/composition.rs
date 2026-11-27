@@ -14,21 +14,19 @@ use crate::compiler::glr::table::GLRTable;
 use crate::runtime::artifact::TemplateDfasByTerminal;
 use super::scoped_program::ScopedProgram;
 use super::{Constraint, ParserTableStorage, TemplateParser,
-    TemplateDomain, TopAdmission};
+    TopAdmission};
 #[cfg(test)]
 use super::matches_gss;
 
 /// The first `control_start` programs are exact leaf-local terminal aliases.
 /// The remainder are zero-width controls. IDs are relative to the outer
 /// terminal count, so outer aliases and exact leaf identities cannot collide.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TemplateComposition {
-    pub(crate) programs: TemplateDfasByTerminal,
     pub(crate) control_start: u32,
     pub(crate) views: Vec<ScopedProgram>,
     pub(crate) outer_views: Vec<ScopedProgram>,
-    pub(crate) completion_view: Option<ScopedProgram>,
-    domains: Vec<Arc<TemplateDomain>>,
+    pub(crate) completion_view: ScopedProgram,
     controls_by_top: Vec<SmallVec<[u32; 4]>>,
 }
 
@@ -38,6 +36,7 @@ impl TemplateComposition {
         control_start: u32,
         outer_programs: &TemplateDfasByTerminal,
         programs: TemplateDfasByTerminal,
+        completion: Arc<super::CommitTemplateDfas>,
     ) -> crate::Result<Self> {
         if control_start as usize > programs.len() {
             return Err(crate::Error::Compilation("composition control offset exceeds its program inventory".into()));
@@ -53,12 +52,14 @@ impl TemplateComposition {
             view.guard_owner = false;
             Ok(view)
         }).collect::<crate::Result<Vec<_>>>();
-        Self::from_views(state_count, control_start, prepare(outer_programs)?, prepare(&programs)?, None)
+        let mut completion = ScopedProgram::prepare(completion, state_count)?;
+        completion.guard_owner = false;
+        Self::from_views(state_count, control_start, prepare(outer_programs)?, prepare(&programs)?, completion)
     }
 
     pub(crate) fn from_views(state_count: u32, control_start: u32,
         outer_views: Vec<ScopedProgram>, views: Vec<ScopedProgram>,
-        completion_view: Option<ScopedProgram>) -> crate::Result<Self> {
+        completion_view: ScopedProgram) -> crate::Result<Self> {
         if control_start as usize > views.len() {
             return Err(crate::Error::Compilation("invalid composition control offset".into()));
         }
@@ -66,7 +67,7 @@ impl TemplateComposition {
             > 256 * 1024 * 1024 {
             return Err(crate::Error::Compilation("composition control certificates exceed resource budget".into()));
         }
-        for view in views.iter().chain(&outer_views).chain(completion_view.iter()) {
+        for view in views.iter().chain(&outer_views).chain(std::iter::once(&completion_view)) {
             view.validate_coordinate(state_count)?;
         }
         let controls_by_top = (0..state_count).map(|top| {
@@ -74,13 +75,11 @@ impl TemplateComposition {
                 .filter_map(|(index, view)| (view.classify_top(top) != TopAdmission::Never)
                     .then_some(index as u32)).collect()
         }).collect();
-        let programs = views.iter().map(|view| Some(Arc::clone(&view.source))).collect();
-        let domains = views.iter().map(|view| Arc::clone(&view.domain)).collect();
-        Ok(Self { programs, control_start, views, outer_views, completion_view, domains, controls_by_top })
+        Ok(Self { control_start, views, outer_views, completion_view, controls_by_top })
     }
 
     pub(crate) fn has_controls(&self) -> bool {
-        (self.control_start as usize) < self.programs.len()
+        (self.control_start as usize) < self.views.len()
     }
 
     pub(crate) fn admits(&self, stack: &ParserGSS, index: u32) -> bool {
@@ -96,9 +95,9 @@ impl TemplateComposition {
         })
     }
 
-    pub(crate) fn admits_outer(&self, stack: &ParserGSS, terminal: u32) -> Option<bool> {
-        if terminal == EOF { self.completion_view.as_ref().map(|view| view.admits(stack)) }
-        else { self.outer_views.get(terminal as usize).map(|view| view.admits(stack)) }
+    pub(crate) fn admits_outer(&self, stack: &ParserGSS, terminal: u32) -> bool {
+        if terminal == EOF { self.completion_view.admits(stack) }
+        else { self.outer_views.get(terminal as usize).is_some_and(|view| view.admits(stack)) }
     }
 
     fn advance(&self, stack: &ParserGSS, index: u32) -> ParserGSS {
@@ -108,8 +107,8 @@ impl TemplateComposition {
     pub(crate) fn report(&self) -> serde_json::Value {
         serde_json::json!({
             "scoped_terminal_relations": self.control_start,
-            "control_relations": self.programs.len() - self.control_start as usize,
-            "extra_domain_states": self.domains.iter().map(|domain| domain.state_count()).sum::<usize>(),
+            "control_relations": self.views.len() - self.control_start as usize,
+            "extra_domain_states": self.views.iter().map(|view| view.domain.state_count()).sum::<usize>(),
         })
     }
 }
@@ -179,7 +178,7 @@ fn compile_table_relations(table: &GLRTable) -> crate::Result<TemplateDfasByTerm
 
 impl TemplateParser {
     pub(crate) fn composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
-        let composition = self.composition.as_deref()?;
+        let composition = self.composition()?;
         Some(TemplateCompositionProvider { parser: self, composition })
     }
 }
@@ -189,7 +188,7 @@ impl Constraint {
     /// Every child is fully loaded before its containing core reaches this check.
     pub(crate) fn validate_template_composition_layout(&self) -> Result<(), String> {
         let parser = self.template_parser.as_ref().ok_or("missing template parser")?;
-        let Some(composition) = &parser.composition else {
+        let Some(composition) = parser.composition() else {
             if self.static_dynamic_overlay.is_some() {
                 return Err("standalone template parser has unsupported composition machinery".into());
             }
@@ -237,15 +236,16 @@ impl Constraint {
         let extra = programs.split_off(outer_count as usize);
         let completion = glrmask_parser_dwa::__private::templates::completion::compile_completion_template(&table)
             .map_err(crate::Error::Compilation)?;
-        let mut parser = TemplateParser::compile(layout.total_states, outer_count,
-            table.skip_terminals.iter().copied().filter(|terminal| *terminal < outer_count).collect(),
-            &programs, completion)?;
+        let composition = TemplateComposition::compile(
+            layout.total_states, layout.total_leaf_terminals, &programs, extra, Arc::new(completion))?;
+        let mut parser = TemplateParser::from_composition(layout.total_states, outer_count, composition)?;
+        parser.skip_terminals = table.skip_terminals.iter().copied()
+            .filter(|terminal| *terminal < outer_count).collect();
         parser.embedding = super::embedding::TemplateEmbedding::from_table(&table,
             self.composition_start_nullable().map_err(crate::Error::Compilation)?,
             self.composition_child_return_pop().map_err(crate::Error::Compilation)?,
             self.late_grammar_slots.iter().map(|slot| slot.terminal_id)).ok().map(Arc::new);
-        parser.composition = Some(Arc::new(TemplateComposition::compile(
-            layout.total_states, layout.total_leaf_terminals, &programs, extra)?));
+
 
         let overlay = self.static_dynamic_overlay.as_mut().expect("validated composition overlay");
         for component in &mut overlay.segmented_parser_components {
@@ -335,9 +335,9 @@ mod prepared_relation_tests {
         let view = ScopedProgram::prepare(Arc::new(shift()), symbols).unwrap();
         let composition = TemplateComposition::from_views(symbols, terminals,
             vec![view.clone(); terminals as usize], vec![view.clone(); terminals as usize],
-            Some(view.clone())).unwrap();
+            view.clone()).unwrap();
         let parser = TemplateParser::from_composition(symbols, terminals, composition).unwrap();
-        assert!(parser.possible.is_empty() && parser.unconditional.is_empty(),
+        assert!(parser.local_admission().is_none(),
             "scoped queries must not materialize the unused global Cartesian product");
         let mut candidates = crate::ds::bitset::BitSet::new(terminals as usize + 1);
         candidates.set(0); candidates.set(terminals as usize - 1);
@@ -359,14 +359,15 @@ mod prepared_relation_tests {
     fn composition_scoped_and_outer_advance_use_the_shared_prepared_shift() {
         let outer = vec![Some(Arc::new(shift()))];
         let scoped = vec![Some(Arc::new(shift())), Some(Arc::new(suffix_dependent()))];
-        let mut parser = TemplateParser::compile(8, 1, Default::default(), &outer, rejecting()).unwrap();
-        parser.composition = Some(Arc::new(TemplateComposition::compile(8, 2, &outer, scoped).unwrap()));
+        let composition = TemplateComposition::compile(
+            8, 2, &outer, scoped, Arc::new(rejecting())).unwrap();
+        let parser = TemplateParser::from_composition(8, 1, composition).unwrap();
         let provider = parser.composition_provider().unwrap();
         for input in inputs() {
             let before = input.to_stacks(128).unwrap();
             for terminal in [0, 1, 2] {
                 let program = if terminal == 0 { outer[0].as_deref().unwrap() }
-                    else { parser.composition.as_ref().unwrap().programs[(terminal-1) as usize].as_deref().unwrap() };
+                    else { parser.composition().unwrap().views[(terminal-1) as usize].source.as_ref() };
                 let expected = advance_with_prepared_template(program, input.clone(), None);
                 let actual = provider.advance_relation(&input, terminal).unwrap();
                 assert_eq!(actual.semantically_eq(&expected, 65536), Some(true));
@@ -388,13 +389,13 @@ mod prepared_relation_tests {
         let outer = vec![Some(Arc::new(shift()))];
         let scoped = vec![Some(Arc::new(shift())), Some(Arc::new(suffix_dependent())),
                           Some(Arc::new(rejecting()))];
-        let composition = TemplateComposition::compile(8, 2, &outer, scoped).unwrap();
-        assert_eq!(composition.domains[0].classify_top(5), TopAdmission::Always);
-        assert_eq!(composition.domains[0].classify_top(6), TopAdmission::Never);
-        assert_eq!(composition.domains[1].classify_top(5), TopAdmission::DependsOnSuffix);
+        let composition = TemplateComposition::compile(8, 2, &outer, scoped, Arc::new(rejecting())).unwrap();
+        assert_eq!(composition.views[0].domain.classify_top(5), TopAdmission::Always);
+        assert_eq!(composition.views[0].domain.classify_top(6), TopAdmission::Never);
+        assert_eq!(composition.views[1].domain.classify_top(5), TopAdmission::DependsOnSuffix);
         for input in inputs() {
-            for (index, domain) in composition.domains.iter().enumerate() {
-                assert_eq!(composition.admits(&input, index as u32), matches_gss(domain, &input));
+            for (index, view) in composition.views.iter().enumerate() {
+                assert_eq!(composition.admits(&input, index as u32), matches_gss(&view.domain, &input));
             }
             assert!(!composition.admits(&input, u32::MAX));
         }

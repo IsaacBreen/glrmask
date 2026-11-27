@@ -44,7 +44,7 @@ pub(crate) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
         assert_eq!(decoded.link_grammar, parser.link_grammar);
         assert!(bincode::serialize(decoded.programs.as_ref().unwrap()).unwrap() == bincode::serialize(templates).unwrap(),
             "compact template wire changed raw graph numbering, edges, or links");
-        assert!(bincode::serialize(&decoded.completion).unwrap() == bincode::serialize(&*parser.completion_template).unwrap(),
+        assert!(bincode::serialize(&decoded.completion).unwrap() == bincode::serialize(parser.completion_template().as_ref()).unwrap(),
             "compact template wire changed raw EOF completion program");
         eprintln!("[glrmask/validate][template_parser_wire] exact_graphs=true templates={} bytes={}", templates.len(), bytes.len());
     }
@@ -152,7 +152,7 @@ impl ParserSeed {
                 .map(|view| Some(Arc::clone(&view.source))).collect();
             let composition = super::composition::TemplateComposition::from_views(
                 self.state_count, composition.control_start, composition.outer,
-                composition.scoped, Some(composition.completion)).map_err(|error| error.to_string())?;
+                composition.scoped, composition.completion).map_err(|error| error.to_string())?;
             (TemplateParser::from_composition(self.state_count, self.terminal_count, composition)
                 .map_err(|error| error.to_string())?, Vec::new())
         } else { TemplateParser::compile_with_runtime(

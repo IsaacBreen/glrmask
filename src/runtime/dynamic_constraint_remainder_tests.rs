@@ -128,7 +128,7 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
 
     let templates = prepared.templates.clone();
     let runtime = prepared.runtime.clone();
-    let completion = Arc::clone(&prepared.parser.completion_template);
+    let completion = Arc::clone(prepared.parser.completion_template());
     drop(table);
     drop(analyzed);
 
@@ -146,7 +146,7 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
     assert!(!result.table.is_present());
     assert!(Arc::ptr_eq(
         &completion,
-        &result.template_parser.as_ref().unwrap().completion_template,
+        result.template_parser.as_ref().unwrap().completion_template(),
     ));
     for (before, after) in templates.iter().zip(&result.template_dfas_by_terminal) {
         match (before, after) {
