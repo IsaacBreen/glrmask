@@ -68,7 +68,7 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // Helpers
 // ---------------------------------------------------------------------------
 
-pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyValueError,
+pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyException,
     "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
 
 pub(crate) fn glrmask_error(kind: &str, message: impl Into<String>) -> PyErr {
@@ -686,7 +686,7 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
@@ -886,29 +886,6 @@ impl PyDynamicConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Returns the number of tokens committed. If it is less than `len(token_ids)`, the token at that index was not allowed and the state is now terminated (as after `commit_token` returns False). To try tokens without changing this state, commit them on a copy.
-    #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
-        if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
-            return Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)));
-        }
-        let values = token_ids.extract::<Vec<Bound<'_, PyAny>>>()?;
-        let mut ids = Vec::with_capacity(values.len());
-        for value in &values {
-            match resolve_token_id(value)? {
-                Some(id) => ids.push(id),
-                None => {
-                    let count = with_state_mut(&mut self.inner, |state| {
-                        let count = state.commit_tokens(&ids);
-                        state.reject();
-                        count
-                    });
-                    return Ok(count);
-                }
-            }
-        }
-        Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)))
-    }
 
 
     /// Diagnostic commit profile for the common single-alternative dynamic
@@ -1061,7 +1038,7 @@ impl PyConstraintState {
         allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
     }
 
-    /// Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL.
+    /// Like `mask()`, but writes the words into `bitmask`. Releases the GIL.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
@@ -1083,29 +1060,6 @@ impl PyConstraintState {
         Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
-    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed.
-    #[pyo3(signature = (token_ids, /))]
-    fn commit_tokens(&mut self, token_ids: &Bound<'_, PyAny>) -> PyResult<usize> {
-        if let Ok(ids) = token_ids.extract::<Vec<u32>>() {
-            return Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)));
-        }
-        let values = token_ids.extract::<Vec<Bound<'_, PyAny>>>()?;
-        let mut ids = Vec::with_capacity(values.len());
-        for value in &values {
-            match resolve_token_id(value)? {
-                Some(id) => ids.push(id),
-                None => {
-                    let count = with_state_mut(&mut self.inner, |state| {
-                        let count = state.commit_tokens(&ids);
-                        state.reject();
-                        count
-                    });
-                    return Ok(count);
-                }
-            }
-        }
-        Ok(with_state_mut(&mut self.inner, |state| state.commit_tokens(&ids)))
-    }
 
     /// Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]

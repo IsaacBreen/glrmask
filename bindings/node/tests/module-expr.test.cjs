@@ -152,23 +152,7 @@ test('Module: externs order and unbound Map-like snapshot',()=>{
   assert.ok(mm.externs.unbound.has('third'));
 });
 
-test('Module: atomic multi-bind',()=>{
-  const multi=Grammar.fromGlrm('glrm 1; start root; extern token a; extern token b; nt root = a b;');
-  const m=new Module(multi);
-  assert.equal(m.externs.unbound.size,2);
-
-  // Failing multi-bind leaves m completely untouched
-  assert.throws(()=>m.bind({a:new TokenSet([1]),b:'not_a_valid_binding'}));
-  assert.equal(m.externs.unbound.size,2);
-  assert.ok(m.externs.unbound.has('a'));
-  assert.ok(m.externs.unbound.has('b'));
-
-  // Successful multi-bind
-  m.bind({a:new TokenSet([1]),b:new TokenSet([2])});
-  assert.equal(m.externs.unbound.size,0);
-});
-
-test('Grammar: clone is independent and multi-bind is atomic',()=>{
+test('Grammar: clone is independent and single binds work',()=>{
   const v=vocab();
   const g=Grammar.fromGlrm('glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;');
   const copy=g.clone();
@@ -180,14 +164,10 @@ test('Grammar: clone is independent and multi-bind is atomic',()=>{
   assert.throws(()=>copy.compileSync(v),/extern "b" is unbound/);
 
   const m=Grammar.fromGlrm('glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;');
-  assert.throws(()=>m.bind({a:source(),b:'not_a_valid_binding'}));
+  assert.throws(()=>m.bind({a:source(),b:source('b')}),TypeError);
   assert.equal(m.externs.unbound.size,2);
-  assert.ok(m.externs.unbound.has('a'));
-  assert.ok(m.externs.unbound.has('b'));
-  // The failed batch left both externs unbound; 'a' would be named first if it had been bound.
-  assert.throws(()=>m.compileSync(v),/extern "a" is unbound/);
-
-  m.bind({a:source(),b:source('b')});
+  m.bind('a',source());
+  m.bind('b',source('b'));
   const state=m.compileSync(v).start();
   assert.ok(state.commitToken(1));assert.ok(state.commitToken(2));assert.ok(state.isAccepting());
 });
@@ -314,4 +294,20 @@ test('Externs inspect includes unbound names',()=>{
   assert.equal(before.unbound.size,1);
   assert.equal(m.externs.unbound.size,0);
   assert.match(require('node:util').inspect(m.externs),/unbound=\[\]/);
+});
+
+
+test('async compile and save capture the call-time module and grammar snapshot',async()=>{
+  const v=vocab(), g=host(), m=new Module(host());
+  const gc=g.compile(v), mc=m.compile(v), ms=m.save();
+  // The work has already captured an unbound source; later binding cannot change it.
+  const checks=Promise.all([assert.rejects(gc,/unbound/),assert.rejects(mc,/unbound/)]);
+  g.bind('child',source()); m.bind('child',source());
+  await checks;
+  const bytes=await ms, pending=Module.load(bytes);
+  bytes.fill(0);
+  const restored=await pending;
+  assert.equal(restored.externs.unbound.size,1);
+  accept(m,v,[4]);
+  assert.ok(g.compileSync(v).start().commitToken(4));
 });

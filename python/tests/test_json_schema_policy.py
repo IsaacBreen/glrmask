@@ -28,7 +28,7 @@ def accepts(constraint, value):
     {"$vocabulary": {"https://example.invalid/vocab": True}},
 ])
 def test_unsupported_assertions_error_instead_of_broadening(schema):
-    with pytest.raises(ValueError, match="unsupported|Unimplemented"):
+    with pytest.raises(glrmask.GLRMaskError, match="unsupported|Unimplemented"):
         compile_schema(schema)
 
 
@@ -47,7 +47,7 @@ def test_metadata_is_opaque_and_constant_conditionals_exact():
 
 def test_removed_approximation_option_errors(monkeypatch):
     monkeypatch.setenv("GLRMASK_JSON_SCHEMA_COERCE_ONE_OF_TO_ANY_OF", "1")
-    with pytest.raises(ValueError, match="approximation has been removed"):
+    with pytest.raises(glrmask.GLRMaskError, match="approximation has been removed"):
         compile_schema({"type": "string"})
 
 

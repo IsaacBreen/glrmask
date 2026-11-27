@@ -1,7 +1,7 @@
 #ifndef GLRMASK_H
 #define GLRMASK_H
 
-/* GLRMask C API, ABI revision 6.
+/* GLRMask C API, ABI revision 7.
  *
  * Lengths count elements, except where a name says bytes. Text is UTF-8 and
  * length-delimited; it doesn't need a NUL terminator. Vocabulary bytes may be
@@ -171,7 +171,7 @@ GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module* module,con
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module* module,const char* name,size_t name_len,const glrmask_expr* value);
 /// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module* module,const char* name,size_t name_len,const glrmask_token_set* value);
-/// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
+/// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
 GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options);
 /// Finishes compiling the module into a constraint.
 GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options,glrmask_constraint** out);
@@ -198,7 +198,7 @@ GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* co
 GLRMASK_API glrmask_status glrmask_constraint_mask_bit_len(const glrmask_constraint* constraint,size_t* out);
 
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* constraint,glrmask_bytes** out);
-/// May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.
+/// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
 GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n,const glrmask_vocab* vocab,glrmask_constraint** out);
 
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmask_state** out);
@@ -208,7 +208,7 @@ GLRMASK_API glrmask_status glrmask_state_mask_bit_len(const glrmask_state* state
 /// Whether the output so far could end here. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state,uint32_t* out);
 /// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`.
-/// Writes the words into `out`. Extra words are set to 0. Returns
+/// Writes the words into `out`. Returns
 /// `GLRMASK_BUFFER_TOO_SMALL`, writing nothing, if `word_count` is below (N + 31) / 32,
 /// where N is the state mask bit length.
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,uint32_t* out,size_t word_count);
@@ -217,8 +217,7 @@ GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* stat
 /// Commit calls clear the last error on ordinary acceptance or rejection; invalid handles, arguments and internal failures set it.
 /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_token(glrmask_state* state,uint32_t id);
-/// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed. Returns zero for a NULL state.
-GLRMASK_API size_t glrmask_state_commit_tokens(glrmask_state* state,const uint32_t* ids,size_t n);
+
 /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. Returns false for a NULL state.
 GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n);
 /// The bytes that must come next.

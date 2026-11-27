@@ -75,19 +75,19 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     child = glrmask.Grammar.from_lark('start: "a"')
     with pytest.raises(TypeError):
         _bound_snapshot(g, 'T', 'not a binding')
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         _bound_snapshot(g, 'T', child)
     open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound externs"):
         _bound_snapshot(g, 'C', open_child)
     bound = _bound_snapshot(g, 'T', glrmask.TokenSet([7]))
     assert list(bound.externs.unbound) == ['C']
     assert set(bound.externs) == {'T', 'C'}
-    with pytest.raises(ValueError, match="already bound"):
+    with pytest.raises(glrmask.GLRMaskError, match="already bound"):
         _bound_snapshot(bound, 'T', glrmask.TokenSet([8]))
-    with pytest.raises(ValueError, match="there is no .*extern named"):
+    with pytest.raises(glrmask.GLRMaskError, match="there is no .*extern named"):
         _bound_snapshot(bound, 'missing', child)
-    with pytest.raises(ValueError, match="there is no extern named"):
+    with pytest.raises(glrmask.GLRMaskError, match="there is no extern named"):
         _bound_snapshot(bound, 'C::sub', child)
     complete = _bound_snapshot(bound, 'C', child)
     assert list(complete.externs.unbound) == []
@@ -98,7 +98,7 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     v = vocab()
     c = _module_expr(glrmask.Expr.sequence(glrmask.Grammar.from_lark('start: "a"'), glrmask.TokenSet([130]))).compile(v)
     s = c.start()
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         s.fill_mask(np.zeros(1, dtype=np.uint32))
     words = np.full(7, 0xffffffff, dtype=np.uint32)
     s.fill_mask(words)
@@ -132,10 +132,10 @@ def test_artifact_ownership_and_existing_vocab_validation():
     s = c.start()
     assert s.commit_token(0)
     assert token_allowed(s.mask(), 130)
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         glrmask.Constraint.load(raw[:-1], v)
     other = glrmask.Vocab({0: b'changed'})
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         glrmask.Constraint.load(raw, other)
 
 
@@ -143,8 +143,8 @@ def test_token_set_has_no_introspection_accessors():
     assert not hasattr(glrmask.Vocab, "tokens")
     assert not hasattr(glrmask.Vocab, "token_ranges")
     value = glrmask.TokenSet([7, 7, 3])
-    assert repr(value) == "TokenSet.from_ranges([range(3, 4), range(7, 8)])"
-    assert value == glrmask.TokenSet.from_ranges([range(3, 4), range(7, 8)])
+    assert repr(value) == "TokenSet([range(3, 4), range(7, 8)])"
+    assert value == glrmask.TokenSet([range(3, 4), range(7, 8)])
     for name in ["ids", "ranges", "size", "__len__"]:
         assert not hasattr(value, name), name
 
@@ -163,13 +163,13 @@ def test_token_set_and_sparse_membership_validation():
         assert _bound_snapshot(m, "item", value).compile(v) is not None
     # The largest token ID is accepted; one above it is an error, not a huge mask.
     assert _bound_snapshot(g, "item", glrmask.TokenSet([2**24 - 1])) is not None
-    with pytest.raises(ValueError, match="maximum token ID"):
+    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID"):
         glrmask.TokenSet([2**24])
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
         assert np.flatnonzero(unpack_mask(c.start().mask())).tolist() == [id]
     text = glrmask.Grammar.from_lark('start: "a"')
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         _bound_snapshot(g, "item", text)
     general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
     assert np.flatnonzero(unpack_mask(_bound_snapshot(general, "item", text).compile(v).start().mask())).tolist() == [2, 7]
@@ -181,7 +181,7 @@ def test_source_constructors_reject_invalid_source_at_construction():
         (glrmask.Grammar.from_json_schema, "{"),
         (glrmask.Grammar.from_glrm, "invalid source"),
     ]:
-        with pytest.raises(ValueError):
+        with pytest.raises(glrmask.GLRMaskError):
             factory(source)
 
 
@@ -230,11 +230,11 @@ def test_public_reprs_are_stable_and_python_quoted():
     two = glrmask.Vocab({0: b"a", 1: b"b"})
     assert repr(two) == "<glrmask.Vocab: 2 tokens>"
 
-    assert repr(glrmask.TokenSet([])) == "TokenSet.from_ranges([])"
-    assert repr(glrmask.TokenSet.from_ranges([range(0, 10), range(20, 30)])) == (
-        "TokenSet.from_ranges([range(0, 10), range(20, 30)])"
+    assert repr(glrmask.TokenSet([])) == "TokenSet([])"
+    assert repr(glrmask.TokenSet([range(0, 10), range(20, 30)])) == (
+        "TokenSet([range(0, 10), range(20, 30)])"
     )
-    wide = glrmask.TokenSet.from_ranges([range(index, index + 1) for index in range(0, 18, 2)])
+    wide = glrmask.TokenSet([range(index, index + 1) for index in range(0, 18, 2)])
     assert repr(wide) == "<glrmask.TokenSet: 9 tokens in 9 ranges>"
 
     grammar = glrmask.Grammar.from_glrm(
@@ -284,25 +284,6 @@ def test_grammar_copy_binds_independently():
     assert "T" in grammar.externs.unbound
 
 
-def test_grammar_batch_bind_is_atomic():
-    grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern grammar a; extern grammar b; nt root = a b;"
-    )
-    with pytest.raises(ValueError):
-        grammar.bind(a=glrmask.Expr.literal("a"), b=glrmask.TokenSet([1]))
-    assert len(grammar.externs.unbound) == 2
-    assert "a" in grammar.externs.unbound
-    assert "b" in grammar.externs.unbound
-
-    with pytest.raises(TypeError):
-        grammar.bind("a", glrmask.TokenSet([0]), b=1)
-    with pytest.raises(TypeError):
-        grammar.bind()
-    with pytest.raises(TypeError):
-        glrmask.Module(grammar).bind()
-
-    assert grammar.bind(a=glrmask.Expr.literal("a"), b=glrmask.Expr.literal("b")) is None
-    assert len(grammar.externs.unbound) == 0
 
 
 def test_vocab_requires_bytes_values():
@@ -413,7 +394,8 @@ def test_hashable_public_values_and_token_set_expr_parts():
     with pytest.raises(TypeError):
         glrmask.Expr.choice(5, 6)
     state = _module_expr(glrmask.Expr.sequence(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
-    assert state.commit_tokens([5, 6]) == 2
+    assert state.commit_token(5)
+    assert state.commit_token(6)
     assert state.is_accepting()
     choice = _module_expr(glrmask.Expr.choice(glrmask.TokenSet([5]), glrmask.TokenSet([6]))).compile(glrmask.Vocab({})).start()
     assert choice.commit_token(6)
@@ -465,3 +447,27 @@ def test_grammar_rejects_tokens_transitively_and_module_accepts_them():
         assert len(grammar.externs.unbound) == 1
         state = _module_expr(value).compile(glrmask.Vocab({0: b"x"})).start()
         assert state.commit_token(5) and state.is_accepting()
+
+
+def test_removed_api_forms_and_explicit_strategy_default():
+    grammar = glrmask.Grammar.from_lark('start: "a"')
+    v = vocab()
+    module = glrmask.Module(grammar)
+    assert grammar.compile(v).start().mask().tolist() == grammar.compile(v, mask_strategy=glrmask.MaskStrategy.AUTO).start().mask().tolist()
+    for op in (grammar.compile, module.compile, module.precompile):
+        with pytest.raises(TypeError):
+            op(v, mask_strategy=None)
+    for obj in (grammar, module):
+        with pytest.raises(TypeError):
+            obj.bind(T=glrmask.Expr.literal("a"))
+    assert not hasattr(grammar.compile(v).start(), "commit_tokens")
+    assert not hasattr(glrmask.TokenSet, "from_ranges")
+
+
+def test_mixed_token_set_constructor_and_bool_rejection():
+    assert glrmask.TokenSet([0, range(1, 4), range(8, 2, -2), 9]) == glrmask.TokenSet([0, 1, 2, 3, 4, 6, 8, 9])
+    assert glrmask.TokenSet(range(2**24)) == glrmask.TokenSet([range(2**24)])
+    with pytest.raises(TypeError):
+        glrmask.TokenSet([True])
+    with pytest.raises(TypeError):
+        glrmask.TokenSet([False])

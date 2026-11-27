@@ -9146,16 +9146,6 @@ impl ConstraintState {
         self.commit_token_raw(token_id).is_ok()
     }
 
-    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed.
-    #[must_use]
-    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> usize {
-        for (i, &token_id) in token_ids.iter().enumerate() {
-            if !self.commit_token(token_id) {
-                return i;
-            }
-        }
-        token_ids.len()
-    }
 
     /// Return Some when root termination policy handles this commitment.
     fn commit_end_token(&mut self, token_id: u32) -> Option<Result<(), String>> {

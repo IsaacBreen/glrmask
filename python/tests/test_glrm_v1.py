@@ -66,7 +66,7 @@ def test_named_external_terminal_binding(factory):
 def test_named_external_terminal_binding_errors(bad_bindings):
     vocab = _vocab()
     grammar = glrmask.Grammar.from_glrm(_grammar())
-    with pytest.raises((ValueError, RuntimeError, OverflowError)):
+    with pytest.raises((glrmask.GLRMaskError, RuntimeError, OverflowError)):
         for name, value in bad_bindings.items():
             ids = value if isinstance(value, list) else [value]
             grammar = _bound_snapshot(grammar, name, glrmask.TokenSet(ids))
@@ -93,7 +93,7 @@ def test_empty_event_binding_recognizes_no_output():
 
 
 def test_glrm_markers_are_rejected_by_the_public_parser():
-    with pytest.raises((ValueError, RuntimeError)) as excinfo:
+    with pytest.raises((glrmask.GLRMaskError, RuntimeError)) as excinfo:
         glrmask.Grammar.from_glrm('start start;\nnt start = @mark(1) "a";')
     assert "`@mark` isn't supported" in str(excinfo.value)
 

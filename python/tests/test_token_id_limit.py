@@ -37,7 +37,7 @@ def test_token_sets_reject_a_huge_id(token_id):
         glrmask.TokenSet([1, token_id])
     assert exc.value.kind == "invalid_input"
     with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
-        glrmask.TokenSet.from_ranges([range(token_id, token_id + 1)])
+        glrmask.TokenSet([range(token_id, token_id + 1)])
     assert exc.value.kind == "invalid_input"
 
 
@@ -45,7 +45,7 @@ def test_the_maximum_id_is_accepted():
     grammar = token_extern()
     grammar = glrmask.Module(grammar)
     grammar.bind("E", glrmask.TokenSet([MAX_TOKEN_ID]))
-    assert glrmask.TokenSet.from_ranges([range(0, MAX_TOKEN_ID + 1)]) == glrmask.TokenSet.from_ranges(
+    assert glrmask.TokenSet([range(0, MAX_TOKEN_ID + 1)]) == glrmask.TokenSet(
         [range(0, MAX_TOKEN_ID + 1)]
     )
 

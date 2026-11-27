@@ -46,7 +46,8 @@ def link_module(module, vocab, **options):
     end = options.pop("end_tokens", None)
     if end is not None:
         root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
-        root.bind(BODY=module, END=glrmask.TokenSet(end))
+        root.bind('BODY', module)
+        root.bind('END', glrmask.TokenSet(end))
         module = root
     return module.compile(vocab, **options)
 

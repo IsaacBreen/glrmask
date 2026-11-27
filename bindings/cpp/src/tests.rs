@@ -161,7 +161,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
 
 #[test]
 fn status_codes_distinguish_error_kinds() {
-    assert_eq!(glrmask_abi_version(), 6);
+    assert_eq!(glrmask_abi_version(), 7);
     assert_eq!(status(core::ErrorKind::Syntax), 1);
     assert_eq!(status(core::ErrorKind::InvalidInput), 2);
     assert_eq!(status(core::ErrorKind::Compilation), 3);

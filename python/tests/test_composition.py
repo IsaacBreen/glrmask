@@ -24,7 +24,8 @@ def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, mask_strategy=Non
     m = _prepare_glrm(source, vocab, subgrammars=subgrammars)
     if end_tokens is not None:
         root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
-        root.bind(BODY=m, END=glrmask.TokenSet(end_tokens))
+        root.bind('BODY', m)
+        root.bind('END', glrmask.TokenSet(end_tokens))
         m = root
     if mask_strategy is not None:
         kwargs["mask_strategy"] = mask_strategy

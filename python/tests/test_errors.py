@@ -2,7 +2,7 @@ import pytest
 import glrmask
 
 def test_error_base_and_syntax():
-    assert issubclass(glrmask.GLRMaskError, ValueError)
+    assert glrmask.GLRMaskError.__base__ is Exception
     with pytest.raises(glrmask.GLRMaskError) as exc:
         glrmask.Grammar.from_glrm("start s nt s = )")
     assert exc.value.kind == "syntax"

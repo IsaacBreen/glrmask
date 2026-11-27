@@ -26,7 +26,7 @@ assert state.commit_bytes(b"weather")
 | | From IDs | From ranges |
 |---|---|---|
 | Rust | `TokenSet::new([1, 2, 3])` | `TokenSet::from_ranges([0..10])` or `[0..=9]` |
-| Python | `TokenSet([1, 2, 3])` | `TokenSet.from_ranges([range(0, 10)])` |
+| Python | `TokenSet([1, 2, 3])` | `TokenSet([range(0, 10)])` |
 | Node.js | `new TokenSet([1, 2, 3])` | `TokenSet.fromRanges([{start: 0, end: 10}])` |
 | C | `glrmask_token_set_new` | `glrmask_token_set_from_ranges`, with `{start, end}` |
 | C++ | `TokenSet({1, 2, 3})` | `TokenSet::from_ranges({{0, 10}})` |

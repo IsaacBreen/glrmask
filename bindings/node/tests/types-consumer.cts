@@ -54,3 +54,13 @@ module.bind("slot", 1);
 g.compileSync(v, {maskStrategy: 'parser-dwa'});
 // @ts-expect-error No tuning object in stable API.
 g.compileSync(v, {maskStrategy: {kind:'token-trie'}});
+
+
+// @ts-expect-error Removed batch commitment.
+s.commitTokens([1]);
+// @ts-expect-error Removed record binding.
+module.bind({slot:g});
+// @ts-expect-error Removed record binding.
+g.bind({slot:g});
+// @ts-expect-error null is not a mask strategy.
+g.compileSync(v,{maskStrategy:null});

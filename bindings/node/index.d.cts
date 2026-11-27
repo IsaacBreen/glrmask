@@ -35,8 +35,6 @@ export declare class Grammar implements Disposable {
 
   /** Throws if the extern is undeclared, already bound or the wrong kind. */
   bind(name: string, value: GrammarBindValue): void;
-  /** If one fails, none are bound. */
-  bind(bindings: Record<string, GrammarBindValue>): void;
   /** Compiles the grammar into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
   /** Compiles the grammar into a constraint. */
@@ -107,10 +105,8 @@ export declare class Module implements Disposable {
 
   /** Throws if the extern is undeclared, already bound or the wrong kind. */
   bind(name: string, value: ExprPart): void;
-  /** If one fails, none are bound. */
-  bind(bindings: Record<string, ExprPart>): void;
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
-  /** Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`. */
+  /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
   /** Finishes compiling the module into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
@@ -140,9 +136,9 @@ export declare class Constraint implements Disposable {
   save(): Promise<Uint8Array>;
 
   saveSync(): Uint8Array;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   clone(): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
@@ -156,14 +152,13 @@ export declare class ConstraintState implements Disposable {
 
   /** Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`. */
   mask(): Uint32Array;
-  /** Like `mask()`, but writes the words into `output`. Extra words are set to 0. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
+  /** Like `mask()`, but writes the words into `output`. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
   /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
   /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;
-  /** Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed. */
-  commitTokens(ids: Iterable<number> | Uint32Array): number;
+
   /** Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. */
   commitBytes(bytes: Uint8Array): boolean;
   /** The bytes that must come next. */

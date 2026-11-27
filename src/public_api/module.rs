@@ -637,7 +637,7 @@ impl Module {
         Ok(())
     }
 
-    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
+    /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.precompile_with(vocab, CompileOptions::default())
     }

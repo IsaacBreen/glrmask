@@ -59,7 +59,8 @@ def test_local_precompilation_and_root_only_compile():
     parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
     root = g.Module(g.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
-    root.bind(BODY=parent, END=g.TokenSet([63]))
+    root.bind('BODY', parent)
+    root.bind('END', g.TokenSet([63]))
     state = root.compile(v, mask_strategy=g.MaskStrategy.FAST_MASKS).start()
     assert not token_allowed(state.mask(), 63)
     assert state.commit_token(4)
@@ -110,17 +111,17 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
     incompatible = g.Module(source())
     incompatible.precompile(vocab(True))
     for name, child in [('missing', source()), ('child::MARK', g.TokenSet([8])), ('child', incompatible)]:
-        with pytest.raises(ValueError):
+        with pytest.raises(g.GLRMaskError):
             parent.bind(name, child)
         assert parent.save() == before
     parent.bind('child', source())
     before = parent.save()
-    with pytest.raises(ValueError, match="already bound"):
+    with pytest.raises(g.GLRMaskError, match="already bound"):
         parent.bind('child', source('b'))
     assert parent.save() == before
     accepts(parent, v, [4])
     token_parent = g.Module(g.Grammar.from_glrm(MARK))
-    with pytest.raises(ValueError):
+    with pytest.raises(g.GLRMaskError):
         token_parent.bind('MARK', source())
     assert list(token_parent.externs.unbound) == ['MARK']
     token_parent.bind('MARK', g.TokenSet([62]))
@@ -166,12 +167,12 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
     parent = g.Module(source())
     parent.precompile(v)
     before = parent.save()
-    with pytest.raises(ValueError):
+    with pytest.raises(g.GLRMaskError):
         parent.precompile(vocab(True))
     assert parent.save() == before
     assert g.Module.load(before) is not None
     for data in [b'', b'GLRASM01bad', before[:-1]]:
-        with pytest.raises(ValueError):
+        with pytest.raises(g.GLRMaskError):
             g.Module.load(data)
     target = g.Module(g.Grammar.from_glrm(MARK))
     target.bind('MARK', g.TokenSet([99]))
@@ -210,18 +211,18 @@ def test_expression_whole_token_crosses_boundaries():
 
 def test_open_child_rejection_at_bind_and_expr():
     open_leaf = g.Module(g.Grammar.from_glrm(MARK))
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(g.GLRMaskError, match="unbound externs"):
         g.Expr.choice(open_leaf)
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(g.GLRMaskError, match="unbound externs"):
         g.Expr.sequence(open_leaf)
     parent = g.Module(g.Grammar.from_glrm(HOST))
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(g.GLRMaskError, match="unbound externs"):
         parent.bind('child', open_leaf)
 
 
 def test_self_attachment_rejected_when_open():
     module = g.Module(g.Grammar.from_glrm(HOST))
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(g.GLRMaskError, match="unbound externs"):
         module.bind('child', module)
 
 def test_externs_are_snapshots():
@@ -260,7 +261,8 @@ def test_stronger_preparation_survives_fast_compile():
     expected = fresh.compile(v, mask_strategy=g.MaskStrategy.FAST_MASKS)
     for ids in [[], [0], [0, 1], [0, 1, 3], [4]]:
         a, b = actual.start(), expected.start()
-        assert a.commit_tokens(ids) == b.commit_tokens(ids) == len(ids)
+        for token_id in ids:
+            assert a.commit_token(token_id) and b.commit_token(token_id)
         assert list(a.mask()) == list(b.mask())
         assert a.is_accepting() == b.is_accepting()
 

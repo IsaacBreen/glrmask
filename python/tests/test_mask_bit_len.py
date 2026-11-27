@@ -33,7 +33,7 @@ def test_mask_domain(n):
         s.fill_mask(dense)
     if w:
         buf = np.full(w-1, 0xffffffff, dtype=np.uint32)
-        with pytest.raises(ValueError):
+        with pytest.raises(glrmask.GLRMaskError):
             s.fill_mask(buf)
         assert np.all(buf == 0xffffffff)
         assert s.commit_token(n-1)

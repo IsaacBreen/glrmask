@@ -85,7 +85,7 @@ pub(super) struct PyTokenSet {
 fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::RangeInclusive<u32>>) -> PyResult<()> {
     let range_type = value.py().import("builtins")?.getattr("range")?;
     if !value.is_instance(&range_type)? {
-        return Err(PyTypeError::new_err("TokenSet.from_ranges expects range objects"));
+        return Err(PyTypeError::new_err("TokenSet expects integers or ranges"));
     }
     if !value.is_truthy()? {
         return Ok(());
@@ -116,23 +116,25 @@ impl PyTokenSet {
     #[new]
     #[pyo3(signature = (ids, /))]
     fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let ids = ids
-            .try_iter()?
-            .map(|item| item?.extract::<u32>().and_then(check_token_id))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(Self {
-            inner: glrmask::TokenSet::new(ids),
-        })
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (ranges, /))]
-    fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let mut normalized = Vec::new();
-        for item in ranges.try_iter()? {
-            python_range(&item?, &mut normalized)?;
+        let range_type = ids.py().import("builtins")?.getattr("range")?;
+        let mut ranges = Vec::new();
+        if ids.is_instance(&range_type)? {
+            python_range(ids, &mut ranges)?;
+        } else {
+            for item in ids.try_iter()? {
+                let item = item?;
+                if item.is_instance(&range_type)? {
+                    python_range(&item, &mut ranges)?;
+                } else {
+                    if item.is_instance_of::<pyo3::types::PyBool>() {
+                        return Err(PyTypeError::new_err("TokenSet expects integers or ranges, not bool"));
+                    }
+                    let id = check_token_id(item.extract::<u32>()?)?;
+                    ranges.push(id..=id);
+                }
+            }
         }
-        Ok(Self { inner: glrmask::TokenSet::from_ranges(normalized) })
+        Ok(Self { inner: glrmask::TokenSet::from_ranges(ranges) })
     }
 
     fn __repr__(&self) -> String {
@@ -151,7 +153,7 @@ impl PyTokenSet {
                 .iter()
                 .map(|&(start, end)| format!("range({start}, {})", u64::from(end) + 1))
                 .collect();
-            format!("TokenSet.from_ranges([{}])", listed.join(", "))
+            format!("TokenSet([{}])", listed.join(", "))
         }
     }
 
@@ -254,39 +256,16 @@ impl PyGrammar {
         })
     }
 
-    /// Binds externs by name. If one fails, none are bound.
-    #[pyo3(signature = (*args, **kwargs))]
-    fn bind(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<()> {
-        let request = canonical::bind_arguments(args, kwargs, "Grammar.bind")?;
-        let mut bindings = Vec::with_capacity(match &request {
-            canonical::BindArguments::Single(..) => 1,
-            canonical::BindArguments::Many(items) => items.len(),
-        });
-        match request {
-            canonical::BindArguments::Single(name, value) => {
-                bindings.push((name, canonical::extract_grammar_binding(&value)?));
-            }
-            canonical::BindArguments::Many(items) => {
-                for (name, value) in items {
-                    bindings.push((name, canonical::extract_grammar_binding(&value)?));
-                }
-            }
-        }
+    /// Binds an extern by name.
+    #[pyo3(signature = (name, value, /))]
+    fn bind(slf: &Bound<'_, Self>, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let binding = canonical::extract_grammar_binding(value)?;
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.inner.clone();
-        let next = py
-            .detach(move || {
-                for (name, binding) in bindings {
-                    binding.bind(&mut next, &name)?;
-                }
-                Ok::<_, glrmask::Error>(next)
-            })
-            .map_err(api_error)?;
+        let next = py.detach(move || {
+            binding.bind(&mut next, &name)?;
+            Ok::<_, glrmask::Error>(next)
+        }).map_err(api_error)?;
         target.replace(py, next);
         Ok(())
     }
@@ -300,16 +279,16 @@ impl PyGrammar {
     }
 
     /// Compiles the grammar into a constraint.
-    #[pyo3(signature = (vocab, *, mask_strategy = None))]
+    #[pyo3(signature = (vocab, *, mask_strategy = PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
-        mask_strategy: Option<&Bound<'_, PyAny>>,
+        mask_strategy: PyMaskStrategy,
     ) -> PyResult<PyConstraint> {
         let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
-        let options = canonical::compile_options(mask_strategy)?;
+        let options = canonical::compile_options(mask_strategy);
         py.detach(move || {
             let module = glrmask::Module::new(&grammar);
             module.compile_with(&vocab, options)

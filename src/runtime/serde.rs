@@ -5903,7 +5903,7 @@ impl Constraint {
         bytes
     }
 
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,

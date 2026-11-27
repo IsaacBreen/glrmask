@@ -30,7 +30,7 @@ def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
     assert list(alias.externs.unbound) == []
     assert list(untouched.externs.unbound) == ["M"]
     for name, value in [("M", glrmask.TokenSet([29])), ("absent", glrmask.TokenSet([17]))]:
-        with pytest.raises(ValueError):
+        with pytest.raises(glrmask.GLRMaskError):
             grammar.bind(name, value)
         assert list(grammar.externs.unbound) == []
     for method in [lambda x: x.copy(), copy.copy, copy.deepcopy]:

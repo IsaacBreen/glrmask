@@ -6,7 +6,7 @@
 int main(void) {
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==6);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
+    CHECK(glrmask_abi_version()==7);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_INPUT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,&vocab)==GLRMASK_OK);
     {
@@ -58,14 +58,17 @@ int main(void) {
             glrmask_state_free(probe);
             for(size_t rejection=0;rejection<3;rejection++){
                 uint32_t terminated=0,accepting=0;
-                const uint32_t ids[]={1,0};
                 CHECK(glrmask_constraint_start(constraint,&probe)==GLRMASK_OK);
                 CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==0);
                 if(rejection==0){CHECK(!glrmask_state_commit_token(probe,1));}
-                else if(rejection==1){CHECK(glrmask_state_commit_tokens(probe,ids,2)==0);}
+                else if(rejection==1){CHECK(!glrmask_state_commit_token(probe,65));}
                 else{CHECK(!glrmask_state_commit_bytes(probe,(const uint8_t*)"z",1));}
                 CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==1);
                 CHECK(glrmask_state_is_accepting(probe,&accepting)==GLRMASK_OK && accepting==0);
+                CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[0]==0 && words[1]==0);
+                CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
+                CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==0);
+                glrmask_bytes_free(forced); forced=NULL;
                 CHECK(!glrmask_state_commit_token(probe,0));
                 glrmask_state_free(probe);
             }
@@ -178,7 +181,6 @@ int main(void) {
     CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
     CHECK(!glrmask_state_commit_token(NULL,0));CHECK(strlen(glrmask_error_message())>0);
     CHECK(!glrmask_state_commit_token(copy,0));CHECK(strlen(glrmask_error_message())==0);
-    CHECK(glrmask_state_commit_tokens(NULL,NULL,0)==0);CHECK(strlen(glrmask_error_message())>0);
     CHECK(!glrmask_state_commit_bytes(NULL,NULL,0));CHECK(strlen(glrmask_error_message())>0);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;

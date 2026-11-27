@@ -9,7 +9,7 @@
 - Vocab has one constructor from IDs to bytes. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result`; duplicate IDs or IDs above the maximum return `InvalidInput` instead of panicking. Python uses `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
 - Token IDs range from 0 to 16,777,215 (2^24 - 1, Rust `MAX_TOKEN_ID`). Larger IDs in vocabularies, token sets or bindings return an error instead of risking a failed allocation that aborts the process. Rust open-ended TokenSet ranges such as `5..` end at `MAX_TOKEN_ID`.
 - Rust: `ConstraintState` owns its constraint, has no lifetime parameter and can be stored or moved freely. `ExternKind` is re-exported from the public grammar crate.
-- `commit_tokens` returns the number of tokens committed before the first failure, not a Boolean. Committing a token ID never raises or throws; an ID absent from the vocabulary or otherwise invalid makes the commit return false.
+- Batch token commitment is removed from the 1.0 public API. Committing an integer ID that cannot be admitted returns false and terminates the state.
 
 ### Masks
 
@@ -36,7 +36,7 @@
 
 ### C ABI and C++
 
-- C ABI revision 6 rejects the old hard-selector codes and reserves the former tuning fields. C and C++ no longer expose direct Grammar token-set binding.
+- C ABI revision 7 removes batch token commitment; revision 6 rejects the old hard-selector codes and reserves the former tuning fields. C and C++ no longer expose direct Grammar token-set binding.
 - C single-token and byte commits return `bool`, batch commits return a count, and `GLRMASK_REJECTED` is removed.
 - C status codes are 0 (OK), 1 (Syntax), 2 (InvalidInput), 3 (Compilation), 4 (ResourceLimit), 5 (StrategyUnsupported), 6 (Serialization), 7 (Internal), 8 (BufferTooSmall) and 9 (Closed).
 

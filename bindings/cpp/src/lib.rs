@@ -90,7 +90,7 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 6 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 7 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
 
@@ -227,9 +227,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> bool {
     commit(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> usize {
-    commit(|| unsafe { write(p)?.0.commit_tokens(input(ids, n)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> bool {
     commit(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })

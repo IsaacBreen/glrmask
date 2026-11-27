@@ -24,44 +24,38 @@ def test_out_of_range_token_id_fails_closed(bad):
     assert state.commit_token(0) is False
 
 
-@pytest.mark.parametrize("bad", _BAD_IDS)
-def test_out_of_range_token_id_in_list_fails_closed(bad):
-    state = _constraint().start()
-    assert state.commit_tokens([0, bad]) == 1
-    assert state.is_accepting() is False
-    assert state.is_terminated() is True
-    assert state.commit_tokens([0]) == 0
 
 
 def test_non_integer_token_id_is_a_type_error():
     state = _constraint().start()
     with pytest.raises(TypeError):
         state.commit_token("0")
-    with pytest.raises(TypeError):
-        state.commit_tokens([0, "1"])
 
 
 def test_special_tokens_are_explicit():
     for atom in ("<[1]>", "<[1,3-8]>", "<[]>", "<[^0]>", "<[*]>", "@token(7)"):
-        with pytest.raises(ValueError, match="token IDs can't appear in grammar source"):
+        with pytest.raises(glrmask.GLRMaskError, match="token IDs can't appear in grammar source"):
             glrmask.Grammar.from_lark("start: " + atom)
 
     body = glrmask.Vocab({0: b"a", 1: b"a"})
     module = glrmask.Module(glrmask.Grammar.from_lark("start: <|begin|> <|body|>"))
-    module.bind(begin=glrmask.TokenSet([99]), body=glrmask.TokenSet([1]))
+    module.bind('begin', glrmask.TokenSet([99]))
+    module.bind('body', glrmask.TokenSet([1]))
     state = module.compile(body).start()
     assert token_allowed(state.mask(), 99) and not token_allowed(state.mask(), 0)
     assert state.commit_token(99)
     assert token_allowed(state.mask(), 1) and not token_allowed(state.mask(), 0)
     assert state.commit_token(1)
     assert state.is_accepting()
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         glrmask.Grammar.from_lark("start: <|missing|>").compile(body)
 
-def test_batch_counts_prefix_and_preserves_original_copy():
+def test_rejection_preserves_original_copy():
     original = glrmask.Grammar.from_lark('start: "a" "a" "a" "a" "a"').compile(_vocab()).start()
     copy = original.copy()
-    assert copy.commit_tokens([0, 0, 1, 0, 0]) == 2
+    assert copy.commit_token(0)
+    assert copy.commit_token(0)
+    assert not copy.commit_token(1)
     assert copy.is_terminated()
     assert not original.is_terminated()
     assert not original.is_accepting()

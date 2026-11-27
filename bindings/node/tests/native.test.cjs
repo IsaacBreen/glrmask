@@ -241,14 +241,15 @@ test('out-of-range token IDs fail closed instead of throwing',()=>{
     assert.equal(s.isTerminated(),true);
     assert.equal(s.commitToken(0),false);
     const list=simple().compileSync(v).start();
-    assert.equal(list.commitTokens([0,bad]),1);
+    assert.equal(list.commitToken(0),true);
+    assert.equal(list.commitToken(bad),false);
     assert.equal(list.isAccepting(),false);
     assert.equal(list.isTerminated(),true);
     assert.equal(list.commitToken(0),false);
   }
   const s=simple().compileSync(v).start();
   assert.throws(()=>s.commitToken('0'),TypeError);
-  assert.throws(()=>s.commitTokens([0,'1']),TypeError);
+  assert.equal(s.commitTokens,undefined);
   const ok=simple().compileSync(v).start();
   assert.equal(ok.commitToken(0),true);
   assert.equal(ok.commitToken(1),true);
@@ -303,14 +304,24 @@ test('rejected commits terminate live states for every strategy',()=>{
   for(const {options} of strategies) {
     const c=simple().compileSync(vocab(),options);
     for(const [reject,expected] of [[s=>s.commitToken(65),false],
-                                   [s=>s.commitTokens([0,65,1]),1],
+                                   [s=>{assert.ok(s.commitToken(0));return s.commitToken(65);},false],
                                    [s=>s.commitBytes(b('az')),false]]) {
       const s=c.start();
       assert.equal(s.isTerminated(),false);
       assert.equal(reject(s),expected);
       assert.equal(s.isTerminated(),true);
       assert.equal(s.isAccepting(),false);
+      assert.ok(s.mask().every(w=>w===0));
+      assert.equal(s.forcedBytes().length,0);
       assert.equal(s.commitToken(1),false);
     }
   }
+});
+
+
+test('removed record bind and null mask strategy are rejected',()=>{
+  const g=Grammar.fromGlrm('extern grammar A start r nt r=A');
+  const m=new Module(g);
+  for(const obj of [g,m]) assert.throws(()=>obj.bind({A:simple()}),TypeError);
+  assert.throws(()=>simple().compileSync(vocab(),{maskStrategy:null}),TypeError);
 });

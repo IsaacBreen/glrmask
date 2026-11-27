@@ -28,7 +28,8 @@ async function main() {
     start call
     nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
   `));
-  call.bind({ WEATHER_ARGS: weather, SEARCH_ARGS: search });
+  call.bind("WEATHER_ARGS", weather);
+  call.bind("SEARCH_ARGS", search);
   const constraint = await call.compile(vocab);
 
   const accepted = constraint.start();

@@ -15,42 +15,18 @@ def vocab():
     return glrmask.Vocab({0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 5: b"xb", 63: b""})
 
 
-def test_atomic_kwargs_bind():
-    m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
-    # Valid atomic keyword bind
-    m.bind(A=glrmask.TokenSet([1]), B=glrmask.Grammar.from_lark('start: "b"'))
-    assert len(m.externs.unbound) == 0
-
-    # Failed atomic keyword bind: second argument is invalid
-    m2 = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
-    saved = m2.save()
-    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
-    with pytest.raises(ValueError, match="unbound externs"):
-        m2.bind(A=glrmask.TokenSet([1]), B=open_child)
-    # On error, m2 must be completely unchanged; A was not bound!
-    assert m2.save() == saved
-    assert "A" in m2.externs.unbound
-    assert "B" in m2.externs.unbound
-
-    # Mixing positional and keyword arguments is a TypeError
-    with pytest.raises(TypeError, match="mix"):
-        m2.bind("A", glrmask.TokenSet([1]), B=glrmask.Grammar.from_lark('start: "b"'))
-
-    # Zero arguments is a TypeError
-    with pytest.raises(TypeError):
-        m2.bind()
 
 
 def test_rebinding_error():
     m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
     m.bind("A", glrmask.TokenSet([1]))
-    with pytest.raises(ValueError, match="already bound"):
+    with pytest.raises(glrmask.GLRMaskError, match="already bound"):
         m.bind("A", glrmask.TokenSet([1]))
 
 
 def test_qualified_paths_rejected():
     m = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
-    with pytest.raises(ValueError, match="there is no extern named"):
+    with pytest.raises(glrmask.GLRMaskError, match="there is no extern named"):
         m.bind("child::sub", glrmask.Grammar.from_lark('start: "a"'))
 
 
@@ -58,12 +34,12 @@ def test_open_child_rejected():
     open_child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
     parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     # Binding open child to parent raises ValueError
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound externs"):
         parent.bind("child", open_child)
     # Expr.choice / sequence with open child raises ValueError immediately
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound externs"):
         glrmask.Expr.choice(open_child, glrmask.Grammar.from_lark('start: "a"'))
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound externs"):
         glrmask.Expr.sequence(open_child)
 
 

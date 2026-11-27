@@ -70,7 +70,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
                 assert actual.is_accepting() and not actual.mask().any()
                 assert not actual.mask().any()
     wrong_vocab = glrmask.Vocab({0: b"b", 1: b"ab", 2: b"a", 3: b""})
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         glrmask.Constraint.load(external, wrong_vocab)
     with pytest.raises(TypeError):
         constraint.save(True)
@@ -82,7 +82,7 @@ def test_composed_grammar_with_automatic_boundaries(mode):
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
     child = glrmask.Module(glrmask.Grammar.from_lark('start: "a"'))
     module = glrmask.Module(grammar)
-    with pytest.raises(ValueError, match="unbound"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound"):
         module.compile(vocab, **mode)
     with pytest.raises(TypeError):
         module.compile(vocab, boundary_mask_strategy="EXACT")

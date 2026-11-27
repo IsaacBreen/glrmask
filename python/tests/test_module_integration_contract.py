@@ -66,7 +66,7 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     token_slot = glrmask.Module(glrmask.Grammar.from_glrm(
         "glrm 1; start s; extern token EVENT; nt s=EVENT;"
     ))
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         token_slot.bind("EVENT", source("a"))
     assert list(token_slot.externs.unbound) == ["EVENT"]
 
@@ -78,8 +78,8 @@ def test_invalid_target_and_artifact_are_not_accepted_silently():
     data = m.save()
     different = glrmask.Vocab({0: b"b", 1: b"a"})
     assert glrmask.Module.load(data) is not None
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         m.compile(different)
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         glrmask.Module.load(b"not a module")
     assert m.save() == data

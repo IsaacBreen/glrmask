@@ -56,13 +56,11 @@ print(bytes(output).decode())  # e.g. {"color": "blue"}
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://glrmask.com/api/python/)
 """
 from __future__ import annotations
-from collections.abc import Iterator, Mapping, KeysView, ValuesView, ItemsView
+from collections.abc import Mapping
 from types import ModuleType
-from typing import Any, ClassVar, Iterable, Literal, Sequence, TypeVar, final, overload
+from typing import Any, ClassVar, Iterable, Literal, final
 import numpy as np
 from numpy.typing import NDArray
-
-_T = TypeVar("_T")
 
 _internal: ModuleType
 
@@ -109,19 +107,14 @@ class Grammar:
     @property
     def externs(self) -> Externs:
         ...
-    @overload
     def bind(self, name: str, value: Grammar | Expr, /) -> None:
-        """Binds externs by name. If one fails, none are bound."""
-        ...
-    @overload
-    def bind(self, **bindings: Grammar | Expr) -> None:
-        """Binds externs by name. If one fails, none are bound."""
+        """Binds an extern by name."""
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | None = None,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
     ) -> Constraint:
         """Compiles the grammar into a constraint."""
         ...
@@ -151,10 +144,7 @@ class Expr:
 @final
 class TokenSet:
     """A set of token IDs."""
-    def __init__(self, ids: Iterable[int], /) -> None:
-        ...
-    @staticmethod
-    def from_ranges(ranges: Iterable[range], /) -> TokenSet:
+    def __init__(self, ids: Iterable[int | range], /) -> None:
         ...
     def __repr__(self) -> str:
         ...
@@ -169,27 +159,22 @@ class Module:
     @property
     def externs(self) -> Externs:
         ...
-    @overload
     def bind(self, name: str, value: Grammar | Module | Expr | TokenSet, /) -> None:
-        """Binds externs by name. If one fails, none are bound."""
-        ...
-    @overload
-    def bind(self, **bindings: Grammar | Module | Expr | TokenSet) -> None:
-        """Binds externs by name. If one fails, none are bound."""
+        """Binds an extern by name."""
         ...
     def precompile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | None = None,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
     ) -> None:
-        """Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`."""
+        """Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`."""
         ...
     def compile(
         self,
         vocab: Vocab,
         *,
-        mask_strategy: MaskStrategy | None = None,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
     ) -> Constraint:
         """Finishes compiling the module into a constraint."""
         ...
@@ -221,7 +206,7 @@ class Constraint:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with."""
+        """May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with."""
         ...
 
 @final
@@ -232,7 +217,7 @@ class ConstraintState:
         """Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead."""
         ...
     def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
-        """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
+        """Like `mask()`, but writes the words into `bitmask`. Releases the GIL."""
         ...
     @property
     def mask_bit_len(self) -> int:
@@ -240,9 +225,6 @@ class ConstraintState:
         ...
     def commit_token(self, token_id: int, /) -> bool:
         """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""
-        ...
-    def commit_tokens(self, token_ids: Sequence[int], /) -> int:
-        """Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
         """Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state."""
@@ -279,23 +261,6 @@ class Externs(Mapping[str, "Extern"]):
     @property
     def unbound(self) -> Externs:
         ...
-    def __getitem__(self, key: str, /) -> Extern:
-        ...
-    def __iter__(self) -> Iterator[str]:
-        ...
-    def __len__(self) -> int:
-        ...
-    @overload
-    def get(self, key: str, /) -> Extern | None:
-        ...
-    @overload
-    def get(self, key: str, default: Extern | _T | None, /) -> Extern | _T: ...
-    def keys(self) -> KeysView[str]:
-        ...
-    def values(self) -> ValuesView[Extern]:
-        ...
-    def items(self) -> ItemsView[str, Extern]:
-        ...
     def __repr__(self) -> str:
         ...
     def __eq__(self, other: object, /) -> bool:
@@ -315,6 +280,6 @@ class Extern:
     def __eq__(self, other: object, /) -> bool:
         ...
 
-class GLRMaskError(ValueError):
+class GLRMaskError(Exception):
     kind: str
     """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`."""

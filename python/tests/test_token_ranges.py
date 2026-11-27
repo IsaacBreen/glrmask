@@ -30,30 +30,30 @@ def accepted_ids(state):
 
 
 def test_range_inputs_are_normalized_to_one_set():
-    tokens = glrmask.TokenSet.from_ranges([range(20, 40), range(10, 25), range(40, 50), range(90, 95)])
-    assert tokens == glrmask.TokenSet.from_ranges([range(10, 50), range(90, 95)])
-    assert repr(tokens) == "TokenSet.from_ranges([range(10, 50), range(90, 95)])"
-    assert glrmask.TokenSet.from_ranges(r for r in [range(3, 5), range(5, 9)]) == glrmask.TokenSet.from_ranges([range(3, 9)])
-    assert glrmask.TokenSet(iter([8, 3, 4, 5])) == glrmask.TokenSet.from_ranges([range(3, 6), range(8, 9)])
+    tokens = glrmask.TokenSet([range(20, 40), range(10, 25), range(40, 50), range(90, 95)])
+    assert tokens == glrmask.TokenSet([range(10, 50), range(90, 95)])
+    assert repr(tokens) == "TokenSet([range(10, 50), range(90, 95)])"
+    assert glrmask.TokenSet(r for r in [range(3, 5), range(5, 9)]) == glrmask.TokenSet([range(3, 9)])
+    assert glrmask.TokenSet(iter([8, 3, 4, 5])) == glrmask.TokenSet([range(3, 6), range(8, 9)])
     assert glrmask.TokenSet(range(4)) != glrmask.TokenSet(range(5))
 
 
 def test_stepped_ranges():
-    assert glrmask.TokenSet.from_ranges([range(0, 10, 3)]) == glrmask.TokenSet([0, 3, 6, 9])
-    assert glrmask.TokenSet.from_ranges([range(9, -1, -3), range(1, 3)]) == glrmask.TokenSet([0, 1, 2, 3, 6, 9])
-    assert glrmask.TokenSet.from_ranges([range(10, 0, 2), range(3, 4, 10**100)]) == glrmask.TokenSet([3])
+    assert glrmask.TokenSet([range(0, 10, 3)]) == glrmask.TokenSet([0, 3, 6, 9])
+    assert glrmask.TokenSet([range(9, -1, -3), range(1, 3)]) == glrmask.TokenSet([0, 1, 2, 3, 6, 9])
+    assert glrmask.TokenSet([range(10, 0, 2), range(3, 4, 10**100)]) == glrmask.TokenSet([3])
 
 
 @pytest.mark.parametrize("ranges", [[(2, 10)], [range(-1, 10, 3)], [range(0, 2**24 + 1, 2)]])
 def test_invalid_compact_ranges_are_rejected(ranges):
-    with pytest.raises((ValueError, TypeError, OverflowError)):
-        glrmask.TokenSet.from_ranges(ranges)
+    with pytest.raises((glrmask.GLRMaskError, TypeError, OverflowError)):
+        glrmask.TokenSet(ranges)
 
 
 def test_empty_and_reversed_ranges_contribute_nothing():
-    assert glrmask.TokenSet.from_ranges([range(0)]) == glrmask.TokenSet([])
-    assert glrmask.TokenSet.from_ranges([range(7, 2)]) == glrmask.TokenSet([])
-    assert glrmask.TokenSet.from_ranges([range(3, 3), range(5, 5)]) == glrmask.TokenSet([])
+    assert glrmask.TokenSet([range(0)]) == glrmask.TokenSet([])
+    assert glrmask.TokenSet([range(7, 2)]) == glrmask.TokenSet([])
+    assert glrmask.TokenSet([range(3, 3), range(5, 5)]) == glrmask.TokenSet([])
 
 
 def test_range_construction_normalizes():
@@ -61,19 +61,19 @@ def test_range_construction_normalizes():
     grammar = glrmask.Grammar.from_glrm(ONE)
     # A token set is IDs only; IDs the vocabulary does not define are allowed in
     # the set and simply never match any text.
-    for value in [glrmask.TokenSet(range(4)), glrmask.TokenSet.from_ranges([range(1, 4)])]:
+    for value in [glrmask.TokenSet(range(4)), glrmask.TokenSet([range(1, 4)])]:
         assert _bound_snapshot(grammar, "T", value).compile(v) is not None
     assert glrmask.TokenSet([1, 1]) == glrmask.TokenSet([1])
     assert _bound_snapshot(grammar, "T", glrmask.TokenSet([])).compile(v) is not None
-    assert _bound_snapshot(grammar, "T", glrmask.TokenSet.from_ranges([])).compile(v) is not None
-    assert glrmask.TokenSet.from_ranges([range(0, 2), range(3, 4)]) == glrmask.TokenSet([0, 1, 3])
+    assert _bound_snapshot(grammar, "T", glrmask.TokenSet([])).compile(v) is not None
+    assert glrmask.TokenSet([range(0, 2), range(3, 4)]) == glrmask.TokenSet([0, 1, 3])
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
     source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
-    module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", glrmask.TokenSet(range(10, 31))), "B", glrmask.TokenSet.from_ranges([range(20, 41), range(70, 81)]))
+    module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", glrmask.TokenSet(range(10, 31))), "B", glrmask.TokenSet([range(20, 41), range(70, 81)]))
     c = module.compile(v, **mode)
     for first in (10, 20, 30):
         state = c.start()
@@ -90,13 +90,13 @@ def test_deferred_range_binding_and_serialization():
     v = vocab()
     module = glrmask.Module(glrmask.Grammar.from_glrm(ONE))
     module.precompile(v)
-    bound = _bound_snapshot(module, "T", glrmask.TokenSet.from_ranges([range(3, 9), range(90, 100)]))
+    bound = _bound_snapshot(module, "T", glrmask.TokenSet([range(3, 9), range(90, 100)]))
     expected = set(range(3, 9)) | set(range(90, 100))
     loaded = glrmask.Module.load(bound.save())
     for mode in MODES:
         constraint = loaded.compile(v, **mode)
         assert accepted_ids(constraint.start()) == expected
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         module.compile(v)
 
 
@@ -106,7 +106,7 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
     # Empty byte spellings still denote distinct exact model-token events.
     v = glrmask.Vocab({i: b"" for i in range(n)})
     for tokens, excluded in [(glrmask.TokenSet(range(n)), None),
-                             (glrmask.TokenSet.from_ranges([range(0, 65_535), range(65_536, n)]), 65_535)]:
+                             (glrmask.TokenSet([range(0, 65_535), range(65_536, n)]), 65_535)]:
         module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
         constraint = module.compile(v, **mode)
         state = constraint.start()
@@ -149,7 +149,7 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
             compact.precompile(v)
             pointwise.precompile(v)
         for name, ranges in selections.items():
-            compact = _bound_snapshot(compact, name, glrmask.TokenSet.from_ranges(ranges))
+            compact = _bound_snapshot(compact, name, glrmask.TokenSet(ranges))
             oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
             pointwise = _bound_snapshot(pointwise, name, oracle)
         actual = compact.compile(v, **mode)
@@ -201,7 +201,8 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = glrmask.Module(grammar)
-    grammar.bind(A=glrmask.TokenSet(a), B=glrmask.TokenSet(b))
+    grammar.bind('A', glrmask.TokenSet(a))
+    grammar.bind('B', glrmask.TokenSet(b))
     constraint = _module_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, **mode)
     state = constraint.start()
     assert state.commit_token(0)

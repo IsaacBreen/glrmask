@@ -368,58 +368,8 @@ pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<Gram
     ))
 }
 
-/// The positional-or-keyword forms shared by `Grammar.bind` and `Module.bind`.
-pub(super) enum BindArguments<'py> {
-    Single(String, Bound<'py, PyAny>),
-    Many(Vec<(String, Bound<'py, PyAny>)>),
-}
-
-pub(super) fn bind_arguments<'py>(
-    args: &Bound<'py, pyo3::types::PyTuple>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
-    method: &str,
-) -> PyResult<BindArguments<'py>> {
-    let has_args = !args.is_empty();
-    let has_kwargs = kwargs.map_or(false, |kw| !kw.is_empty());
-
-    if has_args && has_kwargs {
-        return Err(PyTypeError::new_err(format!(
-            "cannot mix positional and keyword arguments in {method}",
-        )));
-    }
-    if !has_args && !has_kwargs {
-        return Err(PyTypeError::new_err(format!(
-            "{method} expects either positional (name, value) or keyword bindings",
-        )));
-    }
-
-    if has_args {
-        if args.len() != 2 {
-            return Err(PyTypeError::new_err(format!(
-                "{method} positional form takes exactly 2 arguments (name, value), got {}",
-                args.len()
-            )));
-        }
-        let name: String = args.get_item(0)?.extract()?;
-        return Ok(BindArguments::Single(name, args.get_item(1)?));
-    }
-
-    let kwargs = kwargs.unwrap();
-    let mut bindings = Vec::with_capacity(kwargs.len());
-    for (key, val) in kwargs.iter() {
-        let name: String = key
-            .extract()
-            .map_err(|_| PyTypeError::new_err("binding names must be strings"))?;
-        bindings.push((name, val));
-    }
-    Ok(BindArguments::Many(bindings))
-}
-
-pub(super) fn compile_options(
-    mask_strategy: Option<&Bound<'_, PyAny>>,
-) -> PyResult<glrmask::CompileOptions> {
-    let mask_strategy = super::resolve_mask_strategy(mask_strategy)?;
-    Ok(glrmask::CompileOptions::default().mask_strategy(mask_strategy))
+pub(super) fn compile_options(mask_strategy: super::PyMaskStrategy) -> glrmask::CompileOptions {
+    glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::from(mask_strategy))
 }
 
 #[pymethods]
@@ -433,53 +383,30 @@ impl PyModule {
         Ok(Self::from_inner(glrmask::Module::new(&grammar.inner)))
     }
 
-    /// Binds externs by name. If one fails, none are bound.
-    #[pyo3(signature = (*args, **kwargs))]
-    fn bind(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<()> {
-        let request = bind_arguments(args, kwargs, "Module.bind")?;
-        let mut bindings = Vec::with_capacity(match &request {
-            BindArguments::Single(..) => 1,
-            BindArguments::Many(items) => items.len(),
-        });
-        match request {
-            BindArguments::Single(name, value) => {
-                bindings.push((name, extract_binding(&value)?));
-            }
-            BindArguments::Many(items) => {
-                for (name, value) in items {
-                    bindings.push((name, extract_binding(&value)?));
-                }
-            }
-        }
+    /// Binds an extern by name.
+    #[pyo3(signature = (name, value, /))]
+    fn bind(slf: &Bound<'_, Self>, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let binding = extract_binding(value)?;
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
-        let next = py
-            .detach(move || {
-                for (name, binding) in bindings {
-                    next.bind(&name, binding)?;
-                }
-                Ok::<_, glrmask::Error>(next)
-            })
-            .map_err(api_error)?;
+        let next = py.detach(move || {
+            next.bind(&name, binding)?;
+            Ok::<_, glrmask::Error>(next)
+        }).map_err(api_error)?;
         target.replace(py, next);
         Ok(())
     }
 
-    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
-    #[pyo3(signature = (vocab, *, mask_strategy = None))]
+    /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
+    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
     fn precompile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
-        mask_strategy: Option<&Bound<'_, PyAny>>,
+        mask_strategy: super::PyMaskStrategy,
     ) -> PyResult<()> {
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy)?;
+        let options = compile_options(mask_strategy);
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
         let next = py
@@ -493,16 +420,16 @@ impl PyModule {
     }
 
     /// Finishes compiling the module into a constraint.
-    #[pyo3(signature = (vocab, *, mask_strategy = None))]
+    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
-        mask_strategy: Option<&Bound<'_, PyAny>>,
+        mask_strategy: super::PyMaskStrategy,
     ) -> PyResult<PyConstraint> {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy)?;
+        let options = compile_options(mask_strategy);
         let constraint = py
             .detach(move || snapshot.compile_with(&vocab, options))
             .map_err(api_error)?;

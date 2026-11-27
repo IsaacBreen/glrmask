@@ -90,7 +90,7 @@ bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token` and `commit_bytes` advance the state by a token or bytes and return whether the input was allowed. `commit_tokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. A failed commit terminates the state,
+`commit_token` and `commit_bytes` advance the state by a token or bytes and return whether the input was allowed. A failed commit terminates the state,
 so copy it first to try a token without committing to it. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 
@@ -130,11 +130,11 @@ Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
 | `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `(mask_bit_len() + 31) / 32`. |
-| `GLRMASK_CLOSED` | The object was moved from or disposed. |
+| `GLRMASK_CLOSED` | The object was moved from. |
 
 ## Objects and threads
 
-Every object owns its native handle and frees it when destroyed; `dispose()` frees it sooner. Copying a `Module`,
+Every object owns its native handle and frees it when destroyed. Copying a `Module`,
 `Grammar` or state gives an independent copy. A state keeps its constraint alive.
 
 A `Constraint` can be shared between threads, each with its own states. Don't use one grammar, module or state from two

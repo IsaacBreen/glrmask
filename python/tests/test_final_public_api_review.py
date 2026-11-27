@@ -58,7 +58,7 @@ def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     assert token_allowed(mask, 4)
     assert state.commit_token(4)
     assert accepting(state)
-    with pytest.raises((ValueError, RuntimeError)):
+    with pytest.raises((glrmask.GLRMaskError, RuntimeError)):
         parent.compile(v)
     with pytest.raises(TypeError):
         _bound_snapshot(parent, "child", child.compile(v))
@@ -75,9 +75,9 @@ def test_module_save_load_remains_open_and_immutable():
     bound = _bound_snapshot(loaded, "child", child).compile(v)
     assert token_allowed(bound.start().mask(), 4)
     for open_mod in [host, loaded]:
-        with pytest.raises((ValueError, RuntimeError)):
+        with pytest.raises((glrmask.GLRMaskError, RuntimeError)):
             open_mod.compile(v)
-    with pytest.raises((ValueError, RuntimeError)):
+    with pytest.raises((glrmask.GLRMaskError, RuntimeError)):
         glrmask.Constraint.load(artifact, v)
 
 
@@ -85,13 +85,13 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     value = glrmask.TokenSet([63, 7])
     gc.collect()
     v = vocab()
-    assert repr(value) == "TokenSet.from_ranges([range(7, 8), range(63, 64)])"
+    assert repr(value) == "TokenSet([range(7, 8), range(63, 64)])"
     c = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", value).compile(v)
     mask = c.start().mask()
     assert token_allowed(mask, 7) and token_allowed(mask, 63)
     assert not token_allowed(mask, 1)  # Same bytes as token 7, not the same token ID.
     empty = glrmask.TokenSet([])
-    assert empty == glrmask.TokenSet.from_ranges([])
+    assert empty == glrmask.TokenSet([])
     for mode in MODES:
         m = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
         m.bind("MARK", empty)
@@ -106,9 +106,9 @@ def test_nested_path_and_open_child_are_rejected():
     v = vocab()
     child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
     parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
-    with pytest.raises(ValueError, match="unbound externs"):
+    with pytest.raises(glrmask.GLRMaskError, match="unbound externs"):
         parent.bind("child", child)
-    with pytest.raises(ValueError, match="there is no extern named"):
+    with pytest.raises(glrmask.GLRMaskError, match="there is no extern named"):
         parent.bind("child::MARK", glrmask.TokenSet([7]))
     child.bind("MARK", glrmask.TokenSet([7]))
     parent.bind("child", child)
@@ -156,7 +156,7 @@ def test_token_membership_is_checked_against_target_without_identity_guarantees(
     for target in [v, vocab(different)]:
         mask = desc.compile(target).start().mask()
         assert token_allowed(mask, 7) and not token_allowed(mask, 1)
-    with pytest.raises(ValueError):
+    with pytest.raises(glrmask.GLRMaskError):
         _bound_snapshot(desc, "missing", glrmask.TokenSet([7]))
 
 
@@ -190,7 +190,8 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
     root = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar BODY extern token END nt s = BODY END"))
-    root.bind(BODY=parent_mod, END=glrmask.TokenSet([63]))
+    root.bind('BODY', parent_mod)
+    root.bind('END', glrmask.TokenSet([63]))
     c = root.compile(v, mask_strategy=mode)
     state = c.start()
     assert token_allowed(state.mask(), 4)

@@ -48,13 +48,13 @@ void basic() {
         CHECK(buffer[3]==0 && buffer[4]==0);
         std::vector<TokenId> short_buffer(1, 123); throws([&]{ s.fill_mask(short_buffer); }, GLRMASK_BUFFER_TOO_SMALL);
         CHECK(short_buffer[0]==123); CHECK(s.mask()==initial);
-        auto copy = s; c.dispose(); g.dispose(); v.dispose();
+        auto copy = s; { auto owned = std::move(c); auto source = std::move(g); auto vocab_owner = std::move(v); }
         CHECK(!s.is_terminated());
         CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(s.is_terminated()); CHECK(!copy.is_accepting());
         CHECK(copy.commit_token(0)); auto before = copy.mask(); CHECK(copy.forced_bytes()==Bytes{static_cast<uint8_t>('b')}); CHECK(copy.mask()==before);
         CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting()); CHECK(copy.is_terminated());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
-        s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
+        auto moved_s = std::move(s); throws([&]{ s.mask(); }, GLRMASK_CLOSED); CHECK(moved_s.is_accepting());
     }
 }
 
@@ -148,8 +148,8 @@ void composition_and_persistence() {
     auto host = Grammar::from_glrm(R"(glrm 1; start root; extern grammar child; nt root = "x" child "y";)");
     auto host_mod = Module(host);
     auto ext = host_mod.externs();
-    CHECK(ext.size()==1 && ext[0].name=="child");
-    CHECK(ext[0].kind==ExternKind::Grammar);
+    CHECK(ext.size()==1 && (ext.begin()+0)->name=="child");
+    CHECK((ext.begin()+0)->kind==ExternKind::Grammar);
     CHECK(host_mod.externs().unbound().size()==1);
 
     auto a = Grammar::from_lark(R"(start: "a")");
@@ -175,7 +175,7 @@ void composition_and_persistence() {
     Module lp(host); lp.precompile(v);
     Module ap(a); ap.precompile(v);
     lp.bind("child", ap);
-    const auto prepared_bytes = lp.save(); lp.dispose(); ap.dispose();
+    const auto prepared_bytes = lp.save(); { auto owner1 = std::move(lp); auto owner2 = std::move(ap); }
     auto restored = Module::load(prepared_bytes);
     CHECK(restored.externs().unbound().empty());
 
@@ -282,22 +282,23 @@ void commit_contract() {
         auto s = c.start();
         CHECK(!s.commit_token(1));
         CHECK(!s.is_accepting()); CHECK(s.is_terminated());
+        for(auto w:s.mask()) CHECK(w==0); CHECK(s.forced_bytes().empty());
         CHECK(!s.commit_token(0)); CHECK(!s.commit_bytes("a"));
         auto list = c.start();
-        CHECK(list.commit_tokens(std::vector<TokenId>{0, 0}) == 1);
+        CHECK(list.commit_token(0)); CHECK(!list.commit_token(0));
         CHECK(!list.is_accepting()); CHECK(list.is_terminated());
         auto bytes = c.start();
         CHECK(!bytes.is_terminated());
         CHECK(!bytes.commit_bytes("az"));
         CHECK(bytes.is_terminated()); CHECK(!bytes.is_accepting());
+        for(auto w:bytes.mask()) CHECK(w==0); CHECK(bytes.forced_bytes().empty());
         CHECK(!bytes.commit_token(1));
         auto closed = c.start();
-        closed.dispose();
+        auto moved_closed = std::move(closed); (void)moved_closed;
         throws([&]{ (void)closed.commit_token(0); }, GLRMASK_CLOSED);
     }
     // The C commits return false for a rejected commit and for a NULL state.
     CHECK(glrmask_state_commit_token(nullptr, 0) == false);
-    CHECK(glrmask_state_commit_tokens(nullptr, nullptr, 0) == 0);
     CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0) == false);
     auto c = Module(simple()).compile(v);
     glrmask_state* raw = nullptr;
@@ -368,19 +369,19 @@ void canonical_modules() {
 
     auto loaded = Module::load(parent.save());
     CHECK(loaded.externs().unbound().empty());
-    CHECK(original.externs().unbound().at(0).name=="child");
-    CHECK(loaded.externs().at(0).name=="child");
+    CHECK(original.externs().unbound().get("child")->name=="child");
+    CHECK(loaded.externs().get("child")->name=="child");
 
     // Retained work survives without storing per-module settings.
     auto child_bytes = child.save();
     auto child_loaded = Module::load(child_bytes);
     CHECK(child_loaded.externs().empty());
 
-    auto state = loaded.compile(v, child_options).start(); loaded.dispose(); parent.dispose(); child.dispose();
+    auto state = loaded.compile(v, child_options).start(); { auto owner1 = std::move(loaded); auto owner2 = std::move(parent); auto owner3 = std::move(child); }
     CHECK(state.commit_token(3)); CHECK(state.is_accepting());
 
     bool failed = false; try { original.bind("missing", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
-    CHECK(original.externs().unbound().at(0).name=="child");
+    CHECK(original.externs().unbound().get("child")->name=="child");
 
     // Qualified paths rejected
     failed = false; try { original.bind("child::nested", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
@@ -415,23 +416,23 @@ void canonical_modules() {
     CHECK(ext_all.size() == 3);
     CHECK(ext_all == multi_mod.externs());
     CHECK(ext_all == ext_all.unbound());
-    CHECK(ext_all[0].name == "first" && ext_all[0].kind == ExternKind::Token);
-    CHECK(ext_all[1].name == "second" && ext_all[1].kind == ExternKind::Grammar);
-    CHECK(ext_all[2].name == "third" && ext_all[2].kind == ExternKind::Token);
+    CHECK((ext_all.begin()+0)->name == "first" && (ext_all.begin()+0)->kind == ExternKind::Token);
+    CHECK((ext_all.begin()+1)->name == "second" && (ext_all.begin()+1)->kind == ExternKind::Grammar);
+    CHECK((ext_all.begin()+2)->name == "third" && (ext_all.begin()+2)->kind == ExternKind::Token);
 
     multi_mod.bind("second", Grammar::from_lark("start: \"a\""));
     auto ext_unbound = multi_mod.externs().unbound();
     CHECK(ext_unbound.size() == 2);
     CHECK(ext_unbound == ext_unbound.unbound());
     CHECK(ext_all != multi_mod.externs());
-    CHECK(ext_unbound[0].name == "first");
-    CHECK(ext_unbound[1].name == "third");
+    CHECK((ext_unbound.begin()+0)->name == "first");
+    CHECK((ext_unbound.begin()+1)->name == "third");
 
     // A grammar's unbound view carries its own unbound externs.
     auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern grammar one; extern grammar two; nt start = one two;");
     grammar_externs.bind("one", Expr::literal("a"));
     auto grammar_unbound = grammar_externs.externs().unbound();
-    CHECK(grammar_unbound.size() == 1 && grammar_unbound[0].name == "two");
+    CHECK(grammar_unbound.size() == 1 && (grammar_unbound.begin()+0)->name == "two");
     CHECK(grammar_externs.externs().size() == 2);
 
     // TokenSet equality compares the normalized ID sets.

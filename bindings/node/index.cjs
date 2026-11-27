@@ -160,19 +160,8 @@ class Grammar extends Owned {
     else throw new TypeError('Grammar.fromExpr requires an Expr or Grammar');
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
   }
-  bind(nameOrBindings, value) {
-    if (arguments.length === 1 && typeof nameOrBindings === 'object' && nameOrBindings !== null && !(nameOrBindings instanceof String)) {
-      const entries = Object.entries(nameOrBindings);
-      const snapshot = this.clone();
-      for (const [k, v] of entries) {
-        snapshot._bindSingle(k, v);
-      }
-      handles.set(this, handles.get(snapshot));
-      return;
-    }
-    this._bindSingle(nameOrBindings, value);
-  }
-  _bindSingle(name, value) {
+  bind(name, value) {
+    string(name, 'binding name');
     const target = handle(this, Grammar);
     if (value instanceof Grammar) return invoke(() => target.bindGrammar(name, handle(value, Grammar)));
     if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));
@@ -254,7 +243,7 @@ class Module extends Owned {
 
   clone() { return wrap(Module, invoke(() => handle(this, Module).clone())); }
 
-  _bindSingle(name, value) {
+  bind(name, value) {
     string(name, 'binding name');
     if (name.includes('::')) throw new GLRMaskError('GLRMASK_INVALID_INPUT', `there is no extern named ${JSON.stringify(name)}`);
     invoke(() => {
@@ -273,18 +262,6 @@ class Module extends Owned {
     });
   }
 
-  bind(nameOrBindings, value) {
-    if (arguments.length === 1 && typeof nameOrBindings === 'object' && nameOrBindings !== null && !(nameOrBindings instanceof String)) {
-      const entries = Object.entries(nameOrBindings);
-      const snapshot = this.clone();
-      for (const [k, v] of entries) {
-        snapshot._bindSingle(k, v);
-      }
-      handles.set(this, handles.get(snapshot));
-      return;
-    }
-    this._bindSingle(nameOrBindings, value);
-  }
 
   get externs() {
     const target = handle(this, Module);
@@ -349,20 +326,6 @@ class ConstraintState extends Owned {
   commitToken(id) {
     if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
     return invoke(() => handle(this, ConstraintState).commitToken(id));
-  }
-  commitTokens(ids) {
-    if (ids instanceof Uint32Array) return invoke(() => handle(this, ConstraintState).commitTokens(ids));
-    const words = [];
-    for (const id of iterable(ids, 'token IDs')) {
-      if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
-      if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
-        const count = invoke(() => handle(this, ConstraintState).commitTokens(Uint32Array.from(words)));
-        if (count === words.length) this.commitToken(id);
-        return count;
-      }
-      words.push(id);
-    }
-    return invoke(() => handle(this, ConstraintState).commitTokens(Uint32Array.from(words)));
   }
   commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }

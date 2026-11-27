@@ -333,7 +333,7 @@ fn empty_commits_preserve_state() {
         assert!(!fresh.is_terminated());
         assert!(!fresh.is_accepting());
         assert!(fresh.commit_bytes(b""));
-        assert_eq!(fresh.commit_tokens(&[]), 0);
+
 
         // Finished state (terminated and accepting): empty byte commits return true; zero tokens committed
         let mut finished = constraint.start();
@@ -341,7 +341,7 @@ fn empty_commits_preserve_state() {
         assert!(finished.is_accepting());
         assert!(finished.is_terminated());
         assert!(finished.commit_bytes(b""));
-        assert_eq!(finished.commit_tokens(&[]), 0);
+
 
         // Failed state: committing a disallowed token
         let mut failed = constraint.start();
@@ -351,7 +351,7 @@ fn empty_commits_preserve_state() {
         assert!(!failed.commit_bytes(b""));
         assert!(failed.is_terminated());
         assert!(!failed.is_accepting());
-        assert_eq!(failed.commit_tokens(&[]), 0);
+
         assert!(failed.is_terminated());
         assert!(!failed.is_accepting());
     }
@@ -377,11 +377,13 @@ fn rejected_commits_terminate_live_state() {
             assert!(!s.is_terminated());
             match rejection {
                 0 => assert!(!s.commit_token(2)),
-                1 => assert_eq!(s.commit_tokens(&[0, 2, 1]), 1),
+                1 => { assert!(s.commit_token(0)); assert!(!s.commit_token(2)); },
                 _ => assert!(!s.commit_bytes(b"az")),
             }
             assert!(s.is_terminated());
             assert!(!s.is_accepting());
+            assert!(s.mask().iter().all(|&w| w == 0));
+            assert!(s.forced_bytes().is_empty());
             assert!(!s.commit_token(1));
         }
     }

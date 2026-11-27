@@ -265,7 +265,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 # buffer until the asynchronous transfer completes.
 ```
 
-`commit_token` advances the state by the token. `commit_tokens` advances it by each token in order, stopping at the first one that isn't allowed, and returns how many were committed. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. A failed commit terminates the state, so to try a
+`commit_token` advances the state by the token. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. A failed commit terminates the state, so to try a
 token without committing to it, copy the state first.
 
 `is_accepting()` says whether the output so far could end here. More may still be allowed: `1+2` is complete, but
@@ -300,7 +300,8 @@ call_format = glrmask.Grammar.from_glrm('''
 ''')
 
 call = call_format.copy()
-call.bind(WEATHER_ARGS=weather, SEARCH_ARGS=search)
+call.bind("WEATHER_ARGS", weather)
+call.bind("SEARCH_ARGS", search)
 
 vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
 state = call.compile(vocab).start()
@@ -330,7 +331,8 @@ search_args.precompile(vocab)
 
 call = glrmask.Module(call_format)
 call.precompile(vocab)
-call.bind(WEATHER_ARGS=weather_args, SEARCH_ARGS=search_args)
+call.bind("WEATHER_ARGS", weather_args)
+call.bind("SEARCH_ARGS", search_args)
 constraint = call.compile(vocab)
 ```
 
@@ -350,7 +352,7 @@ token sets. `Grammar.from_expr` makes a grammar from an expression that contains
 ## Token sets
 
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
-`TokenSet([1, 2, 3])`, or from ranges, `TokenSet.from_ranges([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
+`TokenSet([1, 2, 3])`, or from ranges, `TokenSet([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
 
 Token IDs go from 0 to 16,777,215 (2^24 - 1, `MAX_TOKEN_ID` in Rust). A larger ID in a vocabulary, token set or binding
 is an error.
@@ -378,7 +380,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
 Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization` or `Internal`. `source_span()` gives its place in the source.
-Python raises `GLRMaskError` (a `ValueError`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
+Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 
 ## Grammar formats
 

@@ -8765,25 +8765,25 @@ impl ConstraintState {
         Some(shadow)
     }
 
-    /// Like `mask()`, but writes the words into `buf`. Extra words are set to 0.
+    /// Like `mask()`, but writes the words into `bitmask`.
     ///
     /// # Panics
     ///
-    /// Panics if `buf` is shorter than `self.mask_bit_len().div_ceil(32)`.
-    pub fn fill_mask(&self, buf: &mut [u32]) {
-        assert!(buf.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by the mask bit length");
+    /// Panics if `bitmask` has fewer than `mask_bit_len().div_ceil(32)` words.
+    pub fn fill_mask(&self, bitmask: &mut [u32]) {
+        assert!(bitmask.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by the mask bit length");
         if self.terminated {
-            buf.fill(0);
+            bitmask.fill(0);
             return;
         }
-        self.fill_body_mask(buf);
+        self.fill_body_mask(bitmask);
         // Also finalize cached and ordinary dynamic masks: internal body paths
         // may return before their composed-mask endpoint filter runs.
-        self.enforce_empty_byte_token_domain(buf);
+        self.enforce_empty_byte_token_domain(bitmask);
         if !self.constraint.end_tokens.is_empty() {
             let accepting = self.frontier_complete();
             for &id in self.constraint.end_tokens.iter() {
-                let word = &mut buf[id as usize / 32];
+                let word = &mut bitmask[id as usize / 32];
                 let bit = 1u32 << (id % 32);
                 // End IDs are reserved generation controls, not byte pieces.
                 if accepting { *word |= bit; } else { *word &= !bit; }

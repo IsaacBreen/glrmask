@@ -71,9 +71,6 @@ public:
     std::size_t size() const noexcept { return entries_.size(); }
     bool empty() const noexcept { return entries_.empty(); }
 
-    const Extern& operator[](std::size_t index) const { return entries_[index]; }
-    /// The extern at `index`; throws `std::out_of_range` if there is none.
-    const Extern& at(std::size_t index) const { return entries_.at(index); }
 
     std::optional<Extern> get(std::string_view name) const {
         for (const auto& item : entries_) {
@@ -136,11 +133,11 @@ public:
     Owned(Owned&&) noexcept = default;
     Owned& operator=(const Owned& other) { Owned copy(other); handle_.swap(copy.handle_); return *this; }
     Owned& operator=(Owned&&) noexcept = default;
+    /// Borrows the live native handle; do not free it or retain it beyond this object.
     H* native_handle() const {
-        if (!handle_) throw Error(GLRMASK_CLOSED, "object has been disposed or moved from");
+        if (!handle_) throw Error(GLRMASK_CLOSED, "object has been moved from");
         return handle_.get();
     }
-    void dispose() noexcept { handle_.reset(); }
 };
 
 inline Bytes take_bytes(glrmask_bytes* raw) {
@@ -332,7 +329,7 @@ public:
         detail::check(glrmask_module_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
 
-    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
+    /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
     void precompile(const Vocab& vocab, const CompileOptions& options = {}) {
         const glrmask_compile_options native = options.native();
         detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle(), &native));
@@ -367,7 +364,7 @@ public:
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
 
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
     static Constraint load(const Bytes& bytes, const Vocab& vocab) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes.data(), bytes.size(), vocab.native_handle(), &p)); return Constraint(p);
     }
@@ -380,20 +377,16 @@ class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, 
 public:
     /// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`.
     std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
-    /// Like `mask()`, but writes the words into `output`. Extra words are set to 0.
+    /// Like `mask()`, but writes the words into `output`.
     ///
     /// Throws `Error` if `word_count` is less than `(mask_bit_len() + 31) / 32`.
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
-    /// Like `mask()`, but writes the words into `output`. Extra words are set to 0.
+    /// Like `mask()`, but writes the words into `output`.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// The mask's length in bits (the largest token ID plus one).
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
-    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed.
-    [[nodiscard]] std::size_t commit_tokens(const std::uint32_t* ids, std::size_t count) { return glrmask_state_commit_tokens(native_handle(), ids, count); }
-    /// Advances the state by each token in order, stopping at the first one that isn't allowed (which terminates the state). Returns how many were committed.
-    [[nodiscard]] std::size_t commit_tokens(const std::vector<std::uint32_t>& ids) { return commit_tokens(ids.data(), ids.size()); }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return glrmask_state_commit_bytes(native_handle(), bytes, size); }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
