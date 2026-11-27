@@ -4418,7 +4418,6 @@ fn launch_parser_dag_if_ready<'scope>(
                             .len()
                             .div_ceil(32);
                         let caches = crate::runtime::TokenProjection::build(
-                            &final_id_map.vocab_tokens.original_to_internal,
                             &internal_to_tokens,
                             mask_words,
                         );

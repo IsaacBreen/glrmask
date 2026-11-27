@@ -321,6 +321,16 @@ impl TokenClasses {
         }
     }
 
+    pub(crate) fn mapped_member_count(&self) -> usize {
+        match &self.0 {
+            TokenClassStorage::Identity => 0,
+            TokenClassStorage::Owned { forward, .. } =>
+                forward.iter().filter(|&&id| id != u32::MAX).count(),
+            TokenClassStorage::Packed { map, .. } =>
+                (0..map.count).filter(|&index| map.get(index).is_some_and(|id| id != u32::MAX)).count(),
+        }
+    }
+
     fn forward(&self) -> &[u32] {
         match &self.0 {
             TokenClassStorage::Identity => &[],

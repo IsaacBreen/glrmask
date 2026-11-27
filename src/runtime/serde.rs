@@ -39,11 +39,11 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 58;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 61;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 59;
-const EXTERNAL_LINKED_LR_CONSTRAINT_VERSION: u16 = 60;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 62;
+const EXTERNAL_LINKED_LR_CONSTRAINT_VERSION: u16 = 63;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -3828,7 +3828,7 @@ impl Constraint {
             constraint.token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
         }
         if let Some(projection) = external_internal_token_buf_masks {
-            projection.validate_rows(constraint.internal_token_count(), constraint.body_mask_len())
+            projection.validate_rows(&constraint)
                 .map_err(crate::Error::Serialization)?;
             constraint.token_projection = projection;
         }

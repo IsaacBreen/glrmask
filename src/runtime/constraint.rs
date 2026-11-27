@@ -582,39 +582,13 @@ fn template_initial_prime_token_ids(mask: &[u32]) -> Vec<u32> {
     token_ids
 }
 
-fn build_internal_token_buf_masks_from_maps(
-    original_to_internal: &[u32],
-    internal_to_tokens: &[Vec<u32>],
-) -> Vec<InternalTokenBufMasks> {
-    let grouped = crate::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
-        .map(|value| {
-            let value = value.trim();
-            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(true);
-    if !grouped && !original_to_internal.is_empty() {
-        let mut masks = vec![Vec::<(u16, u32)>::new(); internal_to_tokens.len()];
-        for (original, &internal) in original_to_internal.iter().enumerate() {
-            if internal == u32::MAX {
-                continue;
-            }
-            let Some(mask) = masks.get_mut(internal as usize) else {
-                continue;
-            };
-            let word = (original as u32 / 32) as u16;
-            let bit = original as u32 % 32;
-            if let Some((last_word, last_mask)) = mask.last_mut()
-                && *last_word == word
-            {
-                *last_mask |= 1u32 << bit;
-                continue;
-            }
-            mask.push((word, 1u32 << bit));
-        }
-        masks
+fn build_internal_token_buf_masks(internal_to_tokens: &[Vec<u32>]) -> Vec<InternalTokenBufMasks> {
+    if rayon::current_num_threads() == 1 {
+        internal_to_tokens.iter()
+            .map(|originals| Constraint::build_internal_token_buf_mask(originals))
+            .collect()
     } else {
-        internal_to_tokens
-            .iter()
+        internal_to_tokens.par_iter()
             .map(|originals| Constraint::build_internal_token_buf_mask(originals))
             .collect()
     }
@@ -775,30 +749,48 @@ impl TokenProjection {
         }
     }
 
-    pub(crate) fn validate_rows(&self, count: usize, mask_words: usize) -> Result<(), String> {
+    /// Check the serialized projection against the authoritative class map.
+    /// Sorted nonzero words prevent duplicates within a class. Membership in
+    /// the forward map prevents overlap across classes, and equal cardinality
+    /// proves that no mapped member has been omitted.
+    pub(crate) fn validate_rows(&self, constraint: &Constraint) -> Result<(), String> {
+        let count = constraint.internal_token_count();
+        let mask_words = constraint.body_mask_len();
+        let max_id = constraint.body_max_original_token_id();
         if !self.has_rows(count) || self.offsets.first() != Some(&0)
             || self.offsets.windows(2).any(|pair| pair[0] > pair[1])
         {
             return Err("invalid token projection offsets".into());
         }
-        // Each row is sorted and nonzero; class images must be disjoint.
-        let mut occupied = vec![0u32; mask_words];
+        let mut members = 0usize;
         for token in 0..count {
             let mut last = None;
             let mut valid = true;
-            self.for_each_row(token, |word, bits| {
-                if bits == 0 || last.is_some_and(|prev| prev >= word) {
+            self.for_each_row(token, |word, mut bits| {
+                if bits == 0 || last.is_some_and(|prev| prev >= word)
+                    || word as usize >= mask_words
+                {
                     valid = false;
+                    return;
                 }
                 last = Some(word);
-                if let Some(slot) = occupied.get_mut(word as usize) {
-                    if *slot & bits != 0 { valid = false; }
-                    *slot |= bits;
-                } else {
-                    valid = false;
+                while bits != 0 {
+                    let id = u32::from(word) * 32 + bits.trailing_zeros();
+                    if constraint.original_token_internal_at(id) != Some(token as u32)
+                        || max_id.is_none_or(|max| id > max)
+                    {
+                        valid = false;
+                    }
+                    members += 1;
+                    bits &= bits - 1;
                 }
             });
-            if !valid { return Err("invalid or overlapping token projection rows".into()); }
+            if !valid {
+                return Err("token projection disagrees with token class map".into());
+            }
+        }
+        if members != constraint.token_classes.mapped_member_count() {
+            return Err("token projection omits mapped token IDs".into());
         }
         Ok(())
     }
@@ -906,9 +898,9 @@ impl TokenProjection {
     }
 
     pub(crate) fn build(
-        original_to_internal: &[u32], internal_to_tokens: &[Vec<u32>], mask_words: usize,
+        internal_to_tokens: &[Vec<u32>], mask_words: usize,
     ) -> Self {
-        let rows = build_internal_token_buf_masks_from_maps(original_to_internal, internal_to_tokens);
+        let rows = build_internal_token_buf_masks(internal_to_tokens);
         let mut projection = Self::from_rows(rows);
         projection.prepare(mask_words, true, None).expect("compiler token projection");
         projection
@@ -8825,50 +8817,7 @@ impl Constraint {
     }
 
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
-        let Some(internal_token_to_tokens) = self.internal_token_groups() else {
-            return Vec::new();
-        };
-
-        let grouped = crate::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        if !grouped && self.has_original_token_map() {
-            let original_token_to_internal = self.original_token_map();
-            let mut masks = vec![Vec::<(u16, u32)>::new(); internal_token_to_tokens.len()];
-            for (original, &internal) in original_token_to_internal.iter().enumerate() {
-                if internal == u32::MAX {
-                    continue;
-                }
-                let internal = internal as usize;
-                let Some(mask) = masks.get_mut(internal) else {
-                    continue;
-                };
-                let word = (original as u32 / 32) as u16;
-                let bit = original as u32 % 32;
-                if let Some((last_word, last_mask)) = mask.last_mut()
-                    && *last_word == word {
-                        *last_mask |= 1u32 << bit;
-                        continue;
-                    }
-                mask.push((word, 1u32 << bit));
-            }
-            return masks;
-        }
-
-        if rayon::current_num_threads() == 1 {
-            internal_token_to_tokens
-                .iter()
-                .map(|originals| Self::build_internal_token_buf_mask(originals))
-                .collect()
-        } else {
-            internal_token_to_tokens
-                .par_iter()
-                .map(|originals| Self::build_internal_token_buf_mask(originals))
-                .collect()
-        }
+        self.internal_token_groups().map_or_else(Vec::new, build_internal_token_buf_masks)
     }
 
     #[cfg(test)]
