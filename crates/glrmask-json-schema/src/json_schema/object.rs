@@ -291,6 +291,245 @@ impl<'a> Lowerer<'a> {
     fn schema_contains_any_ref(schema: &Schema) -> bool {
         schema.descendants().any(|node| matches!(node.kind, SchemaKind::Ref(_)))
     }
+    pub fn try_lower_closed_object_any_of_variants(
+        &mut self,
+        branches: &[Schema],
+        suppress_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let profile_enabled = branches.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+        if self.has_duplicate_recursive_ref_branches(branches)? {
+            return Ok(None);
+        }
+
+        if let Some(expr) = self.try_lower_ordered_string_discriminator_closed_anyof(branches)? {
+            return Ok(Some(expr));
+        }
+
+        let collect_started_at = profile_enabled.then(std::time::Instant::now);
+        let mut variants = Vec::with_capacity(branches.len());
+        let mut collection_profile = profile_enabled.then(ClosedAnyOfCollectionProfile::default);
+        let mut include_untyped_non_object_alts = false;
+        for branch in branches {
+            let Some((variant, branch_requires_untyped_non_object_alts)) =
+                self.collect_closed_any_of_object_variant(branch, collection_profile.as_mut())?
+            else {
+                return Ok(None);
+            };
+            include_untyped_non_object_alts |=
+                branch_requires_untyped_non_object_alts && !suppress_untyped_non_object_alts;
+            variants.push(variant);
+        }
+
+        let collect_ms = collect_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let build_started_at = profile_enabled.then(std::time::Instant::now);
+        let result = self.lower_closed_any_of_object_variants_expr_nfa(
+            &variants,
+            include_untyped_non_object_alts,
+        )?;
+        if let (Some(profile_started_at), Some(collect_ms), Some(build_started_at), Some(collection_profile)) =
+            (profile_started_at, collect_ms, build_started_at, collection_profile)
+        {
+            eprintln!(
+                "[glrmask/profile][json_schema_closed_anyof] branches={} variants={} outcome={} collect_ms={:.3} property_lower_ms={:.3} identity_ms={:.3} schema_clone_ms={:.3} nfa_build_ms={:.3} elapsed_ms={:.3}",
+                branches.len(),
+                variants.len(),
+                result.is_some(),
+                collect_ms,
+                collection_profile.lower_property_ms,
+                collection_profile.identity_ms,
+                collection_profile.schema_clone_ms,
+                build_started_at.elapsed().as_secs_f64() * 1000.0,
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Fast path for a closed object union whose first, required property is a
+    /// unique singleton string discriminator in every branch.  The generic
+    /// closed-union builder initially creates one NFA state per branch and
+    /// discovers this shared key only during determinization.  Here the shared
+    /// key is represented directly, while the discriminator value selects the
+    /// branch-specific remainder.  This is the same language, including the
+    /// declaration-order restriction used by the ordinary closed-object path.
+    pub(super) fn try_lower_ordered_string_discriminator_closed_anyof(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let profile_enabled = branches.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut discriminator_key: Option<&str> = None;
+        let mut payload_key: Option<&str> = None;
+        let mut cases: Vec<(String, &Schema)> = Vec::with_capacity(branches.len());
+        let mut seen_values = BTreeSet::new();
+
+        for branch in branches {
+            let SchemaKind::Assertions(assertions) = &branch.kind else {
+                return Ok(None);
+            };
+            if assertions.const_value.is_some()
+                || assertions.enum_values.is_some()
+                || assertions.array.is_some()
+                || assertions.string.is_some()
+                || assertions.number.is_some()
+                || !assertions.any_of.is_empty()
+                || !assertions.one_of.is_empty()
+                || !assertions.all_of.is_empty()
+                || assertions.not.is_some()
+            {
+                return Ok(None);
+            }
+            let Some(types) = assertions.types.as_ref() else {
+                return Ok(None);
+            };
+            if types.is_empty() || !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+                return Ok(None);
+            }
+            let Some(object) = assertions.object.as_ref() else {
+                return Ok(None);
+            };
+            if !matches!(object.additional_properties, AdditionalProperties::Deny)
+                || !object.pattern_properties.is_empty()
+                || object.property_names.is_some()
+                || !object.property_dependencies.is_empty()
+                || object.min_properties != 0
+                || object.max_properties.is_some()
+                || object.properties.len() != 2
+                || object.required.len() != 2
+            {
+                return Ok(None);
+            }
+
+            let discriminator = &object.properties[0];
+            let payload = &object.properties[1];
+            if !object.required.contains(&discriminator.name)
+                || !object.required.contains(&payload.name)
+            {
+                return Ok(None);
+            }
+            let Some(discriminator_value) = plain_singleton_string_enum_value(&discriminator.schema) else {
+                return Ok(None);
+            };
+            match discriminator_key {
+                Some(key) if key != discriminator.name => return Ok(None),
+                None => discriminator_key = Some(&discriminator.name),
+                _ => {}
+            }
+            match payload_key {
+                Some(key) if key != payload.name => return Ok(None),
+                None => payload_key = Some(&payload.name),
+                _ => {}
+            }
+            if !seen_values.insert(discriminator_value.clone()) {
+                return Ok(None);
+            }
+            cases.push((discriminator_value, &payload.schema));
+        }
+
+        let discriminator_key = discriminator_key.expect("nonempty branch set has a discriminator key");
+        let payload_key = payload_key.expect("nonempty branch set has a payload key");
+        let validation_ms = profile_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+        let after_discriminator_key = builder.add_state();
+        builder.add_transition(
+            builder.start_state(),
+            self.lower_literal_key_colon(discriminator_key),
+            after_discriminator_key,
+        );
+        let payload_key_prefix = self.lower_literal_key_colon_with_prefix(b", ", payload_key);
+        let payload_lower_started_at = profile_enabled.then(std::time::Instant::now);
+        let mut slow_payloads = profile_enabled.then(Vec::new);
+        let payload_exprs = self.lower_discriminator_payloads(&cases)?;
+        debug_assert_eq!(cases.len(), payload_exprs.len());
+
+        for ((discriminator_value, payload_schema), payload_expr) in
+            cases.into_iter().zip(payload_exprs)
+        {
+            let after_discriminator_value = builder.add_state();
+            builder.add_transition(
+                after_discriminator_key,
+                self.lower_string_literal(&discriminator_value),
+                after_discriminator_value,
+            );
+            let payload_started_at = profile_enabled.then(std::time::Instant::now);
+            if let (Some(payload_started_at), Some(slow_payloads)) =
+                (payload_started_at, slow_payloads.as_mut())
+            {
+                let shape = match &payload_schema.kind {
+                    SchemaKind::Assertions(assertions) => assertions.object.as_ref().map(|object| {
+                        (object.properties.len(), object.required.len())
+                    }),
+                    _ => None,
+                };
+                slow_payloads.push((
+                    payload_started_at.elapsed().as_secs_f64() * 1000.0,
+                    discriminator_value.clone(),
+                    shape,
+                ));
+            }
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                after_discriminator_value,
+                vec![
+                    payload_key_prefix.clone(),
+                    payload_expr,
+                ],
+                accept,
+            );
+        }
+
+        let payload_lower_ms = payload_lower_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let nfa_finalize_started_at = profile_enabled.then(std::time::Instant::now);
+        let rule_name = self.fresh_rule_name("json_anyof_object_body");
+        self.add_nonterminal_rule(
+            &rule_name,
+            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
+        );
+        if let (Some(profile_started_at), Some(validation_ms), Some(payload_lower_ms), Some(nfa_finalize_started_at)) =
+            (
+                profile_started_at,
+                validation_ms,
+                payload_lower_ms,
+                nfa_finalize_started_at,
+            )
+        {
+            eprintln!(
+                "[glrmask/profile][ordered_discriminator] branches={} validation_ms={:.3} payload_lower_ms={:.3} nfa_finalize_ms={:.3} elapsed_ms={:.3}",
+                branches.len(),
+                validation_ms,
+                payload_lower_ms,
+                nfa_finalize_started_at.elapsed().as_secs_f64() * 1000.0,
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        if let Some(slow_payloads) = &mut slow_payloads {
+            slow_payloads.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
+            slow_payloads.truncate(20);
+            eprintln!(
+                "[glrmask/profile][ordered_discriminator_slowest_payloads] payloads={:?}",
+                slow_payloads,
+            );
+        }
+        Ok(Some(seq(vec![lit("{"), r(&rule_name), lit("}")])) )
+    }
+
     fn lower_discriminator_payloads(
         &mut self,
         cases: &[(String, &Schema)],
