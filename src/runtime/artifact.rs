@@ -3730,7 +3730,6 @@ pub(crate) struct DynamicMaskVocab {
     canonical_original_tokens: Arc<Vec<u32>>,
     canonical_original_word_offsets: Arc<Vec<u32>>,
     canonical_original_word_masks: Arc<Vec<(u32, u32)>>,
-    node_token_markers: Arc<Vec<u64>>,
     /// Token markers in the exact order token endpoints are encountered by
     /// `full_walk_ops`. This removes an extra node-id indirection from the
     /// strict walk's very hot endpoint path without changing which endpoints
@@ -4080,16 +4079,9 @@ impl DynamicMaskVocab {
                 &canonical_original_tokens,
             )
         };
-        let build_markers = || {
-            let node_token_markers = Self::build_node_token_markers(
-                trie.as_ref(),
-                &canonical_original_token_offsets,
-                &canonical_original_tokens,
-            );
-            let full_walk_token_markers =
-                Self::build_full_walk_token_markers(trie.as_ref(), &node_token_markers);
-            (node_token_markers, full_walk_token_markers)
-        };
+        let build_markers = || Self::build_full_walk_token_markers(
+            trie.as_ref(), &canonical_original_token_offsets, &canonical_original_tokens,
+        );
         let build_subtree = || {
             // `from_materialized_ordered` receives canonical tokens in lexical
             // trie order. `DynamicMaskTrie::all_subtree_tokens()` therefore
@@ -4125,7 +4117,7 @@ impl DynamicMaskVocab {
 
         let (
             (canonical_original_word_offsets, canonical_original_word_masks),
-            (node_token_markers, full_walk_token_markers),
+            full_walk_token_markers,
             (subtree_original_token_offsets, subtree_original_tokens),
             all_original_token_words,
         ) = if canonical_original_tokens.len() >= 4_096 && rayon::current_num_threads() > 1 {
@@ -4149,7 +4141,6 @@ impl DynamicMaskVocab {
             canonical_original_tokens,
             canonical_original_word_offsets,
             canonical_original_word_masks,
-            node_token_markers,
             full_walk_token_markers,
             subtree_original_token_offsets,
             subtree_original_tokens,
@@ -4243,7 +4234,6 @@ impl DynamicMaskVocab {
             canonical_original_tokens: Arc::clone(&self.canonical_original_tokens),
             canonical_original_word_offsets: Arc::clone(&self.canonical_original_word_offsets),
             canonical_original_word_masks: Arc::clone(&self.canonical_original_word_masks),
-            node_token_markers: Arc::clone(&self.node_token_markers),
             full_walk_token_markers: Arc::clone(&self.full_walk_token_markers),
             subtree_original_token_offsets: Arc::clone(
                 &self.subtree_original_token_offsets,
@@ -4366,13 +4356,9 @@ impl DynamicMaskVocab {
             );
             (offsets, masks, None)
         };
-        let node_token_markers = Self::build_node_token_markers(
-            trie.as_ref(),
-            &canonical_original_token_offsets,
-            &canonical_original_tokens,
+        let full_walk_token_markers = Self::build_full_walk_token_markers(
+            trie.as_ref(), &canonical_original_token_offsets, &canonical_original_tokens,
         );
-        let full_walk_token_markers =
-            Self::build_full_walk_token_markers(trie.as_ref(), &node_token_markers);
         let (subtree_original_token_offsets, subtree_original_tokens) =
             Self::flatten_subtree_original_tokens(
                 trie.as_ref(),
@@ -4388,7 +4374,6 @@ impl DynamicMaskVocab {
             canonical_original_tokens,
             canonical_original_word_offsets,
             canonical_original_word_masks,
-            node_token_markers,
             full_walk_token_markers,
             subtree_original_token_offsets,
             subtree_original_tokens,
@@ -4463,13 +4448,10 @@ impl DynamicMaskVocab {
                 &self.canonical_original_token_offsets,
                 &self.canonical_original_tokens,
             );
-        self.node_token_markers = Self::build_node_token_markers(
-            self.trie.as_ref(),
-            &self.canonical_original_token_offsets,
+        self.full_walk_token_markers = Self::build_full_walk_token_markers(
+            self.trie.as_ref(), &self.canonical_original_token_offsets,
             &self.canonical_original_tokens,
         );
-        self.full_walk_token_markers =
-            Self::build_full_walk_token_markers(self.trie.as_ref(), &self.node_token_markers);
         (self.subtree_original_token_offsets, self.subtree_original_tokens) =
             Self::flatten_subtree_original_tokens(
                 self.trie.as_ref(),
@@ -4788,13 +4770,10 @@ impl DynamicMaskVocab {
             slice_max_token_byte_len,
         ) in slices
         {
-            let slice_node_token_markers = Self::build_node_token_markers(
-                trie.as_ref(),
-                &self.canonical_original_token_offsets,
+            let full_walk_token_markers = Self::build_full_walk_token_markers(
+                trie.as_ref(), &self.canonical_original_token_offsets,
                 &self.canonical_original_tokens,
             );
-            let full_walk_token_markers =
-                Self::build_full_walk_token_markers(trie.as_ref(), &slice_node_token_markers);
             let (subtree_original_token_offsets, subtree_original_tokens) =
                 Self::flatten_subtree_original_tokens(
                     trie.as_ref(),
@@ -6495,62 +6474,31 @@ impl DynamicMaskVocab {
         (Arc::new(offsets), Arc::new(originals))
     }
 
-    fn build_node_token_markers(
+    fn build_full_walk_token_markers(
         trie: &DynamicMaskTrie,
         canonical_offsets: &[u32],
         canonical_original_tokens: &[u32],
     ) -> Arc<Vec<u64>> {
         const FALLBACK_TAG: u64 = 1u64 << 63;
-        let mut markers = Vec::with_capacity(trie.nodes.len());
-        for node in &trie.nodes {
-            let Some(canonical_token) = node.token_id else {
-                markers.push(0);
-                continue;
+        Arc::new(trie.full_walk_token_nodes().iter().map(|&node| {
+            let Some(canonical_token) = trie.nodes[node as usize].token_id else {
+                return 0;
             };
             let index = canonical_token as usize;
             let start = canonical_offsets[index] as usize;
             let end = canonical_offsets[index + 1] as usize;
             let aliases = &canonical_original_tokens[start..end];
-            let Some(&first_token) = aliases.first() else {
-                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
-                continue;
-            };
+            let fallback = FALLBACK_TAG | (canonical_token as u64 + 1);
+            let Some(&first_token) = aliases.first() else { return fallback; };
             let word = first_token / 32;
             let mut bits = 0u32;
-            let mut one_word = true;
             for &token_id in aliases {
-                if token_id / 32 != word {
-                    one_word = false;
-                    break;
-                }
+                if token_id / 32 != word { return fallback; }
                 bits |= 1u32 << (token_id % 32);
             }
-            if one_word {
-                debug_assert_ne!(bits, 0);
-                debug_assert!(word < (1u32 << 31));
-                markers.push((u64::from(word) << 32) | u64::from(bits));
-            } else {
-                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
-            }
-        }
-        Arc::new(markers)
+            (u64::from(word) << 32) | u64::from(bits)
+        }).collect())
     }
-
-    fn build_full_walk_token_markers(
-        trie: &DynamicMaskTrie,
-        node_token_markers: &[u64],
-    ) -> Arc<Vec<u64>> {
-        Arc::new(
-            trie.full_walk_token_nodes()
-                .iter()
-                .map(|&node| {
-                    debug_assert!((node as usize) < node_token_markers.len());
-                    unsafe { *node_token_markers.get_unchecked(node as usize) }
-                })
-                .collect(),
-        )
-    }
-
     #[inline]
     pub(crate) fn subtree_original_tokens(&self, node: u32) -> &[u32] {
         let canonical_range = self.trie.subtree_token_index_range(node);
@@ -6584,12 +6532,6 @@ impl DynamicMaskVocab {
         let start = unsafe { *self.canonical_original_word_offsets.get_unchecked(index) } as usize;
         let end = unsafe { *self.canonical_original_word_offsets.get_unchecked(index + 1) } as usize;
         unsafe { self.canonical_original_word_masks.get_unchecked(start..end) }
-    }
-
-    #[inline(always)]
-    pub(crate) fn node_token_marker(&self, node: u32) -> u64 {
-        debug_assert!((node as usize) < self.node_token_markers.len());
-        unsafe { *self.node_token_markers.get_unchecked(node as usize) }
     }
 
     #[inline(always)]
@@ -8720,7 +8662,6 @@ impl Default for DynamicMaskVocab {
             canonical_original_tokens: Arc::new(Vec::new()),
             canonical_original_word_offsets: Arc::new(vec![0]),
             canonical_original_word_masks: Arc::new(Vec::new()),
-            node_token_markers: Arc::new(vec![0]),
             full_walk_token_markers: Arc::new(Vec::new()),
             subtree_original_token_offsets: Arc::new(vec![0]),
             subtree_original_tokens: Arc::new(Vec::new()),
@@ -9908,10 +9849,6 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         assert!(Arc::ptr_eq(&template.trie, &fresh.trie));
         assert!(template.transfer_aliases.is_none());
         assert!(fresh.transfer_aliases.is_none());
-        assert!(Arc::ptr_eq(left, right));
-            }
-            _ => panic!("materialized ordered vocabulary changed alias representation"),
-        }
         assert!(Arc::ptr_eq(
             &template.canonical_original_token_offsets,
             &fresh.canonical_original_token_offsets,
@@ -9921,8 +9858,8 @@ mod dynamic_mask_vocab_cache_boundary_tests {
             &fresh.canonical_original_tokens,
         ));
         assert!(Arc::ptr_eq(
-            &template.node_token_markers,
-            &fresh.node_token_markers,
+            &template.full_walk_token_markers,
+            &fresh.full_walk_token_markers,
         ));
         assert!(Arc::ptr_eq(
             &template.subtree_original_token_offsets,
