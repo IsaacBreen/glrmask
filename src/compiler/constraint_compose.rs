@@ -191,382 +191,170 @@ fn install_dynamic_direct_boundary_shards(
 }
 
 
+type LocalTokenTuple = SmallVec<[u32; 4]>;
+
+/// Partition one parent class by all other component coordinates. The
+/// pair-only dense accelerator and the general tuple map have exactly
+/// the same ordered output, including the absent-coordinate sentinel.
+enum TokenMeetBuckets {
+    Pair {
+        rows: Vec<Vec<u32>>,
+        touched: Vec<usize>,
+        absent: Vec<u32>,
+    },
+    Tuple(BTreeMap<LocalTokenTuple, Vec<u32>>),
+}
+
+impl TokenMeetBuckets {
+    fn new(components: &[PossibleMatchComponent<'_>]) -> Self {
+        if components.len() == 2
+            && crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none()
+        {
+            Self::Pair {
+                rows: vec![Vec::new(); components[1].constraint.internal_token_count()],
+                touched: Vec::new(),
+                absent: Vec::new(),
+            }
+        } else {
+            Self::Tuple(BTreeMap::new())
+        }
+    }
+
+    fn insert(&mut self, tuple: LocalTokenTuple, original: u32) -> Result<(), String> {
+        match self {
+            Self::Pair { rows, touched, absent } => {
+                let child = tuple[0];
+                if child == u32::MAX {
+                    absent.push(original);
+                } else {
+                    let index = child as usize;
+                    let row = rows.get_mut(index).ok_or_else(|| {
+                        format!("component 1 token class {child} lies outside its internal token domain")
+                    })?;
+                    if row.is_empty() { touched.push(index); }
+                    row.push(original);
+                }
+            }
+            Self::Tuple(rows) => rows.entry(tuple).or_default().push(original),
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self, mut emit: impl FnMut(LocalTokenTuple, Vec<u32>) -> Result<(), String>)
+        -> Result<(), String>
+    {
+        match self {
+            Self::Pair { rows, touched, absent } => {
+                touched.sort_unstable();
+                for child in touched.drain(..) {
+                    emit(smallvec::smallvec![child as u32], std::mem::take(&mut rows[child]))?;
+                }
+                if !absent.is_empty() {
+                    emit(smallvec::smallvec![u32::MAX], std::mem::take(absent))?;
+                }
+            }
+            Self::Tuple(rows) => {
+                for (tuple, originals) in std::mem::take(rows) {
+                    emit(tuple, originals)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn build_direct_component_token_coordinates(
     components: &[PossibleMatchComponent<'_>],
     original_token_ids: &[u32],
 ) -> Result<(ManyToOneIdMap, Vec<Vec<Vec<u32>>>, bool), String> {
-    let original_token_count = original_token_ids
-        .last()
-        .map_or(0, |token| *token as usize + 1);
-    let token_table_error = |error: crate::Error| error.to_string();
-    let mut selected_original =
-        crate::error::try_token_table(original_token_count, false).map_err(token_table_error)?;
-    for &original in original_token_ids {
-        selected_original[original as usize] = true;
-    }
-    let mut token_to_global =
-        crate::error::try_token_table(original_token_count, u32::MAX).map_err(token_table_error)?;
+    let original_token_count = original_token_ids.last().map_or(0, |token| *token as usize + 1);
+    let mut selected = crate::error::try_token_table(original_token_count, false)
+        .map_err(|error| error.to_string())?;
+    let mut token_to_global = crate::error::try_token_table(original_token_count, u32::MAX)
+        .map_err(|error| error.to_string())?;
+    for &original in original_token_ids { selected[original as usize] = true; }
     let mut global_to_tokens = Vec::<Vec<u32>>::new();
     let mut token_representatives = Vec::<u32>::new();
-    let mut local_to_global_tokens = components
-        .iter()
-        .map(|component| {
-            let constraint = component.constraint;
-            let local_count = if constraint.has_original_token_map() {
-                constraint.internal_token_count()
-            } else {
-                original_token_count
-            };
-            vec![Vec::<u32>::new(); local_count]
-        })
-        .collect::<Vec<_>>();
-
-    // A retained dynamic component has no static internal-token quotient: its
-    // exact private coordinate is the original model-token ID. That coordinate
-    // is injective, so once it participates in a product refinement no two
-    // distinct original tokens can ever share a global class. Construct that
-    // singleton refinement directly instead of inserting one unique Vec-key per
-    // token into a BTreeMap merely to rediscover the identity partition.
-    if components
-        .iter()
-        .any(|component| !component.constraint.has_original_token_map())
-    {
-        for &original in original_token_ids {
-            let global = global_to_tokens.len() as u32;
-            token_to_global[original as usize] = global;
-            for (component_index, component) in components.iter().enumerate() {
-                let constraint = component.constraint;
-                let local = if constraint.has_original_token_map() {
-                    constraint
-                        .original_token_internal_at(original)
-                        .unwrap_or(u32::MAX)
-                } else {
-                    // `original_token_ids` is already the composed public token
-                    // domain: supplied vocabulary IDs plus live merged exact
-                    // specials. Compiler-only late-grammar sentinels are removed
-                    // before this point and are therefore not identity members.
-                    original
-                };
-                if local == u32::MAX {
-                    continue;
-                }
-                let Some(destinations) = local_to_global_tokens
-                    .get_mut(component_index)
-                    .and_then(|classes| classes.get_mut(local as usize))
-                else {
-                    return Err(format!(
-                        "component {component_index} token class {local} lies outside its internal token domain"
-                    ));
-                };
-                destinations.push(global);
-            }
-            token_representatives.push(original);
-            global_to_tokens.push(vec![original]);
-        }
-        return Ok((
-            ManyToOneIdMap {
-                original_to_internal: token_to_global,
-                internal_to_originals: global_to_tokens,
-                representative_original_ids: token_representatives,
-            },
-            local_to_global_tokens,
-            true,
-        ));
-    }
-
-    // The overwhelmingly common subgrammar link is parent + one composed
-    // child. Its exact common vocabulary partition is keyed by one child class
-    // inside each parent class; avoid allocating a temporary Vec tuple for
-    // every original token and using that Vec as a tree key.
-    if components.len() == 2 {
-        let parent = components[0].constraint;
-        let child = components[1].constraint;
-        let mut add_pair_class =
-            |originals: Vec<u32>, parent_local: u32, child_local: u32| -> Result<(), String> {
-                if originals.is_empty()
-                    || (parent_local == u32::MAX && child_local == u32::MAX)
-                {
-                    return Ok(());
-                }
-                let global = global_to_tokens.len() as u32;
-                for &original in &originals {
-                    token_to_global[original as usize] = global;
-                }
-                for (component_index, local) in [parent_local, child_local].into_iter().enumerate() {
-                    if local == u32::MAX {
-                        continue;
-                    }
-                    let Some(destinations) = local_to_global_tokens
-                        .get_mut(component_index)
-                        .and_then(|classes| classes.get_mut(local as usize))
-                    else {
-                        return Err(format!(
-                            "component {component_index} token class {local} lies outside its internal token domain"
-                        ));
-                    };
-                    destinations.push(global);
-                }
-                token_representatives.push(originals[0]);
-                global_to_tokens.push(originals);
-                Ok(())
-            };
-
-        let singleton_fast =
-            crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
-        let dense_child_buckets =
-            crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
-        if dense_child_buckets {
-            let child_class_count = child.internal_token_count();
-            let mut buckets = (0..child_class_count)
-                .map(|_| Vec::<u32>::new())
-                .collect::<Vec<_>>();
-            let mut touched = Vec::<usize>::new();
-            let mut touched_flags = vec![false; child_class_count];
-            let mut unmapped = Vec::<u32>::new();
-
-            if let Some(parent_token_groups) = parent.internal_token_groups() {
-                for (parent_local, originals) in parent_token_groups.iter().enumerate() {
-                    if singleton_fast && originals.len() == 1 {
-                        let original = originals[0];
-                        if selected_original
-                            .get(original as usize)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            let child_local = child
-                                .original_token_internal_at(original)
-                                .unwrap_or(u32::MAX);
-                            add_pair_class(vec![original], parent_local as u32, child_local)?;
-                        }
-                        continue;
-                    }
-                    for &original in originals {
-                        if !selected_original
-                            .get(original as usize)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            continue;
-                        }
-                        let child_local = child
-                            .original_token_internal_at(original)
-                            .unwrap_or(u32::MAX);
-                        if child_local == u32::MAX {
-                            unmapped.push(original);
-                            continue;
-                        }
-                        let child_index = child_local as usize;
-                        if child_index >= child_class_count {
-                            return Err(format!(
-                                "component 1 token class {child_local} lies outside its internal token domain"
-                            ));
-                        }
-                        if !touched_flags[child_index] {
-                            touched_flags[child_index] = true;
-                            touched.push(child_index);
-                        }
-                        buckets[child_index].push(original);
-                    }
-                    touched.sort_unstable();
-                    for child_index in touched.drain(..) {
-                        touched_flags[child_index] = false;
-                        let originals = std::mem::take(&mut buckets[child_index]);
-                        add_pair_class(originals, parent_local as u32, child_index as u32)?;
-                    }
-                    if !unmapped.is_empty() {
-                        add_pair_class(
-                            std::mem::take(&mut unmapped),
-                            parent_local as u32,
-                            u32::MAX,
-                        )?;
-                    }
-                }
-            }
-
-            for &original in original_token_ids {
-                let parent_local = parent
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX);
-                if parent_local != u32::MAX {
-                    continue;
-                }
-                let child_local = child
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX);
-                if child_local == u32::MAX {
-                    unmapped.push(original);
-                    continue;
-                }
-                let child_index = child_local as usize;
-                if child_index >= child_class_count {
-                    return Err(format!(
-                        "component 1 token class {child_local} lies outside its internal token domain"
-                    ));
-                }
-                if !touched_flags[child_index] {
-                    touched_flags[child_index] = true;
-                    touched.push(child_index);
-                }
-                buckets[child_index].push(original);
-            }
-            touched.sort_unstable();
-            for child_index in touched.drain(..) {
-                touched_flags[child_index] = false;
-                let originals = std::mem::take(&mut buckets[child_index]);
-                add_pair_class(originals, u32::MAX, child_index as u32)?;
-            }
-            if !unmapped.is_empty() {
-                add_pair_class(std::mem::take(&mut unmapped), u32::MAX, u32::MAX)?;
-            }
+    let mut local_to_global_tokens = components.iter().map(|component| {
+        let constraint = component.constraint;
+        let count = if constraint.has_original_token_map() {
+            constraint.internal_token_count()
         } else {
-            if let Some(parent_token_groups) = parent.internal_token_groups() {
-                for (parent_local, originals) in parent_token_groups.iter().enumerate() {
-                    if singleton_fast && originals.len() == 1 {
-                        let original = originals[0];
-                        if selected_original
-                            .get(original as usize)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            let child_local = child
-                                .original_token_internal_at(original)
-                                .unwrap_or(u32::MAX);
-                            add_pair_class(vec![original], parent_local as u32, child_local)?;
-                        }
-                        continue;
-                    }
-                    let mut groups = BTreeMap::<u32, Vec<u32>>::new();
-                    for &original in originals {
-                        if !selected_original
-                            .get(original as usize)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            continue;
-                        }
-                        let child_local = child
-                            .original_token_internal_at(original)
-                            .unwrap_or(u32::MAX);
-                        groups.entry(child_local).or_default().push(original);
-                    }
-                    for (child_local, originals) in groups {
-                        add_pair_class(originals, parent_local as u32, child_local)?;
-                    }
-                }
-            }
+            original_token_count
+        };
+        vec![Vec::<u32>::new(); count]
+    }).collect::<Vec<_>>();
 
-            let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
-            for &original in original_token_ids {
-                let parent_local = parent
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX);
-                if parent_local != u32::MAX {
-                    continue;
-                }
-                let child_local = child
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX);
-                parent_unmapped.entry(child_local).or_default().push(original);
-            }
-            for (child_local, originals) in parent_unmapped {
-                add_pair_class(originals, u32::MAX, child_local)?;
-            }
+    let identity = components.iter().any(|component| !component.constraint.has_original_token_map());
+    let local = |component: &PossibleMatchComponent<'_>, original| {
+        if component.constraint.has_original_token_map() {
+            component.constraint.original_token_internal_at(original).unwrap_or(u32::MAX)
+        } else {
+            original
         }
-
-        return Ok((
-            ManyToOneIdMap {
-                original_to_internal: token_to_global,
-                internal_to_originals: global_to_tokens,
-                representative_original_ids: token_representatives,
-            },
-            local_to_global_tokens,
-            false,
-        ));
-    }
-    let mut add_token_class = |originals: Vec<u32>, tuple: Vec<u32>| -> Result<(), String> {
-        if originals.is_empty() || tuple.iter().all(|&local| local == u32::MAX) {
-            return Ok(());
-        }
+    };
+    let mut publish = |originals: Vec<u32>, tuple: &[u32]| -> Result<(), String> {
+        if originals.is_empty() || tuple.iter().all(|&id| id == u32::MAX) { return Ok(()); }
         let global = global_to_tokens.len() as u32;
         for &original in &originals {
             token_to_global[original as usize] = global;
         }
-        for (component_index, &local) in tuple.iter().enumerate() {
-            if local == u32::MAX {
-                continue;
-            }
-            let Some(destinations) = local_to_global_tokens
-                .get_mut(component_index)
-                .and_then(|classes| classes.get_mut(local as usize))
-            else {
-                return Err(format!(
-                    "component {component_index} token class {local} lies outside its internal token domain"
-                ));
-            };
-            destinations.push(global);
+        for (component, &id) in tuple.iter().enumerate() {
+            if id == u32::MAX { continue; }
+            local_to_global_tokens[component].get_mut(id as usize).ok_or_else(|| {
+                format!("component {component} token class {id} lies outside its internal token domain")
+            })?.push(global);
         }
         token_representatives.push(originals[0]);
         global_to_tokens.push(originals);
         Ok(())
     };
 
-    let parent = components[0].constraint;
-    let parent_token_groups = parent
-        .internal_token_groups()
-        .ok_or_else(|| "composed parent has no explicit internal-token partition".to_owned())?;
-    for (parent_local, originals) in parent_token_groups.iter().enumerate() {
-        let mut groups = BTreeMap::<Vec<u32>, Vec<u32>>::new();
-        for &original in originals {
-            if !selected_original
-                .get(original as usize)
-                .copied()
-                .unwrap_or(false)
-            {
-                continue;
+    if identity {
+        // An injective component coordinate makes the entire common
+        // refinement discrete. No tuple interning is needed.
+        for &original in original_token_ids {
+            let tuple = components.iter().map(|component| local(component, original))
+                .collect::<LocalTokenTuple>();
+            publish(vec![original], &tuple)?;
+        }
+    } else {
+        let (parent, children) = components.split_first()
+            .ok_or_else(|| "composition has no parent component".to_owned())?;
+        let parent_groups = parent.constraint.internal_token_groups()
+            .ok_or_else(|| "composed parent has no explicit internal-token partition".to_owned())?;
+        let mut buckets = TokenMeetBuckets::new(components);
+        let singleton_fast = crate::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
+        let mut refine = |parent_local: u32, originals: &[u32], parent_absent: bool| -> Result<(), String> {
+            let includes = |original: u32| {
+                if parent_absent { local(parent, original) == u32::MAX }
+                else { selected.get(original as usize).copied().unwrap_or(false) }
+            };
+            let child_tuple = |original| children.iter().map(|child| local(child, original))
+                .collect::<LocalTokenTuple>();
+            let mut emit = |children: LocalTokenTuple, originals: Vec<u32>| {
+                let mut tuple = LocalTokenTuple::new();
+                tuple.push(parent_local);
+                tuple.extend(children);
+                publish(originals, &tuple)
+            };
+            if singleton_fast && originals.len() == 1 {
+                let original = originals[0];
+                if includes(original) { emit(child_tuple(original), vec![original])?; }
+                return Ok(());
             }
-            let child_tuple = components[1..]
-                .iter()
-                .map(|component| {
-                    component
-                        .constraint
-                        .original_token_internal_at(original)
-                        .unwrap_or(u32::MAX)
-                })
-                .collect::<Vec<_>>();
-            groups.entry(child_tuple).or_default().push(original);
+            for &original in originals {
+                if includes(original) {
+                    buckets.insert(child_tuple(original), original)?;
+                }
+            }
+            buckets.drain(emit)
+        };
+        for (class, originals) in parent_groups.iter().enumerate() {
+            refine(class as u32, originals, false)?;
         }
-        for (child_tuple, originals) in groups {
-            let mut tuple = Vec::with_capacity(components.len());
-            tuple.push(parent_local as u32);
-            tuple.extend(child_tuple);
-            add_token_class(originals, tuple)?;
-        }
+        refine(u32::MAX, original_token_ids, true)?;
     }
-
-    let mut parent_unmapped = BTreeMap::<Vec<u32>, Vec<u32>>::new();
-    for &original in original_token_ids {
-        let parent_local = parent.original_token_internal_at(original).unwrap_or(u32::MAX);
-        if parent_local != u32::MAX {
-            continue;
-        }
-        let child_tuple = components[1..]
-            .iter()
-            .map(|component| {
-                component
-                    .constraint
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX)
-            })
-            .collect::<Vec<_>>();
-        parent_unmapped.entry(child_tuple).or_default().push(original);
-    }
-    for (child_tuple, originals) in parent_unmapped {
-        let mut tuple = Vec::with_capacity(components.len());
-        tuple.push(u32::MAX);
-        tuple.extend(child_tuple);
-        add_token_class(originals, tuple)?;
-    }
-
     Ok((
         ManyToOneIdMap {
             original_to_internal: token_to_global,
@@ -574,10 +362,9 @@ fn build_direct_component_token_coordinates(
             representative_original_ids: token_representatives,
         },
         local_to_global_tokens,
-        false,
+        identity,
     ))
 }
-
 
 type PossibleMatches = BTreeMap<u32, Weight>;
 
@@ -716,10 +503,9 @@ pub(crate) fn publish_walk_boundary_shard_work(
             } else {
                 resolve_negative_codes_in_nwa(&mut nwa, grouped)
             };
-            if crate::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
+            if crate::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some()
+                || crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
                 nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(nwa, reverse_topo);
-            } else if crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
-                nwa = reverse_hashcons_positive_acyclic_nwa(nwa);
             }
             for (source, state) in nwa.states().iter().enumerate() {
                 if let Some(&label) = state.transitions.keys().find(|&&label| is_negative_label(label)) {
@@ -1455,6 +1241,7 @@ fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
     NWA::from_parts(states, starts)
 }
 
+#[cfg(test)]
 fn reverse_hashcons_positive_acyclic_nwa(nwa: NWA) -> NWA {
     #[derive(Hash, PartialEq, Eq)]
     struct Key {
@@ -1719,32 +1506,26 @@ pub(crate) fn merged_terminal_display_names(
     children: &[CompiledSubgrammarInput<'_>],
 ) -> Vec<String> {
     let mut names = parent.terminal_display_names.clone();
-    for (index, child) in children.iter().enumerate() {
-        names.extend(
-            child
-                .constraint
-                .terminal_display_names
-                .iter()
-                .map(|name| format!("subgrammar{index}::{name}")),
-        );
-    }
+    // Direct composition numbers children from zero; expanded leaves number
+    // them from one. Keep this display-only distinction explicit.
+    append_component_names(&mut names, children.iter().map(|child| child.constraint), 0);
     names
 }
 
 pub(crate) fn merged_leaf_terminal_display_names(leaves: &[&Constraint]) -> Vec<String> {
-    let mut names = Vec::new();
-    for (index, leaf) in leaves.iter().enumerate() {
-        if index == 0 {
-            names.extend(leaf.terminal_display_names.iter().cloned());
-        } else {
-            names.extend(
-                leaf.terminal_display_names
-                    .iter()
-                    .map(|name| format!("subgrammar{index}::{name}")),
-            );
-        }
-    }
+    let Some((first, rest)) = leaves.split_first() else { return Vec::new(); };
+    let mut names = first.terminal_display_names.clone();
+    append_component_names(&mut names, rest.iter().copied(), 1);
     names
+}
+
+fn append_component_names<'a>(
+    names: &mut Vec<String>, components: impl IntoIterator<Item = &'a Constraint>, first_index: usize,
+) {
+    for (index, component) in components.into_iter().enumerate() {
+        let index = first_index + index;
+        names.extend(component.terminal_display_names.iter().map(|name| format!("subgrammar{index}::{name}")));
+    }
 }
 
 /// Leaf-slice version of `component_ignores_are_globally_erasable` for nested
@@ -1899,34 +1680,8 @@ pub(crate) fn component_ignores_are_globally_erasable(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
-    let components = std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
-        .collect::<Vec<_>>();
-    if components
-        .iter()
-        .any(|component| !component.parser_skip_terminals().is_empty())
-    {
-        return false;
-    }
-    let Some(first) = components.first() else {
-        return true;
-    };
-    match first.ignore_terminal {
-        None => components
-            .iter()
-            .all(|component| component.ignore_terminal.is_none()),
-        Some(first_ignore) => {
-            let Some(expected) = constraint_ignore_expr(first) else {
-                return false;
-            };
-            components.iter().skip(1).all(|component| {
-                let Some(_ignore) = component.ignore_terminal else {
-                    return false;
-                };
-                constraint_ignore_expr(component).is_some_and(|actual| actual == expected)
-            })
-        }
-    }
+    let components = std::iter::once(parent).chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>();
+    leaf_ignores_are_globally_erasable(&components)
 }
 
 
@@ -1938,61 +1693,8 @@ pub(crate) fn merged_ignore_terminals(
     terminal_offsets: &[u32],
     globally_erasable: bool,
 ) -> MergedIgnoreTerminals {
-    let ignores = std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
-        .enumerate()
-        .filter_map(|(component_index, constraint)| {
-            constraint
-                .ignore_terminal
-                .map(|terminal| terminal_offsets[component_index] + terminal)
-        })
-        .collect::<Vec<_>>();
-    let canonical = globally_erasable
-        .then(|| ignores.first().copied())
-        .flatten();
-    let canonical_expr = canonical.and_then(|_| constraint_ignore_expr(parent).cloned());
-    let mut all = BitSet::new(
-        terminal_offsets
-            .iter()
-            .copied()
-            .zip(std::iter::once(parent).chain(children.iter().map(|child| child.constraint)))
-            .map(|(offset, constraint)| offset + constraint.tokenizer.num_terminals())
-            .max()
-            .unwrap_or(0) as usize,
-    );
-    for &ignore in &ignores {
-        all.set(ignore as usize);
-    }
-    for (component_index, component) in std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
-        .enumerate()
-    {
-        let terminal_offset = terminal_offsets[component_index] as usize;
-        for &skip in component.parser_skip_terminals() {
-            all.set(terminal_offset + skip as usize);
-        }
-    }
-    let (global, scoped) = if canonical.is_some() {
-        (all.clone(), BitSet::new(all.len()))
-    } else {
-        (BitSet::new(all.len()), all.clone())
-    };
-    let aliases = canonical
-        .map(|canonical| {
-            ignores
-                .into_iter()
-                .filter(|&ignore| ignore != canonical)
-                .collect()
-        })
-        .unwrap_or_default();
-    MergedIgnoreTerminals {
-        canonical,
-        canonical_expr,
-        all,
-        scoped,
-        global,
-        aliases,
-    }
+    let components = std::iter::once(parent).chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>();
+    merged_leaf_ignore_terminals(&components, terminal_offsets, globally_erasable)
 }
 
 
