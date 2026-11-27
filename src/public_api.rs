@@ -2933,7 +2933,7 @@ impl PreparedGrammar {
 
     fn validate_local_slot_manifest(&self, vocab: &Vocab) -> Result<()> {
         if self.slot_spans.iter().any(|(name,span)|!self.slot_kinds.contains_key(name)
-            || span.start>span.end || span.line==0 || span.column==0) {
+            || span.start()>span.end() || { let (line, column) = glrmask_vocab::__private::source_span_line_column(span); line==0 || column==0 }) {
             return Err(Error::Serialization("invalid prepared requirement source coordinates".into()));
         }
         if !self.inner.end_tokens.is_empty() {

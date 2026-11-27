@@ -217,6 +217,9 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
         }
         return Ok(glrmask::Expr::from(&g.inner));
     }
+    if let Ok(c) = value.extract::<PyRef<'_, PyConstraint>>() {
+        return Ok(glrmask::Expr::from(c.inner.as_ref()));
+    }
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
         return Ok(e.inner.clone());
     }
@@ -224,7 +227,7 @@ pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::E
         return Ok(glrmask::Expr::from(et.inner.clone()));
     }
     Err(PyTypeError::new_err(
-        "Expr parts must be Grammar, Module, Expr or TokenSet",
+        "Expr parts must be Grammar, Module, Constraint, Expr or TokenSet",
     ))
 }
 

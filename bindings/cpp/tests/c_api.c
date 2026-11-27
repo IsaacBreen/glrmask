@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"C ABI check failed at line %d: %s; %s\n",__LINE__,#x,glrmask_error_message());return 1;}}while(0)
+static int viable_outcome(glrmask_state* state, uint32_t outcome) {
+    uint32_t terminated=0, accepting=0;
+    return glrmask_state_is_terminated(state,&terminated)==GLRMASK_OK
+        && glrmask_state_is_accepting(state,&accepting)==GLRMASK_OK
+        && outcome == (uint32_t)!(terminated && !accepting);
+}
 int main(void) {
     uint32_t accepted=0;
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
@@ -73,8 +79,41 @@ int main(void) {
                 CHECK(glrmask_state_commit_token(probe,0,&accepted)==GLRMASK_OK && accepted==0);
                 glrmask_state_free(probe);
             }
+            for(size_t prefix=0;prefix<3;prefix++) {
+                const char* prefixes[]={"","a","z"};
+                for(size_t j=0;j<3;j++){
+                    const uint32_t ids[]={0,31,UINT32_MAX};
+                    CHECK(glrmask_constraint_start(constraint,&probe)==GLRMASK_OK);
+                    CHECK(glrmask_state_commit_bytes(probe,(const uint8_t*)prefixes[prefix],strlen(prefixes[prefix]),&accepted)==GLRMASK_OK);
+                    CHECK(viable_outcome(probe,accepted));
+                    CHECK(glrmask_state_commit_token(probe,ids[j],&accepted)==GLRMASK_OK);
+                    CHECK(viable_outcome(probe,accepted));
+                    CHECK(glrmask_state_commit_bytes(probe,NULL,0,&accepted)==GLRMASK_OK);
+                    CHECK(viable_outcome(probe,accepted));
+                    glrmask_state_free(probe);
+                }
+            }
             glrmask_constraint_free(constraint);constraint=NULL;
         }
+    }
+    {
+        const char src[]="extern token T start root nt root=T";
+        glrmask_grammar* eg=NULL;glrmask_module* em=NULL;glrmask_token_set* ts=NULL;
+        glrmask_constraint* ec=NULL;glrmask_state* es=NULL;
+        CHECK(glrmask_grammar_from_source(GLRMASK_GLRM,src,strlen(src),&eg)==GLRMASK_OK);
+        CHECK(glrmask_module_new(eg,&em)==GLRMASK_OK);
+        CHECK(glrmask_token_set_new(NULL,0,&ts)==GLRMASK_OK);
+        CHECK(glrmask_module_bind_tokens(em,"T",1,ts)==GLRMASK_OK);
+        CHECK(glrmask_module_compile(em,vocab,NULL,&ec)==GLRMASK_OK);
+        CHECK(glrmask_constraint_start(ec,&es)==GLRMASK_OK);
+        CHECK(glrmask_state_commit_bytes(es,NULL,0,&accepted)==GLRMASK_OK && accepted==0);
+        CHECK(viable_outcome(es,accepted));
+        CHECK(glrmask_state_commit_token(es,0,&accepted)==GLRMASK_OK && accepted==0);
+        CHECK(viable_outcome(es,accepted));
+        CHECK(glrmask_state_commit_bytes(es,a,1,&accepted)==GLRMASK_OK && accepted==0);
+        CHECK(viable_outcome(es,accepted));
+        glrmask_state_free(es);glrmask_constraint_free(ec);glrmask_token_set_free(ts);
+        glrmask_module_free(em);glrmask_grammar_free(eg);
     }
     {
         struct old_options { size_t struct_size; uint32_t mask_strategy, reserved; };

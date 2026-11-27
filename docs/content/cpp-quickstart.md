@@ -44,6 +44,7 @@ int main() {
         if (!state.commit_token(token)) return 1;
         output += static_cast<char>(token);
     }
+    if (!state.is_accepting()) return 1;
     std::cout << output << '\n';
 }
 ```

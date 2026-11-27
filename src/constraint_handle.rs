@@ -12,10 +12,11 @@ pub struct Constraint {
 impl Constraint {
     pub(crate) fn from_runtime(inner: RuntimeConstraint) -> Self { Self { inner } }
 
+    pub(crate) fn runtime(&self) -> &RuntimeConstraint { &self.inner }
     /// Starts a new sequence.
     pub fn start(&self) -> ConstraintState { self.inner.start() }
 
-    /// The mask's length in bits (the largest token ID plus one).
+    /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
     pub fn mask_bit_len(&self) -> usize { self.inner.mask_bit_len() }
 
     pub fn save(&self) -> Vec<u8> { self.inner.save() }

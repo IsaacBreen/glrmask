@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "_glrmask"
-version = "1.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "glrmask",
  "libmimalloc-sys",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask"
-version = "1.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "ahash",
  "bincode",

@@ -7,8 +7,8 @@
     "rust": "cargo add glrmask"
   },
   "quickstarts": {
-    "python": "```python\nimport numpy as np\nimport glrmask\n\ngrammar = glrmask.Grammar.from_json_schema({\n    \"type\": \"object\",\n    \"properties\": {\"color\": {\"enum\": [\"red\", \"green\", \"blue\"]}},\n    \"required\": [\"color\"],\n    \"additionalProperties\": False,\n})\n\n# One token per byte, plus EOS. With a real model, build this from its tokenizer.\nvocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})\nEOS = 256\n\nstate = grammar.compile(vocab).start()\nrng = np.random.default_rng(0)\noutput = []\nwhile True:\n    logits = rng.standard_normal(257)  # stand-in for your model\n    allowed = np.zeros(257, dtype=bool)\n    m = state.mask()\n    # NumPy boilerplate: unpack the bitmask into booleans to index the logits.\n    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)\n    allowed[EOS] = state.is_accepting()\n    if not allowed.any():\n        raise RuntimeError(\"no allowed token and cannot stop\")\n    token = int(np.argmax(np.where(allowed, logits, -np.inf)))\n    if token == EOS:\n        break\n    if not state.commit_token(token):\n        raise RuntimeError(\"allowed token rejected\")\n    output.append(token)\n\nprint(bytes(output).decode())  # e.g. {\"color\": \"blue\"}\n```",
-    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let grammar = Grammar::from_json_schema(r#\"{\n        \"type\": \"object\",\n        \"properties\": {\"color\": {\"enum\": [\"red\", \"green\", \"blue\"]}},\n        \"required\": [\"color\"],\n        \"additionalProperties\": false\n    }\"#)?;\n\n    // One token per byte, plus EOS. With a real model, build this from its tokenizer.\n    let vocab = Vocab::new((0..256u32).map(|b| (b, vec![b as u8])))?;\n    const EOS: u32 = 256;\n\n    let mut state = grammar.compile(&vocab)?.start();\n    let mut output = Vec::new();\n    loop {\n        let logits = model(&output); // stand-in for your model\n        let mask = state.mask();\n        let allowed = |t: u32| match t {\n            EOS => state.is_accepting(),\n            t => mask[t as usize / 32] >> (t % 32) & 1 == 1,\n        };\n        let token = (0..=EOS)\n            .filter(|&t| allowed(t))\n            .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))\n            .expect(\"no allowed token and cannot stop\");\n        if token == EOS {\n            break;\n        }\n        assert!(state.commit_token(token), \"allowed token rejected\");\n        output.push(token as u8);\n    }\n    println!(\"{}\", String::from_utf8_lossy(&output)); // e.g. {\"color\": \"blue\"}\n    Ok(())\n}\n\nfn model(output: &[u8]) -> Vec<f32> {\n    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()\n}\n```"
+    "python": "```python\nimport numpy as np\nimport glrmask\n\ngrammar = glrmask.Grammar.from_json_schema({\n    \"type\": \"object\",\n    \"properties\": {\"color\": {\"enum\": [\"red\", \"green\", \"blue\"]}},\n    \"required\": [\"color\"],\n    \"additionalProperties\": False,\n})\n\n# One token per byte, plus EOS. With a real model, build this from its tokenizer.\nvocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})\nEOS = 256\n\nstate = grammar.compile(vocab).start()\nrng = np.random.default_rng(0)\noutput = []\nwhile True:\n    logits = rng.standard_normal(257)  # stand-in for your model\n    allowed = np.zeros(257, dtype=bool)\n    m = state.mask()\n    # NumPy boilerplate: unpack the bitmask into booleans to index the logits.\n    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)\n    allowed[EOS] = state.is_accepting()\n    if not allowed.any():\n        raise RuntimeError(\"no allowed token and cannot stop\")\n    token = int(np.argmax(np.where(allowed, logits, -np.inf)))\n    if token == EOS:\n        break\n    if not state.commit_token(token):\n        raise RuntimeError(\"allowed token rejected\")\n    output.append(token)\n\nif not state.is_accepting():\n    raise RuntimeError(\"incomplete output\")\nprint(bytes(output).decode())  # e.g. {\"color\": \"blue\"}\n```",
+    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let grammar = Grammar::from_json_schema(r#\"{\n        \"type\": \"object\",\n        \"properties\": {\"color\": {\"enum\": [\"red\", \"green\", \"blue\"]}},\n        \"required\": [\"color\"],\n        \"additionalProperties\": false\n    }\"#)?;\n\n    // One token per byte, plus EOS. With a real model, build this from its tokenizer.\n    let vocab = Vocab::new((0..256u32).map(|b| (b, vec![b as u8])))?;\n    const EOS: u32 = 256;\n\n    let mut state = grammar.compile(&vocab)?.start();\n    let mut output = Vec::new();\n    loop {\n        let logits = model(&output); // stand-in for your model\n        let mask = state.mask();\n        let allowed = |t: u32| match t {\n            EOS => state.is_accepting(),\n            t => mask[t as usize / 32] >> (t % 32) & 1 == 1,\n        };\n        let token = (0..=EOS)\n            .filter(|&t| allowed(t))\n            .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))\n            .expect(\"no allowed token and cannot stop\");\n        if token == EOS {\n            break;\n        }\n        assert!(state.commit_token(token), \"allowed token rejected\");\n        output.push(token as u8);\n    }\n    assert!(state.is_accepting(), \"incomplete output\");\n    println!(\"{}\", String::from_utf8_lossy(&output)); // e.g. {\"color\": \"blue\"}\n    Ok(())\n}\n\nfn model(output: &[u8]) -> Vec<f32> {\n    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()\n}\n```"
   },
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
   "python_symbols": {
@@ -39,16 +39,16 @@
     "Constraint": "",
     "Constraint.__repr__": "",
     "Constraint.start": "Starts a new sequence.",
-    "Constraint.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
+    "Constraint.mask_bit_len": "The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.",
     "Constraint.save": "",
     "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.",
     "ConstraintState": "",
     "ConstraintState.__repr__": "",
     "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. May release the GIL.",
-    "ConstraintState.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
-    "ConstraintState.commit_token": "Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.",
-    "ConstraintState.commit_bytes": "Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.",
+    "ConstraintState.mask_bit_len": "The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.",
+    "ConstraintState.commit_token": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.",
+    "ConstraintState.commit_bytes": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.",
     "ConstraintState.forced_bytes": "The bytes that must come next.",
     "ConstraintState.is_accepting": "Whether the output so far could end here.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
@@ -62,7 +62,7 @@
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "",
     "Extern.kind": "",
-    "GLRMaskError": "",
+    "GLRMaskError": "The message text is for humans; its format is not stable.",
     "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"vocab_mismatch\"`, `\"buffer_too_small\"`, `\"internal\"`."
   },
   "python_releases": {
@@ -169,8 +169,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "4af6ca0f06fbc8dbf89db8ad9ee5da6116a8097c60c7a9b6cfe0513051598fbf",
-    "bindings/node/README.md": "b60937cbc6be09766cb212d0211bab0d086088973baba0e982c1751949c61541",
+    "bindings/cpp/README.md": "5eeb88fd064683380faeaa39fd75fa29cb5c4037349de9c61e5d91fba9f62437",
+    "bindings/node/README.md": "7454bc94658a1561e16c7f12d1437c26fa395792adf4525c59243a84fdafc4b5",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -178,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "e9420116ff80f31eef17e5ac3fe514a7fd070789b57f1781ec09d98acd8e38a7"
+  "content_sha256": "dbd0929c1a702687e86d4f19065411bbbca9330906a432ada8c6eab5153dbe78"
 }

@@ -111,11 +111,15 @@ There was no CPU pinning or SMT sibling reservation, and checkpoint publication 
 python -m pip install glrmask
 ```
 
+For the release candidate: `pip install --pre glrmask` or `pip install glrmask==1.0.0rc1`.
+
 #### Rust
 
 ```bash
 cargo add glrmask
 ```
+
+For the release candidate: `cargo add glrmask@1.0.0-rc.1`.
 
 #### Native C++ and Node.js
 
@@ -166,6 +170,8 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
@@ -205,6 +211,7 @@ fn main() -> glrmask::Result<()> {
         assert!(state.commit_token(token), "allowed token rejected");
         output.push(token as u8);
     }
+    assert!(state.is_accepting(), "incomplete output");
     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
     Ok(())
 }

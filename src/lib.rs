@@ -12,6 +12,8 @@
 //! cargo add glrmask
 //! ```
 //!
+//! For the release candidate: `cargo add glrmask@1.0.0-rc.1`.
+//!
 //! GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust version; a patch release won't.
 //!
 //! # Usage
@@ -59,6 +61,7 @@
 //!         assert!(state.commit_token(token), "allowed token rejected");
 //!         output.push(token as u8);
 //!     }
+//!     assert!(state.is_accepting(), "incomplete output");
 //!     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
 //!     Ok(())
 //! }
@@ -124,7 +127,6 @@ pub use public_api::{
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::BoundaryTriggerDetail;
-pub use glrmask_vocab::SourceSpan;
 pub use glrmask_grammar::ExternKind;
 
 /// Unstable compatibility surface for repository tooling and benchmark

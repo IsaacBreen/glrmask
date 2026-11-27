@@ -46,7 +46,7 @@ export declare class Grammar implements Disposable {
 
 
 /** A value that can be part of an `Expr`. */
-export type ExprPart = Grammar | Module | Expr | TokenSet;
+export type ExprPart = Grammar | Module | Constraint | Expr | TokenSet;
 
 /** A grammar expression. */
 export declare class Expr implements Disposable {
@@ -101,7 +101,7 @@ export declare class Module implements Disposable {
   readonly externs: Externs;
 
   /** Throws if the extern is undeclared, already bound or the wrong kind. */
-  bind(name: string, value: ExprPart): void;
+  bind(name: string, value: Exclude<ExprPart, Constraint>): void;
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
@@ -127,7 +127,7 @@ export declare class Constraint implements Disposable {
   private readonly __constraintBrand: void;
   /** Starts a new sequence. */
   start(): ConstraintState;
-  /** The mask's length in bits (the largest token ID plus one). */
+  /** The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs. */
   readonly maskBitLength: number;
 
   save(): Promise<Uint8Array>;
@@ -151,12 +151,12 @@ export declare class ConstraintState implements Disposable {
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
-  /** The mask's length in bits (the largest token ID plus one). */
+  /** The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs. */
   readonly maskBitLength: number;
-  /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
+  /** Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. */
   commitToken(id: number): boolean;
 
-  /** Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. */
+  /** Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. */
   commitBytes(bytes: Uint8Array): boolean;
   /** The bytes that must come next. */
   forcedBytes(): Uint8Array;
@@ -194,6 +194,7 @@ export interface Extern {
 
 export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED' | 'GLRMASK_VOCAB_MISMATCH' | 'GLRMASK_PRECOMPILE_RACE';
 export type ErrorCode = KnownErrorCode | (string & {});
+/** The message text is for humans; its format is not stable. */
 export declare class GLRMaskError extends Error {
   /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`, `GLRMASK_VOCAB_MISMATCH`, `GLRMASK_PRECOMPILE_RACE`. */
   readonly code: ErrorCode;

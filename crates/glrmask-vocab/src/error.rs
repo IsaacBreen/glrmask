@@ -2,25 +2,25 @@
 //! return it; the `glrmask` crate re-exports it as `glrmask::Error`.
 use std::fmt;
 
-/// A location in grammar source.
+/// A half-open byte range in the grammar source (empty for a point error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct SourceSpan {
-    /// Byte offset of the first byte.
-    pub start: usize,
-    /// Byte offset just past the last byte.
-    pub end: usize,
-    /// Line of `start`, counting from 1.
-    pub line: usize,
-    /// Column of `start`, counting characters from 1.
-    pub column: usize,
+    start: usize,
+    end: usize,
+    line: usize,
+    column: usize,
 }
 
 impl SourceSpan {
-    #[doc(hidden)]
-    pub const fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
-        Self { start, end, line, column }
-    }
+    /// Zero-based inclusive start byte offset in the grammar source.
+    #[must_use]
+    pub const fn start(&self) -> usize { self.start }
+
+    /// Zero-based exclusive end byte offset in the grammar source; may equal the start.
+    #[must_use]
+    pub const fn end(&self) -> usize { self.end }
+
+
 }
 
 impl fmt::Display for SourceSpan {
@@ -29,6 +29,7 @@ impl fmt::Display for SourceSpan {
     }
 }
 
+/// An error reported by GLRMask. The message text is for humans; its format is not stable.
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,
@@ -45,7 +46,7 @@ pub enum ErrorKind {
     InvalidInput,
     /// A valid grammar that GLRMask can't compile.
     Compilation,
-    /// A build exceeded a size or time budget.
+    /// A resource limit, such as a size, memory or work budget, was exceeded.
     ResourceLimit,
     /// The chosen mask strategy can't handle this grammar; another strategy may work.
     StrategyUnsupported,
@@ -65,10 +66,6 @@ impl Error {
         self.kind
     }
 
-    /// Where in the grammar source the error is, if known.
-    pub fn source_span(&self) -> Option<SourceSpan> {
-        self.span
-    }
 }
 
 impl fmt::Display for Error {
@@ -100,6 +97,14 @@ impl std::error::Error for Error {}
 pub(crate) mod internal {
     use super::*;
 
+    pub const fn new_source_span(start: usize, end: usize, line: usize, column: usize) -> SourceSpan {
+        SourceSpan { start, end, line, column }
+    }
+
+    pub const fn source_span_line_column(span: &SourceSpan) -> (usize, usize) {
+        (span.line, span.column)
+    }
+
     /// A new error of `kind` with `message`.
     pub fn new_error(kind: ErrorKind, message: String) -> Error {
         Error { kind, message, span: None }
@@ -109,6 +114,9 @@ pub(crate) mod internal {
     pub fn error_message(error: &Error) -> &str {
         &error.message
     }
+
+    /// Internal diagnostic coordinates, not part of the stable error API.
+    pub fn error_source_span(error: &Error) -> Option<SourceSpan> { error.span }
 
     /// Sets the source span if it isn't set yet.
     pub fn with_source_span(mut error: Error, span: Option<SourceSpan>) -> Error {

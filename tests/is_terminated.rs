@@ -388,3 +388,76 @@ fn rejected_commits_terminate_live_state() {
         }
     }
 }
+
+#[test]
+fn byte_commit_outcome_is_independent_of_chunking() {
+    let vocab = Vocab::new((0..256u32).map(|id| (id, vec![id as u8]))).unwrap();
+    let grammar = Grammar::from_lark(r#"start: ("a" | "ab" | "é") "b"?"#).unwrap();
+    use glrmask::{CompileOptions, MaskStrategy};
+    for strategy in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        let constraint = grammar.compile_with(&vocab, CompileOptions::default().mask_strategy(strategy)).unwrap();
+        let mut inputs = vec![Vec::new(), "é".as_bytes().to_vec(), "éb".as_bytes().to_vec(),
+            vec![0xc3], vec![0xc3, b'x']];
+        for len in 1..=4 {
+            for word in 0..3usize.pow(len) {
+                let mut n = word;
+                inputs.push((0..len).map(|_| { let b = b"abz"[n % 3]; n /= 3; b }).collect());
+            }
+        }
+        for bytes in inputs {
+            let mut whole = constraint.start();
+            let expected = whole.commit_bytes(&bytes);
+            assert_eq!(expected, !(whole.is_terminated() && !whole.is_accepting()));
+            let expected_state = (whole.is_accepting(), whole.is_terminated(), whole.mask(), whole.forced_bytes());
+            for cuts in 0..(1usize << bytes.len().saturating_sub(1)) {
+                let mut split = constraint.start();
+                let mut accepted = true;
+                let mut start = 0;
+                for end in 1..bytes.len() {
+                    if cuts & (1 << (end - 1)) != 0 {
+                        let result = split.commit_bytes(&bytes[start..end]);
+                        assert_eq!(result, !(split.is_terminated() && !split.is_accepting()));
+                        accepted &= result;
+                        start = end;
+                    }
+                }
+                let result = split.commit_bytes(&bytes[start..]);
+                assert_eq!(result, !(split.is_terminated() && !split.is_accepting()));
+                accepted &= result;
+                assert_eq!(accepted, expected, "{bytes:?}, cuts={cuts:b}");
+                assert_eq!((split.is_accepting(), split.is_terminated(), split.mask(), split.forced_bytes()),
+                    expected_state, "{bytes:?}, cuts={cuts:b}");
+            }
+        }
+    }
+}
+
+#[test]
+fn commit_outcome_reports_post_state_viability() {
+    use glrmask::{CompileOptions, MaskStrategy};
+    let vocab = Vocab::new([(0, b"a".to_vec()), (1, b"b".to_vec()),
+        (2, b"z".to_vec()), (3, Vec::new())]).unwrap();
+    let ordinary = Module::new(&Grammar::from_lark(r#"start: "a" "b""#).unwrap());
+    let mut empty = Module::new(&Grammar::from_glrm("extern token T start root nt root=T").unwrap());
+    empty.bind("T", TokenSet::new([])).unwrap();
+    for strategy in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        for (module, is_empty) in [(&ordinary, false), (&empty, true)] {
+            let c = module.compile_with(&vocab, CompileOptions::default().mask_strategy(strategy)).unwrap();
+            assert_eq!(c.start().is_terminated(), is_empty);
+            for prefix in [b"".as_slice(), b"a", b"ab", b"z"] {
+                for id in [0, 1, 2, 3, 999, u32::MAX] {
+                    let mut s = c.start();
+                    let _ = s.commit_bytes(prefix);
+                    let result = s.commit_token(id);
+                    assert_eq!(result, !(s.is_terminated() && !s.is_accepting()), "{prefix:?} token={id}");
+                }
+                for bytes in [b"".as_slice(), b"a", b"b", b"z", b"ab"] {
+                    let mut s = c.start();
+                    let _ = s.commit_bytes(prefix);
+                    let result = s.commit_bytes(bytes);
+                    assert_eq!(result, !(s.is_terminated() && !s.is_accepting()), "{prefix:?} bytes={bytes:?}");
+                }
+            }
+        }
+    }
+}

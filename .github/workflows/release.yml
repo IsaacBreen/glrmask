@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version of the existing GitHub Release (e.g. 0.3.1)'
+        description: 'Existing GitHub Release version (e.g. 1.0.0 or 1.0.0-rc.1)'
         required: true
         type: string
       native_target:
@@ -33,6 +33,8 @@ on:
       - '.github/workflows/native-bindings.yml'
       - '.github/workflows/python-wheels.yml'
       - 'scripts/check-release-version.py'
+      - 'scripts/test-check-release-version.py'
+      - 'scripts/check-python-wheel-set.py'
       - 'scripts/publish-crates.py'
       - 'scripts/check-cpp-release-archives.py'
       - 'docs/design/releasing.md'
@@ -44,6 +46,7 @@ on:
 # No token or registry credentials are stored in this workflow.
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: trusted-release-${{ github.ref }}
@@ -55,6 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.versions.outputs.version }}
+      python_version: ${{ steps.versions.outputs.python_version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -68,6 +72,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python -m pip install packaging
+          python scripts/test-check-release-version.py
           VERSION="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
           python scripts/check-release-version.py --tag "v$VERSION" --skip-ancestry
           if python scripts/check-release-version.py --tag v999.0.0 --skip-ancestry; then
@@ -90,9 +96,21 @@ jobs:
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
-          python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
+          stable_only=()
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then stable_only=(--stable-only); fi
+          python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output "${stable_only[@]}"
+          prerelease=false
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then prerelease=true; fi
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" |
-            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false' > /dev/null
+            jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$prerelease" '.tag_name == $tag and .draft == false and .prerelease == $prerelease' > /dev/null
+          # Require runs on the actual merged commit, not a PR's synthetic merge.
+          for workflow in rust.yml python-wheels.yml guide-sync.yml; do
+            runs="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" -f head_sha="$(git rev-parse HEAD)" -f per_page=100)"
+            printf '%s' "$runs" | jq -e --arg sha "$(git rev-parse HEAD)" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))]
+              | sort_by(.id) | last | (.status == "completed" and .conclusion == "success")' >/dev/null ||
+              { echo "Required CI not green for exact main commit: ${workflow}" >&2; exit 1; }
+          done
 
 
   native-build:
@@ -245,8 +263,11 @@ jobs:
       contents: read
       id-token: write
     env:
-      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+      RELEASE_VERSION: ${{ needs.verify.outputs.python_version }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v7
         with:
           name: python-release-artifacts
@@ -258,11 +279,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 8
-          test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
-          find dist -type f | while IFS= read -r file; do
-            test "$(basename "$file" | grep -c "$RELEASE_VERSION")" -eq 1
-          done
+          python -m pip install packaging
+          python scripts/check-python-wheel-set.py dist --version "$RELEASE_VERSION"
       - name: Check PyPI release status
         id: existing
         shell: bash
@@ -403,7 +421,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF_TYPE" = tag
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]+$ ]]
-          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry
+          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry --stable-only
           RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"
           printf '%s' "$RELEASE_JSON" | jq -e '.draft == false and .prerelease == false' > /dev/null
           RELEASE_COMMIT="$(printf '%s' "$RELEASE_JSON" | jq -r .target_commitish)"
@@ -536,14 +554,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify published release, successful wheel CI and exact source-tree identity
+        id: versions
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF_TYPE" = tag
           [[ "$PYTHON_SOURCE_RUN_ID" =~ ^[1-9][0-9]+$ ]]
-          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry
+          test "$GITHUB_REF_NAME" = "v${RELEASE_VERSION}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/v${RELEASE_VERSION}^{commit}")"
+          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --github-output
+          prerelease=false
+          if [[ "$RELEASE_VERSION" == *-rc.* ]]; then prerelease=true; fi
           RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"
-          printf '%s' "$RELEASE_JSON" | jq -e '.draft == false and .prerelease == false' > /dev/null
+          printf '%s' "$RELEASE_JSON" | jq -e --arg tag "v${RELEASE_VERSION}" --argjson prerelease "$prerelease" '.tag_name == $tag and .draft == false and .prerelease == $prerelease' > /dev/null
           RELEASE_COMMIT="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq .object.sha)"
           test "$(printf '%s' "$RELEASE_JSON" | jq -r .target_commitish)" = "$RELEASE_COMMIT"
           git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
@@ -558,6 +581,14 @@ jobs:
           SOURCE_TREE="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_COMMIT}" --jq .tree.sha)"
           test "$SOURCE_TREE" = "$RELEASE_TREE"
           echo "Exact source-tree match: ${SOURCE_TREE}"
+          # Require runs on the actual merged commit, not a PR's synthetic merge.
+          for workflow in rust.yml python-wheels.yml guide-sync.yml; do
+            runs="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" -f head_sha="$(git rev-parse HEAD)" -f per_page=100)"
+            printf '%s' "$runs" | jq -e --arg sha "$(git rev-parse HEAD)" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))]
+              | sort_by(.id) | last | (.status == "completed" and .conclusion == "success")' >/dev/null ||
+              { echo "Required CI not green for exact main commit: ${workflow}" >&2; exit 1; }
+          done
       - uses: actions/download-artifact@v7
         with:
           name: python-release-artifacts
@@ -565,24 +596,23 @@ jobs:
           run-id: ${{ inputs.python_source_run_id }}
           github-token: ${{ github.token }}
       - name: Validate package set and all distribution versions
+        env:
+          PYTHON_VERSION: ${{ steps.versions.outputs.python_version }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 8
-          test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
-          find dist -type f | while IFS= read -r file; do
-            test "$(basename "$file" | grep -c "${RELEASE_VERSION}")" -eq 1
-          done
           python -m pip install --upgrade pip twine packaging
           python -m twine check dist/*
-          python scripts/check-python-wheel-set.py dist
+          python scripts/check-python-wheel-set.py dist --version "$PYTHON_VERSION"
       - name: Check existing PyPI version
+        env:
+          PYTHON_VERSION: ${{ steps.versions.outputs.python_version }}
         id: exists
         shell: bash
         run: |
           python - <<'PY'
           import os,urllib.error,urllib.request
-          u=f'https://pypi.org/pypi/glrmask/{os.environ["RELEASE_VERSION"]}/json'
+          u=f'https://pypi.org/pypi/glrmask/{os.environ["PYTHON_VERSION"]}/json'
           try:
               with urllib.request.urlopen(u,timeout=20) as r:
                   if r.status!=200: raise RuntimeError('Unexpected PyPI response')

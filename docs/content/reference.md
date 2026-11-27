@@ -6,7 +6,7 @@ See the quickstart above for the sampling loop and unpacking the packed mask.
 
 
 Masks indicate which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`.
-Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID plus one, or zero if empty), including gaps.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID in the constraint, including special and end tokens, plus one, or zero if there are no token IDs), including gaps.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask()` returns packed uint32 words. Use `mask().view(np.int32)` for signed packed words without copying.
 The constraint and each state have the same constant mask bit length.
@@ -25,8 +25,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 # buffer until the asynchronous transfer completes.
 ```
 
-`commit_token` advances the state by the token. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. A failed commit terminates the state, so to try a
-token without committing to it, copy the state first.
+`commit_token` advances the state by the token. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
 
 `is_accepting()` says whether the output so far could end here. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed. Together they distinguish in progress (false, false), may stop (true, false), complete (true, true), and dead (false, true). Treat EOS as a caller-side stop decision; committing an unknown EOS token rejects even an accepting state.
@@ -135,8 +134,8 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 ## Errors
 
 Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
-Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
-In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`. `source_span()` gives its place in the source.
+Each error message says what went wrong. It may also include a location in the grammar source. The message text is for humans; its format is not stable.
+In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`.
 Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 
 ## Grammar formats

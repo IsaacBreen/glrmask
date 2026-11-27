@@ -3,6 +3,8 @@ name: Python wheels
 on:
   workflow_call:
   workflow_dispatch:
+  push:
+    branches: [main]
   pull_request:
     paths:
       - ".github/workflows/python-wheels.yml"
@@ -252,7 +254,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip twine packaging
           python -m twine check dist/*
-          python scripts/check-python-wheel-set.py dist
+          PYTHON_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("python/pyproject.toml","rb"))["project"]["version"])')"
+          python scripts/check-python-wheel-set.py dist --version "$PYTHON_VERSION"
 
       - name: Upload combined validated artifact set
         uses: actions/upload-artifact@v6

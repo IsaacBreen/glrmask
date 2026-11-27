@@ -12,7 +12,7 @@ def main() -> None:
     p.add_argument('--output',type=Path,required=True)
     args=p.parse_args()
     root=Path(__file__).resolve().parents[2]
-    version=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
+    version=tomllib.loads((root/'bindings/cpp/Cargo.toml').read_text(encoding='utf-8'))['package']['version']
     if not all(c.isalnum() or c=='-' for c in args.platform): raise ValueError('Invalid platform label')
     report=json.loads((args.install_work/'report.json').read_text(encoding='utf-8'))
     if {v['kind'] for v in report}!={'static','shared'} or not all(v['sourceTests'] and v['relocatedConsumer'] for v in report):

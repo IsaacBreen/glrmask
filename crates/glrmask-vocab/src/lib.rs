@@ -8,7 +8,7 @@ use std::ops::{Range, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod error;
-pub use error::{Error, ErrorKind, SourceSpan};
+pub use error::{Error, ErrorKind};
 
 const MAX_TOKEN_ID: u32 = (1 << 24) - 1;
 
@@ -413,7 +413,8 @@ pub(crate) mod vocab_prefix_tree;
 pub mod __private {
     pub const MAX_TOKEN_ID: u32 = super::MAX_TOKEN_ID;
     pub use super::derived_artifact::VocabDerivedArtifact;
-    pub use super::error::internal::{error_message, new_error, with_source_span};
+    pub use super::error::SourceSpan;
+    pub use super::error::internal::{error_message, error_source_span, new_error, new_source_span, source_span_line_column, with_source_span};
     pub use super::Vocab;
 
     pub mod vocab_prefix_tree {

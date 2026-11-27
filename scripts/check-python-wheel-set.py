@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
+import tarfile
+import zipfile
 from collections import Counter
 from pathlib import Path
 
-from packaging.utils import parse_wheel_filename
+from packaging.utils import parse_wheel_filename, parse_sdist_filename, canonicalize_name
+from packaging.version import Version
 
 PYTHONS = {
     "cp39": "3.9",
@@ -49,9 +53,42 @@ def classify(path: Path) -> tuple[str, str]:
     return python_tag, matches[0]
 
 
+def validate_distribution(path: Path, expected: str) -> None:
+    if path.suffix == ".whl":
+        name, version, _, _ = parse_wheel_filename(path.name)
+        with zipfile.ZipFile(path) as archive:
+            members = [n for n in archive.namelist() if n.count("/") == 1 and n.endswith(".dist-info/METADATA")]
+            if len(members) != 1:
+                raise ValueError(f"{path}: expected exactly one wheel METADATA")
+            for filename in ("py.typed", "__init__.pyi"):
+                if f"glrmask/{filename}" not in archive.namelist():
+                    raise ValueError(f"{path}: missing glrmask/{filename}")
+            raw = archive.read(members[0])
+    else:
+        name, version = parse_sdist_filename(path.name)
+        with tarfile.open(path, "r:gz") as archive:
+            members = [m for m in archive.getmembers() if m.isfile() and m.name.count("/") == 1 and m.name.endswith("/PKG-INFO")]
+            if len(members) != 1:
+                raise ValueError(f"{path}: expected exactly one root PKG-INFO")
+            root = members[0].name.split("/", 1)[0]
+            paths = {m.name for m in archive.getmembers() if m.isfile()}
+            for filename in ("py.typed", "__init__.pyi"):
+                if not any(p.startswith(root + "/") and p.endswith(f"/glrmask/{filename}") for p in paths):
+                    raise ValueError(f"{path}: missing glrmask/{filename}")
+            with archive.extractfile(members[0]) as info:
+                raw = info.read()
+    metadata = email.parser.BytesParser().parsebytes(raw, headersonly=True)
+    names = metadata.get_all("Name", [])
+    versions = metadata.get_all("Version", [])
+    if (name != "glrmask" or version != Version(expected)
+            or len(names) != 1 or canonicalize_name(names[0]) != "glrmask"
+            or versions != [expected]):
+        raise ValueError(f"{path}: expected glrmask {expected}, filename={name} {version}, metadata={names} {versions}")
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--version", help="Require this canonical Python version in every distribution")
     args = parser.parse_args()
 
     wheels = sorted(args.directory.glob("*.whl"))
@@ -69,6 +106,13 @@ def main() -> None:
         extra = observed - expected
         raise SystemExit(f"wheel matrix mismatch; missing={dict(missing)}, extra={dict(extra)}")
 
+    if args.version is not None:
+        if str(Version(args.version)) != args.version:
+            raise ValueError("Expected a canonical PEP 440 version")
+        if set(args.directory.rglob("*")) - set(wheels) - set(sdists):
+            raise ValueError("Unexpected files in release distribution directory")
+        for path in wheels + sdists:
+            validate_distribution(path, args.version)
     print(f"validated {len(wheels)} wheels and {len(sdists)} sdist")
 
 

@@ -4342,8 +4342,8 @@ nt document = left right;
         match from_glrm(source).unwrap_err() {
             GlrMaskError::GrammarParseAt { message, span } => {
                 assert_eq!(message, "definitions use `=`, not `::=`");
-                assert_eq!(&source[span.start..span.end], "::=");
-                assert_eq!((span.line, span.column), (2, 6));
+                assert_eq!(&source[span.start()..span.end()], "::=");
+                assert_eq!(glrmask_vocab::__private::source_span_line_column(&span), (2, 6));
             }
             other => panic!("expected a located error, got {other:?}"),
         }

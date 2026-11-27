@@ -6,14 +6,15 @@ Release workflow: [`.github/workflows/release.yml`](../../.github/workflows/rele
 
 ## What publishes, and what does not
 
-Publishing a GitHub Release with a **new stable tag** (`vMAJOR.MINOR.PATCH`) runs the release
-workflow. Merely pushing to `main`, opening a PR, or creating a tag does **not** publish
-anything. The release tag must point to a commit already on `main`, and these versions
-must all match its tag:
-
-- `Cargo.toml` root `glrmask` version
-- `python/pyproject.toml` version
-- `bindings/node/package.json` `@glrmask/node` version
+Publishing a GitHub Release with a stable tag (`vMAJOR.MINOR.PATCH`) or a release-candidate
+tag (`vMAJOR.MINOR.PATCH-rc.N`) runs the release workflow. Merely pushing to main,
+opening a PR, or creating a tag does **not** publish anything. The tag must point
+to a commit already on main. Mark RC releases as prereleases, and stable releases
+as non-prereleases. The verifier checks the Rust root and Python crate versions
+and exact Python dependency pin against the tag, and the canonical Python package
+version (e.g. `1.0.0rc1` for `v1.0.0-rc.1`). On stable tags it additionally
+checks all native crate versions, npm versions and platform dependency pins, and
+the CMake project version. Native publication and recovery require stable tags.
 
 The published GitHub Release automatically builds and publishes **only Rust (crates.io) and Python (PyPI)**.
 Node and C/C++ are separate, explicit releases on the same stable tag. For each, open

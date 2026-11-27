@@ -8,6 +8,8 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 python -m pip install glrmask
 ```
 
+For the release candidate: `pip install --pre glrmask` or `pip install glrmask==1.0.0rc1`.
+
 ## Usage
 
 GLRMask has four core types:
@@ -53,6 +55,8 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
@@ -135,11 +139,11 @@ class Expr:
         """Matches `value` exactly."""
         ...
     @staticmethod
-    def sequence(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+    def sequence(*parts: Grammar | Module | Constraint | Expr | TokenSet) -> Expr:
         """Matches `parts` in order."""
         ...
     @staticmethod
-    def choice(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+    def choice(*parts: Grammar | Module | Constraint | Expr | TokenSet) -> Expr:
         """Matches any one of `parts`."""
         ...
 
@@ -204,7 +208,7 @@ class Constraint:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits (the largest token ID plus one)."""
+        """The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs."""
         ...
     def save(self) -> bytes:
         ...
@@ -225,13 +229,13 @@ class ConstraintState:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits (the largest token ID plus one)."""
+        """The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs."""
         ...
     def commit_token(self, token_id: SupportsIndex, /) -> bool:
-        """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""
+        """Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state."""
+        """Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable."""
         ...
     def forced_bytes(self) -> bytes:
         """The bytes that must come next."""
@@ -289,5 +293,6 @@ class Extern:
     def __hash__(self) -> int: ...
 
 class GLRMaskError(Exception):
+    """The message text is for humans; its format is not stable."""
     kind: str
     """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`."""

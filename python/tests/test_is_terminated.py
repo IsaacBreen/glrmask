@@ -59,3 +59,22 @@ def test_rejected_commits_terminate_live_state():
             assert not state.mask().any()
             assert state.forced_bytes() == b""
             assert not state.commit_token(1)
+
+
+def test_commit_outcome_reports_post_state_viability():
+    v = glrmask.Vocab({0: b"a", 1: b"b", 2: b"z", 3: b""})
+    ordinary = glrmask.Module(glrmask.Grammar.from_lark('start: "a" "b"'))
+    empty = glrmask.Module(glrmask.Grammar.from_glrm("extern token T start root nt root=T"))
+    empty.bind("T", glrmask.TokenSet([]))
+    for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS):
+        for module, is_empty in ((ordinary, False), (empty, True)):
+            c = module.compile(v, mask_strategy=mode)
+            assert c.start().is_terminated() == is_empty
+            for prefix in (b"", b"a", b"ab", b"z"):
+                for method, inputs in (("commit_token", (0, 1, 2, 3, 999, 2**32-1)),
+                                       ("commit_bytes", (b"", b"a", b"b", b"z", b"ab"))):
+                    for data in inputs:
+                        state = c.start()
+                        state.commit_bytes(prefix)
+                        result = getattr(state, method)(data)
+                        assert result is (not (state.is_terminated() and not state.is_accepting()))

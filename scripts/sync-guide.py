@@ -69,6 +69,13 @@ def benchmark_body(flavor):
 
 def install(language, heading, note=''):
     command = 'python -m pip install glrmask' if language == 'python' else 'cargo add glrmask'
+    # Keep the generated installation note in step with release metadata.
+    version = tomllib.loads((ROOT / 'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
+    if '-rc.' in version:
+        py_version = version.replace('-rc.', 'rc')
+        rc_note = (f'For the release candidate: `pip install --pre glrmask` or `pip install glrmask=={py_version}`.'
+                   if language == 'python' else f'For the release candidate: `cargo add glrmask@{version}`.')
+        note = '\n\n'.join(filter(None, (rc_note, note)))
     tail = f'\n\n{note}' if note else ''
     return f'{heading}\n\n```bash\n{command}\n```{tail}'
 
