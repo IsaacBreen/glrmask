@@ -104,10 +104,6 @@ impl InternalMaskStrategy {
 #[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Module; use a Grammar, Module, Expr or TokenSet")]
 pub trait IntoBinding: sealed::ModuleValue {}
 
-/// A value accepted by [Grammar::bind].
-#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Grammar; bind token sets and modules on a Module")]
-pub trait IntoGrammarBinding: sealed::GrammarValue {}
-
 pub(super) mod sealed {
     use super::{Expr, Grammar, Module, TokenSet};
 
@@ -118,17 +114,8 @@ pub(super) mod sealed {
         TokenSet(TokenSet),
     }
 
-    pub enum GrammarBinding {
-        Grammar(Grammar),
-        Expr(Expr),
-    }
-
     pub trait ModuleValue {
         fn into_binding(self) -> Binding;
-    }
-
-    pub trait GrammarValue {
-        fn into_grammar_binding(self) -> GrammarBinding;
     }
 
     macro_rules! module_value {
@@ -146,18 +133,6 @@ pub(super) mod sealed {
     module_value!(Expr);
     module_value!(TokenSet);
 
-    macro_rules! grammar_value {
-        ($ty:ident) => {
-            impl GrammarValue for $ty {
-                fn into_grammar_binding(self) -> GrammarBinding { GrammarBinding::$ty(self) }
-            }
-            impl GrammarValue for &$ty {
-                fn into_grammar_binding(self) -> GrammarBinding { GrammarBinding::$ty(self.clone()) }
-            }
-        };
-    }
-    grammar_value!(Grammar);
-    grammar_value!(Expr);
 }
 
 use sealed::Binding;
@@ -170,10 +145,6 @@ impl IntoBinding for Expr {}
 impl IntoBinding for &Expr {}
 impl IntoBinding for TokenSet {}
 impl IntoBinding for &TokenSet {}
-impl IntoGrammarBinding for Grammar {}
-impl IntoGrammarBinding for &Grammar {}
-impl IntoGrammarBinding for Expr {}
-impl IntoGrammarBinding for &Expr {}
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
@@ -1390,7 +1361,7 @@ impl Module {
 
     pub(super) fn to_source(&self) -> Result<Grammar> {
         if !self.node.prepared.is_empty() {
-            return Err(error("a Module can't be part of a Grammar; bind it to a Module instead"));
+            return Err(error("a Grammar expression cannot contain a Module"));
         }
         self.flatten_source()
     }
@@ -1411,6 +1382,7 @@ impl Module {
 
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
     /// May fail if saved by a different GLRMask version.
+    /// Only load artifacts you trust.
     pub fn load(bytes: &[u8]) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes, None))
     }

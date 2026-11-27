@@ -226,7 +226,11 @@ def test_self_attachment_rejected_when_open():
         module.bind('child', module)
 
 def test_externs_are_snapshots():
-    for owner in [g.Grammar.from_glrm(HOST), g.Module(g.Grammar.from_glrm(HOST))]:
+    grammar = g.Grammar.from_glrm(HOST)
+    before = grammar.externs
+    del grammar
+    assert "child" in before.unbound
+    for owner in [g.Module(g.Grammar.from_glrm(HOST))]:
         before = owner.externs
         assert "child" in before.unbound
         assert before == owner.externs

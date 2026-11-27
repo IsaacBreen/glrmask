@@ -153,12 +153,6 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_expr(expr: *const crate::module_api::glrmask_expr, out: *mut *mut glrmask_grammar) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_expr(&read(expr)?.0)?))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_grammar(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_grammar) -> i32 {
-    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_expr(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const crate::module_api::glrmask_expr) -> i32 {
-    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
-}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs();

@@ -111,9 +111,6 @@ class Grammar:
     @property
     def externs(self) -> Externs:
         ...
-    def bind(self, name: str, value: Grammar | Expr, /) -> None:
-        """Binds an extern by name."""
-        ...
     def compile(
         self,
         vocab: Vocab,
@@ -188,7 +185,7 @@ class Module:
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
-        """May fail if saved by a different GLRMask version."""
+        """May fail if saved by a different GLRMask version. Only load artifacts you trust."""
         ...
     def copy(self) -> Module:
         ...
@@ -212,7 +209,7 @@ class Constraint:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with."""
+        """May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust."""
         ...
 
 @final

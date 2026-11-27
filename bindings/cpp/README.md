@@ -131,8 +131,8 @@ call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```
 
-On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. It changes the grammar or module in
-place; if it fails, nothing changes. Copy a grammar or module first to bind the same one in different ways. `externs().unbound()` lists the unbound names.
+On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. It changes the module in
+place; if it fails, nothing changes. Copy a module first to bind the same one in different ways. `externs().unbound()` lists the unbound names.
 
 `Expr::choice`, `Expr::sequence` and `Expr::literal` combine grammars without writing a new one:
 
@@ -142,7 +142,7 @@ auto reply = glrmask::Expr::choice({
 auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({glrmask::Expr::literal("Answer: "), reply}));
 ```
 
-Grammar bindings and Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
+Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
 
 ## Mask strategies
 

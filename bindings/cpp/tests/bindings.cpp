@@ -111,7 +111,6 @@ void reject_module_expr_in_grammar() {
     auto token = TokenSet({5});
     for (const auto& expr : {Expr::choice({token,Expr::literal("x")}), Expr::sequence({Expr::literal(""),token}), Expr::sequence({Expr::choice({token,Expr::literal("x")}),Expr::literal("")})}) {
         throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
-        throws([&]{ host.bind("item",expr); }, GLRMASK_INVALID_INPUT);
         auto outer=Module(host); outer.bind("item",expr);
         auto state=outer.compile(v).start(); CHECK(state.commit_token(5) && state.is_accepting());
     }
@@ -119,7 +118,6 @@ void reject_module_expr_in_grammar() {
         for (const auto& expr : {Expr::sequence({m}), Expr::sequence({Expr::choice({m}), Expr::literal("")})}) {
             throws([&]{ (void)Grammar::from_expr(expr); }, GLRMASK_INVALID_INPUT);
             auto g = host;
-            throws([&]{ g.bind("item",expr); }, GLRMASK_INVALID_INPUT);
             CHECK(g.externs().unbound().size()==1);
             auto outer = Module(host); outer.bind("item",expr);
             auto state = outer.compile(v).start();
@@ -431,9 +429,11 @@ void canonical_modules() {
 
     // A grammar's unbound view carries its own unbound externs.
     auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern grammar one; extern grammar two; nt start = one two;");
-    grammar_externs.bind("one", Expr::literal("a"));
-    auto grammar_unbound = grammar_externs.externs().unbound();
+    auto grammar_module = Module(grammar_externs);
+    grammar_module.bind("one", Expr::literal("a"));
+    auto grammar_unbound = grammar_module.externs().unbound();
     CHECK(grammar_unbound.size() == 1 && (grammar_unbound.begin()+0)->name() == "two");
+    CHECK(grammar_externs.externs().unbound().size() == 2);
     CHECK(grammar_externs.externs().size() == 2);
 
     // TokenSet equality compares the normalized ID sets.

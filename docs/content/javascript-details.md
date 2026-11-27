@@ -1,6 +1,6 @@
 ## Vocabularies and token sets
 
-`new Vocab(entries)` takes `[id, bytes]` pairs, with each token's exact bytes as a `Uint8Array` or `Buffer`.
+`new Vocab(entries)` takes an iterable of `[id, bytes]` pairs (such as an array or Map), with each token's exact bytes as a `Uint8Array` or `Buffer`.
 Use the bytes the tokenizer produces, not its display form: a token may be part of a UTF-8 character. IDs need not be
 contiguous, and two tokens may have the same bytes. An ID can't appear twice. Leave out tokens with no bytes, such as
 tool-call tokens; a token set can still allow them.
@@ -48,8 +48,7 @@ call.bind('ARGS', weather);
 const constraint = await call.compile(vocab);
 ```
 
-On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`, and `bind({A: a, B: b})` binds several
-at once; if one fails, none is bound. `bind` changes the grammar or module in place, so `clone()` it first to bind the
+On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. `bind` changes the module in place, so `clone()` it first to bind the
 same one in different ways. `externs.unbound` lists the unbound names.
 
 `Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
@@ -59,7 +58,7 @@ const reply = Expr.choice(Grammar.fromLark('start: "yes"'), Grammar.fromLark('st
 const grammar = Grammar.fromExpr(Expr.sequence(Expr.literal('Answer: '), reply));
 ```
 
-Grammar bindings and Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
+Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
 
 ## Mask strategies
 

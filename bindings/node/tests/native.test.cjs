@@ -123,6 +123,8 @@ test('frontends and input validation preserve the public contracts',async()=>{
   }
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
+  assert.throws(()=>new Vocab({0:b('a')}),TypeError);
+  assert.ok(simple().compileSync(new Vocab(new Map([[0,b('a')]]))).start().commitToken(0));
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GLRMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) assert.throws(()=>new TokenSet([bad]),RangeError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296]) {

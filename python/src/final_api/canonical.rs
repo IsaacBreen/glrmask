@@ -352,40 +352,6 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<ModuleBinding> {
     ))
 }
 
-/// One value passed to `Grammar.bind`, before it is applied to the grammar.
-pub(super) enum GrammarBinding {
-    Grammar(glrmask::Grammar),
-    Expr(glrmask::Expr),
-}
-
-impl GrammarBinding {
-    pub(super) fn bind(
-        self,
-        grammar: &mut glrmask::Grammar,
-        name: &str,
-    ) -> glrmask::Result<()> {
-        match self {
-            Self::Grammar(value) => grammar.bind(name, value),
-            Self::Expr(value) => grammar.bind(name, value),
-        }
-    }
-}
-
-pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<GrammarBinding> {
-    if let Ok(g) = value.extract::<PyRef<'_, PyGrammar>>() {
-        return Ok(GrammarBinding::Grammar(g.inner.clone()));
-    }
-    if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
-        return Ok(GrammarBinding::Expr(e.inner.clone()));
-    }
-    if value.extract::<PyRef<'_, PyTokenSet>>().is_ok() {
-        return Err(crate::glrmask_error("invalid_input", "token sets can only be bound to a Module"));
-    }
-    Err(PyTypeError::new_err(
-        "Grammar.bind accepts a Grammar or Expr",
-    ))
-}
-
 pub(super) fn compile_options(mask_strategy: super::PyMaskStrategy) -> glrmask::CompileOptions {
     glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::from(mask_strategy))
 }
@@ -490,7 +456,7 @@ impl PyModule {
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
-    /// May fail if saved by a different GLRMask version.
+    /// May fail if saved by a different GLRMask version. Only load artifacts you trust.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

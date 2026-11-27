@@ -652,10 +652,8 @@ fn grammar_expressions_reject_modules_at_any_depth_but_module_bind_accepts_them(
         for expr in [Expr::from(&m), Expr::sequence([Expr::choice([Expr::from(&m)]), Expr::literal("")])] {
             let err = Grammar::from_expr(&expr).unwrap_err();
             assert_eq!(err.kind(), glrmask::ErrorKind::InvalidInput);
-            assert_eq!(err.to_string(), "a Module can't be part of a Grammar; bind it to a Module instead");
-            let mut grammar = host.clone();
-            assert_eq!(grammar.bind("item", &expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
-            assert_eq!(grammar.externs().unbound().len(), 1);
+            assert_eq!(err.to_string(), "a Grammar expression cannot contain a Module");
+            assert_eq!(host.externs().unbound().len(), 1);
             let mut module = Module::new(&host);
             module.bind("item", expr).unwrap();
             let mut state = module.compile(&v).unwrap().start();
@@ -682,10 +680,9 @@ fn grammar_rejects_token_sets_transitively_but_module_accepts() {
     let host = Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE").unwrap();
     assert_eq!(Grammar::from_expr(&expression).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
     for expr in [expression, choice, sequence, nested] {
-        let mut g = host.clone();
-        assert_eq!(g.bind("VALUE", &expr).unwrap_err().to_string(), "token sets can only be bound to a Module");
+
         assert_eq!(Grammar::from_expr(&expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
-        assert_eq!(g.externs().unbound().len(), 1);
+        assert_eq!(host.externs().unbound().len(), 1);
         let v = Vocab::new([(0, b"x".to_vec())]).unwrap();
         let c = module_expr(expr).unwrap().compile(&v).unwrap();
         let mut s = c.start();

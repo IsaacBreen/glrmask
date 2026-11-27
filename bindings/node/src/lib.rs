@@ -172,18 +172,6 @@ impl NativeGrammar {
         call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(&*live(&value.inner)?)?) }))
     }
     #[napi]
-    pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
-    }
-    #[napi]
-    pub fn bind_expr(&self, name: String, value: &NativeExpr) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
-    }
-    #[napi]
-    pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(&name, g::Expr::from(live(&value.inner)?.clone()))?; Ok(()) })
-    }
-    #[napi]
     pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);

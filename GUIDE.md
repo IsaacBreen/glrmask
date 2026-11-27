@@ -251,7 +251,7 @@ token without committing to it, copy the state first.
 
 A grammar can declare externs: named slots that you bind later.
 
-- `extern grammar NAME` takes a grammar or expression; on a `Module` it can also take a module or token set.
+- `extern grammar NAME` takes a grammar, module, expression or token set.
 - `extern token NAME` can be declared on a Grammar but must be filled on a Module with a token set. It matches exactly one of those tokens, never their text.
 
 ```python
@@ -270,7 +270,7 @@ call_format = glrmask.Grammar.from_glrm('''
     nt call = "<weather>" WEATHER_ARGS "</weather>" | "<search>" SEARCH_ARGS "</search>"
 ''')
 
-call = call_format.copy()
+call = glrmask.Module(call_format)
 call.bind("WEATHER_ARGS", weather)
 call.bind("SEARCH_ARGS", search)
 
@@ -283,14 +283,14 @@ assert state.is_accepting()
 Each grammar keeps its own rules, including the whitespace it ignores, and one model token can span the boundary
 between parts.
 
-`bind` changes the grammar or module in place; copy it first to bind the same one in different ways. Each extern is
-bound once, on the grammar or module that declares it. An unknown name is an error; an unbound name accepts a value of the appropriate kind; an already bound name rejects rebinding. Bindings capture values, not later mutations. A value can't be bound while it has unbound externs of its own.
+`bind` changes the module in place; copy it first to bind the same one in different ways. Each extern is
+bound once, on the module that declares it. An unknown name is an error; an unbound name accepts a value of the appropriate kind; an already bound name rejects rebinding. Bindings capture values, not later mutations. A value can't be bound while it has unbound externs of its own.
 `externs` is a read-only mapping of extern names to `Extern`, and `externs.unbound` lists the ones not yet bound (in Rust, `externs()`
 and `externs().unbound()`). This is a shallow view of the direct declarations, not a recursive search. Qualified names use `::` for scoped declarations.
 
 ### Modules
 
-A `Grammar` holds source and bindings. A `Module` can also hold model-specific token IDs and precompiled work. `precompile(vocab)` compiles as much as it can now,
+A `Grammar` describes a language. A `Module` holds a grammar, its bindings and precompiled work. `precompile(vocab)` compiles as much as it can now,
 even with externs unbound, and `compile` finishes compiling the module into a constraint. Use modules when the same parts appear in many grammars. Tool
 calls are the typical case: precompile each tool's schema once, and any combination of tools then compiles quickly.
 
@@ -312,7 +312,7 @@ constraint = call.compile(vocab)
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling or precompiling it with another is an error.
 
 `constraint.save()` and `Constraint.load(data, vocab)` save and load a compiled constraint. The vocabulary isn't saved,
-and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another. Load artifacts only from trusted sources; malformed input is rejected where detected, but this is not a hardened untrusted-data parser.
+and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another. Only load artifacts you trust.
 
 ### Expressions
 

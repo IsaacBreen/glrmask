@@ -698,7 +698,7 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust.
     #[staticmethod]
     #[pyo3(signature = (data, vocab, /))]
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {

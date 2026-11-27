@@ -144,10 +144,6 @@ GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const cha
 
 /// Builds a grammar from an `Expr`.
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
-/// Fails if the extern is undeclared, already bound or the wrong kind.
-GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_grammar* value);
-/// Fails if the extern is undeclared, already bound or the wrong kind.
-GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* grammar,const char* name,size_t name_len,const glrmask_expr* value);
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* grammar,glrmask_grammar** out);
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar* grammar);
 GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar* grammar,glrmask_externs** out);
@@ -173,7 +169,7 @@ GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module* module,c
 GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module* module,glrmask_externs** out);
 GLRMASK_API glrmask_status glrmask_module_unbound_externs(const glrmask_module* module,glrmask_externs** out);
 GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module* module,glrmask_bytes** out);
-/// May fail if saved by a different GLRMask version.
+/// May fail if saved by a different GLRMask version. Only load artifacts you trust.
 GLRMASK_API glrmask_status glrmask_module_load(const uint8_t* bytes,size_t n,glrmask_module** out);
 
 /// Matches any one of `operands`.
@@ -193,7 +189,7 @@ GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* co
 GLRMASK_API glrmask_status glrmask_constraint_mask_bit_len(const glrmask_constraint* constraint,size_t* out);
 
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* constraint,glrmask_bytes** out);
-/// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
+/// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust.
 GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n,const glrmask_vocab* vocab,glrmask_constraint** out);
 
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmask_state** out);

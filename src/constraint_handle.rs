@@ -21,6 +21,7 @@ impl Constraint {
     pub fn save(&self) -> Vec<u8> { self.inner.save() }
 
     /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
+    /// Only load artifacts you trust.
     pub fn load(bytes: &[u8], vocab: &Vocab) -> Result<Self> {
         RuntimeConstraint::load(bytes, vocab).map(Self::from_runtime)
     }

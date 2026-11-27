@@ -45,10 +45,11 @@ fn scoped_threads_share_module_snapshots_without_mutating_the_source() {
 #[test]
 fn externs_snapshot_outlives_grammar_and_records_binding_at_creation() {
     let (before, after) = {
-        let mut grammar = Grammar::from_glrm("extern grammar item start root nt root=item").unwrap();
+        let grammar = Grammar::from_glrm("extern grammar item start root nt root=item").unwrap();
         let before = grammar.externs();
-        grammar.bind("item", Grammar::from_lark("start: \"x\"").unwrap()).unwrap();
-        (before, grammar.externs())
+        let mut module = Module::new(&grammar);
+        module.bind("item", Grammar::from_lark("start: \"x\"").unwrap()).unwrap();
+        (before, module.externs())
     };
     assert_eq!(before.unbound().len(), 1);
     assert_eq!(after.unbound().len(), 0);

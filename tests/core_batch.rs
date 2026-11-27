@@ -20,13 +20,13 @@ fn module_bind_accepts_every_binding_kind() {
     let borrowed=Grammar::from_glrm("start root nt root=\"b\"").unwrap();
     let tokens=TokenSet::new([7]);
     let borrowed_tokens=TokenSet::new([8]);
-    let mut g=Grammar::from_glrm(
+    let g=Grammar::from_glrm(
         "extern grammar OWNED extern grammar BORROWED extern grammar EXPR extern token TOKENS extern token SET extern token ID start root nt root=OWNED BORROWED EXPR TOKENS SET ID"
     ).unwrap();
+    let mut g=Module::new(&g);
     g.bind("OWNED",owned).unwrap();
     g.bind("BORROWED",&borrowed).unwrap();
     g.bind("EXPR",Expr::literal("a")).unwrap();
-    let mut g=Module::new(&g);
     g.bind("TOKENS",tokens).unwrap();
     g.bind("SET",&borrowed_tokens).unwrap();
     g.bind("ID",glrmask::TokenSet::new([9u32])).unwrap();
@@ -41,7 +41,7 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let v=vocab();let text="extern token MARK start root nt root=MARK";
     let parent_text="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT";
     let mut child=Grammar::from_glrm(text).unwrap();
-    let mut parent=Grammar::from_glrm(parent_text).unwrap();parent.bind("LEFT",&child).unwrap();parent.bind("RIGHT",&child).unwrap();
+    let mut parent=Grammar::from_glrm(parent_text).unwrap();parent=parent.bind_snapshot("LEFT",&child).unwrap();parent=parent.bind_snapshot("RIGHT",&child).unwrap();
     child=child.bind_snapshot("MARK",TokenSet::new([29])).unwrap();
     assert!(child.requirements().unwrap().is_empty());
     assert_eq!(parent.requirements().unwrap().len(),2);
@@ -72,8 +72,8 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
             let mut s=c.start();assert!(s.commit_token(17));assert!(s.is_accepting());
         }
     }
-    let mut t=Grammar::from_glrm("extern token VALUE start root nt root=VALUE").unwrap();
-    assert!(t.bind("VALUE",Grammar::from_glrm("start r nt r=\"x\"").unwrap()).is_err());
+    let t=Grammar::from_glrm("extern token VALUE start root nt root=VALUE").unwrap();
+    assert!(Module::new(&t).bind("VALUE",Grammar::from_glrm("start r nt r=\"x\"").unwrap()).is_err());
     assert_eq!(t.requirements().unwrap().len(),1);
 }
 #[test]

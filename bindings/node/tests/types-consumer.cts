@@ -1,5 +1,8 @@
 import api = require('@glrmask/node');
 const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]]);
+const mapVocab = new api.Vocab(new Map([[0,Buffer.from("a")]]));
+// @ts-expect-error Vocab requires iterable pairs, not a record.
+new api.Vocab({0:Buffer.from("a")});
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromLark('start: "a"');
@@ -15,7 +18,7 @@ const saved: Uint8Array = c.saveSync(); api.Constraint.loadSync(saved, v);
 s.fillMask(new Int32Array(1));
 // @ts-expect-error Mask words must be unsigned 32-bit values.
 s.fillMask(new Float32Array(1));
-// @ts-expect-error Grammar cannot bind a TokenSet.
+// @ts-expect-error Grammar has no bind method.
 g.bind("slot", exact);
 // @ts-expect-error Token sets are constructed from an iterable of IDs.
 new api.TokenSet('invalid');

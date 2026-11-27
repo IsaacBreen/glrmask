@@ -108,7 +108,7 @@ def main() -> None:
             assert path.is_relative_to(root) and path.exists(),target
     header=(root/'bindings/cpp/include/glrmask.h').read_text(encoding='utf-8')
     symbols=set(re.findall(r'GLRMASK_API[^;]+?\b(glrmask_\w+)\(',header))
-    assert len(symbols)==60,len(symbols)
+    assert len(symbols)==58,len(symbols)
     if args.library:
         verify_runtime_dependencies(args.library.resolve(), args.platform)
         # Library verification runs on the target runtime (inside its Linux
@@ -116,7 +116,8 @@ def main() -> None:
         # not evidence that the exports or runtime dependencies are correct.
         library=ctypes.CDLL(str(args.library.resolve()))
         for name in symbols:assert getattr(library,name),name
-        assert not hasattr(library, "glrmask_grammar_bind_tokens"), "Removed symbol is still exported"
+        for suffix in ("tokens", "grammar", "expr"):
+            assert not hasattr(library, "glrmask_grammar_bind_" + suffix), "Removed symbol is still exported"
         assert not hasattr(library, "glrmask_grammar_precompile"), "Removed symbol is still exported"
         assert not hasattr(library, "glrmask_state_commit_tokens")
         assert not hasattr(library, "glrmask_state_commit_forced_tokens"), "Removed symbol is still exported"

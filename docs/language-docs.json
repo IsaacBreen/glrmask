@@ -19,7 +19,6 @@
     "Grammar.from_json_schema": "Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text or a dict.",
     "Grammar.from_expr": "Builds a grammar from an `Expr`.",
     "Grammar.externs": "",
-    "Grammar.bind": "Binds an extern by name.",
     "Grammar.compile": "Compiles the grammar into a constraint.",
     "Grammar.copy": "",
     "Expr": "A grammar expression.",
@@ -35,14 +34,14 @@
     "Module.precompile": "Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.",
     "Module.compile": "Finishes compiling the module into a constraint.",
     "Module.save": "",
-    "Module.load": "May fail if saved by a different GLRMask version.",
+    "Module.load": "May fail if saved by a different GLRMask version. Only load artifacts you trust.",
     "Module.copy": "",
     "Constraint": "",
     "Constraint.__repr__": "",
     "Constraint.start": "Starts a new sequence.",
     "Constraint.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
     "Constraint.save": "",
-    "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.",
+    "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust.",
     "ConstraintState": "",
     "ConstraintState.__repr__": "",
     "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
@@ -170,8 +169,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "d45941e0081347eb20de1f3a0fcbfffd29021b170e16a801602c38e07ad18fd3",
-    "bindings/node/README.md": "67f68da70ea203e60468586c8613c561b7665f2ebbfa651970a7e8b6edfec572",
+    "bindings/cpp/README.md": "4af6ca0f06fbc8dbf89db8ad9ee5da6116a8097c60c7a9b6cfe0513051598fbf",
+    "bindings/node/README.md": "b60937cbc6be09766cb212d0211bab0d086088973baba0e982c1751949c61541",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -179,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "7a7b5037934b228d9d44f7ef401aedf057e7e025acc1042c7d7dbbec2e4f48ea"
+  "content_sha256": "7310da83e321b7b1a2c7581627cbb54d8470831f11d041de27bb812ea27e7a65"
 }

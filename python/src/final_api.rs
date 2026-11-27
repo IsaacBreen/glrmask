@@ -197,10 +197,6 @@ impl PyGrammar {
     pub(super) fn as_rust(&self) -> glrmask::Result<glrmask::Grammar> {
         Ok(self.inner.clone())
     }
-    fn replace(&mut self, py: Python<'_>, next: glrmask::Grammar) {
-        let previous = std::mem::replace(&mut self.inner, next);
-        py.detach(move || drop(previous));
-    }
 }
 
 impl Drop for PyGrammar {
@@ -255,19 +251,6 @@ impl PyGrammar {
         })
     }
 
-    /// Binds an extern by name.
-    #[pyo3(signature = (name, value, /))]
-    fn bind(slf: &Bound<'_, Self>, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let binding = canonical::extract_grammar_binding(value)?;
-        let mut target = slf.try_borrow_mut()?;
-        let mut next = target.inner.clone();
-        let next = super::catch_python_panic(|| py.detach(move || {
-            binding.bind(&mut next, &name)?;
-            Ok::<_, glrmask::Error>(next)
-        }))?.map_err(api_error)?;
-        target.replace(py, next);
-        Ok(())
-    }
 
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {

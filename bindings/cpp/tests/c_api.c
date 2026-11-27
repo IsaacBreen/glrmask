@@ -157,8 +157,7 @@ int main(void) {
         for (size_t i=0;i<2;i++) {
             glrmask_grammar* bad=(glrmask_grammar*)(uintptr_t)1;
             CHECK(glrmask_grammar_from_expr(cases[i],&bad)==GLRMASK_INVALID_INPUT && bad==NULL);
-            CHECK(strcmp(glrmask_error_message(),"a Module can't be part of a Grammar; bind it to a Module instead")==0);
-            CHECK(glrmask_grammar_bind_expr(parent,"item",4,cases[i])==GLRMASK_INVALID_INPUT);
+            CHECK(strcmp(glrmask_error_message(),"a Grammar expression cannot contain a Module")==0);
             CHECK(glrmask_module_new(parent,&outer)==GLRMASK_OK);
             CHECK(glrmask_module_bind_expr(outer,"item",4,cases[i])==GLRMASK_OK);
             glrmask_module_free(outer);
@@ -170,7 +169,6 @@ int main(void) {
         CHECK(glrmask_expr_sequence(&token_operand,1,&leaf)==GLRMASK_OK);
         glrmask_grammar* bad=NULL;
         CHECK(glrmask_grammar_from_expr(leaf,&bad)==GLRMASK_INVALID_INPUT && bad==NULL);
-        CHECK(glrmask_grammar_bind_expr(parent,"item",4,leaf)==GLRMASK_INVALID_INPUT);
         CHECK(glrmask_module_new(parent,&outer)==GLRMASK_OK);
         CHECK(glrmask_module_bind_expr(outer,"item",4,leaf)==GLRMASK_OK);
         glrmask_module_free(outer);glrmask_expr_free(leaf);glrmask_token_set_free(tokens);

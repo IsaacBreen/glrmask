@@ -96,13 +96,13 @@ impl Expr {
                         ExprLeaf::Grammar(g) => (ExternKind::Grammar, Binding::Grammar(g.clone())),
                         ExprLeaf::Module(m) => {
                             if !allow_modules {
-                                return Err(Error::InvalidInput("a Module can't be part of a Grammar; bind it to a Module instead".into()));
+                                return Err(Error::InvalidInput("a Grammar expression cannot contain a Module".into()));
                             }
                             (ExternKind::Grammar, Binding::Module(m.clone()))
                         },
                         ExprLeaf::TokenSet(t) => {
                             if !allow_modules {
-                                return Err(Error::InvalidInput("token sets can only be bound to a Module".into()));
+                                return Err(Error::InvalidInput("a Grammar expression cannot contain a TokenSet".into()));
                             }
                             (ExternKind::Token, Binding::TokenSet(t.clone()))
                         },

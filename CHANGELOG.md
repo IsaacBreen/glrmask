@@ -5,7 +5,7 @@
 ### API surface
 
 - Expressions and bindings accept tokens only as a `TokenSet`. Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
-- Rust: `Grammar::bind` accepts the sealed `IntoGrammarBinding` trait, which cannot be a `Module`. Binding a module into a grammar is now a compile error, not a runtime error.
+- Binding externs is exclusively a Module operation in all languages.
 - Vocab has one constructor from IDs to bytes. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result`; duplicate IDs or IDs above the maximum return `InvalidInput` instead of panicking. Python uses `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
 - Rust token-set ranges are half-open.
 - Rust: `ConstraintState` owns its constraint, has no lifetime parameter and can be stored or moved freely. `ExternKind` is re-exported from the public grammar crate.

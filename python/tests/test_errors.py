@@ -10,7 +10,7 @@ def test_error_base_and_syntax():
 def test_invalid_input():
     g = glrmask.Grammar.from_glrm("start s extern token E nt s = E")
     with pytest.raises(glrmask.GLRMaskError) as exc:
-        g.bind("missing", glrmask.TokenSet([0]))
+        glrmask.Module(g).bind("missing", glrmask.TokenSet([0]))
     assert exc.value.kind == "invalid_input"
     with pytest.raises(glrmask.GLRMaskError) as exc:
         g.compile(glrmask.Vocab({0: b"a"}))
@@ -24,7 +24,7 @@ def test_invalid_input():
 def test_wrong_type_and_missing_key():
     g = glrmask.Grammar.from_glrm("start s extern token E nt s = E")
     with pytest.raises(TypeError):
-        g.bind("E", object())
+        glrmask.Module(g).bind("E", object())
     with pytest.raises(KeyError):
         g.externs["missing"]
 

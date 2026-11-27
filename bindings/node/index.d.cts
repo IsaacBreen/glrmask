@@ -5,7 +5,7 @@ export declare const version: string;
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
 
-  constructor(entries: Iterable<readonly [number, Uint8Array]> | Readonly<Record<number, Uint8Array>>);
+  constructor(entries: Iterable<readonly [number, Uint8Array]>);
 
   clone(): Vocab;
   /** Frees the native handle now instead of at garbage collection. */
@@ -33,8 +33,6 @@ export declare class Grammar implements Disposable {
   readonly externs: Externs;
 
 
-  /** Throws if the extern is undeclared, already bound or the wrong kind. */
-  bind(name: string, value: GrammarBindValue): void;
   /** Compiles the grammar into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
   /** Compiles the grammar into a constraint. */
@@ -46,7 +44,6 @@ export declare class Grammar implements Disposable {
 }
 
 
-export type GrammarBindValue = Grammar | Expr;
 
 /** A value that can be part of an `Expr`. */
 export type ExprPart = Grammar | Module | Expr | TokenSet;
@@ -114,10 +111,10 @@ export declare class Module implements Disposable {
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   save(): Promise<Uint8Array>;
   saveSync(): Uint8Array;
-  /** May fail if saved by a different GLRMask version. */
+  /** May fail if saved by a different GLRMask version. Only load artifacts you trust. */
   static load(data: Uint8Array): Promise<Module>;
 
-  /** May fail if saved by a different GLRMask version. */
+  /** May fail if saved by a different GLRMask version. Only load artifacts you trust. */
   static loadSync(data: Uint8Array): Module;
   clone(): Module;
   /** Frees the native handle now instead of at garbage collection. */
@@ -136,9 +133,9 @@ export declare class Constraint implements Disposable {
   save(): Promise<Uint8Array>;
 
   saveSync(): Uint8Array;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   clone(): Constraint;
   /** Frees the native handle now instead of at garbage collection. */

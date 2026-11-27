@@ -27,7 +27,7 @@ mod artifact_limits;
 pub(crate) mod module;
 mod expr;
 mod stack;
-pub use module::{Module, CompileOptions, IntoBinding, IntoGrammarBinding};
+pub use module::{Module, CompileOptions, IntoBinding};
 pub use expr::Expr;
 pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
@@ -835,36 +835,6 @@ impl Grammar {
     }
 
     pub fn externs(&self) -> Externs { Externs::snapshot(ExternsSource::Grammar(self)) }
-
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
-    ///
-    /// A module cannot be bound to a grammar:
-    ///
-    /// ```compile_fail
-    /// use glrmask::{Grammar, Module};
-    /// let mut grammar = Grammar::from_glrm("extern grammar CHILD start s nt s = CHILD").unwrap();
-    /// let module = Module::new(&Grammar::from_glrm("start s nt s = \"a\"").unwrap());
-    /// grammar.bind("CHILD", module).unwrap();
-    /// ```
-    ///
-    /// A token set cannot be bound to a grammar either:
-    ///
-    /// ```compile_fail
-    /// use glrmask::{Grammar, TokenSet};
-    /// let mut grammar = Grammar::from_glrm("extern token T; start s; nt s = T;").unwrap();
-    /// grammar.bind("T", TokenSet::new([1])).unwrap();
-    /// ```
-    pub fn bind(&mut self, name: &str, value: impl IntoGrammarBinding) -> Result<()> {
-        let value = match module::sealed::GrammarValue::into_grammar_binding(value) {
-            module::sealed::GrammarBinding::Grammar(grammar) => GrammarValue::Source(Arc::new(grammar)),
-            module::sealed::GrammarBinding::Expr(expr) => {
-                GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
-            }
-        };
-        let next = self.bind_value(name, value)?;
-        *self = next;
-        Ok(())
-    }
 
     /// Compiles the grammar into a constraint.
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint> {

@@ -235,12 +235,6 @@ public:
 
         return Externs(std::move(all_items), std::move(unbound_items));
     }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
-    void bind(std::string_view name, const Grammar& value) {
-        detail::check(glrmask_grammar_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
-    }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
-    void bind(std::string_view name, const Expr& value);
     /// Compiles the grammar into a constraint.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
@@ -289,9 +283,6 @@ public:
 
 inline Grammar Grammar::from_expr(const Expr& value) {
     glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_expr(value.native_handle(), &p)); return Grammar(p);
-}
-inline void Grammar::bind(std::string_view name, const Expr& value) {
-    detail::check(glrmask_grammar_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
 }
 
 /// A partially compiled grammar.
@@ -347,7 +338,7 @@ public:
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
 
-    /// May fail if saved by a different GLRMask version.
+    /// May fail if saved by a different GLRMask version. Only load artifacts you trust.
     static Module load(const Bytes& bytes) { return load(bytes.data(), bytes.size()); }
     static Module load(const std::uint8_t* bytes, std::size_t size) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes, size, &p)); return Module(p);
@@ -370,7 +361,7 @@ public:
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
 
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust.
     static Constraint load(const Bytes& bytes, const Vocab& vocab) { return load(bytes.data(), bytes.size(), vocab); }
     static Constraint load(const std::uint8_t* bytes, std::size_t size, const Vocab& vocab) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes, size, vocab.native_handle(), &p)); return Constraint(p);

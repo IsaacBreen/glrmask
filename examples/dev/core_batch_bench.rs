@@ -39,7 +39,7 @@ fn grammar(case:&str,_vocab:&Vocab)->Result<Grammar,Box<dyn Error>>{
         "scoped_child"=>{
             let p=if true {"glrm 1; start root; extern grammar CHILD; nt root = \"BEGIN:\" CHILD \":END\";"}
                 else {"glrm 1; start root; extern CHILD; nt root = \"BEGIN:\" CHILD \":END\";"};
-            { let mut g=Grammar::from_glrm(p)?;g.bind("CHILD",Grammar::from_glrm(CHILD)?)?;g }
+            { let mut g=Grammar::from_glrm(p)?;g=g.bind_snapshot("CHILD",Grammar::from_glrm(CHILD)?)?;g }
         },
         "exact_token_set"=>{
             let p=if true {"glrm 1; start root; extern token MARK; nt root = MARK MARK;"}

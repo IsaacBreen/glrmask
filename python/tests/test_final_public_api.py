@@ -258,8 +258,7 @@ def token_extern_grammar():
 def test_bind_requires_a_token_set_for_a_token_extern():
     v = vocab()
     grammar = token_extern_grammar()
-    with pytest.raises(glrmask.GLRMaskError, match="token sets can only be bound to a Module"):
-        grammar.bind("T", glrmask.TokenSet([0]))
+    assert not hasattr(grammar, "bind")
     assert len(grammar.externs.unbound) == 1
 
     module = glrmask.Module(token_extern_grammar())
@@ -270,14 +269,12 @@ def test_bind_requires_a_token_set_for_a_token_extern():
 
     for token_id in (0, -1, 2**32):
         with pytest.raises(TypeError):
-            token_extern_grammar().bind("T", token_id)
-        with pytest.raises(TypeError):
             glrmask.Module(token_extern_grammar()).bind("T", token_id)
 
 
-def test_grammar_copy_binds_independently():
+def test_module_copy_binds_independently():
     grammar = glrmask.Grammar.from_glrm("extern grammar T start root nt root = T")
-    copy = grammar.copy()
+    copy = glrmask.Module(grammar).copy()
     assert copy.bind("T", glrmask.Expr.literal("a")) is None
     assert len(copy.externs.unbound) == 0
     assert len(grammar.externs.unbound) == 1
@@ -415,11 +412,9 @@ def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
             with pytest.raises(glrmask.GLRMaskError) as exc:
                 glrmask.Grammar.from_expr(expr)
             assert exc.value.kind == "invalid_input"
-            assert str(exc.value) == "a Module can't be part of a Grammar; bind it to a Module instead"
+            assert str(exc.value) == "a Grammar expression cannot contain a Module"
             g = parent()
-            with pytest.raises(glrmask.GLRMaskError) as exc:
-                g.bind("item", expr)
-            assert exc.value.kind == "invalid_input"
+            assert not hasattr(g, "bind")
             assert len(g.externs.unbound) == 1
             outer = glrmask.Module(parent())
             outer.bind("item", expr)
@@ -442,11 +437,11 @@ def test_grammar_rejects_tokens_transitively_and_module_accepts_them():
         if isinstance(value, glrmask.TokenSet):
             with pytest.raises(TypeError):
                 glrmask.Grammar.from_expr(value)
-        attempts = [lambda: grammar.bind("VALUE", value)]
+        attempts = []
         if isinstance(value, glrmask.Expr):
             attempts.append(lambda: glrmask.Grammar.from_expr(value))
         for attempt in attempts:
-            with pytest.raises(glrmask.GLRMaskError, match="token sets can only be bound to a Module") as exc:
+            with pytest.raises(glrmask.GLRMaskError, match="a Grammar expression cannot contain a TokenSet") as exc:
                 attempt()
             assert exc.value.kind == "invalid_input"
         assert len(grammar.externs.unbound) == 1
@@ -462,9 +457,9 @@ def test_removed_api_forms_and_explicit_strategy_default():
     for op in (grammar.compile, module.compile, module.precompile):
         with pytest.raises(TypeError):
             op(v, mask_strategy=None)
-    for obj in (grammar, module):
-        with pytest.raises(TypeError):
-            obj.bind(T=glrmask.Expr.literal("a"))
+    assert not hasattr(grammar, "bind")
+    with pytest.raises(TypeError):
+        module.bind(T=glrmask.Expr.literal("a"))
     assert not hasattr(grammar.compile(v).start(), "commit_tokens")
     assert not hasattr(glrmask.TokenSet, "from_ranges")
 
