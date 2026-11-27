@@ -854,20 +854,8 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         if let Some(&cached) = self.token_boundary_cache.get(&key) {
             return cached;
         }
-        let Some(future) = constraint.recursive_tokenizer_future_scoped_terminals(lexer_state)
-        else {
-            self.token_boundary_cache.insert(key, false);
-            return false;
-        };
-        let ignored = future
-            .iter_ones()
-            .any(|terminal| constraint.recursive_terminal_is_ignore(terminal as u32));
-        let allowed = ignored || {
-            let parser_gss = self.parser_gss(parser_node, parser_cache);
-            constraint
-                .compact_segmented_parser_may_advance_on_any(&parser_gss, &future)
-                .unwrap_or(false)
-        };
+        let parser_gss = self.parser_gss(parser_node, parser_cache);
+        let allowed = super::commit::end_state_may_advance(constraint, &parser_gss, lexer_state);
         self.token_boundary_cache.insert(key, allowed);
         allowed
     }
@@ -917,35 +905,19 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         }
 
         let parser_gss = self.parser_gss(parser_node, parser_cache);
-        let advanced = if constraint.recursive_terminal_is_ignore(terminal) {
-            // Exact recursive commit closes zero-width CALL/RETURN controls
-            // before deciding which leaf owns the tokenizer reset for an
-            // ignored terminal. Mirror queue_parser_ignored_reset_state here.
-            constraint
-                .close_compact_segmented_parser(&parser_gss)
-                .unwrap_or(parser_gss)
+        let ignored = constraint.recursive_terminal_is_ignore(terminal);
+        let advanced = if ignored {
+            parser_gss
         } else {
-            constraint
-                .advance_compact_segmented_parser(&parser_gss, terminal)
-                .unwrap_or_else(ParserGSS::empty)
+            super::commit::advance_parser_stacks(constraint, &parser_gss, terminal)
         };
         let mut result = SmallVec::<[(u32, u32); 4]>::new();
-        if !advanced.is_empty()
-            && let Some(partitions) =
-                constraint.partition_recursive_parser_gss_by_active_leaf(&advanced)
-        {
-            for (leaf_index, partition) in partitions {
-                let Some(leaf) = self.leaves.get(leaf_index) else {
-                    continue;
-                };
-                let reset = leaf.reset;
-                let stacks = partition.apply(|_| ());
-                let node = self.parser_canonicalizer.intern(stacks, parser_cache);
-                if !result.contains(&(reset, node)) {
-                    result.push((reset, node));
-                }
+        super::commit::visit_parser_reset_routes(constraint, advanced, ignored, |reset, partition| {
+            let node = self.parser_canonicalizer.intern(partition.apply(|_| ()), parser_cache);
+            if !result.contains(&(reset, node)) {
+                result.push((reset, node));
             }
-        }
+        }).expect("valid recursive mask reset routes");
         self.parser_advance_cache.insert(key, result.clone());
         result
     }
@@ -8354,20 +8326,8 @@ fn parser_child(
     // The actual structural advance is already the definitive admissibility
     // test. Running exact admission first would duplicate reduction simulation
     // for every terminal branch explored by the dynamic traversal.
-    let advanced = if constraint.has_template_parser() {
-        super::commit::advance_parser_stacks_if_possible(constraint, &parser_gss, terminal)
-            .unwrap_or_else(ParserGSS::empty)
-    } else if let Some(advanced) =
-        constraint.advance_compact_segmented_parser(&parser_gss, terminal)
-    {
-        advanced
-    } else {
-        constraint
-            .direct_regular_cached_advance(&parser_gss, terminal)
-            .or_else(|| super::commit::advance_stacks_template_dfa(constraint, &parser_gss, terminal))
-            .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
-    }
-    .apply(|_| ());
+    let advanced = super::commit::advance_parser_stacks(constraint, &parser_gss, terminal)
+        .apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
 

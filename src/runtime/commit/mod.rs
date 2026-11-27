@@ -58,7 +58,6 @@ use self::template_advance::advance_stacks_template_dfa_owned;
 pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
     execute_tokenizer_from_state_small, scan_commit_lane,
-    execute_tokenizer_reusable_from_states,
 };
 
 /// An offset bucket is usually one or two lexer lanes. Larger frontiers
@@ -220,7 +219,7 @@ struct NormalizedMatch {
 }
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
-fn advance_parser_stacks(
+pub(crate) fn advance_parser_stacks(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: u32,
@@ -560,13 +559,6 @@ fn advance_parser_stacks_profiled_if_possible(
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
 type AdvanceResultCache = FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>;
 
-fn state_has_nonempty_accumulators(state: &ParserStateMap) -> bool {
-    state
-        .values()
-        .any(|gss| !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
-}
-
-
 fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
     gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit").into_iter().map(|(stack, _)| stack).collect()
 }
@@ -866,25 +858,10 @@ fn merge_special_token_paths(
     state: &mut ParserStateMap,
     special_paths: Option<ParserGSS>,
 ) -> Result<(), String> {
-    let Some(gss) = special_paths.filter(|gss| !gss.is_empty()) else {
-        return Ok(());
-    };
-    if !constraint.uses_compact_segmented_parser_runtime() {
-        state.merge_insert(constraint.runtime_commit_initial_state(), gss);
-        return Ok(());
-    }
-    let partitions = constraint
-        .partition_recursive_parser_gss_by_active_leaf(&gss)
-        .ok_or_else(|| "recursive special-token reset routing failed".to_owned())?;
-    for (leaf_index, partition) in partitions {
-        let reset_state = constraint
-            .recursive_tokenizer_reset_state(leaf_index)
-            .ok_or_else(|| {
-                format!("recursive special-token leaf {leaf_index} has no tokenizer reset")
-            })?;
-        state.merge_insert(reset_state, partition);
-    }
-    Ok(())
+    let Some(gss) = special_paths else { return Ok(()); };
+    visit_parser_reset_routes(constraint, gss, false, |reset, partition| {
+        state.merge_insert(reset, partition);
+    })
 }
 
 fn finish_token_commit(state: &ParserStateMap) -> Result<(), String> {
@@ -1212,7 +1189,7 @@ fn runtime_future_contains_ignore(
 }
 
 #[inline]
-fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
+pub(crate) fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
     if runtime_tokenizer_is_reset_state(constraint, end_state) {
         return true;
     }
@@ -1263,6 +1240,7 @@ pub(crate) fn entry_can_continue(
 ///
 /// Single non-initial end states deliberately keep the old boolean path: the
 /// exact-set computation cannot beat its early-exit simulation in that case.
+#[cfg(test)]
 fn batched_end_state_admitted_terminals(
     constraint: &Constraint,
     gss: &ParserGSS,
@@ -1394,92 +1372,6 @@ fn admission_cache_entry_index(
     cache.len() - 1
 }
 
-fn try_local_row_presence_admission_words(
-    constraint: &Constraint,
-    gss: &ParserGSS,
-    end_states: &[u32],
-) -> Option<[u64; 32]> {
-    const WORDS: usize = 32;
-    if constraint.uses_compact_segmented_parser_runtime()
-        || constraint.parser_admission_policy() != AdmissionPolicy::ExactSimulation
-        || constraint.parser_has_controls()
-        || constraint.tokenizer.num_terminals() as usize > WORDS * 64
-        || (!constraint.has_template_parser()
-            && (constraint.table.advance.len() != constraint.parser_symbol_count() as usize
-                || constraint.table.unconditional_advance.len()
-                    != constraint.parser_symbol_count() as usize))
-    {
-        return None;
-    }
-    let tops = gss.peek_values();
-    if tops.is_empty() {
-        return None;
-    }
-
-    // Only terminals reachable from the tokenizer continuation matter. Both
-    // backends provide a sound upper bound P and a suffix-independent lower
-    // bound U. If (P - U) intersects none of these candidates, U is exact for
-    // this query. Template rows are derived from the input-domain automata;
-    // this shortcut neither reads an LR action nor materializes output stacks.
-    let initial = constraint.runtime_commit_initial_state();
-    let mut candidates = [0u64; WORDS];
-    for &end_state in end_states {
-        if end_state == initial {
-            continue;
-        }
-        for (index, &word) in constraint
-            .tokenizer
-            .possible_future_terminals(end_state)
-            .words()
-            .iter()
-            .enumerate()
-        {
-            if index >= WORDS {
-                return None;
-            }
-            candidates[index] |= word;
-        }
-    }
-
-    let mut admitted = [0u64; WORDS];
-    for state in tops {
-        let advance = constraint.parser_advance_row(state)?;
-        let unconditional = constraint.parser_unconditional_row(state)?;
-        for index in 0..advance.words().len().min(WORDS) {
-            let candidate_word = candidates[index];
-            if candidate_word == 0 {
-                continue;
-            }
-            let advance_word = advance.words()[index];
-            let unconditional_word = unconditional.words().get(index).copied().unwrap_or(0);
-            if (advance_word & !unconditional_word & candidate_word) != 0 {
-                return None;
-            }
-            admitted[index] |= unconditional_word & candidate_word;
-        }
-    }
-    Some(admitted)
-}
-
-#[inline]
-fn end_state_may_advance_from_row_words(
-    constraint: &Constraint,
-    end_state: u32,
-    admitted_words: &[u64; 32],
-) -> bool {
-    if runtime_tokenizer_is_reset_state(constraint, end_state) {
-        return true;
-    }
-    let future = runtime_tokenizer_future_terminals(constraint, end_state)
-        .expect("runtime tokenizer end state must belong to its active coordinate");
-    future
-        .words()
-        .iter()
-        .zip(admitted_words.iter())
-        .any(|(&future, admitted)| (future & *admitted) != 0)
-        || runtime_future_contains_ignore(constraint, future.as_ref())
-}
-
 /// Cached exact-set version of `batched_end_state_admitted_terminals`.
 /// Returns the cache entry containing exact admission facts for every terminal
 /// occurring in these end-state future sets. Single-end-state callers use the
@@ -1574,6 +1466,7 @@ fn end_state_may_advance_from_cache_entry(
 
 
 #[inline]
+#[cfg(test)]
 fn end_state_may_advance_with_batch(
     constraint: &Constraint,
     gss: &ParserGSS,
@@ -1694,44 +1587,6 @@ fn is_actionable_terminal(
     actionable_terminals.is_none_or(|actionable| actionable.contains(constraint, terminal))
 }
 
-
-fn for_each_relevant_matched_terminal(
-    constraint: &Constraint,
-    tokenizer_state: u32,
-    actionable_terminals: Option<&ActionableTerminals>,
-    mut visit: impl FnMut(u32, bool),
-) {
-    let matched = constraint.tokenizer.matched_terminal_bitset(tokenizer_state);
-    if let Some(actionable) = actionable_terminals.and_then(|value| value.bitset(constraint)) {
-        let ignored = constraint.ignore_terminal;
-        for (word_index, (&matched_word, &actionable_word)) in
-            matched.words().iter().zip(actionable.words()).enumerate()
-        {
-            let mut intersection = matched_word & actionable_word;
-            while intersection != 0 {
-                let bit = intersection.trailing_zeros() as usize;
-                let terminal = (word_index * 64 + bit) as u32;
-                if Some(terminal) != ignored {
-                    visit(terminal, false);
-                }
-                intersection &= intersection - 1;
-            }
-        }
-        if let Some(ignored) = ignored
-            && matched.contains(ignored as usize)
-        {
-            visit(ignored, true);
-        }
-        return;
-    }
-
-    for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
-        let ignored = is_ignored_terminal(constraint.ignore_terminal, terminal);
-        if ignored || is_actionable_terminal(actionable_terminals, constraint, terminal) {
-            visit(terminal, ignored);
-        }
-    }
-}
 
 fn scan_wide_frontier_lexer_only(
     constraint: &Constraint,
@@ -1956,86 +1811,6 @@ fn single_disallowed_pair(acc: &TerminalsDisallowed) -> Option<(u32, u32)> {
     Some((*state, *terminals.iter().next()?))
 }
 
-fn try_prune_single_initial_state_batched_accumulators(
-    constraint: &Constraint,
-    gss: &ParserGSS,
-    bytes: &[u8],
-    scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
-    cached_starts: &mut SmallVec<[u32; 8]>,
-) -> Option<ParserGSS> {
-    let mut accumulators = SmallVec::<[TerminalsDisallowed; 8]>::new();
-    let mut overflow = false;
-    gss.for_each_acc(|acc| {
-        if overflow || acc.is_empty() || accumulators.contains(acc) {
-            return;
-        }
-        if accumulators.len() == accumulators.capacity() {
-            overflow = true;
-            return;
-        }
-        accumulators.push(acc.clone());
-    });
-    if overflow || accumulators.len() < 2 {
-        return None;
-    }
-
-    let mut pairs = SmallVec::<[(u32, u32); 8]>::new();
-    for acc in &accumulators {
-        pairs.push(single_disallowed_pair(acc)?);
-    }
-    // Each logical exclusion must belong to a disjoint lexer lane.  Then one
-    // union execution preserves lane-local longest-match semantics because no
-    // terminal ID can be observed from two starts.
-    for i in 0..pairs.len() {
-        let left = constraint.tokenizer.possible_future_terminals(pairs[i].0);
-        for &(right_state, _) in &pairs[..i] {
-            if !left.is_disjoint(
-                constraint.tokenizer.possible_future_terminals(right_state),
-            ) {
-                return None;
-            }
-        }
-    }
-    let starts = pairs
-        .iter()
-        .map(|&(state, _)| state)
-        .collect::<SmallVec<[u32; 8]>>();
-    if !execute_tokenizer_reusable_from_states(constraint, bytes, &starts, scratch) {
-        return None;
-    }
-    cached_starts.clear();
-    cached_starts.extend(starts.iter().copied());
-
-    let mut remapped = SmallVec::<[(TerminalsDisallowed, Option<TerminalsDisallowed>); 8]>::new();
-    for (acc, &(_, terminal)) in accumulators.iter().zip(&pairs) {
-        if scratch.matches.iter().any(|matched| matched.id == terminal) {
-            remapped.push((acc.clone(), None));
-            continue;
-        }
-        let mut next = TerminalsDisallowed::new();
-        for &end_state in &scratch.states {
-            if constraint
-                .tokenizer
-                .possible_future_terminals(end_state)
-                .contains(terminal as usize)
-            {
-                next = next.with_insert(end_state, terminal);
-            }
-        }
-        remapped.push((acc.clone(), Some(next)));
-    }
-
-    Some(gss.apply_and_prune_no_promote(|acc| {
-        if acc.is_empty() {
-            return Some(TerminalsDisallowed::new());
-        }
-        remapped
-            .iter()
-            .find(|(source, _)| source == acc)
-            .and_then(|(_, result)| result.clone())
-    }))
-}
-
 fn prune_single_initial_state_for_parts(
     constraint: &Constraint,
     gss: ParserGSS,
@@ -2109,6 +1884,36 @@ fn queue_parser_state(
     }
 }
 
+/// A completed terminal may activate a different recursive lexer leaf.
+/// Ignored matches still close zero-width controls before choosing that
+/// leaf, but do not apply a grammar terminal. Both commit and mask traversal
+/// consume these same correlated reset routes.
+pub(crate) fn visit_parser_reset_routes(
+    constraint: &Constraint,
+    mut gss: ParserGSS,
+    ignored: bool,
+    mut visit: impl FnMut(u32, ParserGSS),
+) -> Result<(), String> {
+    if gss.is_empty() {
+        return Ok(());
+    }
+    if !constraint.uses_compact_segmented_parser_runtime() {
+        visit(constraint.runtime_commit_initial_state(), gss);
+        return Ok(());
+    }
+    if ignored {
+        gss = constraint.close_compact_segmented_parser(&gss).unwrap_or(gss);
+    }
+    let partitions = constraint.partition_recursive_parser_gss_by_active_leaf(&gss)
+        .ok_or_else(|| "recursive parser reset routing failed".to_owned())?;
+    for (leaf, partition) in partitions {
+        let reset = constraint.recursive_tokenizer_reset_state(leaf)
+            .ok_or_else(|| format!("recursive leaf {leaf} has no tokenizer reset"))?;
+        visit(reset, partition);
+    }
+    Ok(())
+}
+
 fn queue_parser_reset_state(
     constraint: &Constraint,
     processing_queue: &mut [ParserStatesByTokenizer],
@@ -2116,60 +1921,13 @@ fn queue_parser_reset_state(
     new_offset: usize,
     total_len: usize,
     gss: ParserGSS,
+    ignored: bool,
 ) -> bool {
-    if !constraint.uses_compact_segmented_parser_runtime() {
+    visit_parser_reset_routes(constraint, gss, ignored, |reset, partition| {
         queue_parser_state(
-            processing_queue,
-            pending_state,
-            new_offset,
-            total_len,
-            constraint.runtime_commit_initial_state(),
-            gss,
+            processing_queue, pending_state, new_offset, total_len, reset, partition,
         );
-        return true;
-    }
-    let Some(partitions) = constraint.partition_recursive_parser_gss_by_active_leaf(&gss) else {
-        return false;
-    };
-    for (leaf_index, partition) in partitions {
-        let Some(reset_state) = constraint.recursive_tokenizer_reset_state(leaf_index) else {
-            return false;
-        };
-        queue_parser_state(
-            processing_queue,
-            pending_state,
-            new_offset,
-            total_len,
-            reset_state,
-            partition,
-        );
-    }
-    true
-}
-
-fn queue_parser_ignored_reset_state(
-    constraint: &Constraint,
-    processing_queue: &mut [ParserStatesByTokenizer],
-    pending_state: &mut ParserStatesByTokenizer,
-    new_offset: usize,
-    total_len: usize,
-    gss: ParserGSS,
-) -> bool {
-    let gss = if constraint.uses_compact_segmented_parser_runtime() {
-        constraint
-            .close_compact_segmented_parser(&gss)
-            .unwrap_or(gss)
-    } else {
-        gss
-    };
-    queue_parser_reset_state(
-        constraint,
-        processing_queue,
-        pending_state,
-        new_offset,
-        total_len,
-        gss,
-    )
+    }).is_ok()
 }
 
 fn finalize_pending_state(pending_state: &mut ParserStatesByTokenizer) -> ParserStateMap {
@@ -2923,9 +2681,9 @@ fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
                     let end = offset + matched.width;
                     if matched.ignored {
                         observer.stack(constraint, &gss, end);
-                        if !queue_parser_ignored_reset_state(
+                        if !queue_parser_reset_state(
                             constraint, &mut processing_queue, &mut bufs.pending_state,
-                            end, bytes.len(), gss,
+                            end, bytes.len(), gss, true,
                         ) {
                             return Err("recursive tokenizer reset routing failed".to_owned());
                         }
@@ -2950,7 +2708,7 @@ fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
                             observer.stack(constraint, &advanced, end);
                             if !queue_parser_reset_state(
                                 constraint, &mut processing_queue, &mut bufs.pending_state,
-                                end, bytes.len(), advanced,
+                                end, bytes.len(), advanced, false,
                             ) {
                                 return Err("recursive tokenizer reset routing failed".to_owned());
                             }
@@ -2962,9 +2720,9 @@ fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
                     let end = offset + matched.width;
                     if matched.ignored {
                         observer.stack(constraint, &gss, end);
-                        if !queue_parser_ignored_reset_state(
+                        if !queue_parser_reset_state(
                             constraint, &mut processing_queue, &mut bufs.pending_state,
-                            end, bytes.len(), gss.clone(),
+                            end, bytes.len(), gss.clone(), true,
                         ) {
                             return Err("recursive tokenizer reset routing failed".to_owned());
                         }
@@ -3006,7 +2764,7 @@ fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
                     observer.stack(constraint, &advanced, end);
                     if !queue_parser_reset_state(
                         constraint, &mut processing_queue, &mut bufs.pending_state,
-                        end, bytes.len(), advanced,
+                        end, bytes.len(), advanced, false,
                     ) {
                         return Err("recursive tokenizer reset routing failed".to_owned());
                     }
