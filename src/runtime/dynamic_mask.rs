@@ -501,7 +501,7 @@ impl<C: FlatWalkCell> FullWalkTransitionTable for FullWalkFlat<'_, C> {
 
     #[inline(always)]
     fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        !terminals.is_disjoint(self.tokenizer.possible_future_terminals(state))
+        !terminals.is_disjoint_prefix(self.tokenizer.possible_future_terminals(state))
     }
 
     fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
@@ -2206,6 +2206,46 @@ fn singleton_product_cache_keeps_exact_keys_and_capacity() {
 }
 
 
+#[cfg(test)]
+#[test]
+fn bounded_product_cache_keeps_guard_correlations_and_exact_hash_collisions() {
+    let guarded = |parser, terminal| {
+        let mut state = FullWalkProduct::default();
+        state.push(5, parser, FullWalkPruneGuard::Passed);
+        state.push(0, 9, FullWalkPruneGuard::Pending(smallvec::smallvec![
+            FullWalkPruneMemory::Exact(5, terminal)
+        ]));
+        state
+    };
+    let mut cache = FullWalkProductCache::new(4);
+    let FullWalkCursor::Cached(first) = cache.hold(guarded(7, 2)) else { panic!("first") };
+    let other = guarded(7, 3);
+    let mut hash = FxHasher::default();
+    other.hash(&mut hash);
+    cache.ids.insert(hash.finish(), smallvec::smallvec![first]);
+    let FullWalkCursor::Cached(second) = cache.hold(other.clone()) else { panic!("second") };
+    assert_ne!(first, second);
+    assert!(cache.view(&FullWalkCursor::Cached(second)) == &other);
+    assert!(matches!(cache.hold(other), FullWalkCursor::Cached(id) if id == second));
+    let mut wide = FullWalkProduct::default();
+    wide.push(0, 9, FullWalkPruneGuard::Pending((0..5)
+        .map(|x| FullWalkPruneMemory::Exact(x, x)).collect()));
+    let cursor = cache.hold(wide.clone());
+    assert!(matches!(cursor, FullWalkCursor::Owned(_)));
+    assert!(cache.view(&cursor) == &wide);
+    cache.entries[first as usize].row[b'a' as usize] = first;
+    cache.entries[first as usize].self_loops[b'a' as usize / 64] |= 1 << (b'a' % 64);
+    let root = FullWalkCursor::Cached(first);
+    assert!(cache.proves_self_loops(&root, U8Set::single(b'a').to_words()));
+    assert!(!cache.proves_self_loops(&root, U8Set::single(b'b').to_words()));
+    assert!(!cache.proves_self_loops(&FullWalkCursor::Cached(second), U8Set::single(b'a').to_words()));
+    let mut depths = SmallVec::<[Option<FullWalkCursor>; 8]>::new();
+    *full_walk_owned_many_slot(&mut depths, 0, 256) = Some(root.clone());
+    *full_walk_owned_many_slot(&mut depths, 255, 256) = Some(cursor.clone());
+    assert!(cache.view(depths[0].as_ref().unwrap()) == cache.view(&root));
+    assert!(cache.view(depths[255].as_ref().unwrap()) == &wide);
+}
+
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
@@ -2362,11 +2402,16 @@ impl FullWalkParserCache {
             self.nodes[node_index].last_child_target = Self::DEAD;
             return None;
         }
+        if self.nodes[node_index].admitted.as_ref().is_some_and(|set| !set.contains(terminal as usize)) {
+            self.nodes[node_index].children.push((terminal, Self::DEAD));
+            self.nodes[node_index].last_child_terminal = terminal;
+            self.nodes[node_index].last_child_target = Self::DEAD;
+            return None;
+        }
         let next = parser_child(constraint, &self.nodes[node_index].gss, terminal);
         let target = if let Some(gss) = next {
-            // Ordinary parser transitions already have their own exact
-            // (parent node, terminal) cache. Preserve the original O(1) append;
-            // only recursive split/reset routing needs pointer interning.
+            // Dense walks may intern complete stack languages; other providers
+            // retain the O(1) append and exact parent/terminal memo.
             self.intern_dense_parser_stacks(gss)
         } else {
             Self::DEAD
@@ -2478,6 +2523,33 @@ impl FullWalkParserCache {
         node
     }
 
+    fn row_future_allowed<T: FullWalkTransitionTable>(
+        &self, constraint: &Constraint, transitions: &mut T,
+        parser_node: u32, lexer_state: u32,
+    ) -> Option<bool> {
+        let node = parser_node as usize;
+        if self.row_liveness_enabled
+            && self.nodes[node].admitted.is_none()
+            && !constraint.uses_sparse_direct_regular_runtime()
+            && !constraint.uses_compact_segmented_parser_runtime()
+            && !constraint.parser_has_controls()
+        {
+            self.nodes[node].gss.single_top_value().and_then(|top| {
+                let necessary = constraint.parser_advance_row(top)?;
+                let guaranteed = constraint.parser_unconditional_row(top)?;
+                if transitions.future_intersects(lexer_state, guaranteed) {
+                    Some(true)
+                } else if !transitions.future_intersects(lexer_state, necessary) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    }
+
     /// The exact dense row predicate also supports synthetic subset/union
     /// coordinates, by querying the executed transition provider's metadata.
     #[inline(always)]
@@ -2498,26 +2570,7 @@ impl FullWalkParserCache {
             return cached == 2;
         }
         if self.profile { self.profile_boundary_misses += 1; }
-        let row_bound = if self.row_liveness_enabled
-            && self.nodes[node].admitted.is_none()
-            && !constraint.uses_sparse_direct_regular_runtime()
-            && !constraint.uses_compact_segmented_parser_runtime()
-            && !constraint.parser_has_controls()
-        {
-            self.nodes[node].gss.single_top_value().and_then(|top| {
-                let necessary = constraint.parser_advance_row(top)?;
-                let guaranteed = constraint.parser_unconditional_row(top)?;
-                if transitions.future_intersects(lexer_state, guaranteed) {
-                    Some(true)
-                } else if !transitions.future_intersects(lexer_state, necessary) {
-                    Some(false)
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let row_bound = self.row_future_allowed(constraint, transitions, parser_node, lexer_state);
         let allowed = constraint.ignore_terminal
             .is_some_and(|terminal| transitions.future_contains(lexer_state, terminal))
             || row_bound.unwrap_or_else(|| {
@@ -5364,7 +5417,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                 }
                 continue;
             }
-            if !terminals.is_disjoint(self.tokenizer.possible_future_terminals(state))
+            if !terminals.is_disjoint_prefix(self.tokenizer.possible_future_terminals(state))
                 && self.tokenizer.exact_dynamic_state_has_future(state)?
             {
                 return Ok(true);
