@@ -287,6 +287,125 @@ pub(crate) struct MaskScratch {
 }
 
 impl MaskScratch {
+    pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
+        let dense_words = constraint.internal_token_dense_words;
+        let mut segmented_component_scratch = Vec::new();
+        if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
+            let authoritative_dynamic_direct = constraint.uses_compact_segmented_parser_runtime()
+                && overlay.segmented_parser_components.iter().all(|component| {
+                    component.boundary.as_ref().is_some_and(|shard| {
+                        matches!(
+                            shard.backend,
+                            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                        )
+                    })
+                });
+            if !authoritative_dynamic_direct {
+                segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
+                for component in &overlay.segmented_parser_components {
+                    let source = component.constraint.as_ref();
+                    segmented_component_scratch.push(Arc::new(Mutex::new(
+                        MaskScratch::for_constraint(source),
+                    )));
+                }
+            }
+        }
+        Self {
+            merged_dense: Vec::with_capacity(dense_words),
+            chain_merged_dense: Vec::with_capacity(dense_words),
+            output_buf: Vec::with_capacity(constraint.body_mask_len()),
+            // Allocate and touch these before any timed runtime operation. The
+            // direct kernel clears/reuses them without changing capacity.
+            single_path_aux_dense: vec![0; dense_words],
+            single_path_acc_dense: vec![0; dense_words],
+            indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
+            segmented_component_scratch,
+        }
+    }
+}
+
+/// Exact admission facts retained for one structurally persistent parser GSS.
+///
+/// `gss` is a strong Arc-backed clone, so pointer identity cannot be recycled
+/// while the entry exists. `tested`/`admitted` record pointwise exact terminal
+/// admission. `boolean_queries` caches existential results for the common
+/// single tokenizer-end-state case without forcing a full admitted-set closure.
+#[derive(Debug, Clone)]
+pub(crate) struct ParserAdmissionCacheEntry {
+    pub(crate) gss: ParserGSS,
+    pub(crate) tested: BitSet,
+    pub(crate) admitted: BitSet,
+    pub(crate) boolean_queries: SmallVec<[(BitSet, bool); 8]>,
+}
+
+/// Proven equality of the next-token vocabulary observation for two exact
+/// lexer states under one parser-admitted terminal set. The proof itself is
+/// parser-stack independent once the admitted set is fixed: before the first
+/// finalization only these terminals are observable, and after an equal
+/// admitted finalization both sides advance the same current GSS and reset to
+/// the same lexer state.
+#[derive(Debug, Clone)]
+pub(crate) struct ParserRelativeMaskEqCacheEntry {
+    pub(crate) left: u32,
+    pub(crate) right: u32,
+    pub(crate) admitted: BitSet,
+}
+
+/// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
+/// to avoid repeated heap allocation.
+#[derive(Debug)]
+pub(crate) struct CommitBuffers {
+    pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
+    pub semantic_frontier_keys: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
+    pub admission_cache: SmallVec<[ParserAdmissionCacheEntry; 8]>,
+    pub parser_relative_mask_eq_cache: SmallVec<[ParserRelativeMaskEqCacheEntry; 8]>,
+    pub pending_state: crate::runtime::commit::CommitBucket,
+    pub seen_matches: FxHashSet<(usize, u32)>,
+    pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
+    pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
+    pub reusable_tokenizer_exec:
+        crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
+    pub processing_queue: Vec<crate::runtime::commit::CommitBucket>,
+    pub template_advance_runtime: crate::runtime::commit::TemplateAdvanceRuntime,
+}
+
+impl Default for CommitBuffers {
+    fn default() -> Self {
+        Self::with_allocation_policy::<false>()
+    }
+}
+
+impl CommitBuffers {
+    pub(crate) fn for_mask_only_shadow() -> Self {
+        Self::with_allocation_policy::<true>()
+    }
+
+    pub(crate) fn for_finite_recursive_mask() -> Self {
+        Self::default()
+    }
+
+    fn with_allocation_policy<const MASK_ONLY: bool>() -> Self {
+        Self {
+            advance_result_cache: FxHashMap::default(),
+            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(if MASK_ONLY { 0 } else { 256 }),
+            admission_cache: SmallVec::new(),
+            parser_relative_mask_eq_cache: SmallVec::new(),
+            pending_state: Default::default(),
+            seen_matches: FxHashSet::default(),
+            terminal_result_cache: FxHashMap::default(),
+            small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult {
+                end_state: crate::automata::lexer::tokenizer::TokenizerStateSet::new(),
+                matches: Vec::with_capacity(if MASK_ONLY { 0 } else { 8 }),
+            },
+            reusable_tokenizer_exec:
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
+            processing_queue: Vec::new(),
+            template_advance_runtime:
+                if MASK_ONLY { crate::runtime::commit::TemplateAdvanceRuntime::for_mask_only_shadow() }
+                else { crate::runtime::commit::TemplateAdvanceRuntime::default() },
+        }
+    }
+
     pub(crate) fn for_constraint(_constraint: &Constraint) -> Self {
         Self::default()
     }
@@ -294,7 +413,7 @@ impl MaskScratch {
 
 impl Clone for CommitBuffers {
     fn clone(&self) -> Self {
-        // Don't clone scratch buffers — start fresh
+        // Don't clone scratch buffers ΓÇö start fresh
         Self::default()
     }
 }
@@ -333,7 +452,7 @@ pub struct ConstraintState {
     /// Used for cheap cache invalidation in fill_mask.
     pub(crate) generation: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
-    /// Not cloned — clone starts with empty cache.
+    /// Not cloned ΓÇö clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Arc<Mutex<MaskScratch>>,
