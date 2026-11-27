@@ -10221,14 +10221,8 @@ pub(crate) struct SegmentedBoundaryTerminalTrie {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
-    /// Generic wire/reference representation. Compact in-memory boundary
-    /// parsers leave this as the empty one-state DWA and use
-    /// `compact_parser_dwa`; V17 serialization materializes the compact machine
-    /// back into this exact generic wire shape.
+    /// Exact deterministic boundary parser in the generic weight algebra.
     pub(crate) parser_dwa: DWA,
-    #[serde(skip, default)]
-    pub(crate) compact_parser_dwa:
-        Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
     /// Provider-native static boundary parser in the recursive leaf parser-state
     /// coordinate. New v25 compositions compile and serialize this coordinate
     /// directly. Legacy v24 static boundaries retain only `parser_dwa` and stay

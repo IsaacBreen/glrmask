@@ -46,10 +46,8 @@ use crate::compiler::stages::parser_dwa::{
     PrebuiltParserBundleCache,
     normalize_weighted_parser_stack_nwa,
     normalize_weighted_parser_stack_nwa_small_boundary,
-    normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count,
     normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
     normalize_weighted_parser_stack_nwa_small_boundary_with_tsid_map,
-    SmallBoundaryDwa,
     normalize_signed_weighted_parser_stack_nwa_small_boundary,
     normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
     resolve_negative_codes_small_boundary,
@@ -2091,31 +2089,6 @@ enum BoundaryRuntimeCandidate {
     },
 }
 
-enum PublishedBoundaryRuntime {
-    Parser {
-        parser_dwa: DWA,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        positive_build_ms: f64,
-        normalize_ms: f64,
-        tsid_quotient: Option<Vec<u32>>,
-    },
-    CompactParser {
-        parser_dwa: SmallBoundaryDwa,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        positive_build_ms: f64,
-        normalize_ms: f64,
-        tsid_quotient: Option<Vec<u32>>,
-    },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        build_ms: f64,
-    },
-}
-
 #[derive(Clone)]
 pub(crate) struct PublishedStaticBoundaryShard {
     pub(crate) start_component: u32,
@@ -2341,7 +2314,6 @@ fn finish_walk_shard_publication(
             candidate_tokens,
             boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
                 parser_dwa: DWA::new(0, 0),
-                compact_parser_dwa: None,
                 recursive_parser_dwa: Some(parser_dwa),
                 uses_composed_tsid_coordinate: false,
                 tokenizer_state_to_tsid,
@@ -2693,25 +2665,6 @@ impl PositiveBoundaryParser {
                 source_tsid_map,
             ),
         }
-    }
-
-    fn compact_runtime_dwa_for_parser_state_count(
-        &self,
-        num_parser_states: u32,
-        num_tsids: usize,
-        num_tokens: usize,
-        source_tsid_map: Option<&[u32]>,
-    ) -> Option<SmallBoundaryDwa> {
-        let Self::Nwa(nwa) = self else {
-            return None;
-        };
-        normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count(
-            nwa,
-            num_parser_states,
-            num_tsids,
-            num_tokens,
-            source_tsid_map,
-        )
     }
 
     fn ensure_positive(&self) -> Result<(), String> {

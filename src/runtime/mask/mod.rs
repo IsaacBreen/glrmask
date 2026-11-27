@@ -1699,338 +1699,6 @@ impl<'a> BoundaryWeightDagEvaluator<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Exact cap-free u64 evaluator for the compact boundary DWA representation.
-//
-// Same DAG/product structure as the Weight evaluator above, but weights are
-// per-(weight-id, TSID) u64 token masks for one fixed TSID. Bitwise AND
-// distributes over OR exactly as Weight intersection distributes over union,
-// so the same memoized grouping argument applies.
-#[cfg(test)]
-struct BoundaryMask64DagEvaluator<'a> {
-    dwa: &'a crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
-    tsid: u32,
-    dag: &'a IndexedLeveledGss<u32, TerminalsDisallowed>,
-    upper_memo: FxHashMap<(u32, u32), FxHashMap<u32, u64>>,
-    lower_memo: FxHashMap<(u32, u32), u64>,
-    groups_memo: FxHashMap<u32, FxHashSet<u32>>,
-    nonempty_memo: FxHashMap<u32, bool>,
-    dwa_steps: u64,
-}
-
-#[cfg(test)]
-impl<'a> BoundaryMask64DagEvaluator<'a> {
-    fn new(
-        dwa: &'a crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
-        tsid: u32,
-        dag: &'a IndexedLeveledGss<u32, TerminalsDisallowed>,
-    ) -> Self {
-        Self {
-            dwa,
-            tsid,
-            dag,
-            upper_memo: FxHashMap::default(),
-            lower_memo: FxHashMap::default(),
-            groups_memo: FxHashMap::default(),
-            nonempty_memo: FxHashMap::default(),
-            dwa_steps: 0,
-        }
-    }
-
-    fn dwa_edge(&mut self, state: u32, parser_state: u32) -> Option<(u32, u64)> {
-        self.dwa_steps += 1;
-        let st = self.dwa.states.get(state as usize)?;
-        let label = encode_positive_label(parser_state);
-        let (_, target, weight) = st
-            .transitions
-            .iter()
-            .find(|(edge_label, _, _)| *edge_label == label)
-            .or_else(|| {
-                st.transitions
-                    .iter()
-                    .find(|(edge_label, _, _)| *edge_label == DEFAULT_LABEL)
-            })?;
-        Some((*target, self.dwa.weight_mask(*weight, self.tsid)))
-    }
-
-    fn dwa_final_mask(&self, state: u32, path_mask: u64) -> u64 {
-        let Some(st) = self.dwa.states.get(state as usize) else {
-            return 0;
-        };
-        if st.final_weight == 0 {
-            return 0;
-        }
-        path_mask & self.dwa.weight_mask(st.final_weight, self.tsid)
-    }
-
-    fn lower_nonempty(&mut self, node: u32) -> bool {
-        if let Some(&cached) = self.nonempty_memo.get(&node) {
-            return cached;
-        }
-        let dag = self.dag;
-        let result = match &dag.nodes[node as usize] {
-            IndexedLeveledGssNode::LowerGeneral { empty, children, .. } => {
-                *empty || children.iter().any(|(_, child)| self.lower_nonempty(*child))
-            }
-            IndexedLeveledGssNode::LowerSegment { next, .. } => self.lower_nonempty(*next),
-            IndexedLeveledGssNode::UpperBranch { .. } | IndexedLeveledGssNode::Interface { .. } => {
-                debug_assert!(false, "lower_nonempty reached upper node");
-                false
-            }
-        };
-        self.nonempty_memo.insert(node, result);
-        result
-    }
-
-    fn upper_groups(&mut self, node: u32) -> FxHashSet<u32> {
-        if let Some(cached) = self.groups_memo.get(&node) {
-            return cached.clone();
-        }
-        let dag = self.dag;
-        let result = match &dag.nodes[node as usize] {
-            IndexedLeveledGssNode::Interface { lower, .. } => {
-                let mut set = FxHashSet::default();
-                if self.lower_nonempty(*lower) {
-                    set.insert(node);
-                }
-                set
-            }
-            IndexedLeveledGssNode::UpperBranch { empty, children } => {
-                let mut set = FxHashSet::default();
-                if empty.is_some() {
-                    set.insert(node);
-                }
-                for (_, child) in children {
-                    set.extend(self.upper_groups(*child));
-                }
-                set
-            }
-            IndexedLeveledGssNode::LowerGeneral { .. }
-            | IndexedLeveledGssNode::LowerSegment { .. } => {
-                debug_assert!(false, "upper_groups reached lower node");
-                FxHashSet::default()
-            }
-        };
-        self.groups_memo.insert(node, result.clone());
-        result
-    }
-
-    fn step_segment(&mut self, dwa_state: u32, values: &[u32], next: u32) -> u64 {
-        let all = self.dwa.all_token_mask();
-        let mut out = self.dwa_final_mask(dwa_state, all);
-        let mut cumulative = all;
-        let mut state = dwa_state;
-        let mut live = true;
-        for value in values.iter().rev() {
-            let Some((target, edge_mask)) = self.dwa_edge(state, *value) else {
-                live = false;
-                break;
-            };
-            cumulative &= edge_mask;
-            if cumulative == 0 {
-                live = false;
-                break;
-            }
-            state = target;
-            out |= self.dwa_final_mask(state, cumulative);
-        }
-        if live {
-            out |= cumulative & self.lower_eval(state, next);
-        }
-        out
-    }
-
-    fn lower_eval(&mut self, dwa_state: u32, node: u32) -> u64 {
-        if let Some(&cached) = self.lower_memo.get(&(dwa_state, node)) {
-            return cached;
-        }
-        let dag = self.dag;
-        let result = match dag.nodes[node as usize].clone() {
-            IndexedLeveledGssNode::LowerGeneral { empty: _, children, .. } => {
-                // Empty-prefix acceptance belongs to every stack in a
-                // nonempty language, not just the empty stack.
-                if !self.lower_nonempty(node) {
-                    return 0;
-                }
-                let all = self.dwa.all_token_mask();
-                let mut out = self.dwa_final_mask(dwa_state, all);
-                for (value, child) in children {
-                    let Some((target, edge_mask)) = self.dwa_edge(dwa_state, value) else {
-                        continue;
-                    };
-                    out |= edge_mask & self.lower_eval(target, child);
-                }
-                out
-            }
-            IndexedLeveledGssNode::LowerSegment { values, next, .. } => {
-                if self.lower_nonempty(next) {
-                    self.step_segment(dwa_state, &values, next)
-                } else {
-                    0
-                }
-            }
-            IndexedLeveledGssNode::UpperBranch { .. } | IndexedLeveledGssNode::Interface { .. } => {
-                debug_assert!(false, "lower_eval reached upper node");
-                0
-            }
-        };
-        self.lower_memo.insert((dwa_state, node), result);
-        result
-    }
-
-    fn eval_upper(&mut self, dwa_state: u32, node: u32) -> FxHashMap<u32, u64> {
-        if let Some(cached) = self.upper_memo.get(&(dwa_state, node)) {
-            return cached.clone();
-        }
-        let dag = self.dag;
-        let result = match dag.nodes[node as usize].clone() {
-            IndexedLeveledGssNode::Interface { lower, .. } => {
-                let mask = self.lower_eval(dwa_state, lower);
-                let mut map = FxHashMap::default();
-                if mask != 0 {
-                    map.insert(node, mask);
-                }
-                map
-            }
-            IndexedLeveledGssNode::UpperBranch { children, .. } => {
-                let mut map = FxHashMap::default();
-                for (value, child) in children {
-                    let Some((target, edge_mask)) = self.dwa_edge(dwa_state, value) else {
-                        continue;
-                    };
-                    let child_map = self.eval_upper(target, child);
-                    for (group, mask) in child_map {
-                        *map.entry(group).or_insert(0) |= edge_mask & mask;
-                    }
-                }
-                let all = self.dwa.all_token_mask();
-                let final_here = self.dwa_final_mask(dwa_state, all);
-                if final_here != 0 {
-                    for group in self.upper_groups(node) {
-                        *map.entry(group).or_insert(0) |= final_here;
-                    }
-                }
-                map
-            }
-            IndexedLeveledGssNode::LowerGeneral { .. }
-            | IndexedLeveledGssNode::LowerSegment { .. } => {
-                debug_assert!(false, "eval_upper reached lower node");
-                FxHashMap::default()
-            }
-        };
-        self.upper_memo.insert((dwa_state, node), result.clone());
-        result
-    }
-
-    fn lower_eval_top_filtered(
-        &mut self,
-        dwa_state: u32,
-        node: u32,
-        top_live: &dyn Fn(Option<u32>) -> bool,
-    ) -> u64 {
-        let dag = self.dag;
-        match dag.nodes[node as usize].clone() {
-            IndexedLeveledGssNode::LowerGeneral { empty, children, .. } => {
-                // Empty-prefix acceptance belongs to every surviving stack,
-                // not just the empty stack.
-                let live_empty = empty && top_live(None);
-                let live_language = live_empty
-                    || children
-                        .iter()
-                        .any(|(value, child)| top_live(Some(*value)) && self.lower_nonempty(*child));
-                let all = self.dwa.all_token_mask();
-                let mut out = if live_language {
-                    self.dwa_final_mask(dwa_state, all)
-                } else {
-                    0
-                };
-                for (value, child) in children {
-                    if !top_live(Some(value)) {
-                        continue;
-                    }
-                    let Some((target, edge_mask)) = self.dwa_edge(dwa_state, value) else {
-                        continue;
-                    };
-                    out |= edge_mask & self.lower_eval(target, child);
-                }
-                out
-            }
-            IndexedLeveledGssNode::LowerSegment { values, next, .. } => {
-                if values.is_empty() {
-                    return self.lower_eval_top_filtered(dwa_state, next, top_live);
-                }
-                let top = *values.last().expect("nonempty segment has a top value");
-                if !top_live(Some(top)) || !self.lower_nonempty(next) {
-                    return 0;
-                }
-                self.step_segment(dwa_state, &values, next)
-            }
-            IndexedLeveledGssNode::UpperBranch { .. } | IndexedLeveledGssNode::Interface { .. } => {
-                debug_assert!(false, "lower_eval_top_filtered reached upper node");
-                0
-            }
-        }
-    }
-
-    fn eval_root(&mut self, top_live: &dyn Fn(Option<u32>) -> bool) -> FxHashMap<u32, u64> {
-        let dag = self.dag;
-        let start = self.dwa.start_state();
-        let root = dag.root;
-        match dag.nodes[root as usize].clone() {
-            IndexedLeveledGssNode::Interface { lower, .. } => {
-                let mask = self.lower_eval_top_filtered(start, lower, top_live);
-                let mut map = FxHashMap::default();
-                if mask != 0 {
-                    map.insert(root, mask);
-                }
-                map
-            }
-            IndexedLeveledGssNode::UpperBranch { empty, children } => {
-                let mut map = FxHashMap::default();
-                let mut live_groups = FxHashSet::default();
-                if empty.is_some() && top_live(None) {
-                    live_groups.insert(root);
-                }
-                for (value, child) in children {
-                    if !top_live(Some(value)) {
-                        continue;
-                    }
-                    live_groups.extend(self.upper_groups(child));
-                    let Some((target, edge_mask)) = self.dwa_edge(start, value) else {
-                        continue;
-                    };
-                    let child_map = self.eval_upper(target, child);
-                    for (group, mask) in child_map {
-                        *map.entry(group).or_insert(0) |= edge_mask & mask;
-                    }
-                }
-                let all = self.dwa.all_token_mask();
-                let final_here = self.dwa_final_mask(start, all);
-                if final_here != 0 {
-                    for group in live_groups {
-                        *map.entry(group).or_insert(0) |= final_here;
-                    }
-                }
-                map
-            }
-            IndexedLeveledGssNode::LowerGeneral { .. }
-            | IndexedLeveledGssNode::LowerSegment { .. } => {
-                debug_assert!(false, "boundary DAG root is not an upper node");
-                FxHashMap::default()
-            }
-        }
-    }
-
-    fn group_accumulator(&self, group: u32) -> Option<TerminalsDisallowed> {
-        match &self.dag.nodes[group as usize] {
-            IndexedLeveledGssNode::Interface { accumulator, .. } => Some(accumulator.clone()),
-            IndexedLeveledGssNode::UpperBranch { empty, .. } => empty.clone(),
-            IndexedLeveledGssNode::LowerGeneral { .. }
-            | IndexedLeveledGssNode::LowerSegment { .. } => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4007,51 +3675,6 @@ fn boundary_weight_mask_via_shared_queue(
     output
 }
 
-/// The small boundary representation supplies one-word intersections to the
-/// same traversal. It does not have an independent GSS/DWA walk.
-fn boundary_mask64_via_shared_queue(
-    dwa: &crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
-    tsid: u32,
-    stacks: &LeveledGSS<u32, ()>,
-    top_live: &impl Fn(Option<u32>) -> bool,
-) -> Option<DenseMaskAcc> {
-    if tsid >= dwa.tsid_count as u32 { return None; }
-    let full = dwa.all_token_mask();
-    let seed = DenseMaskAcc::from_dense(tsid, vec![full])?;
-    let mut queue = MaskQueue::new();
-    queue.enqueue(dwa.start_state(), boundary_queue_seed(stacks, &seed, top_live));
-    let intersect = |acc: &DenseMaskAcc, mask: u64| {
-        debug_assert_eq!(acc.0.len(), 1);
-        let (tsid, words) = acc.0.first()?;
-        debug_assert_eq!(words.len(), 1);
-        DenseMaskAcc::from_dense(*tsid, vec![words[0] & mask])
-    };
-    let mut output = None;
-    walk_static_dwa_gss_queue(
-        &mut queue,
-        &mut None,
-        |state| {
-            let weight = dwa.states.get(state as usize)?.final_weight;
-            (weight != 0).then(|| dwa.weight_mask(weight, tsid))
-        },
-        |state, parser| {
-            let row = &dwa.states.get(state as usize)?.transitions;
-            let label = encode_positive_label(parser);
-            row.iter().find(|(key, _, _)| *key == label)
-                .or_else(|| row.iter().find(|(key, _, _)| *key == DEFAULT_LABEL))
-                .map(|&(_, target, weight)| (target, dwa.weight_mask(weight, tsid)))
-        },
-        |mask, gss| {
-            gss.for_each_acc(|acc| merge_boundary_dense_result(&mut output, intersect(acc, mask)));
-        },
-        |queue, target, mask, popped, _profile| {
-            if mask == full { queue.enqueue(target, popped.clone()); }
-            else if mask != 0 { queue.enqueue(target, popped.apply_and_prune(|acc| intersect(acc, mask))); }
-        },
-    );
-    output
-}
-
 impl ConstraintState {
     fn or_segmented_component_mask(&self, output: &mut [u32], component_mask: &[u32]) {
         // Retained components can carry private linker sentinel IDs (and other
@@ -5826,50 +5449,10 @@ impl ConstraintState {
         true
     }
 
-    /// Admit one exact-DAG group's accepted compact u64 mask into `buf`.
-    /// Same decline contract as `admit_boundary_weight_group`.
-    fn admit_boundary_mask64_group(
-        &self,
-        boundary: &crate::runtime::SegmentedBoundaryParser,
-        mut accepted: u64,
-        allowed: &DenseMaskAcc,
-        buf: &mut [u32],
-    ) -> bool {
-        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
-            let word = token as usize / 64;
-            let bit = token % 64;
-            acc.0.iter().any(|(_, dense)| {
-                dense.get(word)
-                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
-            })
-        }
-        while accepted != 0 {
-            let internal_token = accepted.trailing_zeros();
-            accepted &= accepted - 1;
-            let Some(originals) = boundary
-                .internal_token_to_originals
-                .get(internal_token as usize)
-            else {
-                return false;
-            };
-            for &original in originals {
-                let outer_internal = self
-                    .constraint
-                    .original_token_internal_at(original)
-                    .unwrap_or(u32::MAX);
-                if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
-                    set_original_mask_bit(buf, original);
-                }
-            }
-        }
-        true
-    }
-
     fn or_boundary_dag_via_shared_queue(
         &self,
         boundary: &crate::runtime::SegmentedBoundaryParser,
         parser_dwa: &crate::automata::weighted_u32::dwa::DWA,
-        recursive_parser: bool,
         boundary_tsids: &[u32],
         global_tokenizer_state: u32,
         gss: &ParserGSS,
@@ -5887,17 +5470,10 @@ impl ConstraintState {
             // accepted language and output eligibility remain correlated.
             // Partitioning operates on the compact GSS, never enumerating a
             // bounded list of individual stacks.
-            let accepted = if !recursive_parser {
-                if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
-                    boundary_mask64_via_shared_queue(compact, boundary_tsids[0], &stacks, top_live)
-                } else {
-                    boundary_weight_mask_via_shared_queue(parser_dwa, boundary_tsids,
-                        boundary.internal_token_to_originals.len(), &stacks, top_live)
-                }
-            } else {
-                boundary_weight_mask_via_shared_queue(parser_dwa, boundary_tsids,
-                    boundary.internal_token_to_originals.len(), &stacks, top_live)
-            };
+            let accepted = boundary_weight_mask_via_shared_queue(
+                parser_dwa, boundary_tsids, boundary.internal_token_to_originals.len(),
+                &stacks, top_live,
+            );
             let Some(accepted) = accepted else { continue; };
             for (_, dense) in &accepted.0 {
                 for (word, &bits) in dense.iter().enumerate() {
@@ -6055,44 +5631,6 @@ impl ConstraintState {
             accepted
         }
 
-        fn accepted_mask_for_stack(
-            dwa: &crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
-            tsid: u32,
-            top_first: &[u32],
-        ) -> u64 {
-            if tsid >= dwa.tsid_count as u32 {
-                return 0;
-            }
-            let mut path_mask = dwa.all_token_mask();
-            let mut accepted = 0u64;
-            walk_single_stack::<false, _>(
-                dwa.start_state(), top_first,
-                |state| {
-                    let weight = dwa.states.get(state as usize)?.final_weight;
-                    (weight != 0).then(|| dwa.weight_mask(weight, tsid))
-                },
-                |state, parser| {
-                    let row = &dwa.states.get(state as usize)?.transitions;
-                    let label = encode_positive_label(parser);
-                    row.iter().find(|(key, _, _)| *key == label)
-                        .or_else(|| row.iter().find(|(key, _, _)| *key == DEFAULT_LABEL))
-                        .map(|&(_, target, weight)| (target, dwa.weight_mask(weight, tsid)))
-                },
-                |event| {
-                    match event {
-                        StackWalkEvent::Final(weight) => accepted |= path_mask & weight,
-                        StackWalkEvent::Intersect(weight) => {
-                            path_mask &= weight;
-                            return path_mask != 0;
-                        }
-                        StackWalkEvent::Top(_) => unreachable!("top hook is compiled out"),
-                    }
-                    true
-                },
-            );
-            accepted
-        }
-
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -6203,113 +5741,62 @@ impl ConstraintState {
                 if let Some(mark) = phase_mark {
                     phase_allowed_ns += elapsed_ns(mark);
                 }
-                if !recursive_parser
-                    && let Some(compact) = boundary.compact_parser_dwa.as_ref()
-                {
-                    let boundary_tsid = boundary_tsids[0];
+                let mut debug_internal = Vec::new();
+                let mut debug_originals = Vec::new();
+                for &boundary_tsid in &boundary_tsids {
                     let walk_mark = single_started.is_some().then(Instant::now);
-                    let mut accepted = accepted_mask_for_stack(compact, boundary_tsid, top_first);
+                    let accepted = accepted_dense_for_stack(
+                        parser_dwa, boundary_tsid,
+                        boundary.internal_token_to_originals.len(), top_first,
+                    );
                     if let Some(mark) = walk_mark {
                         phase_walk_ns += elapsed_ns(mark);
                     }
-                    if debug_boundary {
-                        let internal = (0..compact.token_count as u32)
-                            .filter(|&token| accepted & (1u64 << token) != 0)
-                            .collect::<Vec<_>>();
-                        let originals = internal
-                            .iter()
-                            .flat_map(|&token| boundary.internal_token_to_originals.get(token as usize).into_iter().flatten().copied())
-                            .collect::<Vec<_>>();
-                        eprintln!(
-                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal={:?} accepted_originals={:?} compact=true",
-                            top_first,
-                            boundary_tsid,
-                            internal,
-                            originals,
-                        );
-                    }
                     let admit_mark = single_started.is_some().then(Instant::now);
-                    while accepted != 0 {
-                        let internal_token = accepted.trailing_zeros();
-                        accepted &= accepted - 1;
-                        let Some(originals) = boundary
-                            .internal_token_to_originals
-                            .get(internal_token as usize)
-                        else {
-                            complete = false;
-                            return;
-                        };
-                        for &original in originals {
-                            let outer_internal = self
-                                .constraint
-                                .original_token_internal_at(original)
-                                .unwrap_or(u32::MAX);
-                            if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
-                                set_original_mask_bit(buf, original);
+                    for (word_index, mut bits) in accepted.into_iter().enumerate() {
+                        while bits != 0 {
+                            let internal_token = (word_index * 64) as u32 + bits.trailing_zeros();
+                            bits &= bits - 1;
+                            let Some(originals) = boundary
+                                .internal_token_to_originals
+                                .get(internal_token as usize)
+                            else {
+                                complete = false;
+                                return;
+                            };
+                            if debug_boundary {
+                                debug_internal.push(internal_token);
+                                debug_originals.extend_from_slice(originals);
+                            }
+                            for &original in originals {
+                                let outer_internal = self
+                                    .constraint
+                                    .original_token_internal_at(original)
+                                    .unwrap_or(u32::MAX);
+                                if outer_internal != u32::MAX
+                                    && dense_contains(&allowed, outer_internal)
+                                {
+                                    set_original_mask_bit(buf, original);
+                                }
                             }
                         }
                     }
                     if let Some(mark) = admit_mark {
                         phase_admit_ns += elapsed_ns(mark);
                     }
-                } else {
-                    let mut debug_internal = Vec::new();
-                    let mut debug_originals = Vec::new();
-                    for &boundary_tsid in &boundary_tsids {
-                        let walk_mark = single_started.is_some().then(Instant::now);
-                        let accepted = accepted_dense_for_stack(
-                            parser_dwa, boundary_tsid,
-                            boundary.internal_token_to_originals.len(), top_first,
-                        );
-                        if let Some(mark) = walk_mark {
-                            phase_walk_ns += elapsed_ns(mark);
-                        }
-                        let admit_mark = single_started.is_some().then(Instant::now);
-                        for (word_index, mut bits) in accepted.into_iter().enumerate() {
-                            while bits != 0 {
-                                let internal_token = (word_index * 64) as u32 + bits.trailing_zeros();
-                                bits &= bits - 1;
-                                let Some(originals) = boundary
-                                    .internal_token_to_originals
-                                    .get(internal_token as usize)
-                                else {
-                                    complete = false;
-                                    return;
-                                };
-                                if debug_boundary {
-                                    debug_internal.push(internal_token);
-                                    debug_originals.extend_from_slice(originals);
-                                }
-                                for &original in originals {
-                                    let outer_internal = self
-                                        .constraint
-                                        .original_token_internal_at(original)
-                                        .unwrap_or(u32::MAX);
-                                    if outer_internal != u32::MAX
-                                        && dense_contains(&allowed, outer_internal)
-                                    {
-                                        set_original_mask_bit(buf, original);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(mark) = admit_mark {
-                            phase_admit_ns += elapsed_ns(mark);
-                        }
-                    }
-                    if debug_boundary {
-                        debug_internal.sort_unstable();
-                        debug_internal.dedup();
-                        debug_originals.sort_unstable();
-                        debug_originals.dedup();
-                        eprintln!(
-                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsids={:?} accepted_internal={:?} accepted_originals={:?}",
-                            top_first,
-                            boundary_tsids,
-                            debug_internal,
-                            debug_originals,
-                        );
-                    }
+                }
+                if debug_boundary {
+                    debug_internal.sort_unstable();
+                    debug_internal.dedup();
+                    debug_originals.sort_unstable();
+                    debug_originals.dedup();
+                    eprintln!(
+                        "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsids={:?} accepted_internal={:?} accepted_originals={:?}",
+                        top_first,
+                        boundary_tsids,
+                        debug_internal,
+                        debug_originals,
+                    );
                 }
                 });
                 if let Some(single_started) = single_started {
@@ -6350,7 +5837,7 @@ impl ConstraintState {
                 #[cfg(test)]
                 let mut reference_mask = buf.to_vec();
                 let shared_complete = self.or_boundary_dag_via_shared_queue(
-                    boundary, parser_dwa, recursive_parser, &boundary_tsids,
+                    boundary, parser_dwa, &boundary_tsids,
                     global_tokenizer_state, gss, &top_live, buf,
                 );
                 #[cfg(test)]
@@ -6361,81 +5848,43 @@ impl ConstraintState {
                 let profile_static =
                     crate::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some();
                 let dag_started = profile_static.then(Instant::now);
-                if !recursive_parser
-                    && let Some(compact) = boundary.compact_parser_dwa.as_ref()
-                {
-                    let boundary_tsid = boundary_tsids[0];
-                    let mut evaluator =
-                        BoundaryMask64DagEvaluator::new(compact, boundary_tsid, &dag);
-                    let groups = evaluator.eval_root(&top_live);
-                    for (group, accepted) in &groups {
-                        let Some(acc) = evaluator.group_accumulator(*group) else {
-                            complete = false;
-                            break;
-                        };
-                        let Some(allowed) = self.terminals_disallowed_to_dense_acc(
-                            &acc,
-                            global_tokenizer_state,
-                        ) else {
-                            complete = false;
-                            break;
-                        };
-                        if !self.admit_boundary_mask64_group(boundary, *accepted, &allowed, buf)
-                        {
-                            complete = false;
-                            break;
-                        }
+                let mut evaluator = BoundaryWeightDagEvaluator::new(parser_dwa, &dag);
+                let groups = evaluator.eval_root(&top_live);
+                for (group, accepted) in &groups {
+                    let Some(acc) = evaluator.group_accumulator(*group) else {
+                        complete = false;
+                        break;
+                    };
+                    let Some(allowed) = self.terminals_disallowed_to_dense_acc(
+                        &acc,
+                        global_tokenizer_state,
+                    ) else {
+                        complete = false;
+                        break;
+                    };
+                    if !self.admit_boundary_weight_group(
+                        boundary,
+                        accepted,
+                        &boundary_tsids,
+                        &allowed,
+                        buf,
+                    ) {
+                        complete = false;
+                        break;
                     }
-                    if let Some(dag_started) = dag_started {
-                        eprintln!(
-                            "[glrmask/profile][static_boundary_dag] gss_nodes={} upper_memo={} lower_memo={} groups={} dwa_steps={} total_ns={} complete={complete} compact=true",
-                            dag.nodes.len(),
-                            evaluator.upper_memo.len(),
-                            evaluator.lower_memo.len(),
-                            groups.len(),
-                            evaluator.dwa_steps,
-                            elapsed_ns(dag_started),
-                        );
-                    }
-                } else {
-                    let mut evaluator = BoundaryWeightDagEvaluator::new(parser_dwa, &dag);
-                    let groups = evaluator.eval_root(&top_live);
-                    for (group, accepted) in &groups {
-                        let Some(acc) = evaluator.group_accumulator(*group) else {
-                            complete = false;
-                            break;
-                        };
-                        let Some(allowed) = self.terminals_disallowed_to_dense_acc(
-                            &acc,
-                            global_tokenizer_state,
-                        ) else {
-                            complete = false;
-                            break;
-                        };
-                        if !self.admit_boundary_weight_group(
-                            boundary,
-                            accepted,
-                            &boundary_tsids,
-                            &allowed,
-                            buf,
-                        ) {
-                            complete = false;
-                            break;
-                        }
-                    }
-                    if let Some(dag_started) = dag_started {
-                        eprintln!(
-                            "[glrmask/profile][static_boundary_dag] gss_nodes={} upper_memo={} lower_memo={} groups={} dwa_steps={} weight_unions={} weight_intersections={} total_ns={} complete={complete} compact=false",
-                            dag.nodes.len(),
-                            evaluator.upper_memo.len(),
-                            evaluator.lower_memo.len(),
-                            groups.len(),
-                            evaluator.dwa_steps,
-                            evaluator.weight_unions,
-                            evaluator.weight_intersections,
-                            elapsed_ns(dag_started),
-                        );
-                    }
+                }
+                if let Some(dag_started) = dag_started {
+                    eprintln!(
+                        "[glrmask/profile][static_boundary_dag] gss_nodes={} upper_memo={} lower_memo={} groups={} dwa_steps={} weight_unions={} weight_intersections={} total_ns={} complete={complete} compact=false",
+                        dag.nodes.len(),
+                        evaluator.upper_memo.len(),
+                        evaluator.lower_memo.len(),
+                        groups.len(),
+                        evaluator.dwa_steps,
+                        evaluator.weight_unions,
+                        evaluator.weight_intersections,
+                        elapsed_ns(dag_started),
+                    );
                 }
                 assert_eq!(shared_complete, complete, "shared boundary queue completeness differs from DAG oracle");
                 }
@@ -9092,198 +8541,181 @@ mod boundary_dag_exact_tests {
     //! compares the memoized DAG evaluator against a literal per-path
     //! reference walk written independently in test code.
 
-    use super::{BoundaryMask64DagEvaluator, BoundaryWeightDagEvaluator};
+    use super::BoundaryWeightDagEvaluator;
+    use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::compiler::stages::parser_dwa::SmallBoundaryDwa;
+    use crate::ds::weight::Weight;
+    use range_set_blaze::RangeSetBlaze;
 
-    /// 2^8 = 256 stacks sharing a common bottom tail. Level `i` offers
-    /// values `{2*i, 2*i+1}`; the shared tail is `[900, 901, 902]`.
-    /// Bottom-to-top order in each stack.
+    const TOKEN_COUNT: usize = 6;
+    const ALL_TOKENS: u64 = (1 << TOKEN_COUNT) - 1;
+
+    /// 256 distinct stacks sharing a common bottom tail, in bottom-to-top order.
     fn adversarial_stacks() -> Vec<(Vec<u32>, TerminalsDisallowed)> {
-        let mut stacks = Vec::new();
-        for bits in 0..256u32 {
-            let mut stack = vec![900, 901, 902];
-            for level in 0..8u32 {
-                let pick = if (bits >> level) & 1 == 0 {
-                    2 * level
-                } else {
-                    2 * level + 1
-                };
-                stack.push(pick);
-            }
-            stacks.push((stack, TerminalsDisallowed::new()));
-        }
-        stacks
+        (0..256u32)
+            .map(|bits| {
+                let mut stack = vec![900, 901, 902];
+                for level in 0..8u32 {
+                    stack.push(2 * level + ((bits >> level) & 1));
+                }
+                (stack, TerminalsDisallowed::new())
+            })
+            .collect()
     }
 
     fn adversarial_gss() -> ParserGSS {
         ParserGSS::from_stacks(&adversarial_stacks())
     }
 
-    /// Compact DWA exercising positive edges, DEFAULT fallback, prefix
-    /// finals, and a dead end. Single TSID, 6 tokens.
-    ///
-    /// - state 0: final=[0,2]; +0 -> 1 (mask [0,1]); DEFAULT -> 2 (all).
-    /// - state 1: final=[1]; +2 -> 2 (mask [1,3]); no DEFAULT.
-    /// - state 2: final=[3]; no transitions.
-    fn adversarial_compact_dwa() -> SmallBoundaryDwa {
-        let mut weights = vec![[0u64; 16]; 8];
-        weights[1] = [0b00111111, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        weights[2] = [0b00000101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        weights[3] = [0b00000011, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        weights[4] = [0b00001010, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        weights[5] = [0b00000010, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        weights[6] = [0b00001000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        SmallBoundaryDwa {
-            states: vec![
-                crate::compiler::stages::parser_dwa::SmallBoundaryDwaState {
-                    transitions: vec![
-                        (encode_positive_label(0), 1, 3),
-                        (DEFAULT_LABEL, 2, 1),
-                    ],
-                    final_weight: 2,
-                },
-                crate::compiler::stages::parser_dwa::SmallBoundaryDwaState {
-                    transitions: vec![(encode_positive_label(2), 2, 4)],
-                    final_weight: 5,
-                },
-                crate::compiler::stages::parser_dwa::SmallBoundaryDwaState {
-                    transitions: vec![],
-                    final_weight: 6,
-                },
-            ],
-            weights,
-            tsid_count: 1,
-            token_count: 6,
+    /// Positive edges, explicit empty guard, DEFAULT, prefix finals and dead end.
+    /// Coordinate 1 rotates each token set and kills the +0 transition.
+    fn adversarial_dwa(rows: u32) -> DWA {
+        let weight = |mask: u64, kill_second_row: bool| {
+            Weight::from_per_tsid_token_sets((0..rows).filter_map(|tsid| {
+                let bits = if tsid == 0 {
+                    mask
+                } else if kill_second_row {
+                    0
+                } else {
+                    ((mask << 1) | (mask >> 5)) & ALL_TOKENS
+                };
+                (bits != 0).then(|| {
+                    let tokens = (0..TOKEN_COUNT as u32)
+                        .filter(|&token| bits & (1 << token) != 0)
+                        .collect::<RangeSetBlaze<u32>>();
+                    (tsid, tokens)
+                })
+            }))
+        };
+        let states = vec![
+            DWAState {
+                transitions: [
+                    (encode_positive_label(0), (1, weight(0b000011, true))),
+                    (encode_positive_label(14), (2, Weight::empty())),
+                    (DEFAULT_LABEL, (2, Weight::all())),
+                ].into_iter().collect(),
+                final_weight: Some(weight(0b000101, false)),
+            },
+            DWAState {
+                transitions: [(encode_positive_label(2), (2, weight(0b001010, false)))]
+                    .into_iter().collect(),
+                final_weight: Some(weight(0b000010, false)),
+            },
+            DWAState {
+                transitions: Default::default(),
+                final_weight: Some(weight(0b001000, false)),
+            },
+        ];
+        DWA::from_parts(states, 0)
+    }
+
+    fn weight_bits(weight: &Weight, tsid: u32) -> u64 {
+        if weight.is_full() {
+            ALL_TOKENS
+        } else {
+            weight.token_set_for_tsid_ref(tsid).map_or(0, |tokens| {
+                (0..TOKEN_COUNT as u32)
+                    .filter(|&token| tokens.contains(token))
+                    .fold(0, |bits, token| bits | (1 << token))
+            })
         }
     }
 
-    /// Literal per-path reference walk for the compact representation,
-    /// mirroring `accepted_mask_for_stack` but written independently here.
-    fn reference_mask_for_stack(
-        dwa: &SmallBoundaryDwa,
-        tsid: u32,
-        top_first: &[u32],
-    ) -> u64 {
-        if tsid >= dwa.tsid_count as u32 {
-            return 0;
-        }
+    /// Literal per-path oracle with independent bitwise weight operations.
+    fn reference_mask_for_stack(dwa: &DWA, tsid: u32, top_first: &[u32]) -> u64 {
         let mut state_id = dwa.start_state();
-        let mut path_mask = dwa.all_token_mask();
-        let mut accepted = 0u64;
+        let mut path_mask = ALL_TOKENS;
+        let mut accepted = 0;
         let accumulate = |state_id: u32, path_mask: u64, accepted: &mut u64| {
-            let Some(state) = dwa.states.get(state_id as usize) else {
-                return;
-            };
-            if state.final_weight != 0 {
-                *accepted |= path_mask & dwa.weight_mask(state.final_weight, tsid);
+            if let Some(final_weight) = dwa.states()[state_id as usize].final_weight.as_ref() {
+                *accepted |= path_mask & weight_bits(final_weight, tsid);
             }
         };
         accumulate(state_id, path_mask, &mut accepted);
         for &parser_state in top_first {
-            let label = encode_positive_label(parser_state);
-            let Some(state) = dwa.states.get(state_id as usize) else {
+            let transitions = &dwa.states()[state_id as usize].transitions;
+            let Some((target, weight)) = transitions.get(&encode_positive_label(parser_state))
+                .or_else(|| transitions.get(&DEFAULT_LABEL))
+            else {
                 break;
             };
-            let edge = state
-                .transitions
-                .iter()
-                .find(|(edge_label, _, _)| *edge_label == label)
-                .or_else(|| {
-                    state
-                        .transitions
-                        .iter()
-                        .find(|(edge_label, _, _)| *edge_label == DEFAULT_LABEL)
-                });
-            let Some(&(_, target, weight)) = edge else {
-                break;
-            };
-            path_mask &= dwa.weight_mask(weight, tsid);
+            path_mask &= weight_bits(weight, tsid);
             if path_mask == 0 {
                 break;
             }
-            state_id = target;
+            state_id = *target;
             accumulate(state_id, path_mask, &mut accepted);
         }
         accepted
     }
 
     fn reference_union_all_paths(
-        dwa: &SmallBoundaryDwa,
+        dwa: &DWA,
         tsid: u32,
         gss: &ParserGSS,
         top_live: &dyn Fn(Option<u32>) -> bool,
     ) -> (u64, usize) {
-        let mut union = 0u64;
-        let mut count = 0usize;
+        let mut union = 0;
+        let mut count = 0;
         let complete = gss.for_each_stack_top_first_bounded(100_000, |top_first, _| {
-            let live = match top_first.first().copied() {
-                Some(top) => top_live(Some(top)),
-                None => top_live(None),
-            };
-            if !live {
-                return;
+            if top_live(top_first.first().copied()) {
+                count += 1;
+                union |= reference_mask_for_stack(dwa, tsid, top_first);
             }
-            count += 1;
-            union |= reference_mask_for_stack(dwa, tsid, top_first);
         });
         assert!(complete, "reference enumeration must complete");
         (union, count)
     }
 
     #[test]
-    fn compact_dag_evaluator_matches_literal_paths_past_128() {
+    fn weight_dag_evaluator_matches_literal_paths_past_128() {
         let gss = adversarial_gss();
         assert!(!gss.is_single_path());
         assert_eq!(gss.path_count_at_most(129), 129);
-        // The old bounded evaluator declines on this GSS.
         assert!(!gss.for_each_stack_top_first_bounded(128, |_, _| {}));
-
-        let dwa = adversarial_compact_dwa();
+        let dwa = adversarial_dwa(1);
         let dag = gss.indexed_dag();
         let top_live = |_: Option<u32>| true;
         let (expected, path_count) = reference_union_all_paths(&dwa, 0, &gss, &top_live);
         assert_eq!(path_count, 256);
-
-        let mut evaluator = BoundaryMask64DagEvaluator::new(&dwa, 0, &dag);
+        let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
         let groups = evaluator.eval_root(&top_live);
-        let mut actual = 0u64;
-        for (group, mask) in &groups {
-            // Single accumulator for every path: one correlated group.
-            assert!(
-                evaluator.group_accumulator(*group).is_some(),
-                "every group resolves to an accumulator"
-            );
-            actual |= *mask;
+        let mut actual = 0;
+        for (group, weight) in &groups {
+            assert!(evaluator.group_accumulator(*group).is_some());
+            actual |= weight_bits(weight, 0);
         }
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn compact_dag_evaluator_respects_top_filter_and_default() {
+    fn weight_dag_evaluator_respects_top_filter_and_default() {
         let gss = adversarial_gss();
-        let dwa = adversarial_compact_dwa();
+        let dwa = adversarial_dwa(1);
         let dag = gss.indexed_dag();
-        // Tops are the level-7 values 14/15 (every stack ends with one of
-        // them). Filter out top 14: half the paths use the +14 positive edge
-        // (none here — 14 hits DEFAULT) and half keep top 15.
-        let top_live = |top: Option<u32>| top.is_none_or(|value| value != 14);
-        let (expected, path_count) = reference_union_all_paths(&dwa, 0, &gss, &top_live);
-        assert!(path_count < 256 && path_count > 0);
-
-        let mut evaluator = BoundaryMask64DagEvaluator::new(&dwa, 0, &dag);
-        let groups = evaluator.eval_root(&top_live);
-        let actual = groups.values().fold(0u64, |acc, mask| acc | *mask);
-        assert_eq!(actual, expected);
+        // Top 14 has an explicit empty guard; top 15 uses DEFAULT.
+        for (top, expected) in [(14, 0b000101), (15, 0b001101)] {
+            let top_live = |value: Option<u32>| value == Some(top);
+            let (literal, path_count) = reference_union_all_paths(&dwa, 0, &gss, &top_live);
+            assert_eq!(path_count, 128);
+            assert_eq!(literal, expected);
+            let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
+            let groups = evaluator.eval_root(&top_live);
+            let actual = groups.values().fold(0, |bits, weight| bits | weight_bits(weight, 0));
+            assert_eq!(actual, expected);
+        }
+        let positive = ParserGSS::from_stacks(&[(vec![2, 0], TerminalsDisallowed::new())]);
+        let dag = positive.indexed_dag();
+        let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
+        let actual = evaluator.eval_root(&|_| true).values()
+            .fold(0, |bits, weight| bits | weight_bits(weight, 0));
+        assert_eq!(actual, 0b000111);
     }
 
     #[test]
-    fn compact_dag_evaluator_keeps_per_path_acc_groups() {
-        // Two accumulator classes over the same 256 stack shapes: the
-        // evaluator must keep their acceptances in separate groups so the
-        // caller can intersect each with its own eligibility set.
+    fn weight_dag_evaluator_keeps_per_path_acc_groups() {
         let mut stacks = adversarial_stacks();
         for (index, (_, acc)) in stacks.iter_mut().enumerate() {
             if index % 2 == 0 {
@@ -9292,138 +8724,40 @@ mod boundary_dag_exact_tests {
         }
         let gss = ParserGSS::from_stacks(&stacks);
         assert!(!gss.is_single_path());
-        let dwa = adversarial_compact_dwa();
+        let dwa = adversarial_dwa(1);
         let dag = gss.indexed_dag();
         let top_live = |_: Option<u32>| true;
-
-        let mut evaluator = BoundaryMask64DagEvaluator::new(&dwa, 0, &dag);
-        let groups = evaluator.eval_root(&top_live);
-        assert!(
-            groups.len() >= 2,
-            "distinct accumulators stay in distinct groups, got {}",
-            groups.len()
-        );
-        // Union over groups still equals the literal per-path union (the u64
-        // acceptance itself is accumulator-independent; correlation is
-        // enforced by the caller's per-group eligibility intersection).
-        let (expected, _) = reference_union_all_paths(&dwa, 0, &gss, &top_live);
-        let actual = groups.values().fold(0u64, |acc, mask| acc | *mask);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn weight_dag_evaluator_matches_literal_paths_past_128() {
-        use std::collections::BTreeSet;
-        let gss = adversarial_gss();
-        let compact = adversarial_compact_dwa();
-        let dwa = compact.to_generic_dwa();
-        let dag = gss.indexed_dag();
-        let top_live = |_: Option<u32>| true;
-
         let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
         let groups = evaluator.eval_root(&top_live);
-        let mut actual = BTreeSet::new();
-        for (group, weight) in &groups {
-            assert!(
-                evaluator.group_accumulator(*group).is_some(),
-                "every group resolves to an accumulator"
-            );
-            let Some(tokens) = weight.token_set_for_tsid_ref(0) else {
-                continue;
-            };
-            actual.extend(tokens.iter());
-        }
-
-        // Literal reference: per-path Weight walk over the generic DWA.
-        let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
-        let mut expected = BTreeSet::new();
-        let complete = gss.for_each_stack_top_first_bounded(100_000, |top_first, _| {
-            let mut state_id = dwa.start_state();
-            let mut path_weight = crate::ds::weight::Weight::all();
-            let mut accepted = crate::ds::weight::Weight::empty();
-            let accumulate = |state_id: u32,
-                                  path_weight: &crate::ds::weight::Weight,
-                                  accepted: &mut crate::ds::weight::Weight,
-                                  ops: &mut crate::ds::weight::ScopedWeightOpCache| {
-                if let Some(final_weight) = dwa
-                    .states()
-                    .get(state_id as usize)
-                    .and_then(|state| state.final_weight.as_ref())
-                {
-                    let contribution = ops.intersection(path_weight, final_weight);
-                    if !contribution.is_empty() {
-                        *accepted = ops.union(accepted, &contribution);
-                    }
-                }
-            };
-            accumulate(state_id, &path_weight, &mut accepted, &mut ops);
-            for &parser_state in top_first {
-                let label = encode_positive_label(parser_state);
-                let Some(state) = dwa.states().get(state_id as usize) else {
-                    break;
-                };
-                let Some((target, edge_weight)) = state
-                    .transitions
-                    .get(&label)
-                    .or_else(|| state.transitions.get(&DEFAULT_LABEL))
-                else {
-                    break;
-                };
-                path_weight = ops.intersection(&path_weight, edge_weight);
-                if path_weight.is_empty() {
-                    break;
-                }
-                state_id = *target;
-                accumulate(state_id, &path_weight, &mut accepted, &mut ops);
-            }
-            if let Some(tokens) = accepted.token_set_for_tsid_ref(0) {
-                expected.extend(tokens.iter());
-            }
-        });
-        assert!(complete, "reference enumeration must complete");
+        assert!(groups.len() >= 2, "distinct accumulator groups collapsed");
+        let (expected, _) = reference_union_all_paths(&dwa, 0, &gss, &top_live);
+        let actual = groups.values().fold(0, |bits, weight| bits | weight_bits(weight, 0));
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn weight_dag_evaluator_empty_stack_filtering() {
-        // A lone empty stack contributes exactly the empty-prefix final; the
-        // top filter admitting/rejecting the empty stack toggles the group.
-        let stacks = vec![(Vec::new(), TerminalsDisallowed::new())];
-        let gss = ParserGSS::from_stacks(&stacks);
-        let compact = adversarial_compact_dwa();
-        let dwa = compact.to_generic_dwa();
+        let gss = ParserGSS::from_stacks(&[(Vec::new(), TerminalsDisallowed::new())]);
+        let dwa = adversarial_dwa(1);
         let dag = gss.indexed_dag();
-
-        let accept_all = |_: Option<u32>| true;
         let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
-        let with_empty = evaluator.eval_root(&accept_all);
+        let with_empty = evaluator.eval_root(&|_| true);
         assert_eq!(with_empty.len(), 1);
-        let group_weight = with_empty.values().next().expect("one group");
-        let tokens: Vec<u32> = group_weight
-            .token_set_for_tsid_ref(0)
-            .map(|set| set.iter().collect())
-            .unwrap_or_default();
-        // Empty-prefix final of state 0 is weights[2] = {0, 2}.
-        assert_eq!(tokens, vec![0, 2]);
-
-        let reject_empty = |top: Option<u32>| top.is_some();
+        assert_eq!(weight_bits(with_empty.values().next().unwrap(), 0), 0b000101);
         let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
-        let without_empty = evaluator.eval_root(&reject_empty);
-        assert!(
-            without_empty.is_empty(),
-            "rejecting the empty stack drops its group"
-        );
+        assert!(evaluator.eval_root(&|top| top.is_some()).is_empty());
     }
 
     #[test]
-    fn shared_queue_boundary_providers_match_dag_oracles_with_correlated_groups() {
+    fn shared_boundary_queue_preserves_correlated_groups_and_coordinates() {
         let mut stacks = adversarial_stacks();
         for (index, (_, acc)) in stacks.iter_mut().enumerate() {
-            if index % 2 == 0 { *acc = acc.clone().with_insert(7,9); }
+            if index % 2 == 0 {
+                *acc = acc.clone().with_insert(7, 9);
+            }
         }
         stacks.push((Vec::new(), TerminalsDisallowed::new()));
-        let compact = adversarial_compact_dwa();
-        let generic = compact.to_generic_dwa();
+        let dwa = adversarial_dwa(2);
         for gss in [ParserGSS::from_stacks(&stacks), ParserGSS::empty()] {
             for filter in 0..3 {
                 let top_live = |top: Option<u32>| match filter {
@@ -9434,76 +8768,32 @@ mod boundary_dag_exact_tests {
                 for (language, accumulator) in gss.partition_by_accumulator() {
                     let original = language.apply(|_| accumulator.clone());
                     let dag = original.indexed_dag();
-                    let mut oracle = BoundaryMask64DagEvaluator::new(&compact,0,&dag);
-                    let expected = oracle.eval_root(&top_live).values().fold(0,|a,b|a|b);
-                    let compact_actual = super::boundary_mask64_via_shared_queue(&compact,0,&language,&top_live)
-                        .map_or(0,|a|a.0.iter().fold(0,|bits,(_,w)|bits|w[0]));
-                    let generic_actual = super::boundary_weight_mask_via_shared_queue(
-                        &generic,&[0],compact.token_count as usize,&language,&top_live,
-                    ).map_or(0,|a|a.0.iter().fold(0,|bits,(_,w)|bits|w[0]));
-                    assert_eq!(compact_actual,expected,"compact group={accumulator:?} filter={filter}");
-                    assert_eq!(generic_actual,expected,"generic group={accumulator:?} filter={filter}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn shared_boundary_queue_keeps_tokenizer_coordinates_separate() {
-        let mut compact = adversarial_compact_dwa();
-        compact.tsid_count = 2;
-        for (index, weight) in compact.weights.iter_mut().enumerate() {
-            // Distinct per-coordinate languages, including a transition which
-            // is dead only in coordinate 1. Merging coordinates would admit
-            // tokens that the independent per-coordinate oracle rejects.
-            weight[1] = if index == 3 {
-                0
-            } else {
-                ((weight[0] << 1) | (weight[0] >> 5)) & 0b11_1111
-            };
-        }
-        let generic = compact.to_generic_dwa();
-        let mut stacks = adversarial_stacks();
-        stacks.push((Vec::new(), TerminalsDisallowed::new()));
-        for (index, (_, accumulator)) in stacks.iter_mut().enumerate() {
-            if index % 3 == 0 {
-                *accumulator = accumulator.clone().with_insert(7, 9);
-            }
-        }
-        let gss = ParserGSS::from_stacks(&stacks);
-        for filter in 0..3 {
-            let top_live = |top: Option<u32>| match filter {
-                0 => true,
-                1 => top.is_some_and(|value| value != 14),
-                _ => false,
-            };
-            for (language, accumulator) in gss.partition_by_accumulator() {
-                let original = language.apply(|_| accumulator.clone());
-                let dag = original.indexed_dag();
-                for coordinates in [&[0, 1][..], &[1][..]] {
-                    let actual = super::boundary_weight_mask_via_shared_queue(
-                        &generic,
-                        coordinates,
-                        compact.token_count as usize,
-                        &language,
-                        &top_live,
-                    );
-                    for tsid in 0..2 {
-                        let expected = if coordinates.contains(&tsid) {
-                            let mut oracle = BoundaryMask64DagEvaluator::new(
-                                &compact, tsid, &dag,
-                            );
-                            oracle.eval_root(&top_live).values().fold(0, |a, b| a | b)
-                        } else {
-                            0
-                        };
-                        let observed = actual.as_ref().map_or(0, |allowed| {
-                            allowed.0.iter()
-                                .filter(|(coordinate, _)| *coordinate == tsid)
-                                .fold(0, |bits, (_, words)| bits | words[0])
-                        });
-                        assert_eq!(observed, expected,
-                            "coordinate={tsid} selected={coordinates:?} group={accumulator:?} filter={filter}");
+                    let mut evaluator = BoundaryWeightDagEvaluator::new(&dwa, &dag);
+                    let groups = evaluator.eval_root(&top_live);
+                    for coordinates in [&[0, 1][..], &[1][..], &[0][..]] {
+                        let actual = super::boundary_weight_mask_via_shared_queue(
+                            &dwa, coordinates, TOKEN_COUNT, &language, &top_live,
+                        );
+                        for tsid in 0..2 {
+                            let expected = if coordinates.contains(&tsid) {
+                                let (literal, _) =
+                                    reference_union_all_paths(&dwa, tsid, &original, &top_live);
+                                let dag_bits = groups.values().fold(0, |bits, weight| {
+                                    bits | weight_bits(weight, tsid)
+                                });
+                                assert_eq!(literal, dag_bits);
+                                literal
+                            } else {
+                                0
+                            };
+                            let observed = actual.as_ref().map_or(0, |allowed| {
+                                allowed.0.iter()
+                                    .filter(|(coordinate, _)| *coordinate == tsid)
+                                    .fold(0, |bits, (_, words)| bits | words[0])
+                            });
+                            assert_eq!(observed, expected,
+                                "coordinate={tsid} selected={coordinates:?} group={accumulator:?} filter={filter}");
+                        }
                     }
                 }
             }

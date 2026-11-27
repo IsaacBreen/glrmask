@@ -96,7 +96,7 @@ fn finite(
     p: &mut FastBoundaryWeightInterner, policy: Option<Policy>,
 ) -> Option<FiniteBoundaryDwa> {
     match determinize_preconverted_small_boundary_output_with_parallel_policy(
-        source, starts, 6, p, p.values.len(), 0.0, Instant::now(), false, true, policy,
+        source, starts, 6, p, p.values.len(), 0.0, Instant::now(), true, policy,
     )? {
         SmallBoundaryDeterminizeOutput::Finite(output) => Some(output),
         _ => panic!("finite-output test must not switch backend"),

@@ -2867,11 +2867,7 @@ fn can_reuse_omitted_external_dynamic_vocab(
 fn boundary_parser_artifact_ref(
     boundary: &crate::runtime::artifact::SegmentedBoundaryParser,
 ) -> SegmentedBoundaryParserV20Ref<'_> {
-    let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
-        Cow::Owned(compact.to_generic_dwa())
-    } else {
-        Cow::Borrowed(&boundary.parser_dwa)
-    };
+    let parser_dwa = Cow::Borrowed(&boundary.parser_dwa);
     SegmentedBoundaryParserV20Ref {
         parser_dwa,
         tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
@@ -2882,11 +2878,7 @@ fn boundary_parser_artifact_ref(
 fn boundary_parser_v23_ref(
     boundary: &crate::runtime::artifact::SegmentedBoundaryParser,
 ) -> SegmentedBoundaryParserV23Ref<'_> {
-    let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
-        Cow::Owned(compact.to_generic_dwa())
-    } else {
-        Cow::Borrowed(&boundary.parser_dwa)
-    };
+    let parser_dwa = Cow::Borrowed(&boundary.parser_dwa);
     SegmentedBoundaryParserV23Ref {
         parser_dwa,
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
@@ -3511,7 +3503,6 @@ fn restore_boundary_parser_v23(
     }
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
         parser_dwa: boundary.parser_dwa,
-        compact_parser_dwa: None,
         recursive_parser_dwa: None,
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
         tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
@@ -3619,7 +3610,6 @@ fn restore_recursive_boundary_parser_v27(
     }
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
         parser_dwa: crate::automata::weighted_u32::dwa::DWA::new(0, 0),
-        compact_parser_dwa: None,
         recursive_parser_dwa: Some(boundary.parser_dwa),
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
         tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,

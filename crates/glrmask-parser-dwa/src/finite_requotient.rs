@@ -102,11 +102,11 @@ pub(super)fn apply(states:&mut[FastBoundaryNwaState],pool:&mut FastBoundaryWeigh
             states.push(row);
         }
         let original=states.clone();
-        let before=match determinize_preconverted_small_boundary_output(&states,&[0],4,&mut pool,ids.len(),0.,Instant::now(),false,true).unwrap(){SmallBoundaryDeterminizeOutput::Finite(v)=>v.to_generic_dwa(),_=>unreachable!()};
+        let before=match determinize_preconverted_small_boundary_output(&states,&[0],4,&mut pool,ids.len(),0.,Instant::now(),true).unwrap(){SmallBoundaryDeterminizeOutput::Finite(v)=>v.to_generic_dwa(),_=>unreachable!()};
         let decoder=apply(&mut states,&mut pool).unwrap().expect("every fixture must reduce");reductions+=1;
         // Exact graph shape, including empty label keys/targets, is unchanged.
         for(a,b)in original.iter().zip(&states){assert_eq!(a.transitions.iter().map(|(l,b)|(*l,b.iter().map(|v|v.0).collect::<Vec<_>>())).collect::<Vec<_>>(),b.transitions.iter().map(|(l,b)|(*l,b.iter().map(|v|v.0).collect::<Vec<_>>())).collect::<Vec<_>>());}
-        let after=match determinize_preconverted_small_boundary_output(&states,&[0],4,&mut pool,ids.len(),0.,Instant::now(),false,true).unwrap(){SmallBoundaryDeterminizeOutput::Finite(v)=>decoder.decode(v).to_generic_dwa(),_=>unreachable!()};
+        let after=match determinize_preconverted_small_boundary_output(&states,&[0],4,&mut pool,ids.len(),0.,Instant::now(),true).unwrap(){SmallBoundaryDeterminizeOutput::Finite(v)=>decoder.decode(v).to_generic_dwa(),_=>unreachable!()};
         let c=crate::parser_equivalence::compare_parser_mask_prefix_languages(&before,&after,4,100_000).unwrap();assert!(c.difference.is_none(),"case{case} {:?}",c.difference);
     }
     assert_eq!(reductions,128);

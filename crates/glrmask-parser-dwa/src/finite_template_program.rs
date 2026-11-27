@@ -408,7 +408,7 @@ fn normalize_finite_template_program_impl(
     let phase = Instant::now();
     let result = determinize_preconverted_small_boundary_output(
         &states, starts, parser_states, &mut interner, program.coefficients.len(),
-        elapsed_ms(started), started, false, true,
+        elapsed_ms(started), started, true,
     )?;
     profile.normalize_ms = elapsed_ms(phase);
     match result {
@@ -589,14 +589,14 @@ mod tests {
                 states.push(row);
             }
             let left = match determinize_preconverted_small_boundary_output(
-                &states, &[0], 4, &mut interner, weights.len(), 0.0, Instant::now(), false, true).unwrap() {
+                &states, &[0], 4, &mut interner, weights.len(), 0.0, Instant::now(), true).unwrap() {
                 SmallBoundaryDeterminizeOutput::Finite(x) => x.to_generic_dwa(),
                 _ => unreachable!(),
             };
             let (states, starts) = trim(states, &[0]).unwrap();
             removed += n - states.len();
             let right = match determinize_preconverted_small_boundary_output(
-                &states, &starts, 4, &mut interner, weights.len(), 0.0, Instant::now(), false, true).unwrap() {
+                &states, &starts, 4, &mut interner, weights.len(), 0.0, Instant::now(), true).unwrap() {
                 SmallBoundaryDeterminizeOutput::Finite(x) => x.to_generic_dwa(),
                 _ => unreachable!(),
             };

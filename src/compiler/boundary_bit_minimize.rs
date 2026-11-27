@@ -1048,7 +1048,7 @@ mod tests {
     const DEFAULT:i32=2147483646;
     #[test]
     fn referenced_observations_ignore_unused_predicates_and_preserve_prefix_masks() {
-        use glrmask_parser_dwa::__private::parser_dwa::{FiniteBoundaryDwa,SmallBoundaryDwaState};
+        use glrmask_parser_dwa::__private::parser_dwa::{FiniteBoundaryDwa,FiniteBoundaryDwaState};
         let mut weights=vec![vec![0u64;4].into_boxed_slice(),vec![u64::MAX;4].into_boxed_slice()];
         // These historical temporary masks distinguish all128 selected points,
         // but no final, edge, or needed-domain below observes them separately.
@@ -1060,10 +1060,10 @@ mod tests {
         let a=weights.len()as u32;weights.push(vec![0xffffu64;4].into_boxed_slice());
         let b=weights.len()as u32;weights.push(vec![0xffff_0000u64;4].into_boxed_slice());
         let input=FiniteBoundaryDwa{rows:4,token_count:64,weights,states:vec![
-            SmallBoundaryDwaState{final_weight:0,transitions:vec![(0,1,a),(1,2,b),(DEFAULT,3,0)]},
-            SmallBoundaryDwaState{final_weight:a,transitions:vec![(1,3,0)]},
-            SmallBoundaryDwaState{final_weight:b,transitions:vec![]},
-            SmallBoundaryDwaState{final_weight:0,transitions:vec![]},
+            FiniteBoundaryDwaState{final_weight:0,transitions:vec![(0,1,a),(1,2,b),(DEFAULT,3,0)]},
+            FiniteBoundaryDwaState{final_weight:a,transitions:vec![(1,3,0)]},
+            FiniteBoundaryDwaState{final_weight:b,transitions:vec![]},
+            FiniteBoundaryDwaState{final_weight:0,transitions:vec![]},
         ]};
         let(reference,rp)=minimize_native_with_observations(&input,DEFAULT,None,false).unwrap();
         let(candidate,cp)=minimize_native_with_observations(&input,DEFAULT,None,true).unwrap();
@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn referenced_observation_native_dags_match_all_finalized_prefixes() {
-        use glrmask_parser_dwa::__private::parser_dwa::{FiniteBoundaryDwa,SmallBoundaryDwaState};
+        use glrmask_parser_dwa::__private::parser_dwa::{FiniteBoundaryDwa,FiniteBoundaryDwaState};
         let mut seed=471959u64;
         let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as usize};
         for case in 0..256 {
@@ -1093,7 +1093,7 @@ mod tests {
             let n=3+next()%8;
             let mut states=Vec::new();
             for q in 0..n {
-                let mut row=SmallBoundaryDwaState{final_weight:masks[next()%16],transitions:vec![]};
+                let mut row=FiniteBoundaryDwaState{final_weight:masks[next()%16],transitions:vec![]};
                 if q+1<n {
                     for label in [0,1,2,DEFAULT] {
                         if next()%3!=0 {

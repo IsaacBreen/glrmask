@@ -3369,10 +3369,8 @@ fn determinize_with_supports_mode(
 }
 
 
-// Compilation may use a larger exact private observation algebra than the
-// compact runtime format. Keep the common <=16-row case inline and allocate
-// only the actually used rows for larger compile-time domains. Runtime
-// SmallBoundaryDwa publication remains capped at its existing 16-row format.
+// Keep the common <=16-row case inline; larger finite domains allocate
+// only the rows they use.
 const FAST_BOUNDARY_TSID_LIMIT: usize = 64;
 type FastBoundaryWeightValue = SmallVec<[u64; 16]>;
 type FastBoundaryWeightId = u32;
@@ -3507,15 +3505,6 @@ impl FastBoundaryWeightInterner {
             self.failed |= self.work > limits.work || states > limits.states || edges > limits.edges;
         }
         !self.failed
-    }
-
-    fn compact_runtime_weights(&self) -> Option<Vec<[u64; 16]>> {
-        if self.tsid_count > 16 { return None; }
-        Some(self.values.iter().map(|value| {
-            let mut row = [0u64; 16];
-            row[..self.tsid_count].copy_from_slice(value);
-            row
-        }).collect())
     }
 
     fn source_weight_id(
@@ -4445,91 +4434,12 @@ pub fn resolve_negative_codes_small_boundary(
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct SmallBoundaryDwaState {
+pub struct FiniteBoundaryDwaState {
     pub transitions: Vec<(i32, u32, u32)>,
     pub final_weight: u32,
 }
 
-type FastBoundaryDwaState = SmallBoundaryDwaState;
-
-/// Exact deterministic parser DWA specialized for a small private boundary
-/// coordinate.  `weights[id][tsid]` is the bit mask of private token classes
-/// admitted by that weight at the given private TSID.  This changes only the
-/// weight representation: state topology, DEFAULT semantics, and deterministic
-/// parser-state transitions are the same as the ordinary weighted DWA.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SmallBoundaryDwa {
-    pub states: Vec<SmallBoundaryDwaState>,
-    pub weights: Vec<[u64; 16]>,
-    pub tsid_count: u8,
-    pub token_count: u8,
-}
-
-impl SmallBoundaryDwa {
-    #[inline]
-    pub fn start_state(&self) -> u32 { 0 }
-
-    #[inline]
-    pub fn num_states(&self) -> u32 { self.states.len() as u32 }
-
-    pub fn num_transitions(&self) -> usize {
-        self.states.iter().map(|state| state.transitions.len()).sum()
-    }
-
-    #[inline]
-    pub fn weight_mask(&self, weight_id: u32, tsid: u32) -> u64 {
-        if tsid >= self.tsid_count as u32 {
-            return 0;
-        }
-        self.weights
-            .get(weight_id as usize)
-            .map_or(0, |weight| weight[tsid as usize])
-    }
-
-    #[inline]
-    pub fn all_token_mask(&self) -> u64 {
-        if self.token_count == 64 { u64::MAX } else { (1u64 << self.token_count) - 1 }
-    }
-
-    /// Reference/materialization path used by artifact serialization and exact
-    /// differential validation. Runtime compact evaluation does not call this.
-    pub fn to_generic_dwa(&self) -> DWA {
-        let to_weight = |id: u32| {
-            if id == 0 {
-                return Weight::empty();
-            }
-            if id == 1 {
-                return Weight::all();
-            }
-            let Some(value) = self.weights.get(id as usize) else {
-                return Weight::empty();
-            };
-            Weight::from_per_tsid_token_sets(
-                value[..self.tsid_count as usize]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(tsid, &mask)| {
-                        if mask == 0 {
-                            return None;
-                        }
-                        let tokens = range_set_blaze::RangeSetBlaze::from_iter(
-                            (0..self.token_count as u32)
-                                .filter(|&token| mask & (1u64 << token) != 0),
-                        );
-                        Some((tsid as u32, tokens))
-                    }),
-            )
-        };
-        let states = self.states.iter().map(|state| {
-            let transitions = state.transitions.iter().filter(|(_, _, weight)| *weight != 0)
-                .map(|&(label, target, weight)| (label, (target, to_weight(weight))))
-                .collect();
-            let final_weight = (state.final_weight != 0).then(|| to_weight(state.final_weight));
-            DWAState { transitions, final_weight }
-        }).collect();
-        DWA::from_parts(states, 0)
-    }
-}
+type FastBoundaryDwaState = FiniteBoundaryDwaState;
 
 fn fast_boundary_epsilon_closure(
     nwa: &[FastBoundaryNwaState],
@@ -5635,7 +5545,7 @@ fn subtract_fast_boundary_finals(
 /// all 64 private rows and never materializes generic weights per edge.
 #[derive(Debug, Clone)]
 pub struct FiniteBoundaryDwa {
-    pub states: Vec<SmallBoundaryDwaState>,
+    pub states: Vec<FiniteBoundaryDwaState>,
     pub weights: Vec<Box<[u64]>>,
     pub rows: usize,
     pub token_count: usize,
@@ -5671,7 +5581,6 @@ impl FiniteBoundaryDwa {
 enum SmallBoundaryDeterminizeOutput {
     Finite(FiniteBoundaryDwa),
     Generic(DeterminizedDwaWithSupports),
-    Compact(SmallBoundaryDwa),
 }
 
 #[path = "finite_parallel_rows.rs"]
@@ -5685,12 +5594,11 @@ fn determinize_preconverted_small_boundary_output(
     source_weight_count: usize,
     conversion_ms: f64,
     total_started_at: Instant,
-    compact_output: bool,
     finite_output: bool,
 ) -> Option<SmallBoundaryDeterminizeOutput> {
     determinize_preconverted_small_boundary_output_with_parallel_policy(
         fast_nwa, start_states, dense_positive_label_limit, interner,
-        source_weight_count, conversion_ms, total_started_at, compact_output,
+        source_weight_count, conversion_ms, total_started_at,
         finite_output, finite_parallel_rows::Policy::from_environment(
             finite_output, fast_nwa.len(), dense_positive_label_limit as usize),
     )
@@ -5705,7 +5613,6 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
     source_weight_count: usize,
     conversion_ms: f64,
     total_started_at: Instant,
-    compact_output: bool,
     finite_output: bool,
     parallel_policy: Option<finite_parallel_rows::Policy>,
 ) -> Option<SmallBoundaryDeterminizeOutput> {
@@ -5733,17 +5640,10 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
     if start.is_empty() {
         return Some(if finite_output {
             SmallBoundaryDeterminizeOutput::Finite(FiniteBoundaryDwa {
-                states: vec![SmallBoundaryDwaState::default()],
+                states: vec![FiniteBoundaryDwaState::default()],
                 weights: interner.values.iter().map(|value| value.to_vec().into_boxed_slice()).collect(),
                 rows: interner.tsid_count,
                 token_count: interner.token_count,
-            })
-        } else if compact_output {
-            SmallBoundaryDeterminizeOutput::Compact(SmallBoundaryDwa {
-                states: vec![SmallBoundaryDwaState::default()],
-                weights: interner.compact_runtime_weights()?,
-                tsid_count: interner.tsid_count as u8,
-                token_count: interner.token_count as u8,
             })
         } else {
             SmallBoundaryDeterminizeOutput::Generic(DeterminizedDwaWithSupports {
@@ -5989,27 +5889,6 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
         }));
     }
 
-    if compact_output {
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][parser_support_small_boundary] nwa_states={} dwa_states={} fast_weights={} source_weights={} closure_cache={} singleton_closure_cache={} conversion_ms={conversion_ms:.3} determinize_ms={determinize_ms:.3} compact_post_ms={compact_post_ms:.3} materialize_ms=0.000 compact_output=true total_ms={:.3}",
-                fast_nwa.len(),
-                out_states.len(),
-                interner.values.len(),
-                source_weight_count,
-                closure_cache.len(),
-                singleton_closure_cache.len(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        return Some(SmallBoundaryDeterminizeOutput::Compact(SmallBoundaryDwa {
-            states: out_states,
-            weights: interner.compact_runtime_weights()?,
-            tsid_count: interner.tsid_count as u8,
-            token_count: interner.token_count as u8,
-        }));
-    }
-
     let materialize_started_at = Instant::now();
     let mut weight_cache = vec![None::<Weight>; interner.values.len()];
     weight_cache[0] = Some(Weight::empty());
@@ -6077,37 +5956,9 @@ fn determinize_preconverted_small_boundary(
         conversion_ms,
         total_started_at,
         false,
-        false,
     )? {
         SmallBoundaryDeterminizeOutput::Finite(_) => unreachable!("generic output requested"),
         SmallBoundaryDeterminizeOutput::Generic(result) => Some(result),
-        SmallBoundaryDeterminizeOutput::Compact(_) => unreachable!("generic output requested"),
-    }
-}
-
-fn determinize_preconverted_small_boundary_compact(
-    fast_nwa: &[FastBoundaryNwaState],
-    start_states: &[u32],
-    dense_positive_label_limit: u32,
-    interner: &mut FastBoundaryWeightInterner,
-    source_weight_count: usize,
-    conversion_ms: f64,
-    total_started_at: Instant,
-) -> Option<SmallBoundaryDwa> {
-    match determinize_preconverted_small_boundary_output(
-        fast_nwa,
-        start_states,
-        dense_positive_label_limit,
-        interner,
-        source_weight_count,
-        conversion_ms,
-        total_started_at,
-        true,
-        false,
-    )? {
-        SmallBoundaryDeterminizeOutput::Finite(_) => unreachable!("compact output requested"),
-        SmallBoundaryDeterminizeOutput::Compact(result) => Some(result),
-        SmallBoundaryDeterminizeOutput::Generic(_) => unreachable!("compact output requested"),
     }
 }
 
@@ -6505,76 +6356,6 @@ fn determinize_with_supports_small_boundary(
     )
 }
 
-/// Exact small-boundary deterministic parser DWA without generic `Weight`
-/// materialization.  This is the same positive deterministic automaton produced
-/// by the ordinary small-boundary path, retaining the compact TSID×token-mask
-/// weight algebra as its runtime representation.
-pub fn normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count(
-    nwa: &NWA,
-    dense_positive_label_limit: u32,
-    tsid_count: usize,
-    token_count: usize,
-    source_tsid_map: Option<&[u32]>,
-) -> Option<SmallBoundaryDwa> {
-    if std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_some()
-        || (std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_none()
-            && nwa.states().len()
-                < std::env::var("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETON_MIN_NWA_STATES")
-                    .ok()
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .unwrap_or(4_096))
-        || (std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_some()
-            && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_none())
-    {
-        return None;
-    }
-    let total_started_at = Instant::now();
-    let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
-    let mut fast_nwa = Vec::with_capacity(nwa.states().len());
-    for state in nwa.states() {
-        let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?,
-            None => interner.empty_id(),
-        };
-        let mut epsilons = Vec::with_capacity(state.epsilons.len());
-        for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
-            if weight != 0 {
-                epsilons.push((*target, weight));
-            }
-        }
-        let mut transitions = Vec::with_capacity(state.transitions.len());
-        for (&label, branches) in &state.transitions {
-            let mut fast_branches = SmallVec::with_capacity(branches.len());
-            for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
-                if weight != 0 {
-                    fast_branches.push((*target, weight));
-                }
-            }
-            if !fast_branches.is_empty() {
-                transitions.push((label, fast_branches));
-            }
-        }
-        fast_nwa.push(FastBoundaryNwaState {
-            epsilons,
-            transitions,
-            final_weight,
-        });
-    }
-    let conversion_ms = elapsed_ms(total_started_at);
-    determinize_preconverted_small_boundary_compact(
-        &fast_nwa,
-        nwa.start_states(),
-        dense_positive_label_limit,
-        &mut interner,
-        source_weight_ids.len(),
-        conversion_ms,
-        total_started_at,
-    )
-}
-
 /// Retain the exact ordinary positive compiler graph in private bit coordinates.
 pub fn normalize_weighted_parser_stack_nwa_finite_for_parser_state_count(
     nwa: &NWA, parser_states: u32, rows: usize, token_count: usize,
@@ -6715,7 +6496,7 @@ fn normalize_finite_with_read_context_impl(
     match determinize_preconverted_small_boundary_output(
         &fast_nwa, start_states, dense_positive_label_limit,
         &mut interner, source_weight_ids.len(), conversion_ms, total_started_at,
-        false, true,
+        true,
     )? {
         SmallBoundaryDeterminizeOutput::Finite(result) => Some(result),
         _ => unreachable!("finite compile-time output requested"),
@@ -11174,8 +10955,6 @@ mod tests {
                     assert_eq!(domain.intersection(&interner.to_weight(difference)), domain.intersection(a).difference(&domain.intersection(b)));
                 }
             }
-            assert_eq!(interner.compact_runtime_weights().is_some(), rows <= 16,
-                "large compile domains must not be truncated into the 16-row runtime format");
         }
         assert!(super::FastBoundaryWeightInterner::new(65, 64).is_none());
     }
@@ -11741,7 +11520,7 @@ mod checked_topology_reuse_tests {
             assert_eq!(rows(&left,&left_pool),rows(&right,&right_pool),"support case{case}");
             let mut normalized=Vec::new();
             for (source,pool) in [(&left,&mut left_pool),(&right,&mut right_pool)] {
-                match determinize_preconverted_small_boundary_output(source,&[permutation[0]],3,pool,8,0.,Instant::now(),false,true).unwrap() {
+                match determinize_preconverted_small_boundary_output(source,&[permutation[0]],3,pool,8,0.,Instant::now(),true).unwrap() {
                     SmallBoundaryDeterminizeOutput::Finite(x)=>normalized.push(x.to_generic_dwa()), _=>unreachable!(),
                 }
             }
