@@ -59,7 +59,7 @@ impl DynamicParserBackend {
 }
 
 /// Exactly one executable parser representation. The empty variant is a
-/// decode-time section placeholder (also used by the DWA-only envelope),
+/// decode-time section placeholder,
 /// never an implicit LR fallback. Native construction installs its immutable
 /// program directly, without constructing or retaining an LR machine.
 #[derive(Debug, Clone)]
@@ -1013,7 +1013,7 @@ impl Constraint {
                             .collect()
                     );
                     report["packed_lr_compiler_table_present"] =
-                        overlay.recursive_compiler_table.get().is_some().into();
+                        false.into();
                     report["static_boundary_shards"] = overlay.segmented_parser_components.iter()
                         .filter(|component| matches!(
                             component.boundary.as_ref().map(|shard| &shard.backend),

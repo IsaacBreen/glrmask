@@ -202,9 +202,6 @@ impl Constraint {
             return Err("template composition programs use a different parser coordinate".into());
         }
         let overlay = self.static_dynamic_overlay.as_ref().ok_or("missing composition overlay")?;
-        if overlay.recursive_compiler_table.get().is_some() {
-            return Err("template composition must not retain a packed LR compiler table".into());
-        }
         for component in &overlay.segmented_parser_components {
             if component.constraint.table.is_present() || !component.constraint.has_template_parser() {
                 return Err("template composition contains an LR-backed component".into());
@@ -252,9 +249,6 @@ impl Constraint {
             let constraint = Arc::make_mut(&mut component.constraint);
             constraint.install_template_parser_in_coordinate(true)?;
         }
-        // The packed flattened LR copy was only used for the old relinker. A
-        // template artifact must not retain executable LR data in a side field.
-        overlay.recursive_compiler_table = Default::default();
         self.table = ParserExecutable::Native(Arc::new(parser));
         self.deferred_table_rules_blob = None;
         self.deferred_table_rules = Default::default();

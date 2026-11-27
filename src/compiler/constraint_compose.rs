@@ -8391,12 +8391,6 @@ fn compose_dynamic_recursive_shared_fast(
         }
     }
 
-    // Empty bytes are an explicit "provider-native only" marker. Dynamic
-    // recomposition consumes the retained component tree directly. Static or
-    // legacy compiler views may reconstruct from the provider in a later path.
-    let _ = overlay
-        .recursive_compiler_table
-        .set(Arc::<[u8]>::from(Vec::<u8>::new().into_boxed_slice()));
     let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let layout_started_at = Instant::now();

@@ -39,10 +39,10 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 45;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 48;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 46;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 49;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -2002,7 +2002,6 @@ struct RecursiveSegmentedBoundaryShardV27 {
 struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
     components: Vec<RecursiveSegmentedParserComponentV27Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
-    recursive_compiler_table: &'a [u8],
     recursive_tokenizer_internal_tsids: Option<&'a [Vec<u32>]>,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
@@ -2011,7 +2010,6 @@ struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
 struct RecursiveSegmentedRuntimeArtifactV27 {
     components: Vec<RecursiveSegmentedParserComponentV27>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
-    recursive_compiler_table: Vec<u8>,
     recursive_tokenizer_internal_tsids: Option<Vec<Vec<u32>>>,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27>,
 }
@@ -2433,13 +2431,6 @@ fn segmented_runtime_artifact_ref(
         .recursive_parser_layout()
         .expect("validated recursive runtime must derive its parser layout before serialization")
         .expect("provider-native segmented runtime must have a recursive parser layout");
-    let recursive_compiler_table: &[u8] = if constraint.has_template_parser() {
-        assert!(overlay.recursive_compiler_table.get().is_none(), "template runtime retained an LR compiler blob");
-        &[]
-    } else {
-        overlay.recursive_compiler_table.get()
-            .expect("LR recursive runtime must retain its compiler table blob").as_ref()
-    };
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()
@@ -2448,8 +2439,7 @@ fn segmented_runtime_artifact_ref(
         assert_eq!(relation.len(), layout.total_tokenizer_states as usize);
     } else {
         assert!(
-            recursive_compiler_table.is_empty()
-                && overlay.recursive_static_observation.is_none()
+            overlay.recursive_static_observation.is_none()
                 && !overlay.segmented_parser_components.is_empty()
                 && overlay.segmented_parser_components.iter().all(|component| {
                     component.boundary.as_ref().is_some_and(|shard| {
@@ -2515,7 +2505,6 @@ fn segmented_runtime_artifact_ref(
     let runtime = RecursiveSegmentedRuntimeArtifactV27Ref {
             components,
             segmented_parser_links,
-            recursive_compiler_table,
             recursive_tokenizer_internal_tsids,
             boundary_shards,
         };
@@ -2640,10 +2629,6 @@ fn restore_recursive_segmented_runtime_v27(
     vocab: &crate::Vocab,
 ) -> crate::Result<()> {
     let template_backend = constraint.has_template_parser();
-    let recursive_compiler_table = runtime.recursive_compiler_table;
-    if template_backend && !recursive_compiler_table.is_empty() {
-        return Err(crate::Error::Serialization("template composition contains a packed LR compiler table".into()));
-    }
     let recursive_tokenizer_internal_tsids = runtime.recursive_tokenizer_internal_tsids;
     let global_terminal_count = constraint.parser_terminal_count() as usize;
     let global_tokenizer_states = constraint.tokenizer.num_states();
@@ -2713,8 +2698,7 @@ fn restore_recursive_segmented_runtime_v27(
                 relation.len(),
             )));
         }
-    } else if !recursive_compiler_table.is_empty()
-        || runtime.boundary_shards.len() != components.len()
+    } else if runtime.boundary_shards.len() != components.len()
         || runtime.boundary_shards.iter().any(|shard| {
             !matches!(shard.backend, RecursiveSegmentedBoundaryShardBackendV27::DynamicDirect)
         })
@@ -2746,11 +2730,7 @@ fn restore_recursive_segmented_runtime_v27(
             .get_or_insert_with(Default::default);
         overlay.segmented_parser_components = components;
         overlay.segmented_parser_links = links;
-        if !template_backend {
-            overlay.recursive_compiler_table
-                .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
-                .map_err(|_| crate::Error::Serialization("recursive compiler table was initialized twice".into()))?;
-        }
+
     }
     let layout = constraint
         .recursive_parser_layout_for_pending_root()
