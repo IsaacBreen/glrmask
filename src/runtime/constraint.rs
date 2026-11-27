@@ -7830,55 +7830,95 @@ impl Constraint {
         full_dense: &DenseWords,
         dense_cache: &WeightTokenMaskCache,
     ) -> Arc<DenseAcceptanceRows> {
-        let dense_cells = tsid_count
-            .checked_mul(dense_word_count)
-            .expect("acceptance dense matrix size must fit usize");
-        // This used to allocate one Vec per tokenizer state. Large tokenizers
-        // therefore performed tens of thousands of small allocations merely to
-        // materialize one direct-regular acceptance summary. Keep the same
-        // exact row-major matrix in one allocation and freeze only nonempty rows
-        // into the sparse runtime representation below.
-        let mut by_tsid = vec![0u64; dense_cells];
-        let mut row_kinds = vec![0u8; tsid_count];
-        for weight in acceptance_parts {
-            if weight.is_full() {
-                row_kinds.fill(2);
-                continue;
-            }
-            if weight.is_empty() {
-                continue;
-            }
-            for (tsid_range, token_set) in weight.raw_range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                let dense = dense_cache.get(&key).and_then(WeightTokenMaskEntry::dense).cloned().unwrap_or_else(|| {
-                    Self::dense_words_from_internal_set_with_words(
-                        token_set.as_ref(),
-                        dense_word_count,
-                    )
-                });
-                for tsid in *tsid_range.start()..=*tsid_range.end() {
-                    let tsid = tsid as usize;
-                    if tsid >= tsid_count {
-                        continue;
-                    }
-                    if row_kinds[tsid] == 2 {
-                        continue;
-                    }
-                    let start = tsid * dense_word_count;
-                    let dst = &mut by_tsid[start..start + dense_word_count];
-                    for (dst_word, src_word) in dst.iter_mut().zip(dense.iter()) {
-                        *dst_word |= *src_word;
-                    }
-                    row_kinds[tsid] = 1;
-                }
-            }
+        use std::hash::{Hash, Hasher};
+        if dense_word_count == 0 || tsid_count == 0 {
+            return Arc::new(DenseAcceptanceRows::default());
+        }
+        if acceptance_parts.iter().any(Weight::is_full) {
+            return Arc::new(DenseAcceptanceRows::from_runs(
+                dense_word_count, tsid_count, Vec::new(), vec![(0, 1)], Arc::clone(full_dense),
+            ));
         }
 
-        Arc::new(DenseAcceptanceRows::new(
-            dense_word_count,
-            by_tsid,
-            row_kinds,
-            Arc::clone(full_dense),
+        // Acceptance changes only at a weight's interval boundary. Sweep
+        // the actual set changes, not a dense state-by-token Cartesian
+        // matrix. Counts preserve overlapping occurrences of the same set.
+        let mut events = Vec::<(usize, usize, bool)>::new();
+        let mut set_ids = FxHashMap::<usize, usize>::default();
+        let mut sets = Vec::<DenseWords>::new();
+        for weight in acceptance_parts {
+            for (range, token_set) in weight.raw_range_values() {
+                let start = *range.start() as usize;
+                let end = (*range.end() as usize).saturating_add(1).min(tsid_count);
+                if start >= end { continue; }
+                let key = Arc::as_ptr(token_set) as usize;
+                let id = *set_ids.entry(key).or_insert_with(|| {
+                    let id = sets.len();
+                    sets.push(dense_cache.get(&key).and_then(WeightTokenMaskEntry::dense)
+                        .cloned().unwrap_or_else(|| Self::dense_words_from_internal_set_with_words(
+                            token_set.as_ref(), dense_word_count,
+                        )));
+                    id
+                });
+                events.push((start, id, true));
+                if end < tsid_count { events.push((end, id, false)); }
+            }
+        }
+        events.sort_unstable_by_key(|&(position, _, _)| position);
+        let mut active = BTreeMap::<usize, usize>::new();
+        let mut rows = Vec::<u64>::new();
+        let mut row_hashes = FxHashMap::<u64, Vec<u32>>::default();
+        let mut scratch = vec![0u64; dense_word_count];
+        let mut starts = Vec::<(usize, u32)>::new();
+        let mut position = 0usize;
+        let mut event = 0usize;
+        while position < tsid_count {
+            while let Some(&(at, id, add)) = events.get(event) {
+                if at != position { break; }
+                if add {
+                    *active.entry(id).or_default() += 1;
+                } else {
+                    let count = active.get_mut(&id).expect("active acceptance range");
+                    *count -= 1;
+                    if *count == 0 { active.remove(&id); }
+                }
+                event += 1;
+            }
+            let row = if active.is_empty() {
+                0
+            } else {
+                scratch.fill(0);
+                for &id in active.keys() {
+                    for (target, source) in scratch.iter_mut().zip(sets[id].iter()) {
+                        *target |= *source;
+                    }
+                }
+                if scratch.as_slice() == full_dense.as_ref() {
+                    1
+                } else {
+                    let mut hasher = rustc_hash::FxHasher::default();
+                    scratch.hash(&mut hasher);
+                    let candidates = row_hashes.entry(hasher.finish()).or_default();
+                    let known = candidates.iter().copied().find(|&id| {
+                        let start = (id as usize - 2) * dense_word_count;
+                        rows[start..start + dense_word_count] == scratch
+                    });
+                    known.unwrap_or_else(|| {
+                        let id = u32::try_from(rows.len() / dense_word_count)
+                            .ok().and_then(|id| id.checked_add(2)).expect("acceptance row id overflow");
+                        rows.extend_from_slice(&scratch);
+                        candidates.push(id);
+                        id
+                    })
+                }
+            };
+            if starts.last().is_none_or(|&(_, last)| last != row) {
+                starts.push((position, row));
+            }
+            position = events.get(event).map_or(tsid_count, |&(at, _, _)| at);
+        }
+        Arc::new(DenseAcceptanceRows::from_runs(
+            dense_word_count, tsid_count, rows, starts, Arc::clone(full_dense),
         ))
     }
 
@@ -9814,7 +9854,7 @@ impl Constraint {
         // doing so can otherwise put tens of milliseconds onto the first
         // commit of an ordinary statically compiled constraint.
         if let Some(vocab) = self.initialized_dynamic_mask_vocab_for_runtime() {
-            vocab.cache_direct_regular_wide_frontier_index(lower_id, index);
+            vocab.cache_direct_regular_wide_frontier_index(lower_id, gss, index);
         }
         Some(index)
     }

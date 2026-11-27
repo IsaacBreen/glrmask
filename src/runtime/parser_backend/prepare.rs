@@ -66,8 +66,9 @@ pub(super) struct LocalPrograms {
 
 impl LocalPrograms {
     fn new(relations: Vec<Arc<PreparedRelation>>, ids: Vec<u32>) -> Self {
-        if ids.len() == relations.len() {
-            debug_assert!(ids.iter().enumerate().all(|(index, &id)| index == id as usize));
+        if ids.len() == relations.len()
+            && ids.iter().enumerate().all(|(index, &id)| index == id as usize)
+        {
             return Self { relations: relations.into(), dispatch: None };
         }
         let pointer_bytes = std::mem::size_of::<Arc<PreparedRelation>>();

@@ -488,44 +488,66 @@ pub(crate) struct DirectRegularParserStateAcceptance {
 
 pub(crate) type DenseWords = Arc<[u64]>;
 
-/// Exact dense acceptance indexed directly by internal tokenizer-state ID.
-///
-/// `row_kinds` uses 0 for empty, 1 for an ordinary row in `rows`, and 2 for the
-/// shared all-token row. Keeping all ordinary rows in one flat allocation avoids
-/// tens of thousands of per-state `Arc` allocations during finalization and
-/// makes hot-path lookup a bounds check plus one slice operation.
+/// Exact acceptance rows interned independently of tokenizer coordinates.
+/// IDs 0 and 1 denote absent and the shared full mask; all others index the
+/// slab of actual distinct masks. Constant/range dispatch avoids even a
+/// per-state ID when many tokenizer states have the same acceptance.
+#[derive(Debug, Clone)]
+enum AcceptanceRowDispatch {
+    Dense(Arc<[u32]>),
+    Runs { len: usize, starts: Arc<[(usize, u32)]> },
+}
+
+impl Default for AcceptanceRowDispatch {
+    fn default() -> Self { Self::Dense(Arc::from([])) }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DenseAcceptanceRows {
     words_per_row: usize,
     rows: Arc<[u64]>,
-    row_kinds: Arc<[u8]>,
+    dispatch: AcceptanceRowDispatch,
     full_dense: DenseWords,
 }
 
 impl DenseAcceptanceRows {
-    pub(crate) fn new(
+    pub(crate) fn from_runs(
         words_per_row: usize,
+        tsid_count: usize,
         rows: Vec<u64>,
-        row_kinds: Vec<u8>,
+        starts: Vec<(usize, u32)>,
         full_dense: DenseWords,
     ) -> Self {
-        debug_assert_eq!(rows.len(), words_per_row.saturating_mul(row_kinds.len()));
-        Self {
-            words_per_row,
-            rows: rows.into(),
-            row_kinds: row_kinds.into(),
-            full_dense,
-        }
+        let run_bytes = starts.len().saturating_mul(std::mem::size_of::<(usize, u32)>());
+        let dense_bytes = tsid_count.saturating_mul(std::mem::size_of::<u32>());
+        let dispatch = if run_bytes < dense_bytes {
+            AcceptanceRowDispatch::Runs { len: tsid_count, starts: starts.into() }
+        } else {
+            let mut ids = vec![0u32; tsid_count];
+            for (index, &(start, id)) in starts.iter().enumerate() {
+                let end = starts.get(index + 1).map_or(tsid_count, |&(end, _)| end);
+                ids[start..end].fill(id);
+            }
+            AcceptanceRowDispatch::Dense(ids.into())
+        };
+        Self { words_per_row, rows: rows.into(), dispatch, full_dense }
     }
 
     #[inline]
     pub(crate) fn get(&self, tsid: u32) -> Option<&[u64]> {
         let tsid = tsid as usize;
-        match self.row_kinds.get(tsid).copied()? {
+        let id = match &self.dispatch {
+            AcceptanceRowDispatch::Dense(ids) => *ids.get(tsid)?,
+            AcceptanceRowDispatch::Runs { len, starts } => {
+                if tsid >= *len { return None; }
+                starts[starts.partition_point(|&(start, _)| start <= tsid).checked_sub(1)?].1
+            }
+        };
+        match id {
             0 => None,
-            2 => Some(self.full_dense.as_ref()),
+            1 => Some(self.full_dense.as_ref()),
             _ => {
-                let start = tsid.checked_mul(self.words_per_row)?;
+                let start = (id as usize - 2).checked_mul(self.words_per_row)?;
                 self.rows.get(start..start + self.words_per_row)
             }
         }
@@ -4195,7 +4217,7 @@ pub(crate) struct DynamicMaskVocab {
     lazy_union_cache: Arc<Mutex<DynamicLazyUnionCache>>,
     direct_regular_frontier_cache:
         Arc<Mutex<FxHashMap<usize, DirectRegularDynamicFrontierCacheEntry>>>,
-    direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, usize>>>,
+    direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, (ParserGSS, usize)>>>,
     direct_regular_terminal_support: Arc<DirectRegularTerminalSupport>,
     self_loop_projections: Arc<Vec<DynamicSelfLoopProjection>>,
     projection_by_source: Arc<[u32]>,
@@ -6447,18 +6469,21 @@ impl DynamicMaskVocab {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&key)
-            .copied()
+            .map(|(_, index)| *index)
     }
 
     pub(crate) fn cache_direct_regular_wide_frontier_index(
         &self,
         key: usize,
+        source: &ParserGSS,
         index: usize,
     ) {
-        self.direct_regular_wide_frontier_index_cache
+        let mut cache = self.direct_regular_wide_frontier_index_cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key, index);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= 1024 { cache.clear(); }
+        // Retain the GSS interface which owns the pointer key.
+        cache.insert(key, (source.clone(), index));
     }
 
     pub(crate) fn set_self_loop_projections(
