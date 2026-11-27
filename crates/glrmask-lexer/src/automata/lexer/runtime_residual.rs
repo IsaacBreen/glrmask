@@ -134,6 +134,16 @@ impl ResidualLivenessBudget {
     }
 }
 
+/// The derivative algebra is independent of where its memoized edges live.
+/// Liveness queries retain only a temporary sparse cache and charge misses,
+/// while ordinary token steps reuse persistent dense rows.
+enum DerivativeMemo<'a> {
+    Runtime,
+    Proof {
+        budget: &'a mut ResidualLivenessBudget,
+        edges: &'a mut FxHashMap<u64, ResidualId>,
+    },
+}
 impl ResidualArena {
     pub(crate) fn from_expr(expr: &Expr) -> Option<(Self, ResidualId)> {
         let mut arena = Self {
@@ -431,17 +441,7 @@ impl ResidualArena {
     }
 
     pub(crate) fn step(&mut self, id: ResidualId, byte: u8) -> Option<ResidualId> {
-        if let Some(row) = self.transitions[id as usize].as_ref() {
-            let cached = row[byte as usize];
-            if cached != TRANSITION_UNKNOWN {
-                return Some(cached);
-            }
-        }
-        let target = self.derive_uncached(id, byte)?;
-        let row = self.transitions[id as usize]
-            .get_or_insert_with(|| Box::new([TRANSITION_UNKNOWN; 256]));
-        row[byte as usize] = target;
-        Some(target)
+        self.step_with_memo(id, byte, &mut DerivativeMemo::Runtime).ok()
     }
 
     fn sparse_step(
@@ -451,31 +451,44 @@ impl ResidualArena {
         budget: &mut ResidualLivenessBudget,
         cache: &mut FxHashMap<u64, ResidualId>,
     ) -> Result<ResidualId, String> {
-        let key = (u64::from(id) << 8) | u64::from(byte);
-        if let Some(&target) = cache.get(&key) {
-            return Ok(target);
-        }
-        // Charge every actual derivative computation, including recursive
-        // child derivatives. This makes the transition budget a real bound on
-        // the temporary sparse cache/work rather than only on outer BFS edges.
-        budget.consume_transition()?;
-        let target = self.derive_uncached_sparse(id, byte, budget, cache)?;
-        cache.insert(key, target);
-        Ok(target)
+        self.step_with_memo(id, byte, &mut DerivativeMemo::Proof { budget, edges: cache })
     }
 
-    /// Derivative used only by exact liveness reachability. Unlike `step`, it
-    /// must not populate the persistent dense 256-entry transition row for
-    /// every explored residual: a hard Boolean liveness proof can visit many
-    /// states that normal token traversal will never touch. A temporary sparse
-    /// cache keeps repeated sub-derivatives cheap without retaining
-    /// `O(256 * visited_states)` memory after the query completes.
-    fn derive_uncached_sparse(
+    fn step_with_memo(
         &mut self,
         id: ResidualId,
         byte: u8,
-        budget: &mut ResidualLivenessBudget,
-        cache: &mut FxHashMap<u64, ResidualId>,
+        memo: &mut DerivativeMemo<'_>,
+    ) -> Result<ResidualId, String> {
+        let key = (u64::from(id) << 8) | u64::from(byte);
+        match memo {
+            DerivativeMemo::Runtime => {
+                if let Some(row) = &self.transitions[id as usize] {
+                    let target = row[byte as usize];
+                    if target != TRANSITION_UNKNOWN { return Ok(target); }
+                }
+            }
+            DerivativeMemo::Proof { budget, edges } => {
+                if let Some(&target) = edges.get(&key) { return Ok(target); }
+                // Charge recursive misses as well as the outer graph edge.
+                budget.consume_transition()?;
+            }
+        }
+        let target = self.derive_uncached(id, byte, memo)?;
+        match memo {
+            DerivativeMemo::Runtime => {
+                self.transitions[id as usize]
+                    .get_or_insert_with(|| Box::new([TRANSITION_UNKNOWN; 256]))[byte as usize] = target;
+            }
+            DerivativeMemo::Proof { edges, .. } => { edges.insert(key, target); }
+        }
+        Ok(target)
+    }
+    fn derive_uncached(
+        &mut self,
+        id: ResidualId,
+        byte: u8,
+        memo: &mut DerivativeMemo<'_>,
     ) -> Result<ResidualId, String> {
         let overflow = || "dynamic residual state-id overflow".to_owned();
         match self.nodes[id as usize].clone() {
@@ -505,7 +518,7 @@ impl ResidualArena {
             ResidualNode::Choice(parts) => {
                 let mut derivatives = Vec::with_capacity(parts.len());
                 for &part in parts.iter() {
-                    derivatives.push(self.sparse_step(part, byte, budget, cache)?);
+                    derivatives.push(self.step_with_memo(part, byte, memo)?);
                 }
                 self.choice(derivatives).ok_or_else(overflow)
             }
@@ -513,7 +526,7 @@ impl ResidualArena {
                 let mut alternatives = Vec::new();
                 for index in 0..parts.len() {
                     let head = parts[index];
-                    let derivative = self.sparse_step(head, byte, budget, cache)?;
+                    let derivative = self.step_with_memo(head, byte, memo)?;
                     if derivative != self.empty {
                         let mut sequence = Vec::with_capacity(parts.len() - index);
                         sequence.push(derivative);
@@ -527,17 +540,17 @@ impl ResidualArena {
                 self.choice(alternatives).ok_or_else(overflow)
             }
             ResidualNode::Intersect(left, right) => {
-                let left = self.sparse_step(left, byte, budget, cache)?;
-                let right = self.sparse_step(right, byte, budget, cache)?;
+                let left = self.step_with_memo(left, byte, memo)?;
+                let right = self.step_with_memo(right, byte, memo)?;
                 self.intersect(left, right).ok_or_else(overflow)
             }
             ResidualNode::Exclude(left, right) => {
-                let left = self.sparse_step(left, byte, budget, cache)?;
-                let right = self.sparse_step(right, byte, budget, cache)?;
+                let left = self.step_with_memo(left, byte, memo)?;
+                let right = self.step_with_memo(right, byte, memo)?;
                 self.exclude(left, right).ok_or_else(overflow)
             }
             ResidualNode::Repeat { body, min, max } => {
-                let derivative = self.sparse_step(body, byte, budget, cache)?;
+                let derivative = self.step_with_memo(body, byte, memo)?;
                 if derivative == self.empty {
                     return Ok(self.empty);
                 }
@@ -546,75 +559,6 @@ impl ResidualArena {
                     .repeat(body, min.saturating_sub(1), next_max)
                     .ok_or_else(overflow)?;
                 self.seq(vec![derivative, tail]).ok_or_else(overflow)
-            }
-        }
-    }
-
-    fn derive_uncached(&mut self, id: ResidualId, byte: u8) -> Option<ResidualId> {
-        match self.nodes[id as usize].clone() {
-            ResidualNode::Empty | ResidualNode::Epsilon => Some(self.empty),
-            ResidualNode::SigmaStar => Some(self.sigma_star),
-            ResidualNode::Literal { bytes, offset } => {
-                if bytes[offset as usize] != byte {
-                    Some(self.empty)
-                } else {
-                    self.literal_at(bytes, offset + 1)
-                }
-            }
-            ResidualNode::Class(bytes) => {
-                Some(if bytes.contains(byte) { self.epsilon } else { self.empty })
-            }
-            ResidualNode::Dfa { dfa, states } => {
-                let mut targets = Vec::new();
-                for &state in states.iter() {
-                    if let Some(target) = dfa.step(state, byte) {
-                        targets.push(target);
-                    }
-                }
-                self.dfa(dfa, &targets)
-            }
-            ResidualNode::Choice(parts) => {
-                let derivatives = parts
-                    .iter()
-                    .map(|&part| self.step(part, byte))
-                    .collect::<Option<Vec<_>>>()?;
-                self.choice(derivatives)
-            }
-            ResidualNode::Seq(parts) => {
-                let mut alternatives = Vec::new();
-                for index in 0..parts.len() {
-                    let head = parts[index];
-                    let derivative = self.step(head, byte)?;
-                    if derivative != self.empty {
-                        let mut sequence = Vec::with_capacity(parts.len() - index);
-                        sequence.push(derivative);
-                        sequence.extend_from_slice(&parts[index + 1..]);
-                        alternatives.push(self.seq(sequence)?);
-                    }
-                    if !self.is_nullable(head) {
-                        break;
-                    }
-                }
-                self.choice(alternatives)
-            }
-            ResidualNode::Intersect(left, right) => {
-                let left = self.step(left, byte)?;
-                let right = self.step(right, byte)?;
-                self.intersect(left, right)
-            }
-            ResidualNode::Exclude(left, right) => {
-                let left = self.step(left, byte)?;
-                let right = self.step(right, byte)?;
-                self.exclude(left, right)
-            }
-            ResidualNode::Repeat { body, min, max } => {
-                let derivative = self.step(body, byte)?;
-                if derivative == self.empty {
-                    return Some(self.empty);
-                }
-                let next_max = max.map(|max| max - 1);
-                let tail = self.repeat(body, min.saturating_sub(1), next_max)?;
-                self.seq(vec![derivative, tail])
             }
         }
     }
@@ -902,6 +846,56 @@ struct BoundedCodeOracleCoordinate {
     envelope: BoundedCodeEnvelopeState,
 }
 
+/// The envelope is independent of the pattern DFA and the representation of
+/// its body transitions. Suffix entry takes priority at a legal boundary.
+struct EnvelopeStepper<'a> {
+    prefix: &'a [u8],
+    suffix: &'a [u8],
+    body: &'a DFA,
+    productive: &'a [bool],
+    min: usize,
+    max: usize,
+}
+
+impl EnvelopeStepper<'_> {
+    #[inline]
+    fn step(
+        &self, envelope: BoundedCodeEnvelopeState, byte: u8,
+        body_step: impl FnOnce(u32) -> Option<u32>,
+    ) -> Option<BoundedCodeEnvelopeState> {
+        use BoundedCodeEnvelopeState::*;
+        Some(match envelope {
+            Prefix { next } => {
+                if self.prefix.get(next).copied()? != byte { return None; }
+                if next + 1 == self.prefix.len() {
+                    Body { completed: 0, body_state: 0 }
+                } else {
+                    Prefix { next: next + 1 }
+                }
+            }
+            Body { completed, body_state } => {
+                if body_state == 0 && completed >= self.min && self.suffix.first().copied()? == byte {
+                    if self.suffix.len() == 1 { Done } else { Suffix { next: 1 } }
+                } else {
+                    if completed >= self.max { return None; }
+                    let target = body_step(body_state)?;
+                    if !self.body.finalizers(target).is_empty() {
+                        Body { completed: completed.checked_add(1)?, body_state: 0 }
+                    } else if self.productive[target as usize] {
+                        Body { completed, body_state: target }
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            Suffix { next } => {
+                if self.suffix.get(next).copied()? != byte { return None; }
+                if next + 1 == self.suffix.len() { Done } else { Suffix { next: next + 1 } }
+            }
+            Done => return None,
+        })
+    }
+}
 /// Opaque exact bounded-code residual coordinate for the dynamic masker's
 /// parser-transparent first-match lane. The runtime index is part of the key
 /// so coordinates from distinct terminals cannot be mixed accidentally.
@@ -2004,6 +1998,13 @@ impl BoundedCodeIntersectionOracle {
         self.step_coordinate_with_max(coordinate, byte, self.max)
     }
 
+    fn envelope_stepper(&self, max: usize) -> EnvelopeStepper<'_> {
+        EnvelopeStepper {
+            prefix: &self.prefix, suffix: &self.suffix, body: &self.body,
+            productive: &self.body_productive, min: self.min, max,
+        }
+    }
+
     fn step_coordinate_with_max(
         &self,
         coordinate: BoundedCodeOracleCoordinate,
@@ -2011,72 +2012,11 @@ impl BoundedCodeIntersectionOracle {
         max: usize,
     ) -> Option<BoundedCodeOracleCoordinate> {
         let pattern_state = self.pattern.step(coordinate.pattern_state, byte)?;
-        let envelope = match coordinate.envelope {
-            BoundedCodeEnvelopeState::Prefix { next } => {
-                if self.prefix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.prefix.len() {
-                    BoundedCodeEnvelopeState::Body {
-                        completed: 0,
-                        body_state: 0,
-                    }
-                } else {
-                    BoundedCodeEnvelopeState::Prefix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Body {
-                completed,
-                body_state,
-            } => {
-                if body_state == 0
-                    && completed >= self.min
-                    && self.suffix[0] == byte
-                {
-                    if self.suffix.len() == 1 {
-                        BoundedCodeEnvelopeState::Done
-                    } else {
-                        BoundedCodeEnvelopeState::Suffix { next: 1 }
-                    }
-                } else {
-                    if completed >= max {
-                        return None;
-                    }
-                    let target = self.body.step(body_state, byte)?;
-                    if !self.body.finalizers(target).is_empty() {
-                        BoundedCodeEnvelopeState::Body {
-                            completed: completed.checked_add(1)?,
-                            body_state: 0,
-                        }
-                    } else if self.body_productive[target as usize] {
-                        BoundedCodeEnvelopeState::Body {
-                            completed,
-                            body_state: target,
-                        }
-                    } else {
-                        return None;
-                    }
-                }
-            }
-            BoundedCodeEnvelopeState::Suffix { next } => {
-                if self.suffix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.suffix.len() {
-                    BoundedCodeEnvelopeState::Done
-                } else {
-                    BoundedCodeEnvelopeState::Suffix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Done => return None,
-        };
-        Some(BoundedCodeOracleCoordinate {
-            pattern_state,
-            envelope,
-        })
+        let envelope = self.envelope_stepper(max).step(
+            coordinate.envelope, byte, |state| self.body.step(state, byte),
+        )?;
+        Some(BoundedCodeOracleCoordinate { pattern_state, envelope })
     }
-
-
     fn slice_atom_is_exact_body_code(
         &self,
         slice_start: u32,
@@ -2319,69 +2259,11 @@ impl BoundedCodeIntersectionOracle {
         transitions: &FiniteMaskClassTransitions,
     ) -> Option<BoundedCodeOracleCoordinate> {
         let pattern_state = transitions.pattern_step(coordinate.pattern_state, class)?;
-        let envelope = match coordinate.envelope {
-            BoundedCodeEnvelopeState::Prefix { next } => {
-                if self.prefix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.prefix.len() {
-                    BoundedCodeEnvelopeState::Body {
-                        completed: 0,
-                        body_state: 0,
-                    }
-                } else {
-                    BoundedCodeEnvelopeState::Prefix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Body {
-                completed,
-                body_state,
-            } => {
-                if body_state == 0 && completed >= self.min && self.suffix[0] == byte {
-                    if self.suffix.len() == 1 {
-                        BoundedCodeEnvelopeState::Done
-                    } else {
-                        BoundedCodeEnvelopeState::Suffix { next: 1 }
-                    }
-                } else {
-                    if completed >= max {
-                        return None;
-                    }
-                    let target = transitions.body_step(&self.body, body_state, byte, class)?;
-                    if !self.body.finalizers(target).is_empty() {
-                        BoundedCodeEnvelopeState::Body {
-                            completed: completed.checked_add(1)?,
-                            body_state: 0,
-                        }
-                    } else if self.body_productive[target as usize] {
-                        BoundedCodeEnvelopeState::Body {
-                            completed,
-                            body_state: target,
-                        }
-                    } else {
-                        return None;
-                    }
-                }
-            }
-            BoundedCodeEnvelopeState::Suffix { next } => {
-                if self.suffix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.suffix.len() {
-                    BoundedCodeEnvelopeState::Done
-                } else {
-                    BoundedCodeEnvelopeState::Suffix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Done => return None,
-        };
-        Some(BoundedCodeOracleCoordinate {
-            pattern_state,
-            envelope,
-        })
-
+        let envelope = self.envelope_stepper(max).step(coordinate.envelope, byte, |state| {
+            transitions.body_step(&self.body, state, byte, class)
+        })?;
+        Some(BoundedCodeOracleCoordinate { pattern_state, envelope })
     }
-
     fn has_future(&mut self, coordinate: BoundedCodeOracleCoordinate) -> bool {
         match coordinate.envelope {
             BoundedCodeEnvelopeState::Done => false,
@@ -4221,76 +4103,15 @@ impl DirectCoordinateStepper {
         byte: u8,
     ) -> Option<BoundedCodeOracleCoordinate> {
         let class = self.byte_to_class[byte as usize] as usize;
-        let pattern_state = self
-            .class_transitions
-            .pattern_step(coordinate.pattern_state, class)?;
-        let envelope = match coordinate.envelope {
-            BoundedCodeEnvelopeState::Prefix { next } => {
-                if self.prefix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.prefix.len() {
-                    BoundedCodeEnvelopeState::Body {
-                        completed: 0,
-                        body_state: 0,
-                    }
-                } else {
-                    BoundedCodeEnvelopeState::Prefix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Body {
-                completed,
-                body_state,
-            } => {
-                if body_state == 0
-                    && completed >= self.min
-                    && self.suffix.first().copied()? == byte
-                {
-                    if self.suffix.len() == 1 {
-                        BoundedCodeEnvelopeState::Done
-                    } else {
-                        BoundedCodeEnvelopeState::Suffix { next: 1 }
-                    }
-                } else {
-                    if completed >= self.max {
-                        return None;
-                    }
-                    let target = self
-                        .class_transitions
-                        .body_step(&self.body, body_state, byte, class)?;
-                    if !self.body.finalizers(target).is_empty() {
-                        BoundedCodeEnvelopeState::Body {
-                            completed: completed.checked_add(1)?,
-                            body_state: 0,
-                        }
-                    } else if self.body_productive[target as usize] {
-                        BoundedCodeEnvelopeState::Body {
-                            completed,
-                            body_state: target,
-                        }
-                    } else {
-                        return None;
-                    }
-                }
-            }
-            BoundedCodeEnvelopeState::Suffix { next } => {
-                if self.suffix.get(next).copied()? != byte {
-                    return None;
-                }
-                if next + 1 == self.suffix.len() {
-                    BoundedCodeEnvelopeState::Done
-                } else {
-                    BoundedCodeEnvelopeState::Suffix { next: next + 1 }
-                }
-            }
-            BoundedCodeEnvelopeState::Done => return None,
-        };
-        Some(BoundedCodeOracleCoordinate {
-            pattern_state,
-            envelope,
-        })
+        let pattern_state = self.class_transitions.pattern_step(coordinate.pattern_state, class)?;
+        let envelope = EnvelopeStepper {
+            prefix: &self.prefix, suffix: &self.suffix, body: &self.body,
+            productive: &self.body_productive, min: self.min, max: self.max,
+        }.step(coordinate.envelope, byte, |state| {
+            self.class_transitions.body_step(&self.body, state, byte, class)
+        })?;
+        Some(BoundedCodeOracleCoordinate { pattern_state, envelope })
     }
-
     #[inline(always)]
     fn accepting(&self, coordinate: BoundedCodeOracleCoordinate) -> bool {
         matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
