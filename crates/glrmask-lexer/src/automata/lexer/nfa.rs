@@ -107,61 +107,11 @@ impl Nfa {
             return;
         }
 
-        let mut disc = vec![-1i32; num_states];
-        let mut low = vec![-1i32; num_states];
-        let mut on_stack = vec![false; num_states];
-        let mut stack: Vec<usize> = Vec::new();
-        let mut time = 0i32;
-        let mut scc_map = vec![0usize; num_states];
-        let mut scc_count = 0usize;
-        let mut work_stack: Vec<(usize, usize)> = Vec::new();
-
-        for root in 0..num_states {
-            if disc[root] != -1 {
-                continue;
-            }
-
-            work_stack.push((root, 0));
-            while let Some((state, edge_index)) = work_stack.pop() {
-                if edge_index == 0 {
-                    disc[state] = time;
-                    low[state] = time;
-                    time += 1;
-                    stack.push(state);
-                    on_stack[state] = true;
-                }
-
-                let neighbors = &self.states[state].epsilon_transitions;
-                if edge_index < neighbors.len() {
-                    let next = neighbors[edge_index] as usize;
-                    work_stack.push((state, edge_index + 1));
-                    if disc[next] == -1 {
-                        work_stack.push((next, 0));
-                    } else if on_stack[next] {
-                        low[state] = low[state].min(disc[next]);
-                    }
-                    continue;
-                }
-
-                if low[state] == disc[state] {
-                    loop {
-                        let member = stack.pop().expect("epsilon SCC stack underflow");
-                        on_stack[member] = false;
-                        scc_map[member] = scc_count;
-                        if member == state {
-                            break;
-                        }
-                    }
-                    scc_count += 1;
-                }
-
-                if let Some((parent, _)) = work_stack.last() {
-                    low[*parent] = low[*parent].min(low[state]);
-                }
-            }
-        }
-
-        if scc_count == num_states {
+        let components = super::graph::components(num_states, |state| {
+            self.states[state].epsilon_transitions.iter().map(|&target| target as usize)
+        });
+        let scc_map = components.of;
+        let scc_count = components.count;        if scc_count == num_states {
             return;
         }
 

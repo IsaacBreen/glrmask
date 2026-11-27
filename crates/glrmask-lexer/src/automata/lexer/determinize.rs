@@ -107,135 +107,17 @@ fn compute_reachable_groups(nfa: &Nfa, group_count: usize) -> Vec<BitSet> {
             .collect();
     }
 
-    let adj: Vec<Vec<usize>> = nfa
-        .states
-        .iter()
-        .map(|state| {
-            let mut targets: Vec<usize> = state
-                .epsilon_transitions
-                .iter()
-                .map(|&target| target as usize)
-                .collect();
-            targets.extend(state.transitions.iter().map(|(_, target)| *target as usize));
-            targets.sort_unstable();
-            targets.dedup();
-            targets
-        })
-        .collect();
-
-    let mut scc_id = vec![u32::MAX; num_states];
-    let mut scc_count: u32 = 0;
-    let mut index_counter: u32 = 0;
-    let mut stack: Vec<usize> = Vec::new();
-    let mut on_stack = vec![false; num_states];
-    let mut lowlink = vec![0u32; num_states];
-    let mut disc = vec![u32::MAX; num_states];
-    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
-
-    for root in 0..num_states {
-        if disc[root] != u32::MAX {
-            continue;
+    super::graph::reachable_groups(num_states, group_count, |state| {
+        let row = &nfa.states[state];
+        row.epsilon_transitions.iter().copied()
+            .chain(row.transitions.iter().map(|(_, target)| *target))
+            .map(|target| target as usize)
+    }, |state, groups| {
+        for &group in &nfa.states[state].finalizers {
+            groups.set(group as usize);
         }
-
-        dfs_stack.push((root, 0));
-        disc[root] = index_counter;
-        lowlink[root] = index_counter;
-        index_counter += 1;
-        stack.push(root);
-        on_stack[root] = true;
-
-        while let Some(&mut (state, ref mut child_index)) = dfs_stack.last_mut() {
-            if *child_index < adj[state].len() {
-                let next = adj[state][*child_index];
-                *child_index += 1;
-                if disc[next] == u32::MAX {
-                    disc[next] = index_counter;
-                    lowlink[next] = index_counter;
-                    index_counter += 1;
-                    stack.push(next);
-                    on_stack[next] = true;
-                    dfs_stack.push((next, 0));
-                } else if on_stack[next] {
-                    lowlink[state] = lowlink[state].min(disc[next]);
-                }
-            } else {
-                if lowlink[state] == disc[state] {
-                    while let Some(member) = stack.pop() {
-                        on_stack[member] = false;
-                        scc_id[member] = scc_count;
-                        if member == state {
-                            break;
-                        }
-                    }
-                    scc_count += 1;
-                }
-                dfs_stack.pop();
-                if let Some(&mut (parent, _)) = dfs_stack.last_mut() {
-                    lowlink[parent] = lowlink[parent].min(lowlink[state]);
-                }
-            }
-        }
-    }
-
-    let mut scc_reachable: Vec<BitSet> = (0..scc_count as usize)
-        .map(|_| BitSet::new(group_count))
-        .collect();
-    for (state_idx, state) in nfa.states.iter().enumerate() {
-        let sid = scc_id[state_idx] as usize;
-        for &group in &state.finalizers {
-            scc_reachable[sid].set(group as usize);
-        }
-    }
-
-    let mut scc_successors: Vec<Vec<u32>> = vec![Vec::new(); scc_count as usize];
-    for (state_idx, targets) in adj.iter().enumerate() {
-        let src_scc = scc_id[state_idx];
-        for &target in targets {
-            let dst_scc = scc_id[target];
-            if src_scc != dst_scc {
-                scc_successors[src_scc as usize].push(dst_scc);
-            }
-        }
-    }
-    for successors in &mut scc_successors {
-        successors.sort_unstable();
-        successors.dedup();
-    }
-
-    let mut scc_predecessors: Vec<Vec<u32>> = vec![Vec::new(); scc_count as usize];
-    let mut remaining_successors = vec![0usize; scc_count as usize];
-    for (sid, successors) in scc_successors.iter().enumerate() {
-        remaining_successors[sid] = successors.len();
-        for &succ in successors {
-            scc_predecessors[succ as usize].push(sid as u32);
-        }
-    }
-
-    let mut queue: VecDeque<u32> = remaining_successors
-        .iter()
-        .enumerate()
-        .filter_map(|(sid, &count)| (count == 0).then_some(sid as u32))
-        .collect();
-
-    while let Some(sid) = queue.pop_front() {
-        let sid = sid as usize;
-        let sid_reachable = scc_reachable[sid].clone();
-
-        for &pred in &scc_predecessors[sid] {
-            let pred = pred as usize;
-            scc_reachable[pred].union_with(&sid_reachable);
-            remaining_successors[pred] -= 1;
-            if remaining_successors[pred] == 0 {
-                queue.push_back(pred as u32);
-            }
-        }
-    }
-
-    (0..num_states)
-        .map(|state_idx| scc_reachable[scc_id[state_idx] as usize].clone())
-        .collect()
+    })
 }
-
 fn is_epsilon_free_deterministic(nfa: &Nfa) -> bool {
     nfa.states.iter().all(|state| {
         if !state.epsilon_transitions.is_empty() {

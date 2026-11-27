@@ -231,19 +231,6 @@ fn clear_possible_futures_for_minimization(dfa: &mut DFA) {
     dfa.mask_possible_futures(&empty);
 }
 
-fn dedup_adjacency(dfa: &DFA) -> Vec<Vec<usize>> {
-    dfa.states()
-        .iter()
-        .map(|state| {
-            let mut targets: Vec<usize> =
-                state.transitions.iter().map(|(_, &target)| target as usize).collect();
-            targets.sort_unstable();
-            targets.dedup();
-            targets
-        })
-        .collect()
-}
-
 enum InverseEdges {
     // Finite-mask DFAs are capped well below 2^24 states. Packing the source
     // into 24 bits and the byte label into the high byte halves inverse-edge
@@ -681,64 +668,6 @@ fn can_reach_accepting_from_inverse(dfa: &DFA, inverse: &InverseTransitions) -> 
     can_reach_accepting
 }
 
-fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
-    let num_states = adj.len();
-    let mut scc_id = vec![u32::MAX; num_states];
-    let mut scc_count: u32 = 0;
-    let mut index_counter: u32 = 0;
-    let mut stack: Vec<usize> = Vec::new();
-    let mut on_stack = vec![false; num_states];
-    let mut lowlink = vec![0u32; num_states];
-    let mut disc = vec![u32::MAX; num_states];
-    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
-
-    for root in 0..num_states {
-        if disc[root] != u32::MAX {
-            continue;
-        }
-        dfs_stack.push((root, 0));
-        disc[root] = index_counter;
-        lowlink[root] = index_counter;
-        index_counter += 1;
-        stack.push(root);
-        on_stack[root] = true;
-
-        while let Some(&mut (state, ref mut edge_index)) = dfs_stack.last_mut() {
-            if *edge_index < adj[state].len() {
-                let target = adj[state][*edge_index];
-                *edge_index += 1;
-                if disc[target] == u32::MAX {
-                    disc[target] = index_counter;
-                    lowlink[target] = index_counter;
-                    index_counter += 1;
-                    stack.push(target);
-                    on_stack[target] = true;
-                    dfs_stack.push((target, 0));
-                } else if on_stack[target] {
-                    lowlink[state] = lowlink[state].min(disc[target]);
-                }
-            } else {
-                if lowlink[state] == disc[state] {
-                    while let Some(member) = stack.pop() {
-                        on_stack[member] = false;
-                        scc_id[member] = scc_count;
-                        if member == state {
-                            break;
-                        }
-                    }
-                    scc_count += 1;
-                }
-                dfs_stack.pop();
-                if let Some(&mut (parent, _)) = dfs_stack.last_mut() {
-                    lowlink[parent] = lowlink[parent].min(lowlink[state]);
-                }
-            }
-        }
-    }
-
-    (scc_id, scc_count)
-}
-
 impl DFA {
     /// Minimize deterministic byte rows; epsilon components retain their
     /// independently minimized representation.
@@ -888,230 +817,50 @@ impl DFA {
     ///
     /// With one terminal group, the future bit is set exactly when one byte
     /// transition can reach a state from which acceptance remains possible.
-    fn recompute_single_group_possible_futures(&mut self) {
-        let n = self.states().len();
-        let mut predecessor_counts = vec![0usize; n];
-        for state in self.states() {
-            for (_, &target) in state.transitions.iter() {
-                predecessor_counts[target as usize] += 1;
-            }
-        }
-
-        let mut offsets = Vec::with_capacity(n + 1);
-        offsets.push(0usize);
-        for &count in &predecessor_counts {
-            offsets.push(offsets.last().copied().unwrap() + count);
-        }
-        let mut cursors = offsets[..n].to_vec();
-        let mut predecessors = vec![0u32; offsets[n]];
-        for (source, state) in self.states().iter().enumerate() {
-            for (_, &target) in state.transitions.iter() {
-                let target = target as usize;
-                let cursor = &mut cursors[target];
-                predecessors[*cursor] = source as u32;
-                *cursor += 1;
-            }
-        }
-
-        let mut can_reach_accepting = vec![false; n];
-        let mut queue = VecDeque::new();
-        for (state, can_reach) in can_reach_accepting.iter_mut().enumerate() {
-            if !self.finalizers(state as u32).is_empty() {
-                *can_reach = true;
-                queue.push_back(state as u32);
-            }
-        }
-        while let Some(target) = queue.pop_front() {
-            let target = target as usize;
-            for &source in &predecessors[offsets[target]..offsets[target + 1]] {
-                let source = source as usize;
-                if !can_reach_accepting[source] {
-                    can_reach_accepting[source] = true;
-                    queue.push_back(source as u32);
-                }
-            }
-        }
-
-        let strict_future = self
-            .states()
-            .iter()
-            .map(|state| {
-                state
-                    .transitions
-                    .iter()
-                    .any(|(_, &target)| can_reach_accepting[target as usize])
-            })
-            .collect::<Vec<_>>();
-        for (state, has_future) in strict_future.into_iter().enumerate() {
-            let mut future = BitSet::new(1);
-            if has_future {
-                future.set(0);
-            }
-            self.set_possible_future_group_ids(state as u32, future);
-        }
-    }
-
-    /// Recompute `possible_future_group_ids` for all states via fixpoint.
+    /// Strict futures require at least one byte. Compute inclusive accepting
+    /// reachability first, then seed each byte source from its target and
+    /// propagate these seeds along epsilon edges only. This also handles
+    /// epsilon cycles without manufacturing a consumed byte.
     pub(super) fn recompute_possible_futures(&mut self) {
-        let n = self.states().len();
-        let num_groups = self.num_groups();
-        if n == 0 {
-            return;
-        }
-
-        if self.has_epsilon_transitions() {
-            self.recompute_possible_futures_with_epsilon();
-            return;
-        }
-        if num_groups == 1 {
-            self.recompute_single_group_possible_futures();
-            return;
-        }
-
-        let adj = dedup_adjacency(self);
-        let (scc_id, scc_count) = compute_tarjan_scc_ids(&adj);
-
-        // `possible_future_group_ids` is strict: it should include only
-        // groups reachable after consuming at least one more byte. That means
-        // an accepting sink state has no possible futures, while a cyclic SCC
-        // can include its own finalizers because they are reachable again via
-        // a non-empty path through the cycle.
-        let mut scc_finalizers: Vec<BitSet> = (0..scc_count as usize)
-            .map(|_| BitSet::new(num_groups))
-            .collect();
-        let mut scc_sizes = vec![0usize; scc_count as usize];
-        let mut scc_has_self_loop = vec![false; scc_count as usize];
-        for (state_idx, state) in self.states().iter().enumerate() {
-            let sid = scc_id[state_idx] as usize;
-            scc_sizes[sid] += 1;
-            for bit in state.finalizers.iter() {
-                scc_finalizers[sid].set(bit);
-            }
-            if state
-                .transitions
-                .iter()
-                .any(|(_, &target)| target as usize == state_idx)
-            {
-                scc_has_self_loop[sid] = true;
-            }
-        }
-
-        let mut scc_futures: Vec<BitSet> = (0..scc_count as usize)
-            .map(|_| BitSet::new(num_groups))
-            .collect();
-        for sid in 0..scc_count as usize {
-            let is_cyclic = scc_sizes[sid] > 1 || scc_has_self_loop[sid];
-            if is_cyclic {
-                scc_futures[sid].union_with(&scc_finalizers[sid]);
-            }
-        }
-
-        // Build SCC adjacency (successor SCCs for each SCC)
-        let mut scc_successors: Vec<Vec<u32>> = vec![vec![]; scc_count as usize];
-        for (state_idx, targets) in adj.iter().enumerate() {
-            let src_scc = scc_id[state_idx];
-            for &target in targets {
-                let dst_scc = scc_id[target];
-                if src_scc != dst_scc {
-                    scc_successors[src_scc as usize].push(dst_scc);
+        let n = self.num_states();
+        let groups = self.num_groups();
+        let epsilon = self.has_epsilon_transitions();
+        let futures = if groups == 1 && !epsilon {
+            let inverse = InverseTransitions::build(self);
+            let reach = can_reach_accepting_from_inverse(self, &inverse);
+            self.states().iter().map(|state| {
+                let mut row = BitSet::new(1);
+                if state.transitions.iter().any(|(_, &target)| reach[target as usize]) {
+                    row.set(0);
                 }
-            }
-        }
-        // Dedup successors
-        for succs in &mut scc_successors {
-            succs.sort_unstable();
-            succs.dedup();
-        }
-
-        let mut scc_predecessors: Vec<Vec<u32>> = vec![vec![]; scc_count as usize];
-        let mut remaining_successors = vec![0usize; scc_count as usize];
-        for (sid, successors) in scc_successors.iter().enumerate() {
-            remaining_successors[sid] = successors.len();
-            for &succ in successors {
-                scc_predecessors[succ as usize].push(sid as u32);
-            }
-        }
-
-        // Process SCCs from sinks upward so every predecessor sees fully
-        // computed successor futures.
-        let mut queue: VecDeque<u32> = remaining_successors
-            .iter()
-            .enumerate()
-            .filter_map(|(sid, &count)| (count == 0).then_some(sid as u32))
-            .collect();
-
-        while let Some(sid) = queue.pop_front() {
-            let sid = sid as usize;
-            let sid_finalizers = scc_finalizers[sid].clone();
-            let sid_futures = scc_futures[sid].clone();
-
-            for &pred in &scc_predecessors[sid] {
-                let pred = pred as usize;
-                scc_futures[pred].union_with(&sid_finalizers);
-                scc_futures[pred].union_with(&sid_futures);
-                remaining_successors[pred] -= 1;
-                if remaining_successors[pred] == 0 {
-                    queue.push_back(pred as u32);
+                row
+            }).collect::<Vec<_>>()
+        } else {
+            let reach = super::graph::reachable_groups(n, groups, |state| {
+                let row = &self.states()[state];
+                row.epsilon_transitions.iter().copied()
+                    .chain(row.transitions.iter().map(|(_, &target)| target))
+                    .map(|target| target as usize)
+            }, |state, bits| bits.union_with(self.finalizers(state as u32)));
+            let immediate = self.states().iter().map(|state| {
+                let mut row = BitSet::new(groups);
+                for (_, &target) in state.transitions.iter() {
+                    row.union_with(&reach[target as usize]);
                 }
+                row
+            }).collect::<Vec<_>>();
+            if epsilon {
+                super::graph::reachable_groups(n, groups, |state| {
+                    self.states()[state].epsilon_transitions.iter().map(|&target| target as usize)
+                }, |state, bits| bits.union_with(&immediate[state]))
+            } else {
+                immediate
             }
-        }
-
-        // Assign futures to states
-        for (state_idx, &state_scc) in scc_id.iter().enumerate().take(n) {
-            let sid = state_scc as usize;
-            self.set_possible_future_group_ids(state_idx as u32, scc_futures[sid].clone());
-        }
-    }
-
-    fn recompute_possible_futures_with_epsilon(&mut self) {
-        let n = self.states().len();
-        let num_groups = self.num_groups();
-        let mut successors: Vec<Vec<u32>> = Vec::with_capacity(n);
-        let mut immediate: Vec<BitSet> = Vec::with_capacity(n);
-
-        for state in 0..n as u32 {
-            let source_closure = self.epsilon_closure(&[state]);
-            let mut targets = Vec::new();
-            let mut finals = BitSet::new(num_groups);
-            for source in source_closure {
-                for (_, &target) in self.states()[source as usize].transitions.iter() {
-                    for closed_target in self.epsilon_closure(&[target]) {
-                        if !targets.contains(&closed_target) {
-                            targets.push(closed_target);
-                        }
-                        finals.union_with(&self.states()[closed_target as usize].finalizers);
-                    }
-                }
-            }
-            targets.sort_unstable();
-            targets.dedup();
-            successors.push(targets);
-            immediate.push(finals);
-        }
-
-        let mut futures = immediate.clone();
-        loop {
-            let mut changed = false;
-            for state in 0..n {
-                let mut next = immediate[state].clone();
-                for &target in &successors[state] {
-                    next.union_with(&futures[target as usize]);
-                }
-                if next != futures[state] {
-                    futures[state] = next;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
+        };
         for (state, future) in futures.into_iter().enumerate() {
             self.set_possible_future_group_ids(state as u32, future);
         }
     }
-
     fn rebuild_owned_from_flat_acyclic_partition(
         mut self,
         partition: AcyclicPartition,

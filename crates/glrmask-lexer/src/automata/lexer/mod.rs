@@ -1,6 +1,7 @@
 pub(crate) mod ast;
 pub(crate) mod compile;
 mod determinize;
+mod graph;
 pub(crate) mod dfa;
 
 #[cfg(feature = "internal-api")]
