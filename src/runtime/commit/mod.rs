@@ -8645,8 +8645,8 @@ impl ConstraintState {
         previous_state: Option<ParserStateMap>,
         commit_succeeded: bool,
     ) {
-        // A failed commit leaves the state exactly as it was, so the cached mask
-        // still describes it and the generation must not advance.
+        // The rejection path has already cleared the frontier and mask cache,
+        // and advanced the generation. Do not update them a second time.
         if !commit_succeeded {
             return;
         }
@@ -9137,7 +9137,7 @@ impl ConstraintState {
         true
     }
 
-    /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
+    /// Advances the state by the token. Returns true on acceptance and false on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_token(
@@ -9435,7 +9435,7 @@ impl ConstraintState {
         result
     }
 
-    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Advances the state by the bytes. Returns true on acceptance and false on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {

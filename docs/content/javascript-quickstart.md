@@ -30,5 +30,6 @@ while (true) {
   if (!state.commitToken(token)) throw new Error('Commit failed');
   output.push(token);
 }
+if (!state.isAccepting()) throw new Error("Incomplete output");
 console.log(Buffer.from(output).toString());
 ```

@@ -85,8 +85,7 @@ const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`.
 `fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-`commitToken` and `commitBytes` advance the state by a token or bytes and return whether the input was allowed. A failed commit terminates the state, so
-`clone()` it first to try a token without committing to it. Commit special tokens and token sets with `commitToken`;
+`commitToken` and `commitBytes` advance the state by a token or bytes and return whether the input was allowed. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first. Commit special tokens and token sets with `commitToken`;
 bytes never match them.
 
 `isAccepting()` says whether the output so far could end here, and `isTerminated()` whether nothing more can be

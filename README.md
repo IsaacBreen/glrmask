@@ -166,6 +166,8 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
@@ -205,6 +207,7 @@ fn main() -> glrmask::Result<()> {
         assert!(state.commit_token(token), "allowed token rejected");
         output.push(token as u8);
     }
+    assert!(state.is_accepting(), "incomplete output");
     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
     Ok(())
 }

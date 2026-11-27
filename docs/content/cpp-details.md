@@ -90,8 +90,7 @@ bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token` and `commit_bytes` advance the state by a token or bytes and return whether the input was allowed. A failed commit terminates the state,
-so copy it first to try a token without committing to it. Commit special tokens and token sets with `commit_token`;
+`commit_token` and `commit_bytes` advance the state by a token or bytes and return whether the input was allowed. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 
 `is_accepting()` says whether the output so far could end here, and `is_terminated()` whether nothing more can be

@@ -53,6 +53,8 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
@@ -228,10 +230,10 @@ class ConstraintState:
         """The mask's length in bits (the largest token ID plus one)."""
         ...
     def commit_token(self, token_id: SupportsIndex, /) -> bool:
-        """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""
+        """Advances the state by the token. Returns True on acceptance and False on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
-        """Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state."""
+        """Advances the state by the bytes. Returns True on acceptance and False on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first."""
         ...
     def forced_bytes(self) -> bytes:
         """The bytes that must come next."""

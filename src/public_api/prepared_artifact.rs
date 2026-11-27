@@ -335,11 +335,16 @@ mod tests {
             |m|m.instances.last_mut().unwrap().boundary_trigger=255,
             |m|m.instances.last_mut().unwrap().definition=u32::MAX,
             |m|m.instances.last_mut().unwrap().bindings.clear(),
+            |m|m.definitions[0].bytes=u64::MAX,
+            |m|m.definitions[0].bytes=0,
             |m|m.definitions.push(Definition{bytes:0,runnable:false,exact_only_token_ids:vec![]}),
             |m|m.instances.last_mut().unwrap().slot_spans.get_mut("CHILD").unwrap().line=0,
         ];
         for (index,mutation) in mutations.into_iter().enumerate() {
             assert!(load(&corrupt(&bytes,mutation),None).is_err(),"corruption {index}");
+        }
+        for end in [0, HEADER - 1, HEADER, bytes.len() - 1] {
+            assert!(load(&bytes[..end], None).is_err(), "nested truncation at {end}");
         }
         assert!(load(&bytes,None).is_ok(), "{:?}", load(&bytes,None).err());
     }

@@ -32,5 +32,7 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```

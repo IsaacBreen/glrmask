@@ -383,13 +383,13 @@ public:
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// The mask's length in bits (the largest token ID plus one).
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
-    /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
+    /// Advances the state by the token. Returns true on acceptance and false on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     [[nodiscard]] bool commit_token(TokenId id) { uint32_t accepted = 0; detail::check(glrmask_state_commit_token(native_handle(), id, &accepted)); return accepted != 0; }
-    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Advances the state by the bytes. Returns true on acceptance and false on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { uint32_t accepted = 0; detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size, &accepted)); return accepted != 0; }
-    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Advances the state by the bytes. Returns true on acceptance and false on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
-    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Advances the state by the bytes. Returns true on acceptance and false on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     [[nodiscard]] bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
     /// The bytes that must come next.
     Bytes forced_bytes() const { glrmask_bytes* p = nullptr; detail::check(glrmask_state_forced_bytes(native_handle(), &p)); return detail::take_bytes(p); }

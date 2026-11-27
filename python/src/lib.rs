@@ -1062,7 +1062,7 @@ impl PyConstraintState {
         }))?
     }
 
-    /// Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.
+    /// Advances the state by the token. Returns True on acceptance and False on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Some(id) = resolve_token_id(token_id)? else {
@@ -1073,7 +1073,7 @@ impl PyConstraintState {
     }
 
 
-    /// Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.
+    /// Advances the state by the bytes. Returns True on acceptance and False on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<bool> {
         catch_python_panic(|| with_state_mut(&mut self.inner, |state| state.commit_bytes(data)))

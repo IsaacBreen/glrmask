@@ -205,11 +205,13 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,uint32_t* out,size_t word_count);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
-/// Advances the state by the token. Writes 1 on acceptance and 0 on ordinary rejection (which terminates the state).
+/// Advances the state by the token. Writes 1 on acceptance and 0 on ordinary rejection.
+/// A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first.
 /// Returns GLRMASK_OK for either outcome, or a non-OK status on native failure. On failure, a valid accepted out-parameter is zeroed.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* state,uint32_t id,uint32_t* accepted);
 
 /// Advances the state by the bytes, with the same status and accepted contract as commit_token.
+/// Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n,uint32_t* accepted);
 /// The bytes that must come next.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);

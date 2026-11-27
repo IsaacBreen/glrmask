@@ -162,6 +162,8 @@ while True:
         raise RuntimeError("allowed token rejected")
     output.append(token)
 
+if not state.is_accepting():
+    raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
@@ -201,6 +203,7 @@ fn main() -> glrmask::Result<()> {
         assert!(state.commit_token(token), "allowed token rejected");
         output.push(token as u8);
     }
+    assert!(state.is_accepting(), "incomplete output");
     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
     Ok(())
 }
@@ -237,11 +240,10 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 # buffer until the asynchronous transfer completes.
 ```
 
-`commit_token` advances the state by the token. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. A failed commit terminates the state, so to try a
-token without committing to it, copy the state first.
+`commit_token` advances the state by the token. `commit_bytes` advances it by the bytes, such as a prefix you supply. Text never matches a token set. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first. An empty byte commit leaves the state unchanged and succeeds unless it is terminated and not accepting.
 
 `is_accepting()` says whether the output so far could end here. More may still be allowed: `1+2` is complete, but
-`1+23` is too. `is_terminated()` says whether nothing more can be committed. Together they distinguish in progress (false, false), may stop (true, false), complete (true, true), and dead (false, true). Treat EOS as a caller-side stop decision; committing an unknown EOS token rejects even an accepting state.
+`1+23` is too. `is_terminated()` says whether nothing more can be committed. Together they distinguish in progress (false, false), may stop (true, false), complete (true, true), and dead (false, true). A terminated, non-accepting state can also arise without a rejected commit, for example when the grammar has an empty language. Treat EOS as a caller-side stop decision; committing an unknown EOS token rejects even an accepting state.
 
 ### Forced bytes
 

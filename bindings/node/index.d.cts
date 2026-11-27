@@ -153,10 +153,10 @@ export declare class ConstraintState implements Disposable {
   fillMask(output: Uint32Array): void;
   /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
-  /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
+  /** Advances the state by the token. Returns true on acceptance and false on rejection. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first. */
   commitToken(id: number): boolean;
 
-  /** Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. */
+  /** Advances the state by the bytes. Returns true on acceptance and false on rejection. Empty bytes leave the state unchanged and succeed unless it is terminated and not accepting. A rejected commit leaves the state dead: not accepting, terminated, an all-zero mask, empty forced bytes, and rejection of every later non-empty commit. To try input without risking the state, clone it first. */
   commitBytes(bytes: Uint8Array): boolean;
   /** The bytes that must come next. */
   forcedBytes(): Uint8Array;
