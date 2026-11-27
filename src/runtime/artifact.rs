@@ -1761,7 +1761,6 @@ pub(crate) struct FastCommitTemplateDfas {
     pub(crate) read_shift: Option<Box<super::commit::simple_read_shift::PreparedReadShift>>,
     pub(crate) input_cursor: Option<super::commit::single_cursor::PreparedInputCursor>,
     pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
-    pub(crate) push_dag: Option<super::commit::push_dag::PreparedPushDag>,
     pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
     pub(crate) pop: FastTemplateDfa,
     pub(crate) read: FastTemplateDfa,
@@ -1779,7 +1778,6 @@ impl std::fmt::Debug for FastCommitTemplateDfas {
             .field("read_shift", &self.read_shift)
             .field("input_cursor", &self.input_cursor)
             .field("phase_dag", &self.phase_dag)
-            .field("push_dag", &self.push_dag)
             .field("push_suffixes", &self.push_suffixes)
             .field("pop", &self.pop)
             .field("read", &self.read)
@@ -1824,12 +1822,11 @@ impl FastCommitTemplateDfas {
 
     fn from_preparation(template: &CommitTemplateDfas,
         prepared: Option<&super::commit::template_prepare::TemplatePreparation<'_>>) -> Self {
-        let (input_cursor, phase_dag, push_suffixes, push_dag) = match prepared {
+        let (input_cursor, phase_dag, push_suffixes) = match prepared {
             Some(prepared) => (
                 Some(super::commit::single_cursor::PreparedInputCursor::from_prepared(prepared)),
                 super::commit::phase_dag::PreparedPhaseDag::from_prepared(prepared),
                 super::commit::push_suffixes::from_prepared(prepared),
-                super::commit::push_dag::PreparedPushDag::from_prepared(prepared),
             ),
             // Preserve the independent helpers' behavior for legacy optional
             // templates that do not qualify for whole-program preparation.
@@ -1839,7 +1836,6 @@ impl FastCommitTemplateDfas {
                 super::commit::single_cursor::PreparedInputCursor::prepare(template),
                 super::commit::phase_dag::PreparedPhaseDag::prepare(template),
                 super::commit::push_suffixes::prepare(template),
-                super::commit::push_dag::PreparedPushDag::prepare(template),
             ),
         };
         Self {
@@ -1848,7 +1844,6 @@ impl FastCommitTemplateDfas {
             input_cursor,
             phase_dag,
             push_suffixes,
-            push_dag,
             pop: FastTemplateDfa::from_dfa(&template.pop),
             read: FastTemplateDfa::from_dfa(&template.read),
             push: FastTemplateDfa::from_dfa(&template.push),

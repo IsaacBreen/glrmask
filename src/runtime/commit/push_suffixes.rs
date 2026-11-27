@@ -2,7 +2,7 @@
 //!
 //! This is a derived acceleration index, never a replacement for the complete
 //! template. Preparation never enumerates languages beyond the stated budget.
-//! Large uniform-annotation languages use the graph-native `push_dag` index;
+//! Large uniform-annotation languages use the shared phase dataflow;
 //! correlated annotations retain the ordered exact template evaluator. The
 //! usual shared GSS branch constructor owns all stack storage.
 use crate::compiler::glr::labels::{is_negative_label, negative_to_positive_label};

@@ -6,7 +6,7 @@ pub(crate) use glrmask_parser_dwa::__private::templates::admissibility::Validate
 #[cfg(test)]
 mod tests {
     use super::super::{
-        phase_dag::PreparedPhaseDag, push_dag::PreparedPushDag, push_suffixes,
+        phase_dag::PreparedPhaseDag, push_suffixes,
         single_cursor::PreparedInputCursor,
     };
     use super::*;
@@ -30,10 +30,6 @@ mod tests {
         assert_eq!(
             format!("{:?}", push_suffixes::prepare(template)),
             format!("{:?}", push_suffixes::from_prepared(&prepared))
-        );
-        assert_eq!(
-            format!("{:?}", PreparedPushDag::prepare(template)),
-            format!("{:?}", PreparedPushDag::from_prepared(&prepared))
         );
     }
 

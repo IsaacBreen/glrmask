@@ -16,8 +16,9 @@ use std::collections::BinaryHeap;
 
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
 use crate::automata::unweighted_u32::dfa::DFA;
-use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
+use crate::compiler::glr::labels::{DEFAULT_LABEL, negative_to_positive_label};
 use crate::compiler::glr::parser::ParserGSS;
 use crate::runtime::CommitTemplateDfas;
 use super::template_advance::Phase;
@@ -25,29 +26,7 @@ use super::template_advance::Phase;
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedPhaseDag {
     ranks: [Box<[u32]>; 3],
-}
-
-fn ranks(graph: &DFA) -> Option<Box<[u32]>> {
-    let n = graph.states.len();
-    graph.states.get(graph.start_state as usize)?;
-    let mut incoming = vec![0usize; n];
-    for state in &graph.states {
-        for &target in state.transitions.values() {
-            *incoming.get_mut(target as usize)? += 1;
-        }
-    }
-    let mut order: Vec<_> = incoming.iter().enumerate()
-        .filter_map(|(i, &degree)| (degree == 0).then_some(i)).collect();
-    let mut head = 0;
-    while head < order.len() {
-        let id = order[head]; head += 1;
-        for &target in graph.states[id].transitions.values() {
-            incoming[target as usize] -= 1;
-            if incoming[target as usize] == 0 { order.push(target as usize); }
-        }
-    }
-    if order.len() != n { return None; }
-    ranks_from_order(&order)
+    push_paths: Box<[u8]>,
 }
 
 fn ranks_from_order(order: &[usize]) -> Option<Box<[u32]>> {
@@ -58,32 +37,36 @@ fn ranks_from_order(order: &[usize]) -> Option<Box<[u32]>> {
 
 impl PreparedPhaseDag {
     pub(crate) fn prepare(template: &CommitTemplateDfas) -> Option<Self> {
-        for state in &template.pop.states {
-            if state.transitions.keys().any(|&label| is_negative_label(label)) { return None; }
-        }
-        for state in &template.read.states {
-            if state.transitions.keys().any(|&label| label == DEFAULT_LABEL || is_negative_label(label)) {
-                return None;
-            }
-        }
-        for state in &template.push.states {
-            if state.transitions.keys().any(|&label| !is_negative_label(label)) { return None; }
-        }
-        for target in template.pop_to_read.iter().flatten() { template.read.states.get(*target as usize)?; }
-        for target in template.pop_to_push.iter().chain(&template.read_to_push).flatten() {
-            template.push.states.get(*target as usize)?;
-        }
-        Some(Self { ranks: [ranks(&template.pop)?, ranks(&template.read)?, ranks(&template.push)?] })
+        Self::from_prepared(&super::template_prepare::TemplatePreparation::new(template).ok()?)
     }
 
     pub(crate) fn from_prepared(prepared: &super::template_prepare::TemplatePreparation<'_>) -> Option<Self> {
         let orders = prepared.orders();
-        // Preserve this index's existing empty-phase eligibility rule.
-        if orders.iter().any(Vec::is_empty) { return None; }
-        Some(Self { ranks: [ranks_from_order(&orders[0])?,
-            ranks_from_order(&orders[1])?, ranks_from_order(&orders[2])?] })
+        let graph = &prepared.template().push;
+        let mut push_paths = vec![0u8; graph.states.len()];
+        for &id in orders[2].iter().rev() {
+            let state = &graph.states[id];
+            let mut paths = u8::from(state.is_accepting);
+            for &target in state.transitions.values() {
+                paths = paths.saturating_add(push_paths[target as usize]).min(65);
+            }
+            push_paths[id] = paths;
+        }
+        Some(Self {
+            ranks: [ranks_from_order(&orders[0])?, ranks_from_order(&orders[1])?,
+                ranks_from_order(&orders[2])?],
+            push_paths: push_paths.into_boxed_slice(),
+        })
     }
 
+    pub(super) fn apply_large_push(
+        &self, template: &CommitTemplateDfas, entry: u32, base: &ParserGSS,
+    ) -> Option<ParserGSS> {
+        if *self.push_paths.get(entry as usize)? <= 64 { return None; }
+        if base.is_empty() { return Some(ParserGSS::empty()); }
+        base.single_interface_lower_id()?;
+        Some(self.apply(template, [(Phase::Push, entry, base.clone())], ParserGSS::empty()))
+    }
     fn phase_number(phase: Phase) -> u8 {
         match phase { Phase::Pop => 0, Phase::Read => 1, Phase::Push => 2 }
     }
@@ -103,13 +86,15 @@ impl PreparedPhaseDag {
                        queue: &mut BinaryHeap<Reverse<(u8, u32, u32)>>,
                        phase: u8, id: u32, stacks: ParserGSS| {
             if stacks.is_empty() { return; }
+            let Some(&rank) = self.ranks[phase as usize].get(id as usize) else { return; };
+            if phase == 2 && self.push_paths[id as usize] == 0 { return; }
             match incoming.entry((phase, id)) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let merged = entry.get().merge(&stacks); entry.insert(merged);
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(stacks);
-                    queue.push(Reverse((phase, self.ranks[phase as usize][id as usize], id)));
+                    queue.push(Reverse((phase, rank, id)));
                 }
             }
         };
@@ -123,9 +108,32 @@ impl PreparedPhaseDag {
             let state = &graph.states[id as usize];
             if state.is_accepting { output = output.merge(&stacks); }
             if phase == 2 {
-                for (&label, &target) in &state.transitions {
-                    enqueue(&mut incoming, &mut queue, phase, target,
-                        stacks.push(negative_to_positive_label(label) as u32));
+                // Batch sibling labels with one continuation, preserving the
+                // shared output graph instead of enumerating output words.
+                let mut edges = smallvec::SmallVec::<[(u32, u32); 8]>::new();
+                edges.extend(state.transitions.iter()
+                    .filter(|(_, target)| self.push_paths[**target as usize] != 0)
+                    .map(|(&label, &target)| (target, negative_to_positive_label(label) as u32)));
+                edges.sort_unstable();
+                let mut first = 0;
+                while first < edges.len() {
+                    let target = edges[first].0;
+                    let mut end = first + 1;
+                    while end < edges.len() && edges[end].0 == target { end += 1; }
+                    let siblings = &edges[first..end];
+                    let pushed = if siblings.len() == 1 {
+                        stacks.push(siblings[0].1)
+                    } else {
+                        stacks.apply_shared_pop_push_single_branches(
+                            0, siblings.iter().map(|(_, label)| label),
+                        ).unwrap_or_else(|| {
+                            let mut language = ParserGSS::empty();
+                            for &(_, label) in siblings { language = language.merge(&stacks.push(label)); }
+                            language
+                        })
+                    };
+                    enqueue(&mut incoming, &mut queue, phase, target, pushed);
+                    first = end;
                 }
             } else {
                 for top in stacks.peek_values() {
@@ -254,5 +262,115 @@ mod tests {
         assert!(PreparedPhaseDag::prepare(&bad).is_none());
         let mut bad=t.clone();bad.pop_to_read=vec![Some(10)];
         assert!(PreparedPhaseDag::prepare(&bad).is_none());
+    }
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+    use crate::automata::unweighted_u32::dfa::DFA;
+    use crate::compiler::glr::{accumulator::TerminalsDisallowed, labels::encode_negative_label};
+
+    fn template(push: DFA, entry: u32) -> CommitTemplateDfas {
+        CommitTemplateDfas { pop: DFA::new(), read: DFA::new(), push,
+            pop_to_read: Vec::new(), pop_to_push: vec![Some(entry)], read_to_push: Vec::new() }
+    }
+    fn literal(graph: &DFA, entry: u32, input: &ParserGSS) -> ParserGSS {
+        let mut out = Vec::new();
+        for (stack, acc) in input.to_stacks(100).unwrap() {
+            let mut pending = vec![(entry, stack)];
+            while let Some((i, stack)) = pending.pop() {
+                let state = &graph.states[i as usize];
+                if state.is_accepting { out.push((stack.clone(), acc.clone())); }
+                for (&label, &target) in &state.transitions {
+                    let mut next = stack.clone(); next.push(negative_to_positive_label(label) as u32);
+                    pending.push((target, next));
+                }
+            }
+        }
+        ParserGSS::from_stacks(&out)
+    }
+
+    #[test]
+    fn large_sibling_fanout_batches_each_target_without_losing_words() {
+        for count in [65u32, 200, 400] {
+            let mut graph = DFA::new();
+            let left = graph.add_state(); let right = graph.add_state();
+            graph.set_accepting(left, true); graph.set_accepting(right, true);
+            for label in 0..count {
+                graph.add_transition(0, encode_negative_label(label), if label % 2 == 0 { left } else { right });
+            }
+            let t = template(graph, 0);
+            let plan = PreparedPhaseDag::prepare(&t).unwrap();
+            let input = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+            let actual = plan.apply_large_push(&t, 0, &input).unwrap();
+            let expected = literal(&t.push, 0, &input);
+            assert_eq!(actual.semantically_eq(&expected, 65_536), Some(true));
+            assert_eq!(actual.top_value_count(), count as usize);
+        }
+    }
+
+    #[test]
+    fn graph_native_push_matches_literal_words_for_random_dags_and_multiple_entries() {
+        let mut seed=0x608894u64;
+        let mut next=||{ seed^=seed<<13; seed^=seed>>7; seed^=seed<<17; seed };
+        let mut covered=0;
+        for _ in 0..256 {
+            let mut graph=DFA::new(); for _ in 1..8 { graph.add_state(); }
+            for i in 0..8u32 {
+                graph.set_accepting(i, next()%3==0);
+                if i==7 { continue; }
+                for label in 0..4u32 {
+                    if next()%3==0 { graph.add_transition(i,encode_negative_label(label),i+1+(next()%(7-i) as u64) as u32); }
+                }
+            }
+            let mut t=template(graph,0); t.read.add_state(); t.read_to_push=vec![Some(2),Some(5)];
+            let Some(plan)=PreparedPhaseDag::prepare(&t) else { continue; };
+            let acc=TerminalsDisallowed::new().with_insert(1,3);
+            for entry in [0,2,5] {
+                for input in [ParserGSS::empty(),
+                    ParserGSS::from_single_stack(Vec::new(),acc.clone()),
+                    ParserGSS::from_single_stack(vec![0,6],acc.clone()),
+                    ParserGSS::from_stacks(&[(vec![0,1],acc.clone()),(vec![0,2,3],acc.clone())]),
+                ] {
+                    let expected=literal(&t.push,entry,&input);
+                    let actual=plan.apply(&t, [(Phase::Push, entry, input)], ParserGSS::empty());
+                    covered+=usize::from(!expected.is_empty());
+                    assert_eq!(actual.semantically_eq(&expected,65_536),Some(true));
+                }
+            }
+        }
+        assert!(covered>1_000,"test must exercise reachable accepting entry languages");
+    }
+
+    #[test]
+    fn exponentially_many_outputs_remain_a_linear_shared_graph() {
+        for depth in [8u32,16,24,64,128] {
+            let mut graph=DFA::new();for _ in 0..depth {graph.add_state();}
+            for i in 0..depth { for label in [1,2] {graph.add_transition(i,encode_negative_label(label),i+1);} }
+            graph.set_accepting(depth,true);let t=template(graph,0);
+            let plan=PreparedPhaseDag::prepare(&t).unwrap();
+            let input=ParserGSS::from_single_stack(vec![0],TerminalsDisallowed::new());
+            let actual=plan.apply(0,&input).unwrap();
+            assert_eq!(actual.max_depth(),depth+1);
+            assert!(actual.node_count_at_most(1024)<=depth as usize+5,
+                "2^depth output words must share each DFA layer, not be enumerated: {:?}",actual.summary());
+            assert_eq!(actual.top_value_count(),2);
+            if depth==8 {assert_eq!(actual.semantically_eq(&literal(&t.push,0,&input),1024),Some(true));}
+        }
+    }
+
+    #[test]
+    fn correlated_annotations_decline_and_malformed_graphs_do_not_get_a_plan() {
+        let mut graph=DFA::new();let end=graph.add_state();graph.set_accepting(end,true);
+        graph.add_transition(0,encode_negative_label(1),end);
+        let mut t=template(graph,0);
+        let plan=PreparedPhaseDag::prepare(&t).unwrap();
+        let input=ParserGSS::from_stacks(&[(vec![0,1],TerminalsDisallowed::new()),
+            (vec![0,2],TerminalsDisallowed::new().with_insert(0,3))]);
+        assert!(plan.apply_large_push(&t,0,&input).is_none());
+        t.push.add_transition(end,encode_negative_label(1),0);assert!(PreparedPhaseDag::prepare(&t).is_none());
+        t.push.states[end as usize].transitions.clear();
+        t.push.states[0].transitions.insert(1,end);assert!(PreparedPhaseDag::prepare(&t).is_none());
     }
 }

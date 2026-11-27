@@ -852,8 +852,8 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
                     continue;
                 }
                 if sparse_input
-                    && let Some(plan) = prepared.and_then(|p| p.push_dag.as_ref())
-                    && let Some(outputs) = plan.apply(state_id, &gss)
+                    && let Some(plan) = prepared.and_then(|p| p.phase_dag.as_ref())
+                    && let Some(outputs) = plan.apply_large_push(template, state_id, &gss)
                 {
                     output = output.merge(&outputs);
                     continue;
