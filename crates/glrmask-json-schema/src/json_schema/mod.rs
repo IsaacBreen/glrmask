@@ -12,6 +12,7 @@ pub(crate) mod object;
 pub(crate) mod pattern_splitting;
 pub(crate) mod preflight;
 pub(crate) mod string;
+mod shape;
 
 
 use std::collections::{BTreeMap, HashMap};

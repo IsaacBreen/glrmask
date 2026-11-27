@@ -9,6 +9,7 @@ use super::ast::{
     SchemaKind, SchemaType, TypeDomain,
 };
 use super::error::{ImportResult, SchemaImportError};
+use super::shape::schemas_shape_equivalent;
 use super::lower::{
     choice, never, normalize_local_ref, r, Lowerer, JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_BOOL_RULE, JSON_INTEGER_RULE,
@@ -2497,27 +2498,6 @@ fn broad_string_assertions(assertions: &SchemaAssertions) -> Option<&super::ast:
     assertions.string.as_ref()
 }
 
-fn schemas_shape_equivalent(left: &Schema, right: &Schema) -> bool {
-    match (&left.kind, &right.kind) {
-        (SchemaKind::Any, SchemaKind::Any) | (SchemaKind::Never, SchemaKind::Never) => true,
-        (SchemaKind::Ref(left), SchemaKind::Ref(right)) => left == right,
-        (SchemaKind::Assertions(left), SchemaKind::Assertions(right)) => {
-            left.types == right.types
-                && left.const_value == right.const_value
-                && left.enum_values == right.enum_values
-                && option_objects_shape_equivalent(left.object.as_ref(), right.object.as_ref())
-                && option_arrays_shape_equivalent(left.array.as_ref(), right.array.as_ref())
-                && option_strings_shape_equivalent(left.string.as_ref(), right.string.as_ref())
-                && option_numbers_shape_equivalent(left.number.as_ref(), right.number.as_ref())
-                && schema_slices_shape_equivalent(&left.any_of, &right.any_of)
-                && schema_slices_shape_equivalent(&left.one_of, &right.one_of)
-                && schema_slices_shape_equivalent(&left.all_of, &right.all_of)
-                && option_schemas_shape_equivalent(left.not.as_ref(), right.not.as_ref())
-        }
-        _ => false,
-    }
-}
-
 fn option_schemas_shape_equivalent(left: Option<&Schema>, right: Option<&Schema>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -2525,41 +2505,6 @@ fn option_schemas_shape_equivalent(left: Option<&Schema>, right: Option<&Schema>
         _ => false,
     }
 }
-
-fn option_objects_shape_equivalent(left: Option<&ObjectSchema>, right: Option<&ObjectSchema>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => object_schemas_shape_equivalent(left, right),
-        _ => false,
-    }
-}
-
-fn object_schemas_shape_equivalent(left: &ObjectSchema, right: &ObjectSchema) -> bool {
-    additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
-        && left.required == right.required
-        && left.required_order == right.required_order
-        && option_schemas_shape_equivalent(left.property_names.as_ref(), right.property_names.as_ref())
-        && left.property_dependencies == right.property_dependencies
-        && left.min_properties == right.min_properties
-        && left.max_properties == right.max_properties
-        && left.pattern_properties.len() == right.pattern_properties.len()
-        && left
-            .pattern_properties
-            .iter()
-            .zip(&right.pattern_properties)
-            .all(|(left, right)| {
-                left.pattern == right.pattern && schemas_shape_equivalent(&left.schema, &right.schema)
-            })
-        && left.properties.len() == right.properties.len()
-        && left
-            .properties
-            .iter()
-            .zip(&right.properties)
-            .all(|(left, right)| {
-                left.name == right.name && schemas_shape_equivalent(&left.schema, &right.schema)
-            })
-}
-
 fn is_singleton_string_discriminator_object_candidate(object: &ObjectSchema) -> bool {
     object.pattern_properties.is_empty()
         && object.property_dependencies.is_empty()
@@ -2836,10 +2781,7 @@ fn extract_singleton_string_literal(schema: &Schema) -> Option<String> {
     {
         return None;
     }
-    if !option_strings_shape_equivalent(
-        assertions.string.as_ref(),
-        Some(&super::ast::StringSchema::default()),
-    ) {
+    if assertions.string.as_ref().is_some_and(|string| *string != super::ast::StringSchema::default()) {
         return None;
     }
     if let Some(Value::String(value)) = &assertions.const_value {
@@ -2909,65 +2851,6 @@ fn additional_properties_shape_equivalent(
         }
         _ => false,
     }
-}
-
-fn option_arrays_shape_equivalent(
-    left: Option<&super::ast::ArraySchema>,
-    right: Option<&super::ast::ArraySchema>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.min_items == right.min_items
-                && left.max_items == right.max_items
-                && schemas_shape_equivalent(&left.items, &right.items)
-                && schema_slices_shape_equivalent(&left.prefix_items, &right.prefix_items)
-        }
-        _ => false,
-    }
-}
-
-fn option_strings_shape_equivalent(
-    left: Option<&super::ast::StringSchema>,
-    right: Option<&super::ast::StringSchema>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.min_length == right.min_length
-                && left.max_length == right.max_length
-                && left.pattern == right.pattern
-                && left.format == right.format
-        }
-        _ => false,
-    }
-}
-
-fn option_numbers_shape_equivalent(
-    left: Option<&super::ast::NumberSchema>,
-    right: Option<&super::ast::NumberSchema>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.integer == right.integer
-                && left.minimum == right.minimum
-                && left.maximum == right.maximum
-                && left.exclusive_minimum == right.exclusive_minimum
-                && left.exclusive_maximum == right.exclusive_maximum
-                && left.multiple_of == right.multiple_of
-                && left.format == right.format
-        }
-        _ => false,
-    }
-}
-
-fn schema_slices_shape_equivalent(left: &[Schema], right: &[Schema]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| schemas_shape_equivalent(left, right))
 }
 
 fn sibling_assertion_schema(assertions: &SchemaAssertions) -> Option<Schema> {
@@ -3783,61 +3666,35 @@ fn merge_property_schemas(left: Schema, right: Schema) -> Schema {
     }
 }
 
+fn assertions_are_type_only(assertions: &SchemaAssertions) -> bool {
+    !assertions.has_combinators() && assertions.const_value.is_none() && assertions.enum_values.is_none()
+        && assertions.object.as_ref().is_none_or(object_schema_is_unconstrained_open)
+        && assertions.array.as_ref().is_none_or(|array| {
+            array_is_bounds_only(array) && array.min_items == 0 && array.max_items.is_none()
+        })
+        && assertions.string.as_ref().is_none_or(|string| *string == super::ast::StringSchema::default())
+        && assertions.number.as_ref().is_none_or(|number| *number == super::ast::NumberSchema::default())
+}
+
+fn schema_is_only_domain(schema: &Schema, domain: TypeDomain) -> bool {
+    match &schema.kind {
+        SchemaKind::Any => domain == TypeDomain::ANY,
+        SchemaKind::Never => domain == TypeDomain::NEVER,
+        SchemaKind::Ref(_) => false,
+        SchemaKind::Assertions(assertions) => {
+            TypeDomain::declared(assertions.types.as_deref()) == domain
+                && assertions_are_type_only(assertions)
+        }
+    }
+}
+
 fn is_vacuous_json_value_schema(schema: &Schema) -> bool {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return matches!(schema.kind, SchemaKind::Any);
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return false;
-    }
-    if !option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default()))
-        || !option_arrays_shape_equivalent(assertions.array.as_ref(), Some(&super::ast::ArraySchema::default()))
-        || !option_strings_shape_equivalent(assertions.string.as_ref(), Some(&super::ast::StringSchema::default()))
-        || !option_numbers_shape_equivalent(assertions.number.as_ref(), Some(&super::ast::NumberSchema::default()))
-    {
-        return false;
-    }
-    let Some(types) = &assertions.types else {
-        return true;
-    };
-    types.contains(&SchemaType::Null)
-        && types.contains(&SchemaType::Boolean)
-        && types.contains(&SchemaType::Object)
-        && types.contains(&SchemaType::Array)
-        && types.contains(&SchemaType::String)
-        && types.contains(&SchemaType::Number)
+    schema_is_only_domain(schema, TypeDomain::ANY)
 }
 
 fn is_vacuous_object_schema(schema: &Schema) -> bool {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return false;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return false;
-    }
-    let Some(types) = &assertions.types else {
-        return false;
-    };
-    if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
-        return false;
-    }
-    (assertions.object.is_none()
-        || option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default())))
-        && assertions.array.is_none()
-        && assertions.string.is_none()
-        && assertions.number.is_none()
+    schema_is_only_domain(schema, TypeDomain::of(SchemaType::Object))
 }
-
 fn drop_vacuous_string_branches(branches: Vec<Schema>) -> Vec<Schema> {
     let has_non_vacuous_string_branch = branches
         .iter()
@@ -3852,34 +3709,8 @@ fn drop_vacuous_string_branches(branches: Vec<Schema>) -> Vec<Schema> {
 }
 
 fn is_vacuous_string_schema(schema: &Schema) -> bool {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return false;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return false;
-    }
-    let Some(types) = &assertions.types else {
-        return false;
-    };
-    if !types.iter().all(|schema_type| *schema_type == SchemaType::String) {
-        return false;
-    }
-    assertions.object.is_none()
-        && assertions.array.is_none()
-        && (assertions.string.is_none()
-            || option_strings_shape_equivalent(
-                assertions.string.as_ref(),
-                Some(&super::ast::StringSchema::default()),
-            ))
-        && assertions.number.is_none()
+    schema_is_only_domain(schema, TypeDomain::of(SchemaType::String))
 }
-
 fn schema_has_string_family(schema: &Schema) -> bool {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return false;

@@ -259,6 +259,50 @@ pub struct NumberSchema {
     pub format: Option<String>,
 }
 
+impl SchemaAssertions {
+    /// Every immediate schema child, in the order used by structural shape
+    /// observations. Instance/annotation values are deliberately not children.
+    pub(crate) fn children(&self) -> impl Iterator<Item = &Schema> {
+        self.any_of.iter().chain(&self.one_of).chain(&self.all_of).chain(&self.not)
+            .chain(self.object.iter().flat_map(|object| {
+                object.properties.iter().map(|property| &property.schema)
+                    .chain(object.pattern_properties.iter().map(|property| &property.schema))
+                    .chain(&object.property_names)
+                    .chain(match &object.additional_properties {
+                        AdditionalProperties::Schema(schema) => Some(schema.as_ref()),
+                        _ => None,
+                    })
+            }))
+            .chain(self.array.iter().flat_map(|array| {
+                std::iter::once(array.items.as_ref()).chain(&array.prefix_items)
+            }))
+    }
+
+    pub(crate) fn has_combinators(&self) -> bool {
+        !self.any_of.is_empty() || !self.one_of.is_empty() || !self.all_of.is_empty() || self.not.is_some()
+    }
+}
+
+impl Schema {
+    pub(crate) fn children(&self) -> impl Iterator<Item = &Schema> {
+        match &self.kind {
+            SchemaKind::Assertions(assertions) => Some(assertions.as_ref()),
+            _ => None,
+        }.into_iter().flat_map(SchemaAssertions::children)
+    }
+
+    pub(crate) fn descendants(&self) -> impl Iterator<Item = &Schema> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            let node = stack.pop()?;
+            let start = stack.len();
+            stack.extend(node.children());
+            stack[start..].reverse();
+            Some(node)
+        })
+    }
+}
+
 impl Schema {
     pub fn normalize_locations_relative(&mut self) {
         let root = self.location.clone();
