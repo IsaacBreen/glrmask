@@ -563,65 +563,58 @@ impl ResidualArena {
         }
     }
 
-    fn has_nonempty_fast(&mut self, id: ResidualId) -> Option<bool> {
-        match self.nodes[id as usize].clone() {
-            ResidualNode::Empty | ResidualNode::Epsilon => Some(false),
-            ResidualNode::SigmaStar => Some(true),
-            ResidualNode::Literal { .. } | ResidualNode::Class(_) => Some(true),
-            // `Expr::Dfa` is allowed to carry stale derived future metadata,
-            // so there is no metadata-only fast proof here. Let the ordinary
-            // bounded derivative reachability below answer this exactly; that
-            // keeps arbitrary embedded-DFA graphs under the same hard work
-            // ceilings as every other non-structural residual.
-            ResidualNode::Dfa { .. } => None,
-            ResidualNode::Choice(parts) => {
-                let mut unknown = false;
-                for &part in parts.iter() {
-                    match self.has_nonempty_fast(part) {
-                        Some(true) => return Some(true),
-                        Some(false) => {}
-                        None => unknown = true,
-                    }
-                }
-                (!unknown).then_some(false)
+    /// Positive-word existence for regular constructors. Unknown leaves
+    /// (Boolean relations and arbitrary embedded DFAs) are the only reason
+    /// to invoke a derivative-graph proof. A sequence with nonnullable
+    /// factors requires all those factors to have a word; nullable factors
+    /// may contribute epsilon. An entirely nullable sequence needs at least
+    /// one positive factor. These are exact rules even in the three-valued
+    /// cheap evaluation, not approximations to the language.
+    fn structural_future(
+        &mut self,
+        id: ResidualId,
+        mut child: impl FnMut(&mut Self, ResidualId) -> Result<Option<bool>, String>,
+    ) -> Result<Option<bool>, String> {
+        let (parts, all_required) = match self.nodes[id as usize].clone() {
+            ResidualNode::Empty | ResidualNode::Epsilon => return Ok(Some(false)),
+            ResidualNode::SigmaStar | ResidualNode::Literal { .. } | ResidualNode::Class(_) => {
+                return Ok(Some(true));
             }
-            ResidualNode::Seq(parts) => {
-                let mut any_nonempty = false;
-                let mut unknown = false;
-                for &part in parts.iter() {
-                    let any_word = if self.is_nullable(part) {
-                        Some(true)
-                    } else {
-                        self.has_nonempty_fast(part)
-                    };
-                    match any_word {
-                        Some(false) => return Some(false),
-                        Some(true) => {}
-                        None => unknown = true,
-                    }
-                    match self.has_nonempty_fast(part) {
-                        Some(true) => any_nonempty = true,
-                        Some(false) => {}
-                        None => unknown = true,
-                    }
-                }
-                if !unknown {
-                    Some(any_nonempty)
-                } else {
-                    None
-                }
+            ResidualNode::Dfa { .. } | ResidualNode::Intersect(_, _) | ResidualNode::Exclude(_, _) => {
+                // Embedded DFA future metadata may be stale. Boolean leaves
+                // likewise need an exact bounded derivative reachability proof.
+                return Ok(None);
             }
             ResidualNode::Repeat { body, max, .. } => {
-                if max == Some(0) {
-                    Some(false)
-                } else {
-                    self.has_nonempty_fast(body)
-                }
+                return if max == Some(0) { Ok(Some(false)) } else { child(self, body) };
             }
-            ResidualNode::Intersect(_, _) | ResidualNode::Exclude(_, _) => None,
+            ResidualNode::Choice(parts) => (parts, false),
+            ResidualNode::Seq(parts) => {
+                let all_required = parts.iter().any(|&part| !self.is_nullable(part));
+                (parts, all_required)
+            }
+        };
+        let mut unknown = false;
+        for &part in parts.iter() {
+            if all_required && self.is_nullable(part) { continue; }
+            match child(self, part)? {
+                Some(value) if value != all_required => return Ok(Some(value)),
+                Some(_) => {}
+                None => unknown = true,
+            }
         }
+        Ok((!unknown).then_some(all_required))
     }
 
+    fn has_nonempty_fast(&mut self, id: ResidualId) -> Option<bool> {
+        if let Some(value) = self.nonempty_cache[id as usize] { return Some(value); }
+        let value = self.structural_future(id, |arena, child| Ok(arena.has_nonempty_fast(child)))
+            .expect("structural-only evaluation is infallible");
+        if let Some(value) = value {
+            self.nonempty_cache[id as usize] = Some(value);
+        }
+        value
+    }
     /// Byte alphabet that can possibly begin a nonempty word of this
     /// residual. For exclusion this is deliberately an over-approximation
     /// (`FIRST(left)`), which is sufficient for exact reachability because the
@@ -726,56 +719,11 @@ impl ResidualArena {
             return Ok(value);
         }
 
-        // Positive-word existence composes exactly through these regular
-        // operators. Resolve their children independently so a giant repeat
-        // never turns a hard *body* liveness question into a search over its
-        // repetition counter. Boolean language relations remain on the general
-        // derivative-graph fallback below.
-        let structural = match self.nodes[id as usize].clone() {
-            ResidualNode::Choice(parts) => {
-                let mut live = false;
-                for &part in parts.iter() {
-                    if self.has_future_with_work_budget(part, budget)? {
-                        live = true;
-                        break;
-                    }
-                }
-                Some(live)
-            }
-            ResidualNode::Seq(parts) => {
-                let has_nonnullable = parts.iter().any(|&part| !self.is_nullable(part));
-                if has_nonnullable {
-                    let mut live = true;
-                    for &part in parts.iter() {
-                        if self.is_nullable(part) {
-                            continue;
-                        }
-                        if !self.has_future_with_work_budget(part, budget)? {
-                            live = false;
-                            break;
-                        }
-                    }
-                    // Every live nonnullable component contributes at least one
-                    // byte, while nullable siblings can always contribute
-                    // epsilon. Their positive-word languages are irrelevant.
-                    Some(live)
-                } else {
-                    let mut live = false;
-                    for &part in parts.iter() {
-                        if self.has_future_with_work_budget(part, budget)? {
-                            live = true;
-                            break;
-                        }
-                    }
-                    Some(live)
-                }
-            }
-            ResidualNode::Repeat { body, max, .. } => Some(
-                max != Some(0) && self.has_future_with_work_budget(body, budget)?,
-            ),
-            _ => None,
-        };
-        if let Some(value) = structural {
+        // Reuse the same structural algebra with an exact child resolver.
+        // In particular, giant repetition counters never become search depth.
+        let structural = self.structural_future(id, |arena, child| {
+            arena.has_future_with_work_budget(child, budget).map(Some)
+        })?;        if let Some(value) = structural {
             self.nonempty_cache[id as usize] = Some(value);
             return Ok(value);
         }
