@@ -98,11 +98,6 @@ impl LeafObservation {
     }
 }
 
-/// Previous unpublished experimental tag had no full-vocabulary horizon or
-/// transport identity. It is decoded only to return a precise rebuild error.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct LegacyRecursiveStaticObservation { pub(crate) leaf_offsets: Vec<u32> }
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RecursiveStaticObservation {
     /// Finite leaves follow synthetic root 0; final entry is exclusive end.
