@@ -706,8 +706,8 @@ fn advance_relation(
     // Preserve the established scoped/correlated traversal order. The
     // prepared cursor and bulk accelerators here still use local symbols.
     let sparse_input = scope.is_none() && stack.single_interface_lower_id().is_some();
-    let seeded = prepared.and_then(|index| index.input_cursor.as_ref())
-        .and_then(|cursor| cursor.apply(template, &stack));
+    let seeded = prepared.and_then(|index| index.phase_dag.as_ref())
+        .and_then(|cursor| cursor.apply_input_cursor(template, &stack));
     let (mut output, mut worklist) = match seeded {
         Some(result) => {
             let mut worklist = SmallVec::<[(Phase, u32, ParserGSS); 8]>::new();

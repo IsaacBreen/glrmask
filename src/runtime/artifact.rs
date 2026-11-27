@@ -1733,7 +1733,6 @@ pub(crate) struct FastCommitTemplateDfas {
     // Arc::make_mut detach any subsequently modified source.
     source: Option<Arc<CommitTemplateDfas>>,
     pub(crate) read_shift: Option<Box<super::commit::simple_read_shift::PreparedReadShift>>,
-    pub(crate) input_cursor: Option<super::commit::single_cursor::PreparedInputCursor>,
     pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
     pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
     input_rows: [WideTemplateRows; 2],
@@ -1745,7 +1744,6 @@ impl std::fmt::Debug for FastCommitTemplateDfas {
         // The ownership witness is not another execution graph to print.
         f.debug_struct("FastCommitTemplateDfas")
             .field("read_shift", &self.read_shift)
-            .field("input_cursor", &self.input_cursor)
             .field("phase_dag", &self.phase_dag)
             .field("push_suffixes", &self.push_suffixes)
             .field("wide_input_rows", &self.input_rows)
@@ -1795,26 +1793,17 @@ impl FastCommitTemplateDfas {
 
     fn from_preparation(template: &CommitTemplateDfas,
         prepared: Option<&super::commit::template_prepare::TemplatePreparation<'_>>) -> Self {
-        let (input_cursor, phase_dag, push_suffixes) = match prepared {
-            Some(prepared) => (
-                Some(super::commit::single_cursor::PreparedInputCursor::from_prepared(prepared)),
-                super::commit::phase_dag::PreparedPhaseDag::from_prepared(prepared),
-                super::commit::push_suffixes::from_prepared(prepared),
-            ),
-            // Preserve the independent helpers' behavior for legacy optional
-            // templates that do not qualify for whole-program preparation.
-            // This is not parser-table fallback; it selects the same derived
-            // views as before and the exact template evaluator remains intact.
-            None => (
-                super::commit::single_cursor::PreparedInputCursor::prepare(template),
-                super::commit::phase_dag::PreparedPhaseDag::prepare(template),
-                super::commit::push_suffixes::prepare(template),
-            ),
+        let phase_dag = prepared.and_then(super::commit::phase_dag::PreparedPhaseDag::from_prepared);
+        let push_suffixes = match prepared {
+            Some(prepared) => super::commit::push_suffixes::from_prepared(
+                prepared, phase_dag.as_ref().map(|plan| plan.push_paths())),
+            // A legacy malformed optional graph may still have a valid PUSH
+            // language. Preserve this bounded independent fallback.
+            None => super::commit::push_suffixes::prepare(template),
         };
         Self {
             source: None,
             read_shift: prepared.and_then(|_| super::commit::simple_read_shift::PreparedReadShift::prepare(template)),
-            input_cursor,
             phase_dag,
             push_suffixes,
             input_rows: [wide_template_rows(&template.pop), wide_template_rows(&template.read)],

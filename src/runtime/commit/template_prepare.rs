@@ -7,7 +7,6 @@ pub(crate) use glrmask_parser_dwa::__private::templates::admissibility::Validate
 mod tests {
     use super::super::{
         phase_dag::PreparedPhaseDag, push_suffixes,
-        single_cursor::PreparedInputCursor,
     };
     use super::*;
     use crate::automata::unweighted_u32::dfa::DFA;
@@ -20,16 +19,12 @@ mod tests {
         // The old entry points validate/prepare independently. Compare every
         // derived field, not only behavior on one exercised stack.
         assert_eq!(
-            format!("{:?}", PreparedInputCursor::prepare(template)),
-            format!("{:?}", Some(PreparedInputCursor::from_prepared(&prepared)))
-        );
-        assert_eq!(
             format!("{:?}", PreparedPhaseDag::prepare(template)),
             format!("{:?}", PreparedPhaseDag::from_prepared(&prepared))
         );
         assert_eq!(
             format!("{:?}", push_suffixes::prepare(template)),
-            format!("{:?}", push_suffixes::from_prepared(&prepared))
+            format!("{:?}", push_suffixes::from_prepared(&prepared, PreparedPhaseDag::from_prepared(&prepared).as_ref().map(|plan| plan.push_paths())))
         );
     }
 

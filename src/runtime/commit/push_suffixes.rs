@@ -9,7 +9,7 @@ use crate::compiler::glr::labels::{is_negative_label, negative_to_positive_label
 use crate::compiler::glr::parser::ParserGSS;
 use crate::runtime::CommitTemplateDfas;
 
-const MAX_PATHS: usize = 64;
+const MAX_PATHS: usize = super::phase_dag::PUSH_PATH_LIMIT as usize;
 const MAX_LENGTH: usize = 8;
 const MAX_TOTAL_SYMBOLS: usize = 4_096;
 
@@ -69,16 +69,23 @@ pub(crate) fn prepare(template: &CommitTemplateDfas) -> Vec<Option<PreparedPushS
         }
     }
     if order.len() != n { return empty(); }
-    prepare_with_order(template, &order)
+    let counts = super::phase_dag::push_path_counts(template, &order);
+    prepare_with_order(template, &order, &counts)
 }
 
 pub(crate) fn from_prepared(
     prepared: &super::template_prepare::TemplatePreparation<'_>,
+    counts: Option<&[u8]>,
 ) -> Vec<Option<PreparedPushSuffixes>> {
-    prepare_with_order(prepared.template(), prepared.push_order())
+    let owned;
+    let counts = if let Some(counts) = counts { counts } else {
+        owned = super::phase_dag::push_path_counts(prepared.template(), prepared.push_order());
+        &owned
+    };
+    prepare_with_order(prepared.template(), prepared.push_order(), counts)
 }
 
-fn prepare_with_order(template: &CommitTemplateDfas, order: &[usize]) -> Vec<Option<PreparedPushSuffixes>> {
+fn prepare_with_order(template: &CommitTemplateDfas, order: &[usize], counts: &[u8]) -> Vec<Option<PreparedPushSuffixes>> {
     let graph = &template.push;
     let n = graph.states.len();
     let empty = || (0..n).map(|_| None).collect::<Vec<_>>();
@@ -89,22 +96,20 @@ fn prepare_with_order(template: &CommitTemplateDfas, order: &[usize]) -> Vec<Opt
         let Some(slot) = entry.get_mut(*target as usize) else { return empty(); };
         *slot = true;
     }
-    let mut counts = vec![0usize; n];
     let mut lengths = vec![0usize; n];
     for &i in order.iter().rev() {
-        counts[i] = usize::from(graph.states[i].is_accepting);
         for &target in graph.states[i].transitions.values() {
             let child = target as usize;
-            counts[i] = (counts[i] + counts[child]).min(MAX_PATHS + 1);
             if counts[child] != 0 { lengths[i] = lengths[i].max((lengths[child]+1).min(MAX_LENGTH+1)); }
         }
     }
     let mut plans = empty();
     let mut used = 0usize;
     for start in 0..n {
-        if !entry[start] || counts[start] < 4 || counts[start] > MAX_PATHS || lengths[start] > MAX_LENGTH { continue; }
-        if used.saturating_add(counts[start] * lengths[start]) > MAX_TOTAL_SYMBOLS { continue; }
-        let mut paths = Vec::with_capacity(counts[start]);
+        let count = counts[start] as usize;
+        if !entry[start] || count < 4 || count > MAX_PATHS || lengths[start] > MAX_LENGTH { continue; }
+        if used.saturating_add(count * lengths[start]) > MAX_TOTAL_SYMBOLS { continue; }
+        let mut paths = Vec::with_capacity(count);
         let mut pending = vec![(start, Vec::<u32>::new())];
         let mut accepts_empty = false;
         while let Some((at, path)) = pending.pop() {
@@ -119,7 +124,7 @@ fn prepare_with_order(template: &CommitTemplateDfas, order: &[usize]) -> Vec<Opt
                 pending.push((target as usize, next));
             }
         }
-        debug_assert_eq!(paths.len() + usize::from(accepts_empty), counts[start]);
+        debug_assert_eq!(paths.len() + usize::from(accepts_empty), count);
         plans[start] = Some(PreparedPushSuffixes {
             accepts_empty,
             single_symbols: paths.iter().all(|s| s.len() == 1),
