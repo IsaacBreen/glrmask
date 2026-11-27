@@ -172,36 +172,6 @@ fn env_flag(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Bound parser-conditioned scalar liveness checks during exact config walks.
-///
-/// Four consecutive non-pruning checks was neutral in the first 1k corpus and
-/// substantially reduced later JSON-schema tails.  Keep the historical env
-/// knob as an override: `0`/`false` disables the bounded checks, `1`/`true`
-/// retains the old experimental 32-check interpretation, and an integer sets
-/// an explicit budget.
-#[inline]
-fn config_scalar_conditioned_budget() -> Option<u32> {
-    static BUDGET: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        match crate::env::var("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_BUDGET") {
-            Ok(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty()
-                    || trimmed == "0"
-                    || trimmed.eq_ignore_ascii_case("false")
-                {
-                    None
-                } else if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
-                    Some(32)
-                } else {
-                    Some(trimmed.parse::<u32>().unwrap_or(32))
-                }
-            }
-            Err(_) => Some(4),
-        }
-    })
-}
-
 trait FullWalkTransitionTable {
     type Cell: Copy;
 
@@ -3888,6 +3858,52 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     result
 }
 
+/// The preorder walk partitions visited token markers into disjoint spans.
+/// A gap belongs to an externally proved/skipped output scope, not to either
+/// verdict. Retain it as a gap so either output polarity can be replayed.
+#[derive(Default)]
+struct DeferredWalkOutput {
+    spans: Vec<(std::ops::Range<usize>, bool)>,
+    work: [usize; 2],
+}
+
+impl DeferredWalkOutput {
+    fn record(&mut self, start: usize, end: usize, allowed: bool, original_count: usize) {
+        self.work[usize::from(allowed)] += original_count;
+        if start == end { return; }
+        if let Some((previous, verdict)) = self.spans.last_mut() {
+            debug_assert!(previous.end <= start);
+            if *verdict == allowed && previous.end == start {
+                previous.end = end;
+                return;
+            }
+        }
+        self.spans.push((start..end, allowed));
+    }
+
+    fn emit(self, vocab: &DynamicMaskVocab, token_markers: &[u64], buf: &mut [u32]) {
+        let positive = self.work[1] <= self.work[0];
+        if positive {
+            buf.fill(0);
+        } else {
+            let all_words = vocab.all_original_token_words();
+            let copy_len = buf.len().min(all_words.len());
+            buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
+            buf[copy_len..].fill(0);
+        }
+        for (span, allowed) in self.spans {
+            if allowed != positive { continue; }
+            for &marker in &token_markers[span] {
+                if positive {
+                    mark_dynamic_token_marker(vocab, marker, buf);
+                } else {
+                    clear_dynamic_token_marker(vocab, marker, buf);
+                }
+            }
+        }
+    }
+}
+
 struct FullWalkTraversalPlan {
     master_decision: Option<(u16, bool)>,
     safe_envelope_upper: Option<u16>,
@@ -3920,12 +3936,7 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
         dense_root_bytes, include_empty_root,
     } = plan;
     let single_root = root_branches.len() == 1;
-    let mut deferred_allowed_markers = Vec::<u64>::new();
-    let mut deferred_rejected_markers = Vec::<u64>::new();
-    let mut deferred_dead_subtrees = Vec::<u32>::new();
-    let mut deferred_admitted_subtrees = Vec::<u32>::new();
-    let mut deferred_positive_work = 0usize;
-    let mut deferred_negative_work = 0usize;
+    let mut deferred = DeferredWalkOutput::default();
     let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
     let scoped_pruning = transitions.parser_conditioned_dead_skip_default();
     let mut cache = FullWalkProductCache::new(transitions.product_transition_cache_capacity());
@@ -3934,21 +3945,11 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
     // Memoized product edges must not depend on traversal history.
     let probe_budget = if scoped_pruning || cache.capacity != 0
         || crate::env::var_os("GLRMASK_PROFILE_SKIP_PREFIX_PROBES").is_some()
-        || (state.generation != 0 && crate::env::var_os(
-            "GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_INITIAL_ONLY"
-        ).is_some())
     {
         0
     } else {
-        config_scalar_conditioned_budget().unwrap_or_else(|| {
-            if crate::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED").is_some()
-                || crate::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP").is_some()
-            {
-                u32::MAX
-            } else {
-                0
-            }
-        })
+        // Stop probing after four consecutive checks that prune nothing.
+        4
     };
     let mut roots = FullWalkProduct::default();
     let direct = first_match_direct_root.map(|(coordinate, parser, terminal)| FullWalkDirect {
@@ -4174,12 +4175,12 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
         }
 
         if frame.is_dead(&cache) {
+            let marker_start = token_marker_index;
             let (child, count) = full_walk_skip_dead_subtree_generic_deferred(
                 vocab, trie, walk_ops, &mut remaining_ops, &mut token_marker_index,
             );
             if deferred_output {
-                deferred_dead_subtrees.push(child);
-                deferred_negative_work += count;
+                deferred.record(marker_start, token_marker_index, false, count);
             } else if !positive_rebuild && !sparse_positive_rebuild {
                 for &id in vocab.subtree_original_tokens_for(trie, child) {
                     clear_mask_bit_known_in_range(buf, id);
@@ -4207,8 +4208,9 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                 {
                     let original_count = vocab.subtree_original_tokens_for(trie, child).len();
                     if deferred_output {
-                        deferred_positive_work += original_count;
-                        deferred_admitted_subtrees.push(child);
+                        let end = trie.subtree_token_index_range(child).end
+                            - usize::from(trie.node(0).token_id.is_some());
+                        deferred.record(token_marker_index, end, true, original_count);
                     } else if positive_rebuild || sparse_positive_rebuild {
                         for &id in vocab.subtree_original_tokens_for(trie, child) {
                             buf[id as usize / 32] |= 1 << (id % 32);
@@ -4239,8 +4241,8 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                 if allowed {
                     if profile_generic_work { profile_allowed_token_endpoints += 1; }
                     if deferred_output {
-                        deferred_positive_work += dynamic_token_marker_original_count(vocab, token_marker);
-                        deferred_allowed_markers.push(token_marker);
+                        deferred.record(token_marker_index - 1, token_marker_index, true,
+                            dynamic_token_marker_original_count(vocab, token_marker));
                     } else if positive_rebuild || sparse_positive_rebuild {
                         mark_dynamic_token_marker(vocab, token_marker, buf);
                     }
@@ -4250,8 +4252,8 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                         profile_blocked_original_tokens += dynamic_token_marker_original_count(vocab, token_marker);
                     }
                     if deferred_output {
-                        deferred_negative_work += dynamic_token_marker_original_count(vocab, token_marker);
-                        deferred_rejected_markers.push(token_marker);
+                        deferred.record(token_marker_index - 1, token_marker_index, false,
+                            dynamic_token_marker_original_count(vocab, token_marker));
                     } else if !positive_rebuild && !sparse_positive_rebuild {
                         clear_dynamic_token_marker(vocab, token_marker, buf);
                     }
@@ -4269,34 +4271,8 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
     drop(kernel);
 
     if deferred_output {
-        if deferred_positive_work <= deferred_negative_work {
-            buf.fill(0);
-            for marker in deferred_allowed_markers {
-                mark_dynamic_token_marker(vocab, marker, buf);
-            }
-            for child in deferred_admitted_subtrees {
-                for &canonical in trie.subtree_tokens(child) {
-                    for &(word, bits) in vocab.token_word_masks(canonical) {
-                        if let Some(slot) = buf.get_mut(word as usize) { *slot |= bits; }
-                    }
-                }
-            }
-        } else {
-            let all_words = vocab.all_original_token_words();
-            let copy_len = buf.len().min(all_words.len());
-            buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
-            if copy_len < buf.len() {
-                buf[copy_len..].fill(0);
-            }
-            for child in deferred_dead_subtrees {
-                for &token_id in vocab.subtree_original_tokens_for(trie, child) {
-                    clear_mask_bit_known_in_range(buf, token_id);
-                }
-            }
-            for marker in deferred_rejected_markers {
-                clear_dynamic_token_marker(vocab, marker, buf);
-            }
-        }
+        let [deferred_negative_work, deferred_positive_work] = deferred.work;
+        deferred.emit(vocab, token_markers, buf);
         // Empty-byte aliases live at the root, outside the edge-marker stream.
         // The eager output starts with these set; reproduce that exact root
         // contribution when the positive adaptive emitter starts from zero.
