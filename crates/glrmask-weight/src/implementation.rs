@@ -114,12 +114,22 @@ impl ScopedWeightOpEntry {
     }
 }
 
+/// Pointer-keyed bulk token unions may survive several calls in a scoped
+/// cache. Keep weak allocation identities so a dropped operand cannot have
+/// its address reused while the corresponding cache entry is live.
+struct BulkTokenUnionEntry {
+    _operands: Vec<Weak<RangeSetBlaze<u32>>>,
+    result: SharedTokenSet,
+}
+
+type BulkTokenUnionCache = FxHashMap<Vec<usize>, BulkTokenUnionEntry>;
+
 #[derive(Default)]
 pub struct ScopedWeightOpCache {
     union_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
     intersection_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
     difference_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
-    bulk_token_union_entries: FxHashMap<Vec<usize>, SharedTokenSet>,
+    bulk_token_union_entries: BulkTokenUnionCache,
 }
 
 impl ScopedWeightOpCache {
@@ -609,40 +619,31 @@ fn shared_token_union(left: &SharedTokenSet, right: &SharedTokenSet) -> SharedTo
     }
 }
 
-fn shared_token_union_many(tokens: &[SharedTokenSet]) -> Option<SharedTokenSet> {
-    match tokens.len() {
-        0 => None,
-        1 => Some(Arc::clone(&tokens[0])),
-        2 => Some(shared_token_union(&tokens[0], &tokens[1])),
-        _ => {
-            let mut ranges = Vec::<(u32, u32)>::new();
-            for token_set in tokens {
-                ranges.extend(
-                    token_set
-                        .ranges()
-                        .map(|range| (*range.start(), *range.end())),
-                );
-            }
-            if ranges.is_empty() {
-                return None;
-            }
-            ranges.sort_unstable();
+fn shared_token_union_many(tokens: &[&SharedTokenSet]) -> Option<SharedTokenSet> {
+    debug_assert!(tokens.len() >= 3);
+    let mut ranges = Vec::<(u32, u32)>::new();
+    for token_set in tokens {
+        ranges.extend(token_set.ranges().map(|range| (*range.start(), *range.end())));
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_unstable();
 
-            let mut merged = Vec::with_capacity(ranges.len());
-            let mut current = ranges[0];
-            for (start, end) in ranges.into_iter().skip(1) {
-                if start <= current.1.saturating_add(1) {
-                    current.1 = current.1.max(end);
-                } else {
-                    merged.push(current.0..=current.1);
-                    current = (start, end);
-                }
-            }
+    let mut merged = Vec::with_capacity(ranges.len());
+    let mut current = ranges[0];
+    for (start, end) in ranges.into_iter().skip(1) {
+        if start <= current.1.saturating_add(1) {
+            current.1 = current.1.max(end);
+        } else {
             merged.push(current.0..=current.1);
-
-            Some(shared_rangeset(RangeSetBlaze::from_iter(merged)))
+            current = (start, end);
         }
     }
+    merged.push(current.0..=current.1);
+    Some(shared_rangeset(RangeSetBlaze::from_sorted_disjoint(
+        CheckSortedDisjoint::new(merged),
+    )))
 }
 
 fn shared_token_intersection(
@@ -1782,7 +1783,7 @@ fn union_all_multiway_impl(weights: &[&Weight], coalesce_repeated_token_ranges: 
 
 fn union_all_multiway_with_token_cache(
     weights: &[&Weight],
-    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+    token_union_cache: &mut BulkTokenUnionCache,
 ) -> Weight {
     union_all_multiway_impl_with_token_cache(weights, false, token_union_cache)
 }
@@ -1790,7 +1791,7 @@ fn union_all_multiway_with_token_cache(
 fn union_all_multiway_impl_with_token_cache(
     weights: &[&Weight],
     coalesce_repeated_token_ranges: bool,
-    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+    token_union_cache: &mut BulkTokenUnionCache,
 ) -> Weight {
     let total_entry_hint: usize = weights.iter().map(|w| w.0.range_values_len()).sum();
     let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
@@ -1827,192 +1828,148 @@ fn union_all_multiway_impl_with_token_cache(
         return builder.finish();
     }
 
-    // The compact rescan path avoids tree-map overhead for the small common
-    // case; the event sweep avoids pathological repeated scans for larger
-    // overlapping unions.
-    const INCREMENTAL_SWEEP_MIN_ENTRIES: usize = 64;
-    if all_entries.len() < INCREMENTAL_SWEEP_MIN_ENTRIES {
-        return union_all_multiway_rescan_with_cache(all_entries, token_union_cache);
-    }
-    union_all_multiway_incremental_with_cache(all_entries, token_union_cache)
+    union_all_multiway_sweep(&all_entries, token_union_cache)
 }
 
 fn union_all_multiway(weights: &[&Weight]) -> Weight {
     union_all_multiway_impl(weights, false)
 }
 
-fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
-    let mut token_union_cache = FxHashMap::default();
-    union_all_multiway_rescan_with_cache(all_entries, &mut token_union_cache)
+/// The same ordered multiset of active token identities has two storage
+/// policies: a small contiguous array for short sweeps, a tree for large
+/// ones. Multiplicities ensure overlapping occurrences of the same shared
+/// token set leave the union only after the last occurrence ends.
+enum ActiveTokenSets<'a> {
+    Small(SmallVec<[(usize, &'a SharedTokenSet, usize); 8]>),
+    Large(BTreeMap<usize, (&'a SharedTokenSet, usize)>),
 }
 
-fn union_all_multiway_rescan_with_cache(
-    all_entries: Vec<WeightRangeEntry>,
-    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+impl<'a> ActiveTokenSets<'a> {
+    fn new(entries: usize) -> Self {
+        if entries < 64 {
+            Self::Small(SmallVec::new())
+        } else {
+            Self::Large(BTreeMap::new())
+        }
+    }
+
+    fn add(&mut self, tokens: &'a SharedTokenSet) {
+        let key = Arc::as_ptr(tokens) as usize;
+        match self {
+            Self::Small(active) => match active.binary_search_by_key(&key, |entry| entry.0) {
+                Ok(index) => active[index].2 += 1,
+                Err(index) => active.insert(index, (key, tokens, 1)),
+            },
+            Self::Large(active) => {
+                active.entry(key)
+                    .and_modify(|(_, count)| *count += 1)
+                    .or_insert((tokens, 1));
+            }
+        }
+    }
+
+    fn remove(&mut self, tokens: &'a SharedTokenSet) {
+        let key = Arc::as_ptr(tokens) as usize;
+        match self {
+            Self::Small(active) => {
+                let index = active.binary_search_by_key(&key, |entry| entry.0)
+                    .expect("end event must have an active start");
+                active[index].2 -= 1;
+                if active[index].2 == 0 {
+                    active.remove(index);
+                }
+            }
+            Self::Large(active) => {
+                use std::collections::btree_map::Entry;
+                let Entry::Occupied(mut entry) = active.entry(key) else {
+                    unreachable!("end event must have an active start");
+                };
+                entry.get_mut().1 -= 1;
+                if entry.get().1 == 0 {
+                    entry.remove();
+                }
+            }
+        }
+    }
+
+    fn collect_into(&self, tokens: &mut Vec<&'a SharedTokenSet>) {
+        tokens.clear();
+        match self {
+            Self::Small(active) => tokens.extend(active.iter().map(|entry| entry.1)),
+            Self::Large(active) => tokens.extend(active.values().map(|entry| entry.0)),
+        }
+    }
+}
+
+fn union_all_multiway_sweep(
+    entries: &[WeightRangeEntry],
+    token_union_cache: &mut BulkTokenUnionCache,
 ) -> Weight {
-    let mut boundaries = Vec::with_capacity(all_entries.len() * 2);
-    for entry in &all_entries {
-        boundaries.push(u64::from(entry.start));
-        boundaries.push(u64::from(entry.end) + 1);
-    }
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    if boundaries.len() < 2 {
-        return Weight::empty();
-    }
-
+    // Entries are sorted by start. Merge that ordering with sorted exclusive
+    // end events; the terminal boundary may be 2^32, not a u32 coordinate.
+    let mut ends: Vec<_> = entries.iter()
+        .map(|entry| (u64::from(entry.end) + 1, &entry.tokens))
+        .collect();
+    ends.sort_unstable_by_key(|&(end, _)| end);
+    let mut starts = entries.iter().peekable();
+    let mut ends = ends.into_iter().peekable();
+    let mut active = ActiveTokenSets::new(entries.len());
+    let mut active_tokens = Vec::new();
     let mut builder = CompactRangeBuilder::new();
-    let mut scan_start = 0usize;
-    let mut active_tokens = Vec::<SharedTokenSet>::new();
 
-    for window in boundaries.windows(2) {
-        let interval_start = window[0] as u32;
-        let interval_end = (window[1] - 1) as u32;
-
-        while scan_start < all_entries.len() && all_entries[scan_start].end < interval_start {
-            scan_start += 1;
+    let next_boundary = |start: Option<u64>, end: Option<u64>| {
+        start.into_iter().chain(end).min()
+    };
+    let mut boundary = next_boundary(
+        starts.peek().map(|entry| u64::from(entry.start)),
+        ends.peek().map(|entry| entry.0),
+    );
+    while let Some(current) = boundary {
+        // Remove exclusive ends before inserting inclusive starts.
+        while ends.peek().is_some_and(|entry| entry.0 == current) {
+            active.remove(ends.next().expect("peeked end event").1);
         }
-
-        active_tokens.clear();
-        for entry in &all_entries[scan_start..] {
-            if entry.start > interval_start {
-                break;
-            }
-            if entry.end >= interval_end {
-                active_tokens.push(Arc::clone(&entry.tokens));
-            }
+        while starts.peek().is_some_and(|entry| u64::from(entry.start) == current) {
+            active.add(&starts.next().expect("peeked start event").tokens);
         }
-
-        active_tokens.sort_unstable_by_key(|tokens| Arc::as_ptr(tokens) as usize);
-        active_tokens.dedup_by_key(|tokens| Arc::as_ptr(tokens) as usize);
-
-        let tokens = union_active_token_sets(&active_tokens, token_union_cache);
-        if let Some(tokens) = tokens {
-            builder.push(interval_start, interval_end, tokens);
+        boundary = next_boundary(
+            starts.peek().map(|entry| u64::from(entry.start)),
+            ends.peek().map(|entry| entry.0),
+        );
+        let Some(next) = boundary else {
+            break;
+        };
+        active.collect_into(&mut active_tokens);
+        if let Some(tokens) = union_active_token_sets(&active_tokens, token_union_cache) {
+            builder.push(current as u32, (next - 1) as u32, tokens);
         } else {
             builder.flush();
         }
     }
-
-    builder.finish()
-}
-
-fn union_all_multiway_incremental(all_entries: Vec<WeightRangeEntry>) -> Weight {
-    let mut token_union_cache = FxHashMap::default();
-    union_all_multiway_incremental_with_cache(all_entries, &mut token_union_cache)
-}
-
-fn union_all_multiway_incremental_with_cache(
-    all_entries: Vec<WeightRangeEntry>,
-    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
-) -> Weight {
-    // Entries are already sorted by start in `union_all_multiway_impl`.
-    // End events are exclusive so entries ending at `boundary - 1` leave the
-    // active set before entries beginning at `boundary` enter it.
-    let mut end_events: Vec<(u64, SharedTokenSet)> = all_entries
-        .iter()
-        .map(|entry| (u64::from(entry.end) + 1, Arc::clone(&entry.tokens)))
-        .collect();
-    end_events.sort_unstable_by_key(|(end_exclusive, _)| *end_exclusive);
-
-    let mut builder = CompactRangeBuilder::new();
-    let mut active: BTreeMap<usize, (SharedTokenSet, usize)> = BTreeMap::new();
-    let mut active_tokens = Vec::<SharedTokenSet>::new();
-    let mut start_index = 0usize;
-    let mut end_index = 0usize;
-
-    while start_index < all_entries.len() || end_index < end_events.len() {
-        let next_start = all_entries
-            .get(start_index)
-            .map(|entry| u64::from(entry.start));
-        let next_end = end_events.get(end_index).map(|(end, _)| *end);
-        let boundary = match (next_start, next_end) {
-            (Some(start), Some(end)) => start.min(end),
-            (Some(start), None) => start,
-            (None, Some(end)) => end,
-            (None, None) => break,
-        };
-
-        while end_index < end_events.len() && end_events[end_index].0 == boundary {
-            let tokens = &end_events[end_index].1;
-            let key = Arc::as_ptr(tokens) as usize;
-            let mut remove = false;
-            if let Some((_, count)) = active.get_mut(&key) {
-                debug_assert!(*count > 0);
-                *count -= 1;
-                remove = *count == 0;
-            } else {
-                debug_assert!(false, "every end event must have an active start event");
-            }
-            if remove {
-                active.remove(&key);
-            }
-            end_index += 1;
-        }
-
-        while start_index < all_entries.len()
-            && u64::from(all_entries[start_index].start) == boundary
-        {
-            let tokens = Arc::clone(&all_entries[start_index].tokens);
-            let key = Arc::as_ptr(&tokens) as usize;
-            active
-                .entry(key)
-                .and_modify(|(_, count)| *count += 1)
-                .or_insert((tokens, 1));
-            start_index += 1;
-        }
-
-        let following_start = all_entries
-            .get(start_index)
-            .map(|entry| u64::from(entry.start));
-        let following_end = end_events.get(end_index).map(|(end, _)| *end);
-        let Some(next_boundary) = (match (following_start, following_end) {
-            (Some(start), Some(end)) => Some(start.min(end)),
-            (Some(start), None) => Some(start),
-            (None, Some(end)) => Some(end),
-            (None, None) => None,
-        }) else {
-            break;
-        };
-
-        if active.is_empty() {
-            builder.flush();
-            continue;
-        }
-
-        active_tokens.clear();
-        active_tokens.extend(active.values().map(|(tokens, _)| Arc::clone(tokens)));
-        let tokens = union_active_token_sets(&active_tokens, token_union_cache)
-            .expect("non-empty active set has a token union");
-        builder.push(boundary as u32, (next_boundary - 1) as u32, tokens);
-    }
-
     builder.finish()
 }
 
 fn union_active_token_sets(
-    active_tokens: &[SharedTokenSet],
-    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+    active_tokens: &[&SharedTokenSet],
+    token_union_cache: &mut BulkTokenUnionCache,
 ) -> Option<SharedTokenSet> {
     match active_tokens.len() {
         0 => None,
-        1 => Some(Arc::clone(&active_tokens[0])),
-        2 => Some(shared_token_union(&active_tokens[0], &active_tokens[1])),
+        1 => Some(Arc::clone(active_tokens[0])),
+        2 => Some(shared_token_union(active_tokens[0], active_tokens[1])),
         _ => {
-            let key: Vec<usize> = active_tokens
-                .iter()
+            let key: Vec<usize> = active_tokens.iter()
                 .map(|tokens| Arc::as_ptr(tokens) as usize)
                 .collect();
             if let Some(cached) = token_union_cache.get(&key) {
-                Some(Arc::clone(cached))
-            } else {
-                let tokens = shared_token_union_many(active_tokens);
-                if let Some(tokens) = &tokens {
-                    token_union_cache.insert(key, Arc::clone(tokens));
-                }
-                tokens
+                return Some(Arc::clone(&cached.result));
             }
+            let result = shared_token_union_many(active_tokens)?;
+            token_union_cache.insert(key, BulkTokenUnionEntry {
+                _operands: active_tokens.iter().map(|tokens| Arc::downgrade(tokens)).collect(),
+                result: Arc::clone(&result),
+            });
+            Some(result)
         }
     }
 }
@@ -3939,6 +3896,35 @@ mod tests {
 
         assert_eq!(bulk, sequential);
         assert_eq!(bulk.range_entries().count(), 4);
+    }
+
+    #[test]
+    fn multiway_sweep_preserves_multiplicity_across_storage_threshold() {
+        for count in [12u32, 80] {
+            let shared = [
+                shared_rangeset(RangeSetBlaze::from_iter([1..=3])),
+                shared_rangeset(RangeSetBlaze::from_iter([8..=10])),
+                shared_rangeset(RangeSetBlaze::from_iter([13..=15])),
+            ];
+            let mut entries = (0..count).map(|index| WeightRangeEntry {
+                start: index,
+                end: index + 3,
+                tokens: Arc::clone(&shared[(index % 3) as usize]),
+            }).collect::<Vec<_>>();
+            entries.push(WeightRangeEntry {
+                start: u32::MAX - 1,
+                end: u32::MAX,
+                tokens: Arc::clone(&shared[0]),
+            });
+            let reference = entries.iter().fold(Weight::empty(), |union, entry| {
+                union.union(&Weight::from_uniform(
+                    entry.start..=entry.end,
+                    entry.tokens.as_ref().clone(),
+                ))
+            });
+            let actual = union_all_multiway_sweep(&entries, &mut BulkTokenUnionCache::default());
+            assert_eq!(actual, reference);
+        }
     }
 
     #[test]
