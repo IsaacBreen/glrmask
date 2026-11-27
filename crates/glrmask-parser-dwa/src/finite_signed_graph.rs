@@ -487,15 +487,11 @@ impl VirtualSignedGraph {
         let n=self.len();
         let finals = final_weights(&overlay, pool, order)?;
         profile.finality_ms=elapsed_ms(phase);
-        if let Some(starts)=reachable_starts {
-            let finalized=FinalizedGraph{graph:&overlay,finals:&finals};
-            if let Some(context)=read_context {
-                // This order certifies the complete original/derived overlay;
-                // positive pruning removes edges only. Context transfer can
-                // therefore precede row allocation without another graph scan.
-                return materialize_sparse_context_positive(&finalized,pool,order,starts,profile,context);
-            }
-            return materialize_reachable_positive(&finalized,pool,initial_order,starts,profile);
+        if let Some(starts) = reachable_starts {
+            let finalized = FinalizedGraph { graph: &overlay, finals: &finals };
+            // Positive pruning removes edges only; the signed/derived
+            // topology remains valid for either reachability abstraction.
+            return materialize_positive(&finalized, pool, order, starts, profile, read_context);
         }
         let phase=Instant::now();
         let mut states=Vec::with_capacity(n);
@@ -525,172 +521,191 @@ impl VirtualSignedGraph {
     }
 }
 
-/// Same result as eager finality/pruning followed by the existing positive
-/// trim, but never allocates an expanded row for an unreachable logical node.
-fn materialize_reachable_positive<G:SignedGraph+?Sized>(graph:&G,pool:&mut FastBoundaryWeightInterner,
-    original_order:&[u32],starts:&[u32],mut profile:VirtualResolveProfile,
-)->Option<PositiveMaterialization> {
-    let n=graph.len();
-    if starts.iter().any(|&q|q as usize>=n){return None;}
-    let phase=Instant::now();
-    let terminal=terminal_default_states(graph,pool);
-    profile.prune_ms=elapsed_ms(phase);
-    let phase=Instant::now();
-    let mut live=vec![false;n];
-    let mut todo=starts.to_vec();
-    while let Some(q)=todo.pop(){
-        if std::mem::replace(&mut live[q as usize],true){continue;}
-        let row=graph.row(q as usize);
-        for e in 0..row.epsilon_count(){
-            let(target,weight)=row.epsilon(e);
-            if target as usize>=n{return None;}
-            if weight!=0 && !live[target as usize]{todo.push(target);}
-        }
-        for e in 0..row.transition_count(){
-            let label=row.label(e);
-            if is_negative_label(label){continue;}
-            for b in 0..row.branch_count(e){
-                let(target,weight)=row.branch(e,b);
-                if target as usize>=n{return None;}
-                if weight!=0 && !live[target as usize]
-                    && keep_positive_branch(label,target,weight,row.final_weight(),&terminal,pool){
-                    todo.push(target);
-                }
-            }
-        }
-    }
-    let mut mapping=vec![u32::MAX;n];
-    let mut count=0u32;
-    for(q,&keep)in live.iter().enumerate(){if keep{mapping[q]=count;count+=1;}}
-    let starts=starts.iter().map(|&q|mapping[q as usize]).collect();
-    let topology=original_order.iter().filter_map(|&q|{
-        let mapped=mapping[q as usize];(mapped!=u32::MAX).then_some(mapped)
-    }).collect();
-    profile.reachability_ms=elapsed_ms(phase);
-    let phase=Instant::now();
-    let mut states=Vec::with_capacity(count as usize);
-    for(q,&keep)in live.iter().enumerate(){
-        if !keep{continue;}
-        let row=graph.row(q);
-        let mut epsilons=Vec::new();
-        for e in 0..row.epsilon_count(){
-            let(target,weight)=row.epsilon(e);
-            if weight!=0{epsilons.push((mapping[target as usize],weight));}
-        }
-        let mut transitions=Vec::new();
-        for e in 0..row.transition_count(){
-            let label=row.label(e);
-            if is_negative_label(label){continue;}
-            let mut had_branches=false;
-            let mut branches=SmallVec::<[(u32,FastBoundaryWeightId);1]>::new();
-            for b in 0..row.branch_count(e){
-                let(target,weight)=row.branch(e,b);
-                if !keep_positive_branch(label,target,weight,row.final_weight(),&terminal,pool){continue;}
-                had_branches=true;
-                if weight!=0{branches.push((mapping[target as usize],weight));}
-            }
-            // Prune removes empty keys; trim retains zero-only guard keys as
-            // exactly one dummy edge, without making an unreachable target live.
-            if !had_branches{continue;}
-            if branches.is_empty(){branches.push((0,0));}
-            transitions.push((label,branches));
-        }
-        profile.materialized_edges+=epsilons.len()+transitions.iter().map(|(_,b)|b.len()).sum::<usize>();
-        states.push(FastBoundaryNwaState{epsilons,transitions,final_weight:row.final_weight()});
-    }
-    profile.materialized_states=states.len();
-    profile.materialize_ms=elapsed_ms(phase);
-    if !pool.allow_work(0,n,profile.materialized_edges){return None;}
-    Some(PositiveMaterialization{states,starts,topology,profile})
+/// The optional parser read context refines ordinary structural
+/// reachability. Both cases propagate only live positive edges and use
+/// exactly the same guard-preserving publication.
+enum PositiveSupport<'a> {
+    Reachable(Vec<bool>),
+    Context(super::finite_read_support::SparseReadContextTransfer<'a>),
 }
 
-/// A private consumer of the complete, checked finalized positive view.
-/// The only caller has validated all original and derived targets/topology,
-/// plus equality of graph/domain alphabets. DEFAULT classification is still
-/// evaluated over every logical row before any context-sensitive removal.
-fn materialize_sparse_context_positive<G:SignedGraph+?Sized>(
-    graph:&G,pool:&mut FastBoundaryWeightInterner,order:&[u32],starts:&[u32],
-    mut profile:VirtualResolveProfile,domain:&FiniteParserReadSupport,
-)->Option<PositiveMaterialization> {
-    let n=graph.len();
-    let phase=Instant::now();
-    let terminal=terminal_default_states(graph,pool);
-    profile.prune_ms=elapsed_ms(phase);
-    let phase=Instant::now();
-    let mut transfer=super::finite_read_support::SparseReadContextTransfer::new(domain,n,starts)?;
-    for &q in order {
-        if !transfer.load_source(q as usize)?{continue;}
-        let row=graph.row(q as usize);
-        for e in 0..row.epsilon_count(){
-            let(target,weight)=row.epsilon(e);
-            if weight!=0 {transfer.transfer_epsilon(target as usize)?;}
+impl<'a> PositiveSupport<'a> {
+    fn new(nodes: usize, starts: &[u32], domain: Option<&'a FiniteParserReadSupport>) -> Option<Self> {
+        if let Some(domain) = domain {
+            return Some(Self::Context(
+                super::finite_read_support::SparseReadContextTransfer::new(domain, nodes, starts)?,
+            ));
         }
-        for e in 0..row.transition_count(){
-            let label=row.label(e);
-            if is_negative_label(label) || !transfer.read_allowed(label)? {continue;}
-            for b in 0..row.branch_count(e){
-                let(target,weight)=row.branch(e,b);
-                if weight!=0 && keep_positive_branch(label,target,weight,row.final_weight(),&terminal,pool){
-                    transfer.transfer_read(label,target as usize)?;
+        let mut live = vec![false; nodes];
+        for &start in starts {
+            *live.get_mut(start as usize)? = true;
+        }
+        Some(Self::Reachable(live))
+    }
+
+    fn live(&self, state: usize) -> Option<bool> {
+        match self {
+            Self::Reachable(live) => live.get(state).copied(),
+            Self::Context(transfer) => transfer.state_nonempty(state),
+        }
+    }
+
+    fn load(&mut self, state: usize) -> Option<bool> {
+        match self {
+            Self::Reachable(live) => live.get(state).copied(),
+            Self::Context(transfer) => transfer.load_source(state),
+        }
+    }
+
+    fn allows(&self, label: i32) -> Option<bool> {
+        match self {
+            Self::Reachable(_) => Some(true),
+            Self::Context(transfer) => transfer.read_allowed(label),
+        }
+    }
+
+    fn epsilon(&mut self, target: u32) -> Option<()> {
+        match self {
+            Self::Reachable(live) => {
+                *live.get_mut(target as usize)? = true;
+                Some(())
+            }
+            Self::Context(transfer) => transfer.transfer_epsilon(target as usize),
+        }
+    }
+
+    fn read(&mut self, label: i32, target: u32) -> Option<()> {
+        match self {
+            Self::Reachable(live) => {
+                *live.get_mut(target as usize)? = true;
+                Some(())
+            }
+            Self::Context(transfer) => transfer.transfer_read(label, target as usize),
+        }
+    }
+}
+
+/// Finalize the private positive view without allocating expanded rows for
+/// unreachable logical nodes. DEFAULT classification is over the entire
+/// finalized graph, before any context-sensitive filtering.
+fn materialize_positive<G: SignedGraph + ?Sized>(
+    graph: &G,
+    pool: &mut FastBoundaryWeightInterner,
+    order: &[u32],
+    starts: &[u32],
+    mut profile: VirtualResolveProfile,
+    domain: Option<&FiniteParserReadSupport>,
+) -> Option<PositiveMaterialization> {
+    let n = graph.len();
+    let phase = Instant::now();
+    let terminal = terminal_default_states(graph, pool);
+    profile.prune_ms = elapsed_ms(phase);
+
+    let phase = Instant::now();
+    let mut support = PositiveSupport::new(n, starts, domain)?;
+    for &state in order {
+        if !support.load(state as usize)? {
+            continue;
+        }
+        let row = graph.row(state as usize);
+        for edge in 0..row.epsilon_count() {
+            let (target, weight) = row.epsilon(edge);
+            if weight != 0 {
+                support.epsilon(target)?;
+            }
+        }
+        for edge in 0..row.transition_count() {
+            let label = row.label(edge);
+            if is_negative_label(label) || !support.allows(label)? {
+                continue;
+            }
+            for branch in 0..row.branch_count(edge) {
+                let (target, weight) = row.branch(edge, branch);
+                if weight != 0
+                    && keep_positive_branch(label, target, weight, row.final_weight(), &terminal, pool)
+                {
+                    support.read(label, target)?;
                 }
             }
         }
     }
-    profile.context_input_states=n;
-    profile.context_allocated_states=transfer.allocated_nodes();
-    profile.read_context_ms=elapsed_ms(phase);
-    let phase=Instant::now();
-    let mut mapping=vec![u32::MAX;n];
-    let mut count=0u32;
-    for(q,slot)in mapping.iter_mut().enumerate(){
-        if transfer.state_nonempty(q)? {*slot=count;count+=1;}
+    if let PositiveSupport::Context(transfer) = &support {
+        profile.context_input_states = n;
+        profile.context_allocated_states = transfer.allocated_nodes();
+        profile.read_context_ms = elapsed_ms(phase);
     }
-    let starts=starts.iter().map(|&q|mapping[q as usize]).collect();
-    let topology=order.iter().filter_map(|&q|{
-        let mapped=mapping[q as usize];(mapped!=u32::MAX).then_some(mapped)
-    }).collect();
-    profile.reachability_ms=elapsed_ms(phase);
-    let phase=Instant::now();
-    let mut states=Vec::with_capacity(count as usize);
-    for(q,&mapped)in mapping.iter().enumerate(){
-        if mapped==u32::MAX {continue;}
-        if !transfer.load_source(q)? {return None;}
-        let row=graph.row(q);
-        let mut epsilons=Vec::new();
-        for e in 0..row.epsilon_count(){let(target,weight)=row.epsilon(e);
-            if weight!=0{
-                let target=*mapping.get(target as usize)?;
-                if target==u32::MAX{return None;}
-                epsilons.push((target,weight));
+
+    let mapping_started = Instant::now();
+    let mut mapping = vec![u32::MAX; n];
+    let mut count = 0u32;
+    for (state, slot) in mapping.iter_mut().enumerate() {
+        if support.live(state)? {
+            *slot = count;
+            count += 1;
+        }
+    }
+    let mapped_target = |target: u32| {
+        mapping.get(target as usize).copied().filter(|&target| target != u32::MAX)
+    };
+    let starts = starts.iter().map(|&state| mapped_target(state)).collect::<Option<Vec<_>>>()?;
+    let topology = order.iter().filter_map(|&state| mapped_target(state)).collect();
+    profile.reachability_ms = elapsed_ms(if domain.is_some() { mapping_started } else { phase });
+
+    let phase = Instant::now();
+    let mut states = Vec::with_capacity(count as usize);
+    for (state, &mapped) in mapping.iter().enumerate() {
+        if mapped == u32::MAX {
+            continue;
+        }
+        if !support.load(state)? {
+            return None;
+        }
+        let row = graph.row(state);
+        let mut epsilons = Vec::new();
+        for edge in 0..row.epsilon_count() {
+            let (target, weight) = row.epsilon(edge);
+            if weight != 0 {
+                epsilons.push((mapped_target(target)?, weight));
             }
         }
-        let mut transitions=Vec::new();
-        for e in 0..row.transition_count(){
-            let label=row.label(e);
-            if is_negative_label(label){continue;}
-            let allowed=transfer.read_allowed(label)?;
-            let mut had_branches=false;
-            let mut branches=SmallVec::<[(u32,FastBoundaryWeightId);1]>::new();
-            for b in 0..row.branch_count(e){let(target,weight)=row.branch(e,b);
-                if !keep_positive_branch(label,target,weight,row.final_weight(),&terminal,pool){continue;}
-                had_branches=true;
-                if weight!=0 && allowed{
-                    let target=*mapping.get(target as usize)?;
-                    if target==u32::MAX{return None;}
-                    branches.push((target,weight));
+        let mut transitions = Vec::new();
+        for edge in 0..row.transition_count() {
+            let label = row.label(edge);
+            if is_negative_label(label) {
+                continue;
+            }
+            let allowed = support.allows(label)?;
+            let mut had_branches = false;
+            let mut branches = SmallVec::<[(u32, FastBoundaryWeightId); 1]>::new();
+            for branch in 0..row.branch_count(edge) {
+                let (target, weight) = row.branch(edge, branch);
+                if !keep_positive_branch(label, target, weight, row.final_weight(), &terminal, pool) {
+                    continue;
+                }
+                had_branches = true;
+                if allowed && weight != 0 {
+                    branches.push((mapped_target(target)?, weight));
                 }
             }
-            if !had_branches {continue;}
-            if branches.is_empty(){branches.push((0,0));}
-            transitions.push((label,branches));
+            // Pruned-away keys are absent; explicit blocked or zero-only
+            // guards must remain, without making their old target live.
+            if had_branches {
+                if branches.is_empty() {
+                    branches.push((0, 0));
+                }
+                transitions.push((label, branches));
+            }
         }
-        profile.materialized_edges+=epsilons.len()+transitions.iter().map(|(_,b)|b.len()).sum::<usize>();
-        states.push(FastBoundaryNwaState{epsilons,transitions,final_weight:row.final_weight()});
+        profile.materialized_edges += epsilons.len()
+            + transitions.iter().map(|(_, branches)| branches.len()).sum::<usize>();
+        states.push(FastBoundaryNwaState { epsilons, transitions, final_weight: row.final_weight() });
     }
-    profile.materialized_states=states.len();
-    profile.materialize_ms=elapsed_ms(phase);
-    if !pool.allow_work(0,n,profile.materialized_edges){return None;}
-    Some(PositiveMaterialization{states,starts,topology,profile})
+    profile.materialized_states = states.len();
+    profile.materialize_ms = elapsed_ms(phase);
+    if !pool.allow_work(0, n, profile.materialized_edges) {
+        return None;
+    }
+    Some(PositiveMaterialization { states, starts, topology, profile })
 }
 
 /// Original epsilon sequence followed by derived cancellation edges.
