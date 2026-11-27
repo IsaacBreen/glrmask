@@ -198,7 +198,7 @@ struct FullWalkLazyUnion<'a> {
     base_transitions16: Option<&'a [u16]>,
     base_transitions32: Option<&'a [u32]>,
     base_state_count: u32,
-    tokenizer: *const Tokenizer,
+    tokenizer: Arc<Tokenizer>,
     overflowed: &'a std::cell::Cell<bool>,
     use_union_pair_memo: bool,
     cache: std::cell::UnsafeCell<std::sync::MutexGuard<'a, DynamicLazyUnionCache>>,
@@ -211,13 +211,13 @@ impl<'a> FullWalkLazyUnion<'a> {
     const MAX_UNION_PAIR_MEMO: usize = 2048;
 
     fn new(
-        tokenizer: &Tokenizer,
+        tokenizer: &Arc<Tokenizer>,
         base_transitions16: Option<&'a [u16]>,
         base_transitions32: Option<&'a [u32]>,
         mut cache: std::sync::MutexGuard<'a, DynamicLazyUnionCache>,
         root_states: &[u32],
         overflowed: &'a std::cell::Cell<bool>,
-        ) -> Option<(Self, u32)> {
+    ) -> Option<(Self, u32)> {
         if root_states.len() < 2 {
             return None;
         }
@@ -225,11 +225,9 @@ impl<'a> FullWalkLazyUnion<'a> {
         if base_state_count >= 0x8000_0000u32.saturating_sub(Self::RESERVED_EXTENSION_STATES as u32) {
             return None;
         }
-        if cache.base_state_count == 0 {
-            cache.base_state_count = base_state_count;
-        } else if cache.base_state_count != base_state_count {
+        if !cache.source.as_ref().is_some_and(|source| Arc::ptr_eq(source, tokenizer)) {
             Self::clear_cache(&mut cache);
-            cache.base_state_count = base_state_count;
+            cache.source = Some(Arc::clone(tokenizer));
         }
         if cache.states.len() >= Self::SOFT_MAX_EXTENSION_STATES {
             // `clear_cache()` also drops the sparse physical transition rows.
@@ -238,7 +236,6 @@ impl<'a> FullWalkLazyUnion<'a> {
             // the unchecked hot-path lookup in `base_cell()` immediately
             // out-of-bounds on the next physical transition.
             Self::clear_cache(&mut cache);
-            cache.base_state_count = base_state_count;
         }
         if base_transitions16.is_none() && base_transitions32.is_none()
             && cache.base_rows.len() != base_state_count as usize
@@ -257,7 +254,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             base_transitions16,
             base_transitions32,
             base_state_count,
-            tokenizer: tokenizer as *const Tokenizer,
+            tokenizer: Arc::clone(tokenizer),
             overflowed,
             use_union_pair_memo,
             cache: std::cell::UnsafeCell::new(cache),
@@ -439,7 +436,7 @@ impl<'a> FullWalkLazyUnion<'a> {
                     .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
             };
         }
-        let tokenizer = unsafe { &*self.tokenizer };
+        let tokenizer = self.tokenizer.as_ref();
         let target = tokenizer.dynamic_direct_transition(state, byte);
         if target == u32::MAX {
             return u32::MAX;
@@ -578,7 +575,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             }
             members.clone()
         };
-        let tokenizer = unsafe { &*self.tokenizer };
+        let tokenizer = self.tokenizer.as_ref();
         let budget = members.len().saturating_mul(PROBE_AMORTIZATION);
         let mut outgoing = 0usize;
         for &member in &members {
@@ -731,7 +728,7 @@ impl<'a> FullWalkLazyUnion<'a> {
     #[cold]
     #[inline(never)]
     fn build_virtual_metadata(&self, index: usize) {
-        let tokenizer = unsafe { &*self.tokenizer };
+        let tokenizer = self.tokenizer.as_ref();
         let mut matched = BitSet::new(tokenizer.num_terminals() as usize);
         let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
         {
@@ -825,7 +822,7 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
             if !base.is_empty() {
                 return unsafe { *base.get_unchecked(state as usize) };
             }
-            let tokenizer = unsafe { &*self.tokenizer };
+            let tokenizer = self.tokenizer.as_ref();
             return match tokenizer.matched_terminals_slice(state) {
                 [] => u32::MAX,
                 [terminal] => *terminal,
@@ -846,7 +843,7 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
             if !base.is_empty() {
                 return unsafe { *base.get_unchecked(state as usize) != 0 };
             }
-            let tokenizer = unsafe { &*self.tokenizer };
+            let tokenizer = self.tokenizer.as_ref();
             return match tokenizer.matched_terminals_slice(state) {
                 [terminal] => tokenizer
                     .possible_future_terminals(state)
@@ -1619,8 +1616,13 @@ pub(super) fn try_scalar_dispatch(
         return Ok(false);
     };
     let overflowed = std::cell::Cell::new(false);
+    let tokenizer_owner = vocab.mask_runtime_tokenizer_owner()
+        .unwrap_or(&state.constraint.tokenizer);
+    if !std::ptr::eq(tokenizer_owner.as_ref(), tokenizer) {
+        return Ok(false);
+    }
     let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
-        tokenizer,
+        tokenizer_owner,
         transitions16,
         transitions32,
         subset_cache,
@@ -1859,8 +1861,11 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 );
             };
             let overflowed = std::cell::Cell::new(false);
+            let tokenizer_owner = vocab.mask_runtime_tokenizer_owner()
+                .unwrap_or(&state.constraint.tokenizer);
+            if std::ptr::eq(tokenizer_owner.as_ref(), lexer_scan_cache.tokenizer()) {
             if let Some((subset_transitions, root_state)) = FullWalkLazyUnion::new(
-                lexer_scan_cache.tokenizer(),
+                tokenizer_owner,
                 Some(transitions),
                 None,
                 subset_cache,
@@ -1918,6 +1923,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     finalizer_code,
                     single_finalizer_continues,
                 );
+            }
             }
         }
     }
@@ -3600,8 +3606,9 @@ mod full_walk_acceleration_tests {
         }
         let union_storage = std::sync::Mutex::new(DynamicLazyUnionCache::default());
         let overflowed = std::cell::Cell::new(false);
+        let tokenizer_owner = Arc::new(tokenizer.clone());
         let (union, union_root) = FullWalkLazyUnion::new(
-            tokenizer, None, Some(&rows), union_storage.lock().unwrap(),
+            &tokenizer_owner, None, Some(&rows), union_storage.lock().unwrap(),
             &[lexer, tokenizer.start_state()], &overflowed,
         ).unwrap();
         let mut union_adapter = DenseProductTransitions {
@@ -3960,7 +3967,7 @@ mod wide_scalar_dispatch_tests {
 
     #[test]
     fn lazy_union_pair_memo_preserves_virtual_members_aliases_and_bounds() {
-        let tokenizer = crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
+        let tokenizer = Arc::new(crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer());
         let cache = std::sync::Mutex::new(DynamicLazyUnionCache::default());
         let overflowed = std::cell::Cell::new(false);
         let (mut table, first) = FullWalkLazyUnion::new(
@@ -3997,7 +4004,7 @@ mod wide_scalar_dispatch_tests {
         // full, a new union still executes normally but is not retained.
         {
             let cache = unsafe { &mut *table.cache.get() };
-            let memo = cache.state_by_union_pair;
+            let memo = &mut cache.state_by_union_pair;
             for i in 1..=(FullWalkLazyUnion::MAX_UNION_PAIR_MEMO - before) {
                 memo.insert((1u64 << 63) + i as u64, first);
             }
@@ -4011,8 +4018,7 @@ mod wide_scalar_dispatch_tests {
 
     #[test]
     fn lazy_scalar_dispatch_rows_support_states_beyond_flat16() {
-        let tokenizer =
-            crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
+        let tokenizer = Arc::new(crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer());
         let cache = std::sync::Mutex::new(DynamicLazyUnionCache::default());
         let guard = cache.lock().expect("lazy-union cache lock");
         let overflowed = std::cell::Cell::new(false);
@@ -4034,9 +4040,8 @@ mod wide_scalar_dispatch_tests {
 
     #[test]
     fn lazy_scalar_dispatch_soft_reset_reinitializes_physical_rows() {
-        let tokenizer =
-            crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
-        let mut seeded = DynamicLazyUnionCache { base_state_count: tokenizer.num_states(), ..Default::default() };
+        let tokenizer = Arc::new(crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer());
+        let mut seeded = DynamicLazyUnionCache { source: Some(Arc::clone(&tokenizer)), ..Default::default() };
         seeded.state_by_union_pair.insert(17, u32::MAX);
         seeded
             .base_rows
@@ -4071,14 +4076,13 @@ mod wide_scalar_dispatch_tests {
 
     #[test]
     fn lazy_scalar_dispatch_repeated_soft_resets_keep_physical_rows_live() {
-        let tokenizer =
-            crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
+        let tokenizer = Arc::new(crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer());
         let cache = std::sync::Mutex::new(DynamicLazyUnionCache::default());
 
         for _ in 0..3 {
             {
                 let mut seeded = cache.lock().expect("lazy-union cache lock");
-                seeded.base_state_count = tokenizer.num_states();
+                seeded.source = Some(Arc::clone(&tokenizer));
                 seeded
                     .base_rows
                     .resize_with(tokenizer.num_states() as usize, || None);

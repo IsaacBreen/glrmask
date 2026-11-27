@@ -3594,7 +3594,8 @@ pub(crate) struct DynamicLazyUnionState {
 
 #[derive(Debug, Default)]
 pub(crate) struct DynamicLazyUnionCache {
-    pub(crate) base_state_count: u32,
+    /// Exact immutable source identity; retaining the owner prevents address reuse.
+    pub(crate) source: Option<Arc<Tokenizer>>,
     /// Allocated only for physical coordinates without a dense transition slab.
     pub(crate) base_rows: Vec<Option<Box<[u32; 256]>>>,
     /// Two-member sets have a lossless packed key. Wider sets are indexed
@@ -6870,9 +6871,12 @@ impl DynamicMaskVocab {
     /// projection above.
     #[inline]
     pub(crate) fn mask_runtime_tokenizer(&self) -> Option<&Tokenizer> {
-        self.mask_determinized_tokenizer
-            .as_deref()
-            .or(self.mask_tokenizer.as_deref())
+        self.mask_runtime_tokenizer_owner().map(Arc::as_ref)
+    }
+
+    #[inline]
+    pub(crate) fn mask_runtime_tokenizer_owner(&self) -> Option<&Arc<Tokenizer>> {
+        self.mask_determinized_tokenizer.as_ref().or(self.mask_tokenizer.as_ref())
     }
 
     #[inline]
