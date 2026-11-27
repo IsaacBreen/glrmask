@@ -8511,8 +8511,6 @@ fn compose_dynamic_recursive_shared_fast(
         .constraint
         .static_dynamic_overlay
         .get_or_insert_with(Default::default);
-    overlay.terminal_offsets = terminal_offsets;
-    overlay.tokenizer_state_offsets = tokenizer_state_offsets;
     overlay.segmented_parser_components = segmented_components;
     overlay.segmented_parser_links = segmented_parser_links;
     install_dynamic_direct_boundary_shards(overlay, None);
@@ -8734,7 +8732,9 @@ fn compose_constraints_owned_parent_impl(
             constraint.serialized_artifact_cache = None;
         }
         let (terminal_offsets, tokenizer_state_offsets) = constraint.static_dynamic_overlay.as_ref()
-            .map(|overlay| (overlay.terminal_offsets.clone(), overlay.tokenizer_state_offsets.clone()))
+            .map(|overlay| overlay.segmented_parser_components.iter()
+                .map(|component| (component.terminal_offset, component.tokenizer_state_offset))
+                .unzip())
             .unwrap_or_else(|| (vec![0], vec![0]));
         let parser_state_relations = source_state_counts.iter().zip(source_state_offsets)
             .map(|(&count, offset)| (0..count).map(|local| vec![offset + local]).collect()).collect();

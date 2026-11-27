@@ -1701,57 +1701,23 @@ struct NestedExpansionRecorder<'a> {
     raw_links: Vec<RawNestedLink>,
 }
 
-/// Validate one overlay's terminal layout against the composer coordinate
-/// contract (ascending contiguous offsets; each component's interval covers
-/// exactly its terminal domain; dual-stored offsets agree). Any violation is
-/// a loud mapping error, never an assumption.
+/// Validate contiguous component terminal intervals against the owning domain.
 fn validate_overlay_terminal_layout(
     overlay: &crate::runtime::StaticDynamicOverlayMetadata,
     node_terminals: u32,
 ) -> Result<(), String> {
     let components = &overlay.segmented_parser_components;
-    let offsets = &overlay.terminal_offsets;
-    if offsets.len() != components.len() {
-        return Err(format!(
-            "nested link overlay has {} terminal offsets for {} components",
-            offsets.len(),
-            components.len(),
-        ));
-    }
-    if offsets.windows(2).any(|pair| pair[0] > pair[1]) {
-        return Err("nested link overlay terminal offsets are not ascending".to_string());
-    }
-    // Both splice producers pack the parent block first at terminal 0
-    // (`compose_subgrammar_tables_with_rules` and its prepass twin push 0
-    // before any child), and overlays only ever copy those offsets (or faithful
-    // serde round-trips), so a nonzero first offset is corruption, not a new
-    // layout: decline loudly instead of mapping slots against a shifted frame.
-    if offsets.first() != Some(&0) {
+    if components.first().map(|component| component.terminal_offset) != Some(0) {
         return Err("nested link overlay terminal offsets must start at 0".to_string());
     }
     for (index, component) in components.iter().enumerate() {
-        let start = offsets[index];
-        let end = if index + 1 < offsets.len() {
-            offsets[index + 1]
-        } else {
-            node_terminals
-        };
-        if end < start {
-            return Err(format!(
-                "nested link overlay component {index} has an inverted terminal interval"
-            ));
-        }
-        if component.terminal_offset != start {
-            return Err(format!(
-                "nested link overlay component {index} offset {} disagrees with overlay offsets {start}",
-                component.terminal_offset,
-            ));
-        }
+        let start = component.terminal_offset;
+        let end = components.get(index + 1)
+            .map_or(node_terminals, |next| next.terminal_offset);
         let domain = component.constraint.parser_terminal_count();
         if end.checked_sub(start) != Some(domain) {
             return Err(format!(
-                "nested link overlay component {index} interval size {} differs from its terminal domain {domain}",
-                end.saturating_sub(start),
+                "nested link overlay component {index} interval {start}..{end} disagrees with its terminal domain {domain}",
             ));
         }
     }
@@ -1787,15 +1753,14 @@ fn map_overlay_slot_terminal(
             }
         }
     }
-    let offsets = &overlay.terminal_offsets;
-    let owner = offsets
-        .partition_point(|&offset| offset <= slot)
+    let owner = components
+        .partition_point(|component| component.terminal_offset <= slot)
         .checked_sub(1)
         .filter(|&owner| owner < components.len())
         .ok_or_else(|| {
             format!("nested link slot terminal {slot} lies outside the composed terminal domain")
         })?;
-    let start = offsets[owner];
+    let start = components[owner].terminal_offset;
     let local = slot.checked_sub(start).ok_or_else(|| {
         format!("nested link slot terminal {slot} underflows component {owner} offset {start}")
     })?;

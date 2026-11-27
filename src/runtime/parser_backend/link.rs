@@ -253,7 +253,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     specials.dedup(); constraint.special_token_terminals = specials;
     constraint.static_dynamic_overlay = Some(StaticDynamicOverlayMetadata {
-        terminal_offsets, tokenizer_state_offsets: tokenizer_offsets, segmented_parser_components: wrappers,
+        segmented_parser_components: wrappers,
         segmented_parser_links: links,
         ..Default::default()
     });

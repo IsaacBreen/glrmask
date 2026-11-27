@@ -9516,11 +9516,6 @@ pub(crate) struct RecursiveParserLayout {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StaticDynamicOverlayMetadata {
-    /// Global terminal-id offsets for the transported composition components.
-    pub(crate) terminal_offsets: Vec<u32>,
-    /// Global raw-tokenizer-state offsets for those same components. State zero
-    /// is the merged reset dispatcher and deliberately belongs to no component.
-    pub(crate) tokenizer_state_offsets: Vec<u32>,
     /// Terminals whose composed parser template has behavior absent from the
     /// transported component parser artifacts (including scoped-ignore repair
     /// and conservative unsafe terminals).

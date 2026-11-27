@@ -272,12 +272,12 @@ fn mb_scoped_ignore_mapping_trace(
         eprintln!("[map-trace {label}] no static_dynamic_overlay");
         return;
     };
-    eprintln!("[map-trace {label}] terminal_offsets={:?}", overlay.terminal_offsets);
+    eprintln!("[map-trace {label}] terminal_offsets={:?}", overlay.segmented_parser_components.iter().map(|component| component.terminal_offset).collect::<Vec<_>>());
     eprintln!(
         "[map-trace {label}] tokenizer_state_offsets={:?}",
-        overlay.tokenizer_state_offsets
+        overlay.segmented_parser_components.iter().map(|component| component.tokenizer_state_offset).collect::<Vec<_>>()
     );
-    if let Some(&child_offset) = overlay.terminal_offsets.get(1) {
+    if let Some(child_offset) = overlay.segmented_parser_components.get(1).map(|component| component.terminal_offset) {
         for (index, name) in child.terminal_display_names.iter().enumerate() {
             eprintln!(
                 "[map-trace {label}] child local terminal {index} -> composed {} name={name:?}",

@@ -284,20 +284,12 @@ pub(crate) struct MaskScratch {
     /// `Arc<Mutex<_>>` lets a short-lived projected `ConstraintState` borrow the
     /// component scratch without moving it out of the parent scratch object.
     pub segmented_component_scratch: Vec<Arc<Mutex<MaskScratch>>>,
-    /// Exact component initial states/masks, prepared outside mask timing. A
-    /// composed projection frequently lands exactly at a component entry; in
-    /// that case reuse the component's already-cached initial mask rather than
-    /// invoking its uncached mask engine through a synthetic shadow state.
-    pub segmented_component_initial_states: Vec<ParserStateMap>,
-    pub segmented_component_initial_masks: Vec<Vec<u32>>,
 }
 
 impl MaskScratch {
     pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
         let dense_words = constraint.internal_token_dense_words;
         let mut segmented_component_scratch = Vec::new();
-        let mut segmented_component_initial_states = Vec::new();
-        let mut segmented_component_initial_masks = Vec::new();
         if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
             let authoritative_dynamic_direct = constraint.uses_compact_segmented_parser_runtime()
                 && overlay.segmented_parser_components.iter().all(|component| {
@@ -310,15 +302,11 @@ impl MaskScratch {
                 });
             if !authoritative_dynamic_direct {
                 segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
-                segmented_component_initial_states.reserve(overlay.segmented_parser_components.len());
-                segmented_component_initial_masks.reserve(overlay.segmented_parser_components.len());
                 for component in &overlay.segmented_parser_components {
                     let source = component.constraint.as_ref();
                     segmented_component_scratch.push(Arc::new(Mutex::new(
                         MaskScratch::for_constraint(source),
                     )));
-                    segmented_component_initial_states.push(source.initial_state_map());
-                    segmented_component_initial_masks.push(source.start().mask());
                 }
             }
         }
@@ -332,8 +320,6 @@ impl MaskScratch {
             single_path_acc_dense: vec![0; dense_words],
             indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
             segmented_component_scratch,
-            segmented_component_initial_states,
-            segmented_component_initial_masks,
         }
     }
 }
