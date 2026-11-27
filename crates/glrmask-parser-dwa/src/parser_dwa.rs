@@ -1635,19 +1635,89 @@ enum PossibleOutgoingIds {
     Some(BitSet),
 }
 
+enum OutgoingParserLabels {
+    All,
+    Explicit(Vec<u32>),
+}
+
+fn summarize_outgoing_parser_labels(
+    labels: impl IntoIterator<Item = i32>,
+    num_parser_states: u32,
+) -> OutgoingParserLabels {
+    let mut ids = Vec::new();
+    for label in labels {
+        if label == DEFAULT_LABEL {
+            return OutgoingParserLabels::All;
+        }
+        if let Some(id) = parser_state_label(label, num_parser_states) {
+            ids.push(id);
+        }
+    }
+    OutgoingParserLabels::Explicit(ids)
+}
+
+fn build_possible_outgoing_ids<S: Sync>(
+    states: &[S],
+    state_supports: &[Vec<u32>],
+    num_parser_states: u32,
+    parallel_states: bool,
+    parallel_supports: bool,
+    summarize: impl Fn(&S) -> OutgoingParserLabels + Sync + Send,
+) -> Vec<PossibleOutgoingIds> {
+    use rayon::prelude::*;
+
+    let state_outgoing = if parallel_states {
+        states.par_iter().map(summarize).collect::<Vec<_>>()
+    } else {
+        states.iter().map(summarize).collect::<Vec<_>>()
+    };
+    let n = num_parser_states as usize;
+    let all_parser_states = BitSet::all(n);
+    let summarize_support = |support: &Vec<u32>| {
+        // Avoid allocating a bitset for the common empty/single-all cases.
+        if let [state] = support.as_slice() {
+            match state_outgoing.get(*state as usize) {
+                None => return PossibleOutgoingIds::Empty,
+                Some(OutgoingParserLabels::All) => return PossibleOutgoingIds::All,
+                Some(OutgoingParserLabels::Explicit(ids)) if ids.is_empty() => {
+                    return PossibleOutgoingIds::Empty;
+                }
+                _ => {}
+            }
+        }
+        let mut set = BitSet::new(n);
+        for &state in support {
+            match state_outgoing.get(state as usize) {
+                Some(OutgoingParserLabels::All) => return PossibleOutgoingIds::All,
+                Some(OutgoingParserLabels::Explicit(ids)) if !ids.is_empty() => {
+                    for &id in ids {
+                        set.set(id as usize);
+                    }
+                    if set == all_parser_states {
+                        return PossibleOutgoingIds::All;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if set.is_empty() {
+            PossibleOutgoingIds::Empty
+        } else {
+            PossibleOutgoingIds::Some(set)
+        }
+    };
+    if parallel_supports {
+        state_supports.par_iter().map(summarize_support).collect()
+    } else {
+        state_supports.iter().map(summarize_support).collect()
+    }
+}
+
 fn build_possible_outgoing_ids_by_state(
     parser_nwa: &NWA,
     state_supports: &[Vec<u32>],
     num_parser_states: u32,
 ) -> Vec<PossibleOutgoingIds> {
-    enum OutgoingIds {
-        Empty,
-        All,
-        Some(Vec<u32>),
-    }
-
-    let num_parser_states = num_parser_states as usize;
-    let all_parser_states = BitSet::all(num_parser_states);
     let parallel = rayon::current_num_threads() > 1
         && parser_nwa.states().len()
             >= std::env::var("GLRMASK_POSSIBLE_OUTGOING_PARALLEL_MIN_NWA_STATES")
@@ -1656,84 +1726,17 @@ fn build_possible_outgoing_ids_by_state(
                 .unwrap_or(4_096)
         && std::env::var_os("GLRMASK_DISABLE_PARALLEL_POSSIBLE_OUTGOING").is_none();
 
-    let summarize_state = |state: &crate::automata::weighted::nwa::NWAState| {
-        let mut ids = Vec::new();
-        for &label in state.transitions.keys() {
-            if label == DEFAULT_LABEL {
-                return OutgoingIds::All;
-            }
-            if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
-                ids.push(parser_state_id);
-            }
-        }
-        if ids.is_empty() {
-            OutgoingIds::Empty
-        } else {
-            OutgoingIds::Some(ids)
-        }
-    };
-
-    let state_outgoing_ids: Vec<OutgoingIds> = if parallel {
-        use rayon::prelude::*;
-        parser_nwa.states().par_iter().map(summarize_state).collect()
-    } else {
-        parser_nwa.states().iter().map(summarize_state).collect()
-    };
-
-    let summarize_support = |support: &Vec<u32>| {
-        if support.len() == 1 {
-            let state_id = support[0] as usize;
-            return match state_outgoing_ids.get(state_id) {
-                Some(OutgoingIds::Empty) => PossibleOutgoingIds::Empty,
-                Some(OutgoingIds::All) => PossibleOutgoingIds::All,
-                Some(OutgoingIds::Some(ids)) => {
-                    let mut bitset = BitSet::new(num_parser_states);
-                    for &parser_state_id in ids {
-                        bitset.set(parser_state_id as usize);
-                    }
-                    if bitset == all_parser_states {
-                        PossibleOutgoingIds::All
-                    } else {
-                        PossibleOutgoingIds::Some(bitset)
-                    }
-                }
-                None => PossibleOutgoingIds::Empty,
-            };
-        }
-
-        let mut ids = BitSet::new(num_parser_states);
-        for &state_id in support {
-            let Some(state_ids) = state_outgoing_ids.get(state_id as usize) else {
-                continue;
-            };
-            match state_ids {
-                OutgoingIds::Empty => {}
-                OutgoingIds::All => return PossibleOutgoingIds::All,
-                OutgoingIds::Some(state_ids) => {
-                    for &parser_state_id in state_ids {
-                        ids.set(parser_state_id as usize);
-                    }
-                    if ids == all_parser_states {
-                        break;
-                    }
-                }
-            }
-        }
-        if ids.is_empty() {
-            PossibleOutgoingIds::Empty
-        } else if ids == all_parser_states {
-            PossibleOutgoingIds::All
-        } else {
-            PossibleOutgoingIds::Some(ids)
-        }
-    };
-
-    if parallel && state_supports.len() >= 1_024 {
-        use rayon::prelude::*;
-        state_supports.par_iter().map(summarize_support).collect()
-    } else {
-        state_supports.iter().map(summarize_support).collect()
-    }
+    build_possible_outgoing_ids(
+        parser_nwa.states(),
+        state_supports,
+        num_parser_states,
+        parallel,
+        parallel && state_supports.len() >= 1_024,
+        |state| summarize_outgoing_parser_labels(
+            state.transitions.keys().copied(),
+            num_parser_states,
+        ),
+    )
 }
 
 fn local_epsilon_closure(
@@ -6085,88 +6088,27 @@ fn build_possible_outgoing_ids_by_fast_boundary_state(
     state_supports: &[Vec<u32>],
     num_parser_states: u32,
 ) -> Vec<PossibleOutgoingIds> {
-    #[derive(Clone)]
-    enum OutgoingIds {
-        Empty,
-        All,
-        Some(Vec<u32>),
-    }
-    let n = num_parser_states as usize;
-    let all_parser_states = BitSet::all(n);
-    let summarize = |state: &FastBoundaryNwaState| {
-        let mut ids = Vec::new();
-        for (label, branches) in &state.transitions {
-            if branches.is_empty() {
-                continue;
+    let parallel = rayon::current_num_threads() > 1;
+    build_possible_outgoing_ids(
+        parser_nwa,
+        state_supports,
+        num_parser_states,
+        parallel && parser_nwa.len() >= 4_096,
+        parallel && state_supports.len() >= 1_024,
+        |state| {
+            let mut labels = summarize_outgoing_parser_labels(
+                state.transitions.iter().filter_map(|(label, branches)| {
+                    (!branches.is_empty()).then_some(*label)
+                }),
+                num_parser_states,
+            );
+            if let OutgoingParserLabels::Explicit(ids) = &mut labels {
+                ids.sort_unstable();
+                ids.dedup();
             }
-            if *label == DEFAULT_LABEL {
-                return OutgoingIds::All;
-            }
-            if let Some(parser_state_id) = parser_state_label(*label, num_parser_states) {
-                ids.push(parser_state_id);
-            }
-        }
-        if ids.is_empty() {
-            OutgoingIds::Empty
-        } else {
-            ids.sort_unstable();
-            ids.dedup();
-            OutgoingIds::Some(ids)
-        }
-    };
-    let state_outgoing = if rayon::current_num_threads() > 1 && parser_nwa.len() >= 4_096 {
-        use rayon::prelude::*;
-        parser_nwa.par_iter().map(summarize).collect::<Vec<_>>()
-    } else {
-        parser_nwa.iter().map(summarize).collect::<Vec<_>>()
-    };
-    let summarize_support = |support: &Vec<u32>| {
-        if support.len() == 1 {
-            return match state_outgoing.get(support[0] as usize) {
-                Some(OutgoingIds::Empty) | None => PossibleOutgoingIds::Empty,
-                Some(OutgoingIds::All) => PossibleOutgoingIds::All,
-                Some(OutgoingIds::Some(ids)) => {
-                    let mut set = BitSet::new(n);
-                    for &id in ids {
-                        set.set(id as usize);
-                    }
-                    if set == all_parser_states {
-                        PossibleOutgoingIds::All
-                    } else {
-                        PossibleOutgoingIds::Some(set)
-                    }
-                }
-            };
-        }
-        let mut set = BitSet::new(n);
-        for &state in support {
-            match state_outgoing.get(state as usize) {
-                Some(OutgoingIds::All) => return PossibleOutgoingIds::All,
-                Some(OutgoingIds::Some(ids)) => {
-                    for &id in ids {
-                        set.set(id as usize);
-                    }
-                    if set == all_parser_states {
-                        return PossibleOutgoingIds::All;
-                    }
-                }
-                Some(OutgoingIds::Empty) | None => {}
-            }
-        }
-        if set.is_empty() {
-            PossibleOutgoingIds::Empty
-        } else if set == all_parser_states {
-            PossibleOutgoingIds::All
-        } else {
-            PossibleOutgoingIds::Some(set)
-        }
-    };
-    if rayon::current_num_threads() > 1 && state_supports.len() >= 1_024 {
-        use rayon::prelude::*;
-        state_supports.par_iter().map(summarize_support).collect()
-    } else {
-        state_supports.iter().map(summarize_support).collect()
-    }
+            labels
+        },
+    )
 }
 
 /// Exact small-coordinate publication from a signed parser NWA. The signed
