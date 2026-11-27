@@ -1,5 +1,5 @@
 use super::*;
-use std::mem::{size_of, offset_of};
+use std::mem::{size_of};
 
 #[test]
 fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
@@ -38,7 +38,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 let mut accepting = 99;
                 assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0);
                 assert_eq!(accepting != 0, reference.is_accepting());
-                if let Some(token) = token { assert!(glrmask_state_commit_token(state, token)); assert!(reference.commit_token(token)); }
+                if let Some(token) = token { let mut accepted = 0; assert_eq!(glrmask_state_commit_token(state, token, &mut accepted), 0); assert_eq!(accepted, 1); assert!(reference.commit_token(token)); }
             }
             glrmask_state_free(state);
         }
@@ -63,8 +63,6 @@ fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<*const u8>(), 8);
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
     assert_eq!(size_of::<glrmask_compile_options>(), 24);
-    assert_eq!(size_of::<glrmask_extern>(), 24);
-    assert_eq!(offset_of!(glrmask_extern, kind), 16);
 }
 
 #[test]
@@ -97,9 +95,11 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         // Check unbound externs
         let mut slots = ptr::null_mut(); assert_eq!(glrmask_module_unbound_externs(parent, &mut slots), 0);
         let mut count = 0; assert_eq!(glrmask_externs_len(slots, &mut count), 0); assert_eq!(count, 1);
-        let mut ext = glrmask_extern { name: ptr::null(), name_len: 0, kind: 0 };
-        assert_eq!(glrmask_externs_get(slots, 0, &mut ext), 0);
-        assert_eq!(std::slice::from_raw_parts(ext.name.cast::<u8>(), ext.name_len), b"child");
+        let mut name = ptr::null(); let mut name_len = 0; let mut kind = 0;
+        assert_eq!(glrmask_externs_name(slots, 0, &mut name, &mut name_len), 0);
+        assert_eq!(glrmask_externs_kind(slots, 0, &mut kind), 0);
+        assert_eq!(kind, 1);
+        assert_eq!(std::slice::from_raw_parts(name.cast::<u8>(), name_len), b"child");
         glrmask_externs_free(slots);
 
         // Bind prepared child
@@ -118,7 +118,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let mut state = ptr::null_mut(); assert_eq!(glrmask_constraint_start(constraint, &mut state), 0);
         glrmask_constraint_free(constraint); glrmask_module_free(loaded);
         let mut words = [0u32; 1]; assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), 1), 0); assert_ne!(words[0] & (1 << 3), 0);
-        assert!(glrmask_state_commit_token(state, 3)); let mut accepting = 0; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert_eq!(accepting, 1); glrmask_state_free(state);
+        let mut accepted = 0; assert_eq!(glrmask_state_commit_token(state, 3, &mut accepted), 0); assert_eq!(accepted, 1); let mut accepting = 0; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert_eq!(accepting, 1); glrmask_state_free(state);
 
         // Expr literal test
         let mut lit_expr = ptr::null_mut();
@@ -161,7 +161,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
 
 #[test]
 fn status_codes_distinguish_error_kinds() {
-    assert_eq!(glrmask_abi_version(), 7);
+    assert_eq!(glrmask_abi_version(), 8);
     assert_eq!(status(core::ErrorKind::Syntax), 1);
     assert_eq!(status(core::ErrorKind::InvalidInput), 2);
     assert_eq!(status(core::ErrorKind::Compilation), 3);

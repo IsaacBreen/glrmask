@@ -27,9 +27,9 @@ export declare class Grammar implements Disposable {
   /** Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source. */
   static fromLark(source: string): Grammar;
   /** Parses a JSON Schema given as JSON text or an object. */
-  static fromJsonSchema(schema: unknown): Grammar;
+  static fromJsonSchema(schema: string | boolean | object): Grammar;
   /** Builds a grammar from an `Expr`. */
-  static fromExpr(expr: Expr | Grammar): Grammar;
+  static fromExpr(expr: Expr): Grammar;
   readonly externs: Externs;
 
 
@@ -195,10 +195,10 @@ export interface Extern {
   readonly kind: 'token' | 'grammar' | (string & {});
 }
 
-export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
+export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED' | 'GLRMASK_VOCAB_MISMATCH' | 'GLRMASK_PRECOMPILE_RACE';
 export type ErrorCode = KnownErrorCode | (string & {});
 export declare class GLRMaskError extends Error {
-  /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`. */
+  /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`, `GLRMASK_VOCAB_MISMATCH`, `GLRMASK_PRECOMPILE_RACE`. */
   readonly code: ErrorCode;
   constructor(code: ErrorCode, message: string, options?: ErrorOptions);
 }

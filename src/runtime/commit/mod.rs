@@ -6042,7 +6042,7 @@ fn commit_bytes_impl_profiled_inner(
                         bytes.len(),
                         gss_at_offset.clone(),
                     ) {
-                        return Err("recursive tokenizer reset routing failed".to_owned());
+                        panic!("recursive tokenizer reset routing failed");
                     }
                     profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                     continue;
@@ -6104,7 +6104,7 @@ fn commit_bytes_impl_profiled_inner(
                     bytes.len(),
                     advanced,
                 ) {
-                    return Err("recursive tokenizer reset routing failed".to_owned());
+                    panic!("recursive tokenizer reset routing failed");
                 }
                 profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
@@ -8471,7 +8471,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                         bytes.len(),
                         gss_at_offset.clone(),
                     ) {
-                        return Err("recursive tokenizer reset routing failed".to_owned());
+                        panic!("recursive tokenizer reset routing failed");
                     }
                     continue;
                 }
@@ -8496,7 +8496,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                     bytes.len(),
                     gss,
                 ) {
-                    return Err("recursive tokenizer reset routing failed".to_owned());
+                    panic!("recursive tokenizer reset routing failed");
                 }
             }
 
@@ -8589,7 +8589,7 @@ impl ConstraintState {
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
         let width = token_bytes_for_id(constraint, token_id).map_or(0, |bytes| bytes.len());
-        let next = base.checked_add(width as u64).ok_or("marker byte position overflow")?;
+        let next = base.checked_add(width as u64).expect("marker byte position overflow");
         let result = commit_token_impl_observed(constraint, &mut self.state, &mut self.buffers, token_id,
             &mut LiveMarkers { queries, state: markers, base });
         markers.finish(queries, next, result.is_ok());
@@ -8609,7 +8609,7 @@ impl ConstraintState {
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
-        let next = base.checked_add(bytes.len() as u64).ok_or("marker byte position overflow")?;
+        let next = base.checked_add(bytes.len() as u64).expect("marker byte position overflow");
         let result = commit_bytes_impl_observed(&constraint, &mut self.state, bytes, &mut self.buffers,
             &mut LiveMarkers { queries, state: markers, base });
         markers.finish(queries, next, result.is_ok());
@@ -9138,6 +9138,7 @@ impl ConstraintState {
     }
 
     /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
+    /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_token(
         &mut self,
@@ -9177,7 +9178,7 @@ impl ConstraintState {
             Ok(result) => result,
             Err(message) => {
                 self.reject_after_control_resource_limit();
-                Err(format!("parser resource limit: {message}"))
+                panic!("parser resource limit: {message}")
             }
         }
     }
@@ -9435,6 +9436,7 @@ impl ConstraintState {
     }
 
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
+    /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
@@ -9449,7 +9451,7 @@ impl ConstraintState {
             Ok(result) => result,
             Err(message) => {
                 self.reject_after_control_resource_limit();
-                Err(format!("parser resource limit: {message}"))
+                panic!("parser resource limit: {message}")
             }
         }
     }

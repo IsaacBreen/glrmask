@@ -171,7 +171,7 @@ def test_packed_numpy_fill_mask_agrees_with_allocating_mask():
     packed = state.mask()
     assert packed.dtype == np.uint32 and len(packed) == (c.mask_bit_len + 31) // 32 == (state.mask_bit_len + 31) // 32
     assert np.array_equal(packed, actual[:len(packed)])
-    assert np.array_equal(state.mask(dtype=bool), unpack_mask(packed, state.mask_bit_len))
+    assert np.array_equal(np.unpackbits(packed.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool), unpack_mask(packed, state.mask_bit_len))
     assert np.flatnonzero(unpack_mask(state.mask())).tolist() == [7, 63, 127]
 
 

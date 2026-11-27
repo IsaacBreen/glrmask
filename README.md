@@ -153,12 +153,16 @@ output = []
 while True:
     logits = rng.standard_normal(257)  # stand-in for your model
     allowed = np.zeros(257, dtype=bool)
-    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
+    m = state.mask()
+    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)
     allowed[EOS] = state.is_accepting()
+    if not allowed.any():
+        raise RuntimeError("no allowed token and cannot stop")
     token = int(np.argmax(np.where(allowed, logits, -np.inf)))
     if token == EOS:
         break
-    state.commit_token(token)
+    if not state.commit_token(token):
+        raise RuntimeError("allowed token rejected")
     output.append(token)
 
 print(bytes(output).decode())  # e.g. {"color": "blue"}
@@ -193,11 +197,11 @@ fn main() -> glrmask::Result<()> {
         let token = (0..=EOS)
             .filter(|&t| allowed(t))
             .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
-            .unwrap();
+            .expect("no allowed token and cannot stop");
         if token == EOS {
             break;
         }
-        state.commit_token(token);
+        assert!(state.commit_token(token), "allowed token rejected");
         output.push(token as u8);
     }
     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}

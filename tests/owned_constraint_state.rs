@@ -8,6 +8,9 @@ fn public_types_are_send_sync_clone() {
     assert_traits::<Grammar>();
     assert_traits::<Module>();
     assert_traits::<Constraint>();
+    assert_traits::<glrmask::Constraint>();
+    fn require_send<T: Send>() {}
+    require_send::<ConstraintState>();
     assert_traits::<ConstraintState>();
     assert_traits::<Vocab>();
     assert_traits::<TokenSet>();

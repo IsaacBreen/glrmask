@@ -12,13 +12,13 @@ def test_mask_domain(n):
     p = s.mask()
     assert p.dtype == np.uint32 and p.shape == (w,)
     assert p.flags.writeable and p.flags.c_contiguous
-    assert np.array_equal(s.mask(dtype=np.uint32), p)
-    dense = s.mask(dtype=bool)
+    assert np.array_equal(s.mask(), p)
+    dense = np.unpackbits(p.astype('<u4').view(np.uint8), bitorder='little')[:n].astype(bool)
     assert dense.dtype == np.bool_ and dense.shape == (n,)
     assert np.flatnonzero(dense).tolist() == ([n-1] if n else [])
     for i in range(w*32):
         assert bool(int(p[i//32]) & (1 << (i%32))) == (dense[i] if i < n else False)
-    for dtype in [np.int32, np.float32, np.bool_, int, None, "uint32", np.dtype(np.uint32)]:
+    for dtype in [np.uint32, bool, np.int32, np.float32, np.bool_, int, None, "uint32", np.dtype(np.uint32)]:
         with pytest.raises(TypeError):
             s.mask(dtype=dtype)
     with pytest.raises(TypeError):
@@ -33,8 +33,9 @@ def test_mask_domain(n):
         s.fill_mask(dense)
     if w:
         buf = np.full(w-1, 0xffffffff, dtype=np.uint32)
-        with pytest.raises(glrmask.GLRMaskError):
+        with pytest.raises(glrmask.GLRMaskError) as exc:
             s.fill_mask(buf)
+        assert exc.value.kind == "buffer_too_small"
         assert np.all(buf == 0xffffffff)
         assert s.commit_token(n-1)
         s.fill_mask(p)
@@ -99,3 +100,17 @@ def test_cached_mask_bit_len_includes_exact_token():
         assert constraint.mask_bit_len == state.mask_bit_len == 64
         assert state.commit_token(63)
         assert state.mask_bit_len == 64
+
+
+def test_fill_mask_rejects_unaligned_and_swapped_endian_but_accepts_row():
+    state = glrmask.Grammar.from_lark('start: "a"').compile(glrmask.Vocab({0: b"a"})).start()
+    unaligned = np.ndarray((1,), dtype=np.uint32, buffer=bytearray(5), offset=1)
+    nonnative = np.zeros(1, dtype=np.dtype(np.uint32).newbyteorder("S"))
+    for invalid in (unaligned, nonnative):
+        before = invalid.tobytes()
+        with pytest.raises(TypeError):
+            state.fill_mask(invalid)
+        assert invalid.tobytes() == before
+    matrix = np.full((2, 2), 0xffffffff, dtype=np.uint32)
+    state.fill_mask(matrix[1])
+    assert matrix.tolist() == [[0xffffffff, 0xffffffff], [1, 0]]

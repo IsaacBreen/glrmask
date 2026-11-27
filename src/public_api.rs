@@ -215,11 +215,11 @@ impl Extern {
     }
 }
 
-/// A read-only mapping of extern names to `Extern`.
-#[derive(Clone)]
-pub struct Externs<'a> {
-    pub(crate) source: ExternsSource<'a>,
-    pub(crate) only_unbound: bool,
+/// An owned, shallow snapshot of extern declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Externs {
+    entries: Vec<Extern>,
+    unbound: Vec<Extern>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,89 +243,44 @@ impl ExternsSource<'_> {
     }
 }
 
-impl PartialEq for Externs<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other.iter()) && self.unbound().iter().eq(other.unbound().iter())
-    }
-}
-impl Eq for Externs<'_> {}
-
-impl std::fmt::Debug for Externs<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Externs")
-            .field("entries", &self.iter().collect::<Vec<_>>())
-            .field("unbound", &self.unbound().iter().map(|e| e.name).collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-impl<'a> Externs<'a> {
-    pub fn get(&self, name: &str) -> Option<Extern> {
-        let declared = self.source.declarations()?;
-        if self.only_unbound && self.source.bound(name) {
-            return None;
+impl Externs {
+    pub(crate) fn snapshot(source: ExternsSource<'_>) -> Self {
+        let mut entries = Vec::new();
+        if let Some(declared) = source.declarations() {
+            entries.extend(declared.names.iter().filter_map(|name| {
+                Some(Extern { name: name.clone(), kind: *declared.kinds.get(name)? })
+            }));
         }
-        let kind = *declared.kinds.get(name)?;
-        Some(Extern {
-            name: name.to_string(),
-            kind,
-        })
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let unbound = entries.iter().filter(|e| !source.bound(&e.name)).cloned().collect();
+        Self { entries, unbound }
     }
 
-    pub fn len(&self) -> usize {
-        let Some(declared) = self.source.declarations() else { return 0; };
-        if self.only_unbound {
-            declared.names.iter().filter(|n| !self.source.bound(n)).count()
-        } else {
-            declared.names.len()
-        }
+    pub fn get(&self, name: &str) -> Option<&Extern> {
+        self.entries.binary_search_by(|e| e.name.as_str().cmp(name)).ok().map(|i| &self.entries[i])
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// A snapshot containing only declarations unbound at this level.
+    pub fn unbound(&self) -> Self {
+        Self { entries: self.unbound.clone(), unbound: self.unbound.clone() }
     }
 
-    pub fn unbound(&self) -> Externs<'a> {
-        Externs {
-            source: self.source.clone(),
-            only_unbound: true,
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
-        let items: Vec<Extern> = match self.source.declarations() {
-            Some(declared) => declared
-                .names
-                .iter()
-                .filter(|name| !self.only_unbound || !self.source.bound(name))
-                .filter_map(|name| {
-                    let kind = *declared.kinds.get(name)?;
-                    Some(Extern {
-                        name: name.clone(),
-                        kind,
-                    })
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        items.into_iter()
-    }
+    pub fn iter(&self) -> impl Iterator<Item = &Extern> + '_ { self.entries.iter() }
 }
 
-impl<'a> IntoIterator for Externs<'a> {
+impl IntoIterator for Externs {
     type Item = Extern;
     type IntoIter = std::vec::IntoIter<Extern>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter().collect::<Vec<_>>().into_iter()
-    }
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
 }
 
-impl<'a> IntoIterator for &'a Externs<'a> {
-    type Item = Extern;
-    type IntoIter = std::vec::IntoIter<Extern>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter().collect::<Vec<_>>().into_iter()
-    }
+impl<'a> IntoIterator for &'a Externs {
+    type Item = &'a Extern;
+    type IntoIter = std::slice::Iter<'a, Extern>;
+    fn into_iter(self) -> Self::IntoIter { self.entries.iter() }
 }
 
 /// How the parser is represented and run when masks are computed with
@@ -650,24 +605,23 @@ impl Grammar {
     }
 
     /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
-    pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
-        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
+    pub fn from_glrm(source: &str) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source)));
         grammar.component()?;
         Ok(grammar)
     }
 
 
     /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source.
-    pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
-        let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
+    pub fn from_lark(source: &str) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Lark(Arc::from(source)));
         grammar.lark_document()?;
         grammar.declarations()?;
         Ok(grammar)
     }
 
     /// Parses a JSON Schema given as JSON text.
-    pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
-        let source = source.as_ref();
+    pub fn from_json_schema(source: &str) -> Result<Self> {
         crate::import::parse_json_schema_to_named(source)?;
         Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))
     }
@@ -806,9 +760,8 @@ impl Grammar {
     }
 
     /// Builds a grammar from an `Expr`.
-    pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
-        let expr = expr.into();
-        Self::from_expr_ref(&expr)
+    pub fn from_expr(expr: &Expr) -> Result<Grammar> {
+        Self::from_expr_ref(expr)
     }
 
     // Keep the large historical differential fixture corpus readable while it
@@ -872,12 +825,7 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    pub fn externs(&self) -> Externs<'_> {
-        Externs {
-            source: ExternsSource::Grammar(self),
-            only_unbound: false,
-        }
-    }
+    pub fn externs(&self) -> Externs { Externs::snapshot(ExternsSource::Grammar(self)) }
 
     /// Fails if the extern is undeclared, already bound or the wrong kind.
     ///
@@ -2371,7 +2319,7 @@ impl SpecGrammarBinding<'_> {
         if compatible {
             Ok(())
         } else {
-            Err(Error::InvalidInput(format!(
+            Err(Error::VocabMismatch(format!(
                 "the module bound to extern {name:?} was precompiled for a different vocabulary",
             )))
         }
@@ -3106,7 +3054,7 @@ impl PreparedGrammar {
         let vocab = constraint_vocab(self.inner.as_ref());
         let binding = match value {
             UnlinkedValue::Prepared(child) => {
-                if !child.targets_vocab(&vocab){return Err(Error::InvalidInput("the bound modules were precompiled for different vocabularies".into()));}
+                if !child.targets_vocab(&vocab){return Err(Error::VocabMismatch("the bound modules were precompiled for different vocabularies".into()));}
                 let _=graph::prepared_first(&child)?;
                 ModuleBinding::Module(child)
             }
@@ -3117,7 +3065,7 @@ impl PreparedGrammar {
             UnlinkedValue::StaticBorrowed(child) => {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child, &vocab) {
-                    return Err(Error::InvalidInput(format!(
+                    return Err(Error::VocabMismatch(format!(
                         "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }
@@ -3126,7 +3074,7 @@ impl PreparedGrammar {
             UnlinkedValue::StaticOwned(child) => {
                 self.require_direct_slot(name)?;
                 if !static_constraint_targets(child.as_ref(), &vocab) {
-                    return Err(Error::InvalidInput(format!(
+                    return Err(Error::VocabMismatch(format!(
                         "the module bound to extern {name:?} was precompiled for a different vocabulary",
                     )));
                 }

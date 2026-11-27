@@ -54,11 +54,11 @@ fn main() -> glrmask::Result<()> {
         let token = (0..=EOS)
             .filter(|&t| allowed(t))
             .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
-            .unwrap();
+            .expect("no allowed token and cannot stop");
         if token == EOS {
             break;
         }
-        state.commit_token(token);
+        assert!(state.commit_token(token), "allowed token rejected");
         output.push(token as u8);
     }
     println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}

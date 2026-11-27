@@ -190,6 +190,8 @@ the vocabulary its precompiled parts were built for; `compile` and `precompile` 
 the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
 load saved bytes from untrusted sources.
 
+Empty ranges are no-ops; reversed ranges are invalid. Externs views are shallow, and bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting. Load only trusted artifacts.
+
 ## Errors
 
 Arguments of the wrong type throw `TypeError`, and token IDs out of range throw `RangeError`. Everything else throws a
@@ -203,11 +205,12 @@ Arguments of the wrong type throw `TypeError`, and token IDs out of range throw 
 | `GLRMASK_RESOURCE_LIMIT` | A resource limit was exceeded. |
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
+| `GLRMASK_VOCAB_MISMATCH` | Compiled for a different vocabulary. |
 | `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `Math.ceil(maskBitLength / 32)`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
 
-Async methods reject with the same errors.
+A lost asynchronous precompile race reports `GLRMASK_PRECOMPILE_RACE`. Async methods reject with the same errors. Out-of-u32 commit arguments raise RangeError without changing the state.
 
 ## Freeing memory
 

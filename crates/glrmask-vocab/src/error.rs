@@ -49,14 +49,18 @@ pub enum ErrorKind {
     ResourceLimit,
     /// The chosen mask strategy can't handle this grammar; another strategy may work.
     StrategyUnsupported,
-    /// Saved bytes are corrupt, from another GLRMask version, or for another vocabulary.
+    /// Saved bytes are corrupt or from another GLRMask version.
     Serialization,
+    /// A compiled artifact or module belongs to another vocabulary.
+    VocabMismatch,
+    /// The supplied output buffer is too small.
+    BufferTooSmall,
     /// A bug in GLRMask.
     Internal,
 }
 
 impl Error {
-    /// One of `ErrorKind::Syntax`, `ErrorKind::InvalidInput`, `ErrorKind::Compilation`, `ErrorKind::ResourceLimit`, `ErrorKind::StrategyUnsupported`, `ErrorKind::Serialization`, or `ErrorKind::Internal`.
+    /// The category of this error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
@@ -81,7 +85,7 @@ impl fmt::Display for Error {
                 "internal error (a bug in GLRMask; please report it): {}",
                 self.message
             )?,
-            ErrorKind::InvalidInput | ErrorKind::Compilation => f.write_str(&self.message)?,
+            ErrorKind::InvalidInput | ErrorKind::Compilation | ErrorKind::VocabMismatch | ErrorKind::BufferTooSmall => f.write_str(&self.message)?,
         }
         if let Some(span) = self.span {
             write!(f, " ({span})")?;

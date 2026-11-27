@@ -57,6 +57,7 @@ pub(crate) trait ErrorExt: Sized {
     fn StrategyUnsupported(message: String) -> Self;
     /// An artifact could not be serialized or loaded.
     fn Serialization(message: String) -> Self;
+    fn VocabMismatch(message: String) -> Self;
     /// The message, without the kind prefix or source span.
     fn message(&self) -> &str;
     /// Sets the source span if it isn't set yet.
@@ -90,6 +91,9 @@ impl ErrorExt for Error {
     }
     fn Serialization(message: String) -> Self {
         error_internal::new_error(ErrorKind::Serialization, message)
+    }
+    fn VocabMismatch(message: String) -> Self {
+        error_internal::new_error(ErrorKind::VocabMismatch, message)
     }
     fn message(&self) -> &str {
         error_internal::error_message(self)

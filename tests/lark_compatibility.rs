@@ -14,7 +14,7 @@ fn source_token_id_atoms_are_rejected() {
 }
 #[test]
 fn explicit_module_sets_use_actual_id_domain() {
-    let v=Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).unwrap();
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).unwrap();
     for expected in [vec![1],vec![0,1],vec![3],vec![7],vec![]] {
         for mode in MODES {
             let mut m=Module::new(&lark("start: <|event|>"));

@@ -409,9 +409,8 @@ def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
     prepared = glrmask.Module(source)
     prepared.precompile(v)
     for m in (glrmask.Module(source), prepared):
-        with pytest.raises(glrmask.GLRMaskError) as exc:
+        with pytest.raises(TypeError):
             glrmask.Grammar.from_expr(m)
-        assert exc.value.kind == "invalid_input"
         for expr in (glrmask.Expr.sequence(m), glrmask.Expr.sequence(glrmask.Expr.choice(m), glrmask.Expr.literal(""))):
             with pytest.raises(glrmask.GLRMaskError) as exc:
                 glrmask.Grammar.from_expr(expr)
@@ -440,7 +439,13 @@ def test_grammar_rejects_tokens_transitively_and_module_accepts_them():
                   glrmask.Expr.sequence(glrmask.Expr.literal(""), token),
                   glrmask.Expr.sequence(glrmask.Expr.choice(glrmask.Expr.literal("x"), token), glrmask.Expr.literal(""))):
         grammar = glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE")
-        for attempt in (lambda: grammar.bind("VALUE", value), lambda: glrmask.Grammar.from_expr(value)):
+        if isinstance(value, glrmask.TokenSet):
+            with pytest.raises(TypeError):
+                glrmask.Grammar.from_expr(value)
+        attempts = [lambda: grammar.bind("VALUE", value)]
+        if isinstance(value, glrmask.Expr):
+            attempts.append(lambda: glrmask.Grammar.from_expr(value))
+        for attempt in attempts:
             with pytest.raises(glrmask.GLRMaskError, match="token sets can only be bound to a Module") as exc:
                 attempt()
             assert exc.value.kind == "invalid_input"

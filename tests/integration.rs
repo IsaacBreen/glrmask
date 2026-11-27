@@ -1513,7 +1513,7 @@ fn internal_ebnf_and_bound_lark_accept_special_tokens() {
 
 #[test]
 fn byte_less_special_token_extends_mask_token_space() {
-    let vocab = Vocab::new::<Vec<u8>>(Vec::new()).unwrap();
+    let vocab = Vocab::new(Vec::new()).unwrap();
     let res = with_stable_ti_env(|| {
         Constraint::compile(glrmask::Grammar::glrm(r#"
                 start start;
@@ -1534,7 +1534,7 @@ fn grammar_def_json_supports_special_token_terminals() {
     });
     let constraint = Constraint::compile_grammar_def_json(
         &grammar.to_string(),
-        &Vocab::new::<Vec<u8>>(Vec::new()).unwrap(),
+        &Vocab::new(Vec::new()).unwrap(),
     )
     .unwrap();
     assert_eq!(allowed(&constraint.start().mask()), vec![100]);
@@ -2549,7 +2549,7 @@ fn module_retained_work_is_checked_against_the_compile_vocabulary() {
     let vocab = vocab(&["a", "b"]);
     let mut module = glrmask::Module::new(&glrmask::Grammar::ebnf(r#"start ::= "a" "b""#));
     module.precompile(&vocab).unwrap();
-    let loaded = glrmask::Module::load(module.save()).unwrap();
+    let loaded = glrmask::Module::load(&module.save()).unwrap();
     assert_eq!(
         loaded.compile(&vocab).unwrap().start().mask(),
         module.compile(&vocab).unwrap().start().mask(),
@@ -2560,7 +2560,7 @@ fn module_retained_work_is_checked_against_the_compile_vocabulary() {
 
 #[test]
 fn rejection_preserves_original_clone() {
-    let vocab = Vocab::new([(0, b"a".as_slice()), (1, b"b".as_slice())]).unwrap();
+    let vocab = Vocab::new([(0, b"a".to_vec()), (1, b"b".to_vec())]).unwrap();
     let constraint = glrmask::Grammar::from_lark("start: \"a\" \"a\" \"a\" \"a\" \"a\"").unwrap().compile(&vocab).unwrap();
     let original = constraint.start();
     let mut copy = original.clone();

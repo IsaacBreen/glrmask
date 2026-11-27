@@ -121,8 +121,9 @@ class TokenSet extends Owned {
   static fromRanges(values) {
     const ranges = iterable(values, 'token ranges').map(r => {
       if (r === null || typeof r !== 'object') throw new TypeError('A token range must have start and end');
-      const start = tokenId(r.start), end = r.end;
-      if (!Number.isInteger(end) || end <= start || end > MAX_TOKEN_ID + 1) throw new RangeError('Invalid half-open token range');
+      const {start, end} = r;
+      if (![start,end].every(v => Number.isInteger(v) && v >= 0 && v <= MAX_TOKEN_ID + 1)) throw new RangeError('Invalid half-open token range');
+      if (start > end) throw new GLRMaskError('GLRMASK_INVALID_INPUT','range start exceeds end');
       return {start, end};
     });
     return wrap(TokenSet, invoke(() => native.NativeTokenSet.fromRanges(ranges)));
@@ -139,6 +140,7 @@ class TokenSet extends Owned {
 class Grammar extends Owned {
   static fromGlrm(source) { return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('glrm', string(source)))); }
   static fromJsonSchema(schema) {
+    if (typeof schema !== 'string' && typeof schema !== 'boolean' && (schema === null || typeof schema !== 'object' || Array.isArray(schema))) throw new TypeError('JSON Schema must be a string, boolean or object');
     const source = typeof schema === 'string' ? schema : JSON.stringify(schema);
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('json-schema', string(source, 'JSON Schema'))));
   }
@@ -152,13 +154,7 @@ class Grammar extends Owned {
   }
   clone() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
   static fromExpr(value) {
-    let expr;
-    if (value instanceof Expr) expr = handle(value, Expr);
-    else if (value instanceof Module) expr = invoke(() => native.NativeExpr.fromModule(handle(value, Module)));
-    else if (value instanceof Grammar) expr = invoke(() => native.NativeExpr.fromGrammar(handle(value, Grammar)));
-    else if (value instanceof TokenSet) expr = invoke(() => native.NativeExpr.fromTokenSet(handle(value, TokenSet)));
-    else throw new TypeError('Grammar.fromExpr requires an Expr or Grammar');
-    return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
+    return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(handle(value, Expr))));
   }
   bind(name, value) {
     string(name, 'binding name');
@@ -325,6 +321,7 @@ class ConstraintState extends Owned {
   }
   commitToken(id) {
     if (typeof id !== 'number') throw new TypeError('Token IDs must be numbers');
+    if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) throw new RangeError('Token ID is outside the u32 range');
     return invoke(() => handle(this, ConstraintState).commitToken(id));
   }
   commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }

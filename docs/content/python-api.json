@@ -32,8 +32,8 @@
   "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.",
   "ConstraintState": "",
   "ConstraintState.__repr__": "",
-  "ConstraintState.mask": "Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead.",
-  "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. Releases the GIL.",
+  "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
+  "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. May release the GIL.",
   "ConstraintState.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
   "ConstraintState.commit_token": "Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.",
   "ConstraintState.commit_bytes": "Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.",
@@ -51,5 +51,5 @@
   "Extern.name": "",
   "Extern.kind": "",
   "GLRMaskError": "",
-  "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`."
+  "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"vocab_mismatch\"`, `\"buffer_too_small\"`, `\"internal\"`."
 }

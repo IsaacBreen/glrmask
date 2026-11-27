@@ -4,9 +4,10 @@
 #include <string.h>
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"C ABI check failed at line %d: %s; %s\n",__LINE__,#x,glrmask_error_message());return 1;}}while(0)
 int main(void) {
+    uint32_t accepted=0;
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==7);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
+    CHECK(glrmask_abi_version()==8);CHECK(strcmp(glrmask_version(),GLRMASK_TEST_EXPECTED_VERSION)==0);
     CHECK(glrmask_vocab_new(NULL,1,&vocab)==GLRMASK_INVALID_INPUT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,&vocab)==GLRMASK_OK);
     {
@@ -51,7 +52,7 @@ int main(void) {
             CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
             CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==1 && data[0]=='a');
             CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[0]==0x80000001 && words[1]==0);
-            CHECK(glrmask_state_commit_bytes(probe,data,count));glrmask_bytes_free(forced);forced=NULL;
+            CHECK(glrmask_state_commit_bytes(probe,data,count,&accepted)==GLRMASK_OK && accepted==1);glrmask_bytes_free(forced);forced=NULL;
             CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
             CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==0);
             glrmask_bytes_free(forced);
@@ -60,16 +61,16 @@ int main(void) {
                 uint32_t terminated=0,accepting=0;
                 CHECK(glrmask_constraint_start(constraint,&probe)==GLRMASK_OK);
                 CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==0);
-                if(rejection==0){CHECK(!glrmask_state_commit_token(probe,1));}
-                else if(rejection==1){CHECK(!glrmask_state_commit_token(probe,65));}
-                else{CHECK(!glrmask_state_commit_bytes(probe,(const uint8_t*)"z",1));}
+                if(rejection==0){CHECK(glrmask_state_commit_token(probe,1,&accepted)==GLRMASK_OK && accepted==0);}
+                else if(rejection==1){CHECK(glrmask_state_commit_token(probe,65,&accepted)==GLRMASK_OK && accepted==0);}
+                else{CHECK(glrmask_state_commit_bytes(probe,(const uint8_t*)"z",1,&accepted)==GLRMASK_OK && accepted==0);}
                 CHECK(glrmask_state_is_terminated(probe,&terminated)==GLRMASK_OK && terminated==1);
                 CHECK(glrmask_state_is_accepting(probe,&accepting)==GLRMASK_OK && accepting==0);
                 CHECK(glrmask_state_fill_mask(probe,words,2)==GLRMASK_OK && words[0]==0 && words[1]==0);
                 CHECK(glrmask_state_forced_bytes(probe,&forced)==GLRMASK_OK);
                 CHECK(glrmask_bytes_data(forced,&data,&count)==GLRMASK_OK && count==0);
                 glrmask_bytes_free(forced); forced=NULL;
-                CHECK(!glrmask_state_commit_token(probe,0));
+                CHECK(glrmask_state_commit_token(probe,0,&accepted)==GLRMASK_OK && accepted==0);
                 glrmask_state_free(probe);
             }
             glrmask_constraint_free(constraint);constraint=NULL;
@@ -85,6 +86,22 @@ int main(void) {
         CHECK(glrmask_grammar_compile(grammar,vocab,(const glrmask_compile_options*)&old.opts,&constraint)==GLRMASK_OK);
         glrmask_constraint_free(constraint); constraint=NULL;
         CHECK(glrmask_compile_options_init(NULL,sizeof(options))==GLRMASK_INVALID_INPUT);
+    }
+    {
+        struct { glrmask_compile_options opts; uint64_t trailing; } future;
+        CHECK(glrmask_compile_options_init(&future.opts,sizeof(future))==GLRMASK_OK);
+        CHECK(glrmask_grammar_compile(grammar,vocab,&future.opts,&constraint)==GLRMASK_OK);
+        glrmask_constraint_free(constraint);constraint=NULL;
+        future.trailing=1;
+        CHECK(glrmask_grammar_compile(grammar,vocab,&future.opts,&constraint)==GLRMASK_INVALID_INPUT && constraint==NULL);
+
+        CHECK(strlen(glrmask_error_message())>0);
+        accepted=99; CHECK(glrmask_state_commit_token(NULL,0,&accepted)==GLRMASK_INVALID_INPUT && accepted==0);
+
+        CHECK(glrmask_abi_version()==8);
+        CHECK(!strlen(glrmask_error_message()));
+        size_t zero=99;
+        CHECK(glrmask_constraint_mask_bit_len(NULL,&zero)==GLRMASK_INVALID_INPUT && zero==0);
     }
     options.struct_size=0;
     CHECK(glrmask_grammar_compile(grammar,vocab,&options,&constraint)==GLRMASK_INVALID_INPUT);CHECK(constraint==NULL);
@@ -173,15 +190,15 @@ int main(void) {
     CHECK(words[0]==(UINT32_C(1)|UINT32_C(0x80000000)) && words[1]==0 && words[2]==0);
     uint32_t terminated=0;
     CHECK(glrmask_state_is_terminated(state,&terminated)==GLRMASK_OK);CHECK(terminated==0);
-    CHECK(glrmask_state_commit_token(state,31));
+    CHECK(glrmask_state_commit_token(state,31,&accepted)==GLRMASK_OK && accepted==1);
     uint32_t accepting=0;CHECK(glrmask_state_is_accepting(state,&accepting)==GLRMASK_OK);CHECK(accepting==1);
     CHECK(glrmask_state_is_terminated(state,&terminated)==GLRMASK_OK);CHECK(terminated==1);
     glrmask_state* copy=NULL;CHECK(glrmask_state_clone(state,&copy)==GLRMASK_OK);
     glrmask_state_free(state);CHECK(glrmask_state_is_accepting(copy,&accepting)==GLRMASK_OK && accepting==1);
     CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
-    CHECK(!glrmask_state_commit_token(NULL,0));CHECK(strlen(glrmask_error_message())>0);
-    CHECK(!glrmask_state_commit_token(copy,0));CHECK(strlen(glrmask_error_message())==0);
-    CHECK(!glrmask_state_commit_bytes(NULL,NULL,0));CHECK(strlen(glrmask_error_message())>0);
+    accepted=99; CHECK(glrmask_state_commit_token(NULL,0,&accepted)==GLRMASK_INVALID_INPUT && accepted==0);CHECK(strlen(glrmask_error_message())>0);
+    CHECK(glrmask_state_commit_token(copy,0,&accepted)==GLRMASK_OK && accepted==0);CHECK(strlen(glrmask_error_message())==0);
+    accepted=99; CHECK(glrmask_state_commit_bytes(NULL,NULL,0,&accepted)==GLRMASK_INVALID_INPUT && accepted==0);CHECK(strlen(glrmask_error_message())>0);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
     CHECK(glrmask_grammar_from_source(GLRMASK_LARK,bad_utf8,1,&grammar)==GLRMASK_INVALID_INPUT);CHECK(grammar==NULL);
@@ -206,7 +223,7 @@ int main(void) {
             if(n) CHECK(out[(n-1)/32] & (UINT32_C(1)<<((n-1)%32)));
             CHECK(glrmask_state_fill_mask(state,out,w+2)==GLRMASK_OK);
             CHECK(out[w]==0 && out[w+1]==0);
-            if(n){CHECK(glrmask_state_commit_token(state,(uint32_t)(n-1)));CHECK(glrmask_state_fill_mask(state,out,w)==GLRMASK_OK);for(size_t j=0;j<w;j++)CHECK(out[j]==0);}
+            if(n){CHECK(glrmask_state_commit_token(state,(uint32_t)(n-1),&accepted)==GLRMASK_OK && accepted==1);CHECK(glrmask_state_fill_mask(state,out,w)==GLRMASK_OK);for(size_t j=0;j<w;j++)CHECK(out[j]==0);}
             glrmask_state_free(state);glrmask_constraint_free(constraint);glrmask_grammar_free(grammar);glrmask_vocab_free(vocab);
         }
     }

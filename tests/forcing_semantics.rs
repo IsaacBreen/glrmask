@@ -144,7 +144,7 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
 
 #[test]
 fn exact_events_before_and_after_text_keep_their_original_ids() {
-    let vocab=Vocab::new::<Vec<u8>>(vec![
+    let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),(8,Vec::new()),
     ]).unwrap();
     for (event,expected) in [
@@ -190,7 +190,7 @@ fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
 
 #[test]
 fn exact_event_chain_retains_ids_and_never_canonicalizes_equal_bytes() {
-    let vocab=Vocab::new::<Vec<u8>>(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]).unwrap();
+    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]).unwrap();
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token A; extern token B; extern token C; nt root = A B C;").unwrap()
             .bind_snapshot("A",TokenSet::new([1])).unwrap()
@@ -356,7 +356,7 @@ fn forced_bytes_read_only_and_commit_replay() {
 fn forced_bytes_long_run_in_chunks() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec())]).unwrap();
     let literal = "a".repeat(10_005);
-    let grammar = Grammar::from_expr(glrmask::Expr::literal(literal.as_str())).unwrap();
+    let grammar = Grammar::from_expr(&glrmask::Expr::literal(literal.as_str())).unwrap();
     let constraint = grammar.compile_with(&vocab, glrmask::CompileOptions::default().mask_strategy(glrmask::MaskStrategy::FAST_COMPILE)).unwrap();
     let mut state = constraint.start();
     let mut collected = Vec::new();
@@ -468,7 +468,7 @@ fn caller_eos_equivalence_at_sampled_prefixes() {
             for ends in [&[130][..], &[130,160][..]] {
                 let a=with_end(&body,ends).compile_with(&vocab,options.clone()).unwrap();
                 let words=a.mask_bit_len().div_ceil(32).max(b.mask_bit_len().div_ceil(32)).max(6);
-                for (a,b) in [(a.clone(),b.clone()),(glrmask::Constraint::load(a.save(),&vocab).unwrap(),glrmask::Constraint::load(b.save(),&vocab).unwrap())] {
+                for (a,b) in [(a.clone(),b.clone()),(glrmask::Constraint::load(&a.save(),&vocab).unwrap(),glrmask::Constraint::load(&b.save(),&vocab).unwrap())] {
                     for _ in 0..4 {
                         let mut x=a.start();let mut y=b.start();
                         for step in 0..64 {

@@ -22,7 +22,7 @@ fn caller_errors_are_invalid_input() {
 fn nested_expression_is_a_resource_limit() {
     let mut expr = Expr::literal("a");
     for _ in 0..70 { expr = Expr::sequence([expr]); }
-    assert_eq!(Grammar::from_expr(expr).unwrap_err().kind(), ErrorKind::ResourceLimit);
+    assert_eq!(Grammar::from_expr(&expr).unwrap_err().kind(), ErrorKind::ResourceLimit);
 }
 
 #[test]

@@ -23,8 +23,8 @@ pub struct CompileOptions {
 
 impl CompileOptions {
 
-    pub fn mask_strategy(mut self, strategy: impl Into<MaskStrategy>) -> Self {
-        self.mask_strategy = strategy.into();
+    pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
+        self.mask_strategy = strategy;
         self.internal_mask = None;
         self.retry_mask = None;
         self
@@ -214,7 +214,7 @@ impl RetainedPreparation for PreparedGrammar {
             return Ok(Arc::new(self.clone()));
         };
         if self.retained_vocab_fingerprint != Some(crate::compiler::compile::vocab_fingerprint(vocab)) {
-            return Err(invalid("the module was precompiled for a different vocabulary"));
+            return Err(Error::VocabMismatch("the module was precompiled for a different vocabulary".to_owned()));
         }
         prepared_artifact::load(wire.as_ref(), Some(vocab))
             .map(|prepared| Arc::new(prepared) as Arc<dyn RetainedPreparation>)
@@ -242,7 +242,7 @@ impl Certificate {
     }
     fn target_fingerprint(&mut self, fingerprint: [u8; 32]) -> Result<()> {
         if self.target.is_some_and(|v| v != fingerprint) {
-            return Err(invalid("the bound modules were precompiled for different vocabularies"));
+            return Err(Error::VocabMismatch("the bound modules were precompiled for different vocabularies".to_owned()));
         }
         if self.target.is_none() {
             // The first supplied vocabulary must validate every pending token
@@ -467,12 +467,7 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    pub fn externs(&self) -> Externs<'_> {
-        Externs {
-            source: ExternsSource::Module(self),
-            only_unbound: false,
-        }
-    }
+    pub fn externs(&self) -> Externs { Externs::snapshot(ExternsSource::Module(self)) }
 
     fn bound_module(
         name: &str,
@@ -648,9 +643,7 @@ impl Module {
                     .retained_vocab_fingerprint
                     .unwrap_or_else(|| prepared.inner.vocab_fingerprint());
                 if recorded != expected {
-                    return Err(invalid(
-                        "the module was precompiled for a different vocabulary",
-                    ));
+                    return Err(Error::VocabMismatch("the module was precompiled for a different vocabulary".to_owned()));
                 }
             }
         }
@@ -1418,8 +1411,8 @@ impl Module {
 
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
     /// May fail if saved by a different GLRMask version.
-    pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
-        with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
+    pub fn load(bytes: &[u8]) -> Result<Self> {
+        with_deep_stack(|| artifact::load(bytes, None))
     }
 }
 
@@ -1809,7 +1802,7 @@ mod b_shell_tests {
             .expect("precompile the B shell");
         assert!(module.node.prepared.contains_key(&Engine::TokenTrie.key()));
 
-        let loaded = Module::load(module.save()).expect("load the B shell");
+        let loaded = Module::load(&module.save()).expect("load the B shell");
         assert!(
             loaded.node.prepared.contains_key(&Engine::TokenTrie.key()),
             "the B shell must survive Module save/load",

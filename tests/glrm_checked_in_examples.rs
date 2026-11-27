@@ -183,7 +183,7 @@ fn developer_example_literal_grammars_import() {
                 assert!(Grammar::from_glrm(&source).is_err());
             } else if name == "core_batch_scaling" && source == "start root nt root=E0" {
                 // A fragment used by the generator after emitting the externs.
-                Grammar::from_glrm(format!("extern token E0\n{source}")).unwrap();
+                Grammar::from_glrm(&format!("extern token E0\n{source}")).unwrap();
             } else {
                 Grammar::from_glrm(&source).unwrap_or_else(|e| panic!("{name}: {e}\n{source}"));
             }

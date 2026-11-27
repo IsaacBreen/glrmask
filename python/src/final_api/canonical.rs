@@ -53,8 +53,8 @@ impl PyExtern {
     }
 }
 
-impl From<glrmask::Extern> for PyExtern {
-    fn from(e: glrmask::Extern) -> Self {
+impl From<&glrmask::Extern> for PyExtern {
+    fn from(e: &glrmask::Extern) -> Self {
         let kind = match e.kind() {
             glrmask::ExternKind::Token => "token".to_string(),
             glrmask::ExternKind::Grammar => "grammar".to_string(),
@@ -407,10 +407,10 @@ impl PyModule {
         let binding = extract_binding(value)?;
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
-        let next = py.detach(move || {
+        let next = super::super::catch_python_panic(|| py.detach(move || {
             binding.bind(&mut next, &name)?;
             Ok::<_, glrmask::Error>(next)
-        }).map_err(api_error)?;
+        }))?.map_err(api_error)?;
         target.replace(py, next);
         Ok(())
     }
@@ -427,11 +427,11 @@ impl PyModule {
         let options = compile_options(mask_strategy);
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
-        let next = py
+        let next = super::super::catch_python_panic(|| py
             .detach(move || {
                 next.precompile_with(&vocab, options)?;
                 Ok::<_, glrmask::Error>(next)
-            })
+            }))?
             .map_err(api_error)?;
         target.replace(slf.py(), next);
         Ok(())
@@ -448,8 +448,8 @@ impl PyModule {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
         let options = compile_options(mask_strategy);
-        let constraint = py
-            .detach(move || snapshot.compile_with(&vocab, options))
+        let constraint = super::super::catch_python_panic(|| py
+            .detach(move || snapshot.compile_with(&vocab, options)))?
             .map_err(api_error)?;
         Ok(super::constraint(constraint))
     }
@@ -486,7 +486,7 @@ impl PyModule {
 
     fn save<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = slf.try_borrow()?.snapshot();
-        let bytes = slf.py().detach(move || snapshot.save());
+        let bytes = super::super::catch_python_panic(|| slf.py().detach(move || snapshot.save()))?;
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
@@ -495,7 +495,7 @@ impl PyModule {
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         let data = data.to_vec();
-        py.detach(move || glrmask::Module::load(&data))
+        super::super::catch_python_panic(|| py.detach(move || glrmask::Module::load(&data)))?
             .map(Self::from_inner)
             .map_err(api_error)
     }

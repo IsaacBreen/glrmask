@@ -23,11 +23,6 @@ pub struct glrmask_externs(Vec<glrmask_extern_item>);
 
 #[repr(C)] pub struct glrmask_vocab_entry { pub id: u32, pub bytes: *const u8, pub bytes_len: usize }
 #[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_range { pub start: u32, pub end: u32 }
-#[repr(C)] pub struct glrmask_extern {
-    pub name: *const c_char,
-    pub name_len: usize,
-    pub kind: u32,
-}
 
 fn status(kind: core::ErrorKind) -> i32 {
     match kind {
@@ -37,29 +32,21 @@ fn status(kind: core::ErrorKind) -> i32 {
         core::ErrorKind::ResourceLimit => 4,
         core::ErrorKind::StrategyUnsupported => 5,
         core::ErrorKind::Serialization => 6,
+        core::ErrorKind::VocabMismatch => 10,
+        core::ErrorKind::PrecompileRace => 11,
         core::ErrorKind::Internal => 7,
         core::ErrorKind::BufferTooSmall => 8,
         core::ErrorKind::Closed => 9,
     }
 }
 
-thread_local! { static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) }; }
+thread_local! { static LAST_ERROR: RefCell<Option<(i32, CString)>> = const { RefCell::new(None) }; }
 fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
     match core::guarded(f) {
         Ok(()) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
         Err(e) => {
-            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
+            LAST_ERROR.with(|s| *s.borrow_mut() = Some((status(e.kind), CString::new(e.message.replace('\0', "\\0")).unwrap_or_default())));
             status(e.kind)
-        }
-    }
-}
-/// Ordinary rejection is a successful call with a false/short result.
-fn commit<T: Default>(f: impl FnOnce() -> Result<T>) -> T {
-    match core::guarded(f) {
-        Ok(value) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); value }
-        Err(e) => {
-            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
-            T::default()
         }
     }
 }
@@ -90,9 +77,9 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 7 }
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 8 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |(_, s)| s.as_ptr())) }
 
 macro_rules! free {($name:ident,$ty:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $name(p:*mut $ty) {
@@ -150,21 +137,21 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_equal(a: *const glrmask_token_set, b: *const glrmask_token_set, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = u32::from(read(a)?.0 == read(b)?.0); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(a)?.0 == read(b)?.0); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format: u32, source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let source = text(source, n)?.to_owned();
         let grammar = match format {
-            1 => g::Grammar::from_glrm(source)?,
-            2 => g::Grammar::from_json_schema(source)?,
-            3 => g::Grammar::from_lark(source)?,
+            1 => g::Grammar::from_glrm(&source)?,
+            2 => g::Grammar::from_json_schema(&source)?,
+            3 => g::Grammar::from_lark(&source)?,
             _ => return Err(Error::invalid("unknown source format")),
         }; Ok(glrmask_grammar(grammar))
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_expr(expr: *const crate::module_api::glrmask_expr, out: *mut *mut glrmask_grammar) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_expr(read(expr)?.0.clone())?))) })
+    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_expr(&read(expr)?.0)?))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_grammar(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_grammar) -> i32 {
     ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
@@ -175,19 +162,23 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs();
-        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        let mut entries: Vec<_> = view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect()))
+        }).collect();
+        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        Ok(glrmask_externs(entries))
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_unbound_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs().unbound();
-        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        let mut entries: Vec<_> = view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect()))
+        }).collect();
+        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        Ok(glrmask_externs(entries))
     }) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_compile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {
@@ -203,14 +194,14 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { produce(out, || Ok(glrmask_state(core::State::start(read(p)?.0.clone())?))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_mask_bit_len(p: *const glrmask_constraint, out: *mut usize) -> i32 {
-    ffi(|| unsafe { *write(out)? = read(p)?.0.mask_bit_len(); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = read(p)?.0.mask_bit_len(); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p: *const glrmask_constraint, out: *mut *mut glrmask_bytes) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_bytes(read(p)?.0.save()))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_load(bytes: *const u8, n: usize, v: *const glrmask_vocab, out: *mut *mut glrmask_constraint) -> i32 {
     ffi(|| unsafe { produce(out, || {
-        let bytes = input(bytes, n)?.to_vec();
+        let bytes = input(bytes, n)?;
         if v.is_null() { return Err(Error::invalid("vocab is NULL")); }
         Ok(glrmask_constraint(Arc::new(g::Constraint::load(bytes, &read(v)?.0)?)))
     }) })
@@ -220,22 +211,22 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { produce(out, || Ok(glrmask_state(read(p)?.0.try_clone()?))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_mask_bit_len(p: *const glrmask_state, out: *mut usize) -> i32 {
-    ffi(|| unsafe { *write(out)? = read(p)?.0.mask_bit_len(); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = read(p)?.0.mask_bit_len(); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_fill_mask(p: *const glrmask_state, out: *mut u32, n: usize) -> i32 {
     ffi(|| unsafe { read(p)?.0.fill_mask(output(out, n)?) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> bool {
-    commit(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32, accepted: *mut u32) -> i32 {
+    ffi(|| unsafe { let accepted = write(accepted)?; *accepted = 0; *accepted = u32::from(write(p)?.0.commit_token(id)?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> bool {
-    commit(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize, accepted: *mut u32) -> i32 {
+    ffi(|| unsafe { let accepted = write(accepted)?; *accepted = 0; *accepted = u32::from(write(p)?.0.commit_bytes(input(bytes, n)?)?); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_accepting()?); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(p)?.0.is_accepting()?); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_terminated(p: *const glrmask_state, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_terminated()?); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(p)?.0.is_terminated()?); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_bytes(p: *const glrmask_state, out: *mut *mut glrmask_bytes) -> i32 {
     ffi(|| unsafe {
@@ -245,26 +236,29 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 
 macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $fn(p:*const $handle,out:*mut *const $ty,n:*mut usize)->i32 {
-        ffi(||unsafe{let out=write(out)?;*out=ptr::null();let n=write(n)?;*n=0;let data=&read(p)?.0;*out=data.as_ptr();*n=data.len();Ok(())})
+        ffi(||unsafe{if !out.is_null(){*write(out)?=ptr::null();}if !n.is_null(){*write(n)?=0;}let out=write(out)?;let n=write(n)?;let data=&read(p)?.0;*out=data.as_ptr();*n=data.len();Ok(())})
     }
 };}
 data!(glrmask_bytes_data, glrmask_bytes, u8);
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_len(p: *const glrmask_externs, out: *mut usize) -> i32 {
-    ffi(|| unsafe { *write(out)? = read(p)?.0.iter().len(); Ok(()) })
+    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = read(p)?.0.iter().len(); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_get(p: *const glrmask_externs, index: usize, out: *mut glrmask_extern) -> i32 {
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_name(p: *const glrmask_externs, index: usize, out: *mut *const c_char, n: *mut usize) -> i32 {
     ffi(|| unsafe {
+        if !out.is_null() { *write(out)? = ptr::null(); }
+        if !n.is_null() { *write(n)? = 0; }
+        let out = write(out)?; let n = write(n)?;
         let item = read(p)?.0.get(index).ok_or_else(|| Error::invalid("extern index out of range"))?;
-        *write(out)? = glrmask_extern {
-            name: item.name.as_ptr().cast(),
-            name_len: item.name.len(),
-            kind: match item.kind {
-                g::ExternKind::Token => 0,
-                g::ExternKind::Grammar => 1,
-                _ => unreachable!("every extern kind has a binding name"),
-            },
-        };
+        *out = item.name.as_ptr().cast(); *n = item.name.len();
+        Ok(())
+    })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_kind(p: *const glrmask_externs, index: usize, out: *mut u32) -> i32 {
+    ffi(|| unsafe {
+        let out = write(out)?; *out = 0;
+        let item = read(p)?.0.get(index).ok_or_else(|| Error::invalid("extern index out of range"))?;
+        *out = match item.kind { g::ExternKind::Token => 0, g::ExternKind::Grammar => 1, _ => return Err(Error::invalid("unknown extern kind")) };
         Ok(())
     })
 }

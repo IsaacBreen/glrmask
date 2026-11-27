@@ -18,6 +18,8 @@ fn error(e: core::Error) -> napi::Error {
         core::ErrorKind::ResourceLimit => "GLRMASK_RESOURCE_LIMIT",
         core::ErrorKind::StrategyUnsupported => "GLRMASK_STRATEGY_UNSUPPORTED",
         core::ErrorKind::Serialization => "GLRMASK_SERIALIZATION",
+        core::ErrorKind::VocabMismatch => "GLRMASK_VOCAB_MISMATCH",
+        core::ErrorKind::PrecompileRace => "GLRMASK_PRECOMPILE_RACE",
         core::ErrorKind::Internal => "GLRMASK_INTERNAL",
     };
     napi::Error::new(napi::Status::GenericFailure, format!("{code}: {}", e.message))
@@ -62,8 +64,8 @@ pub struct NativeExtern {
     pub kind: String,
 }
 
-pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec<NativeExtern> {
-    values.into_iter().map(|e| {
+pub fn externs_to_native<'a>(values: impl IntoIterator<Item = &'a g::Extern>) -> Vec<NativeExtern> {
+    let mut items: Vec<_> = values.into_iter().map(|e| {
         let kind = match e.kind() {
             g::ExternKind::Token => "token",
             g::ExternKind::Grammar => "grammar",
@@ -73,7 +75,9 @@ pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec
             name: e.name().to_string(),
             kind: kind.into(),
         }
-    }).collect()
+    }).collect();
+    items.sort_by(|a,b| a.name.cmp(&b.name));
+    items
 }
 
 #[napi]
@@ -108,12 +112,12 @@ impl NativeTokenSet {
         call(|| {
             let mut out = Vec::new();
             for r in ranges {
-                let first = id(r.start)?;
-                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > g::__private::MAX_TOKEN_ID as f64 + 1.0 {
+                if !r.start.is_finite() || r.start.fract() != 0.0 || r.start < 0.0 || r.start > g::__private::MAX_TOKEN_ID as f64 + 1.0 || !r.end.is_finite() || r.end.fract() != 0.0 || r.end < 0.0 || r.end > g::__private::MAX_TOKEN_ID as f64 + 1.0 {
                     return Err(core::Error::invalid(format!("ranges must have integer endpoints from 0 to {}, with the end excluded", g::__private::MAX_TOKEN_ID as u64 + 1)));
                 }
-                if r.end <= r.start { continue; }
-                out.push(first..=((r.end as u64 - 1) as u32));
+                if r.end < r.start { return Err(core::Error::invalid("range start exceeds end")); }
+                if r.end == r.start { continue; }
+                out.push(r.start as u32..r.end as u32);
             }
             Ok(Self { inner: Handle::new(g::TokenSet::from_ranges(out)) })
         })
@@ -144,9 +148,9 @@ impl NativeGrammar {
     pub fn from_source(format: String, source: String) -> napi::Result<Self> {
         call(|| {
             let grammar = match format.as_str() {
-                "glrm" => g::Grammar::from_glrm(source)?,
-                "json-schema" => g::Grammar::from_json_schema(source)?,
-                "lark" => g::Grammar::from_lark(source)?,
+                "glrm" => g::Grammar::from_glrm(&source)?,
+                "json-schema" => g::Grammar::from_json_schema(&source)?,
+                "lark" => g::Grammar::from_lark(&source)?,
                 _ => return Err(core::Error::invalid("unknown grammar source format")),
             }; Ok(Self { inner: Handle::new(grammar) })
         })
@@ -165,7 +169,7 @@ impl NativeGrammar {
     }
     #[napi(factory)]
     pub fn from_expr(value: &NativeExpr) -> napi::Result<Self> {
-        call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(live(&value.inner)?.clone())?) }))
+        call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(&*live(&value.inner)?)?) }))
     }
     #[napi]
     pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
@@ -238,14 +242,12 @@ impl NativeState {
     pub fn commit_token(&self, value: f64) -> napi::Result<bool> {
         call(|| {
             let mut state = live(&self.inner)?;
-            // A number outside the u32 token domain can never be allowed, so
-            // reject the state exactly as a commit of an unknown token does.
+            // Invalid input must not alter the state.
             if !value.is_finite()
                 || value.fract() != 0.0
                 || !(0.0..=u32::MAX as f64).contains(&value)
             {
-                state.reject()?;
-                return Ok(false);
+                return Err(core::Error::invalid("token ID is outside the u32 range"));
             }
             state.commit_token(value as u32)
         })
@@ -296,7 +298,7 @@ impl Task for LoadConstraintTask {
     fn compute(&mut self) -> napi::Result<Self::Output> {
         call(|| {
             let bytes = std::mem::take(&mut self.bytes);
-            Ok(Arc::new(g::Constraint::load(bytes, &self.vocab)?))
+            Ok(Arc::new(g::Constraint::load(&bytes, &self.vocab)?))
         })
     }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeConstraint { inner: Handle::new(value) }) }

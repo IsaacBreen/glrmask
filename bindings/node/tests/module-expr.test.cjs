@@ -259,7 +259,7 @@ test('Grammar rejects direct and nested module expressions; Module.bind still ac
   const prepared=new Module(source());prepared.precompileSync(v);
   const error=e=>e.code==='GLRMASK_INVALID_INPUT' && e.message==="a Module can't be part of a Grammar; bind it to a Module instead";
   for(const m of [new Module(source()),prepared]){
-    assert.throws(()=>Grammar.fromExpr(m),error);
+    assert.throws(()=>Grammar.fromExpr(m),TypeError);
     for(const expr of [Expr.sequence(m),Expr.sequence(Expr.choice(m),Expr.literal(''))]){
       assert.throws(()=>Grammar.fromExpr(expr),error);
       const g=parent();
@@ -275,7 +275,8 @@ test('Grammar: reject direct and nested TokenSet; Module accepts',()=>{
   const g=Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE');
   const token=new TokenSet([5]);
   for(const value of [token,Expr.choice(token,Expr.literal('x')),Expr.sequence(Expr.literal(''),token),Expr.sequence(Expr.choice(token,Expr.literal('x')),Expr.literal(''))]){
-    for(const call of [()=>g.bind('VALUE',value),()=>Grammar.fromExpr(value)]){
+    if(value instanceof TokenSet) assert.throws(()=>Grammar.fromExpr(value),TypeError);
+    for(const call of value instanceof Expr ? [()=>g.bind('VALUE',value),()=>Grammar.fromExpr(value)] : [()=>g.bind('VALUE',value)]){
       assert.throws(call, e=>e.code==='GLRMASK_INVALID_INPUT' && /token sets can only be bound to a Module/.test(e.message));
     }
     assert.equal(g.externs.unbound.size,1);

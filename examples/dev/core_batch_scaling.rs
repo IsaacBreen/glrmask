@@ -16,7 +16,7 @@ impl Apply<PreparedGrammar> for () { fn apply(self, _: &mut PreparedGrammar) {} 
 fn source(slots: usize) -> Grammar {
     let mut text = (0..slots).map(|i| format!("extern token E{i}\n")).collect::<String>();
     text.push_str("start root nt root=E0");
-    Grammar::from_glrm(text).unwrap()
+    Grammar::from_glrm(&text).unwrap()
 }
 
 fn bind_source(g: &mut Module, name: &str, id: u32) -> glrmask::Result<()> {
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let largest: usize = args.next().unwrap_or_else(|| "16".into()).parse()?;
     let jobs: usize = args.next().unwrap_or_else(|| "64".into()).parse()?;
     assert!(largest > 0 && jobs > 0);
-    let v = Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,Vec::new())]).unwrap();
+    let v = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,Vec::new())]).unwrap();
     let options = BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE);
     let workers = [1,2,4,8,16,32,64,128].into_iter().filter(|n| *n<=largest).collect::<Vec<_>>();
     let mut rows = Vec::new();

@@ -116,7 +116,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
 #[test]
 fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
-    let vocab = Vocab::new::<Vec<u8>>(Vec::new()).unwrap();
+    let vocab = Vocab::new(Vec::new()).unwrap();
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -142,7 +142,7 @@ fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
 
 #[test]
 fn external_token_validation_is_early_and_complete() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(7, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(7, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -230,7 +230,7 @@ nt start = "a" SPECIAL | "x" "a" "z";
 
 #[test]
 fn exact_tokens_survive_static_and_dynamic_serialization() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(100, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(100, Vec::new())]).unwrap();
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -523,7 +523,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
 
 #[test]
 fn compiled_children_are_authoritative_and_compose_both_directions() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]).unwrap();
     let child_source = "glrm 1; start start; extern token VALUE; nt start = VALUE;";
     let child_spec = ConstraintSpec::builder(Grammar::glrm(child_source), &vocab)
         .unwrap()
@@ -660,7 +660,7 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
 
 #[test]
 fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(7, Vec::new()), (8, b"z".to_vec())]).unwrap();
+    let vocab = Vocab::new(vec![(7, Vec::new()), (8, b"z".to_vec())]).unwrap();
     let leaf = Grammar::ebnf(r#"start ::= "z""#);
     let child = Grammar::glrm(
         "glrm 1; start start; extern grammar leaf; nt start = leaf;",
@@ -830,7 +830,7 @@ nt start = WORD;
 
 #[test]
 fn nested_external_tokens_are_rejected() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(123, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(123, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start document;
@@ -847,7 +847,7 @@ nt document = inner;
 
 #[test]
 fn external_token_can_label_nonterminal_fa_edges() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(77, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(77, Vec::new())]).unwrap();
     let source = r#"
 glrm 1;
 start start;
@@ -981,7 +981,7 @@ fn additional_reserved_words_require_escaping() {
         let span = error.source_span().unwrap();
         assert_eq!(&source[span.start..span.end], word);
         let escaped = format!("start s; nt `{word}` = \"a\"; nt s = `{word}`;");
-        assert!(Grammar::from_glrm(escaped).is_ok());
+        assert!(Grammar::from_glrm(&escaped).is_ok());
     }
 }
 

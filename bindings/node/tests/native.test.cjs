@@ -89,8 +89,9 @@ test('token sets normalize ranges and expose no inspection accessors',()=>{
   const copy=t.clone();t.dispose();assert.equal(copy.toString(),'TokenSet[31..=32]');
   const empty=new TokenSet([]);assert.equal(empty.toString(),'TokenSet[]');
   assert.ok(new TokenSet([7,7,3]).equals(new TokenSet([3,7])));
-  assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),RangeError);
-  assert.throws(()=>TokenSet.fromRanges([{start:5,end:5}]),RangeError);
+  assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),e=>e.code==='GLRMASK_INVALID_INPUT');
+  assert.ok(TokenSet.fromRanges([{start:5,end:5}]).equals(new TokenSet([])));
+  assert.ok(TokenSet.fromRanges([{start:0x1000000,end:0x1000000}]).equals(new TokenSet([])));
   assert.equal(TokenSet.fromRanges([{start:0xffffff,end:0x1000000}]).toString(),'TokenSet[16777215..=16777215]');
   for(const bad of [2**32-1,4e9,2**24]) {
     assert.throws(()=>new TokenSet([bad]),RangeError);
@@ -125,7 +126,8 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GLRMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) assert.throws(()=>new TokenSet([bad]),RangeError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296]) {
-    assert.equal((await Grammar.fromLark('start: "a" "b"').compile(v)).start().commitToken(bad),false);
+    const state = (await Grammar.fromLark('start: "a" "b"').compile(v)).start();
+    assert.throws(()=>state.commitToken(bad),RangeError);
   }
   for(const bad of ['1',1n,null]) {
     assert.throws(()=>s.commitToken(bad),TypeError);
@@ -169,7 +171,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   const c=g.compileSync(v,0,0);
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
     const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_INPUT/.test(String(e));
-    assert.equal(c.start().commitToken(bad),false);
+    assert.throws(()=>c.start().commitToken(bad),badArg);
     assert.throws(()=>new TokenSet([bad]),badArg);
     assert.throws(()=>g.compileSync(v,bad,0),badArg);
   }
@@ -232,20 +234,22 @@ test('source constructors reject invalid source',()=>{
   assert.throws(()=>Grammar.fromGlrm('invalid source'));
 });
 
-test('out-of-range token IDs fail closed instead of throwing',()=>{
+test('out-of-range token IDs throw without mutating state',()=>{
   const v=vocab();
   for(const bad of [-1,2**32,1.5,NaN,Infinity]) {
     const s=simple().compileSync(v).start();
-    assert.equal(s.commitToken(bad),false);
-    assert.equal(s.isAccepting(),false);
-    assert.equal(s.isTerminated(),true);
-    assert.equal(s.commitToken(0),false);
+    const initial=s.mask();
+    assert.throws(()=>s.commitToken(bad),RangeError);
+    assert.deepEqual(s.mask(),initial);
+    assert.equal(s.isTerminated(),false);
+    assert.equal(s.commitToken(0),true);
     const list=simple().compileSync(v).start();
     assert.equal(list.commitToken(0),true);
-    assert.equal(list.commitToken(bad),false);
-    assert.equal(list.isAccepting(),false);
-    assert.equal(list.isTerminated(),true);
-    assert.equal(list.commitToken(0),false);
+    const next=list.mask();
+    assert.throws(()=>list.commitToken(bad),RangeError);
+    assert.deepEqual(list.mask(),next);
+    assert.equal(list.commitToken(1),true);
+    assert.equal(list.isAccepting(),true);
   }
   const s=simple().compileSync(v).start();
   assert.throws(()=>s.commitToken('0'),TypeError);

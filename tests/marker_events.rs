@@ -7,7 +7,7 @@ fn modes() -> [MaskMode; 6] {
 }
 fn options(mode: MaskMode) -> BuildOptions { mode.build_options() }
 fn vocabulary() -> Vocab {
-    Vocab::new::<Vec<u8>>(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
+    Vocab::new(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
         (3,b"x".to_vec()), (4,b"y".to_vec()), (5,b"xab y".to_vec()),
         (6,b"xaby".to_vec()), (7,b"pxabyq".to_vec()), (8,b"p".to_vec()),
         (9,b"q".to_vec()), (10,Vec::new()), (11,b"<event>".to_vec())]).unwrap()

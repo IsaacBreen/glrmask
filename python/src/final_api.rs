@@ -82,7 +82,7 @@ pub(super) struct PyTokenSet {
     pub(super) inner: glrmask::TokenSet,
 }
 
-fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::RangeInclusive<u32>>) -> PyResult<()> {
+fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::Range<u32>>) -> PyResult<()> {
     let range_type = value.py().import("builtins")?.getattr("range")?;
     if !value.is_instance(&range_type)? {
         return Err(PyTypeError::new_err("TokenSet expects integers or ranges"));
@@ -101,11 +101,11 @@ fn python_range(value: &Bound<'_, PyAny>, ranges: &mut Vec<std::ops::RangeInclus
     let first = convert(value.get_item(0)?.extract()?)?;
     let last = convert(value.get_item(-1)?.extract()?)?;
     if value.getattr("step")?.eq(1)? {
-        ranges.push(first..=last);
+        ranges.push(first..last + 1);
     } else {
         for item in value.try_iter()? {
             let id = convert(item?.extract()?)?;
-            ranges.push(id..=id);
+            ranges.push(id..id + 1);
         }
     }
     Ok(())
@@ -129,8 +129,8 @@ impl PyTokenSet {
                     if item.is_instance_of::<pyo3::types::PyBool>() {
                         return Err(PyTypeError::new_err("TokenSet expects integers or ranges, not bool"));
                     }
-                    let id = check_token_id(item.extract::<u32>()?)?;
-                    ranges.push(id..=id);
+                    let id = check_token_id(super::resolve_token_id(&item)?.expect("validated token ID"))?;
+                    ranges.push(id..id + 1);
                 }
             }
         }
@@ -187,11 +187,11 @@ pub(super) struct PyGrammar {
 
 impl PyGrammar {
     fn new(source: String, kind: SourceKind) -> PyResult<Self> {
-        let inner = match kind {
-            SourceKind::Glrm => glrmask::Grammar::from_glrm(source),
-            SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(source),
-            SourceKind::Lark => glrmask::Grammar::from_lark(source),
-        }
+        let inner = super::catch_python_panic(|| match kind {
+            SourceKind::Glrm => glrmask::Grammar::from_glrm(&source),
+            SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(&source),
+            SourceKind::Lark => glrmask::Grammar::from_lark(&source),
+        })?
         .map_err(api_error)?;
         Ok(Self { inner })
     }
@@ -229,12 +229,13 @@ impl PyGrammar {
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
         let source = match schema.extract::<String>() {
             Ok(source) => source,
-            Err(_) => schema
+            Err(_) if schema.is_instance_of::<PyDict>() || schema.is_instance_of::<pyo3::types::PyBool>() => schema
                 .py()
                 .import("json")?
                 .getattr("dumps")?
                 .call1((schema,))?
                 .extract()?,
+            Err(_) => return Err(PyTypeError::new_err("JSON Schema must be str, bool or dict")),
         };
         Self::new(source, SourceKind::JsonSchema)
     }
@@ -249,10 +250,9 @@ impl PyGrammar {
     /// Builds a grammar from an `Expr`.
     #[staticmethod]
     #[pyo3(signature = (expr, /))]
-    fn from_expr(expr: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let expr = canonical::extract_expr_part(expr)?;
+    fn from_expr(expr: &canonical::PyExpr) -> PyResult<Self> {
         Ok(Self {
-            inner: glrmask::Grammar::from_expr(expr).map_err(api_error)?,
+            inner: super::catch_python_panic(|| glrmask::Grammar::from_expr(&expr.inner))?.map_err(api_error)?,
         })
     }
 
@@ -262,10 +262,10 @@ impl PyGrammar {
         let binding = canonical::extract_grammar_binding(value)?;
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.inner.clone();
-        let next = py.detach(move || {
+        let next = super::catch_python_panic(|| py.detach(move || {
             binding.bind(&mut next, &name)?;
             Ok::<_, glrmask::Error>(next)
-        }).map_err(api_error)?;
+        }))?.map_err(api_error)?;
         target.replace(py, next);
         Ok(())
     }
@@ -289,10 +289,10 @@ impl PyGrammar {
         let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
         let options = canonical::compile_options(mask_strategy);
-        py.detach(move || {
+        super::catch_python_panic(|| py.detach(move || {
             let module = glrmask::Module::new(&grammar);
             module.compile_with(&vocab, options)
-        })
+        }))?
         .map(constraint)
         .map_err(api_error)
     }

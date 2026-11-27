@@ -87,8 +87,8 @@ fn loading_a_constraint_for_a_different_vocabulary_explains_the_bytes() {
     let constraint = grammar.compile(&v).unwrap();
     let other = Vocab::new(vec![(0, b"y".to_vec())]).unwrap();
     assert_eq!(
-        glrmask::Constraint::load(constraint.save(), &other).unwrap_err().to_string(),
-        "cannot load saved bytes: the constraint was saved with a different vocabulary"
+        glrmask::Constraint::load(&constraint.save(), &other).unwrap_err().kind(),
+        glrmask::ErrorKind::VocabMismatch
     );
 }
 

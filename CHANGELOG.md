@@ -7,7 +7,7 @@
 - Expressions and bindings accept tokens only as a `TokenSet`. Grammar bindings and expressions reject model-specific TokenSets, including nested expressions. Bind them on a Module.
 - Rust: `Grammar::bind` accepts the sealed `IntoGrammarBinding` trait, which cannot be a `Module`. Binding a module into a grammar is now a compile error, not a runtime error.
 - Vocab has one constructor from IDs to bytes. Rust `Vocab::new` takes any `(u32, bytes)` iterator and returns `Result`; duplicate IDs or IDs above the maximum return `InvalidInput` instead of panicking. Python uses `Vocab({id: bytes})`; `from_dict`, `from_id_to_bytes`, `from_llama_cpp` and `llama_cpp_end_token_ids` are removed.
-- Token IDs range from 0 to 16,777,215 (2^24 - 1). Larger IDs in vocabularies, token sets or bindings return an error instead of risking a failed allocation that aborts the process. Rust open-ended TokenSet ranges such as `5..` end at 16,777,215.
+- Token IDs outside the supported range return an error during vocabulary creation or binding/compilation rather than risking an allocation failure. Rust token-set ranges are half-open.
 - Rust: `ConstraintState` owns its constraint, has no lifetime parameter and can be stored or moved freely. `ExternKind` is re-exported from the public grammar crate.
 - Batch token commitment is removed from the 1.0 public API. Committing an integer ID that cannot be admitted returns false and terminates the state.
 

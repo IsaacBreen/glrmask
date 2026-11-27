@@ -16,20 +16,24 @@ def _constraint():
 
 
 @pytest.mark.parametrize("bad", _BAD_IDS)
-def test_out_of_range_token_id_fails_closed(bad):
+def test_out_of_range_token_id_leaves_state_unchanged(bad):
     state = _constraint().start()
-    assert state.commit_token(bad) is False
+    before = state.mask().copy()
+    with pytest.raises(ValueError):
+        state.commit_token(bad)
+    assert (state.mask() == before).all()
     assert state.is_accepting() is False
-    assert state.is_terminated() is True
-    assert state.commit_token(0) is False
+    assert state.is_terminated() is False
+    assert state.commit_token(0) is True
 
 
 
 
 def test_non_integer_token_id_is_a_type_error():
     state = _constraint().start()
-    with pytest.raises(TypeError):
-        state.commit_token("0")
+    for bad in ("0", True, False, 1.5):
+        with pytest.raises(TypeError):
+            state.commit_token(bad)
 
 
 def test_special_tokens_are_explicit():
@@ -59,3 +63,11 @@ def test_rejection_preserves_original_copy():
     assert copy.is_terminated()
     assert not original.is_terminated()
     assert not original.is_accepting()
+
+
+def test_index_ids_and_stepped_ranges():
+    import numpy as np
+    assert _constraint().start().commit_token(np.uint32(0))
+    assert glrmask.TokenSet([range(1, 10, 3)]) == glrmask.TokenSet([1, 4, 7])
+    assert glrmask.TokenSet([range(7, 0, -3)]) == glrmask.TokenSet([1, 4, 7])
+    assert glrmask.TokenSet([range(3, 3)]) == glrmask.TokenSet([])

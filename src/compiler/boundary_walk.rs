@@ -4392,7 +4392,7 @@ mod tests {
 
     fn selected10_module(tools: usize, _vocab: &Vocab) -> crate::Result<crate::Module> {
         let mut dispatch =
-            crate::Module::new(&crate::Grammar::from_glrm(selected10_dispatcher_source(tools))?);
+            crate::Module::new(&crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?);
         for (index, (_, file)) in SELECTED10_TOOLS.iter().take(tools).enumerate() {
             dispatch.bind(
                 &format!("TOOL_ARGS_SLOT_{index}"),
@@ -4413,7 +4413,7 @@ mod tests {
             })
             .collect::<crate::Result<Vec<_>>>()?;
         let mut dispatch =
-            crate::Grammar::from_glrm(selected10_dispatcher_source(tools))?.prepare(vocab)?;
+            crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?.prepare(vocab)?;
         for (index, leaf) in leaves.iter().enumerate() {
             dispatch = dispatch.bind_snapshot(format!("TOOL_ARGS_SLOT_{index}"), leaf)?;
         }

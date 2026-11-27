@@ -23,10 +23,13 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
         return Err(Error::invalid("compile-options struct_size does not match ABI"));
     }
     let mut o: glrmask_compile_options = unsafe { std::mem::zeroed() };
-    // Only whole fields are read, and unknown trailing fields are ignored.
+    // Only whole fields are read. Any unrecognized bytes must be zero.
     let known_size = struct_size.min(size_of::<glrmask_compile_options>());
     let complete_size = minimum + (known_size - minimum) / size_of::<u32>() * size_of::<u32>();
     unsafe { std::ptr::copy_nonoverlapping(p.cast::<u8>(), (&mut o as *mut glrmask_compile_options).cast::<u8>(), complete_size) };
+    if unsafe { input(p.cast::<u8>().add(complete_size), struct_size - complete_size)? }.iter().any(|&b| b != 0) {
+        return Err(Error::invalid("unknown compile-options bytes must be zero"));
+    }
     o.struct_size = struct_size;
     if o.reserved != [0, 0, 0] {
         return Err(Error::invalid("reserved compile-options fields must be zero"));
@@ -92,20 +95,24 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_token_set);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_externs(p: *const glrmask_module, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs();
-        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        let mut entries: Vec<_> = view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect()))
+        }).collect();
+        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        Ok(glrmask_externs(entries))
     }) })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_unbound_externs(p: *const glrmask_module, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let view = read(p)?.0.externs().unbound();
-        Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+        let mut entries: Vec<_> = view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-        }).collect()))
+        }).collect();
+        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        Ok(glrmask_externs(entries))
     }) })
 }
 

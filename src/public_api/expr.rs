@@ -62,13 +62,13 @@ impl Expr {
     }
 
     /// Matches `parts` in order.
-    pub fn sequence(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
-        Self(Arc::new(ExprNode::Sequence(parts.into_iter().map(Into::into).collect())))
+    pub fn sequence(parts: impl IntoIterator<Item = Expr>) -> Self {
+        Self(Arc::new(ExprNode::Sequence(parts.into_iter().collect())))
     }
 
     /// Matches any one of `parts`.
-    pub fn choice(parts: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
-        let list: Vec<Expr> = parts.into_iter().map(Into::into).collect();
+    pub fn choice(parts: impl IntoIterator<Item = Expr>) -> Self {
+        let list: Vec<Expr> = parts.into_iter().collect();
         if list.len() == 1 {
             list.into_iter().next().unwrap()
         } else {

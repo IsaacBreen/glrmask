@@ -278,7 +278,7 @@ pub(super) fn prepared_summary(root:&PreparedGrammar)->Result<Arc<Summary>> {
             let child=match value {
                 ModuleBinding::Module(c)=> {
                     if !static_constraint_targets(c.inner.as_ref(),&vocab) {
-                        return Err(Error::Compilation("the bound modules were precompiled for different vocabularies".into()));
+                        return Err(Error::VocabMismatch("the bound modules were precompiled for different vocabularies".into()));
                     }
                     Some(prepared_summary(c)?)
                 },_=>None,

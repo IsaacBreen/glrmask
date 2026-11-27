@@ -4976,7 +4976,7 @@ impl Constraint {
         crate::with_deep_stack(|| {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             if recorded != crate::compiler::compile::vocab_fingerprint(vocab) {
-                return Err(crate::Error::Serialization(
+                return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
@@ -5913,7 +5913,7 @@ impl Constraint {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
-                return Err(crate::Error::Serialization(
+                return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
@@ -6115,7 +6115,7 @@ impl Constraint {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
-                return Err(crate::Error::Serialization(
+                return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }

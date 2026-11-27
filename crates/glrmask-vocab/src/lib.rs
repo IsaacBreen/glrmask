@@ -4,7 +4,7 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::ops::{Bound, RangeBounds, RangeInclusive};
+use std::ops::{Range, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod error;
@@ -36,33 +36,9 @@ impl TokenSet {
         Self::from_pairs(ids.into_iter().map(|id| (id, id)))
     }
 
-    pub fn from_ranges<R: RangeBounds<u32>>(
-        ranges: impl IntoIterator<Item = R>,
-    ) -> Self {
-        let mut pairs = Vec::new();
-        for range in ranges {
-            let start = match range.start_bound() {
-                Bound::Included(&start) => start,
-                Bound::Excluded(&start) => match start.checked_add(1) {
-                    Some(start) => start,
-                    None => continue,
-                },
-                Bound::Unbounded => 0,
-            };
-            let end = match range.end_bound() {
-                Bound::Included(&end) => end,
-                Bound::Excluded(&end) => match end.checked_sub(1) {
-                    Some(end) => end,
-                    None => continue,
-                },
-                Bound::Unbounded => MAX_TOKEN_ID,
-            };
-            if start > end {
-                continue;
-            }
-            pairs.push((start, end));
-        }
-        Self::from_pairs(pairs)
+    /// Builds a normalized set from half-open ranges. Empty ranges contribute no IDs.
+    pub fn from_ranges(ranges: impl IntoIterator<Item = Range<u32>>) -> Self {
+        Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| (r.start, r.end - 1)))
     }
 
     fn from_pairs(ranges: impl IntoIterator<Item = (u32, u32)>) -> Self {
@@ -168,10 +144,10 @@ impl Vocab {
     ///
     /// ```rust
     /// use glrmask_vocab::Vocab;
-    /// let vocab = Vocab::new([(0, b"hello".as_slice()), (1, b"world".as_slice())])?;
+    /// let vocab = Vocab::new([(0, b"hello".to_vec()), (1, b"world".to_vec())])?;
     /// # Ok::<(), glrmask_vocab::Error>(())
     /// ```
-    pub fn new<B: Into<Vec<u8>>>(entries: impl IntoIterator<Item = (u32, B)>) -> Result<Self, Error> {
+    pub fn new(entries: impl IntoIterator<Item = (u32, Vec<u8>)>) -> Result<Self, Error> {
         let mut ids = BTreeSet::new();
         let mut validated = Vec::new();
         for (id, bytes) in entries {
@@ -181,7 +157,7 @@ impl Vocab {
             if !ids.insert(id) {
                 return Err(error::internal::new_error(ErrorKind::InvalidInput, format!("duplicate vocabulary ID {id}")));
             }
-            validated.push((id, bytes.into()));
+            validated.push((id, bytes));
         }
         Ok(Self::from_entries_unchecked(validated))
     }
@@ -455,7 +431,7 @@ mod tests {
 
     #[test]
     fn duplicate_ids_are_rejected() {
-        let error = Vocab::new([(0, b"a".as_slice()), (0, b"b".as_slice())]).unwrap_err();
+        let error = Vocab::new([(0, b"a".to_vec()), (0, b"b".to_vec())]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
@@ -465,14 +441,13 @@ mod tests {
         assert_eq!(TokenSet::new([2u32]).range_pairs(), &[(2, 2)]);
         assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
         assert_eq!(TokenSet::new([]).range_pairs(), &[]);
-        assert_eq!(TokenSet::from_ranges(std::iter::once(3..=5)).range_pairs(), &[(3, 5)]);
         assert_eq!(TokenSet::from_ranges(std::iter::once(3..6)).range_pairs(), &[(3, 5)]);
         assert_eq!(
             TokenSet::from_ranges([0..10, 5..13, 20..30]).range_pairs(),
             &[(0, 12), (20, 29)],
         );
         assert_eq!(
-            TokenSet::from_ranges([0..=11, 10..=12, 20..=29]).range_pairs(),
+            TokenSet::from_ranges([0..12, 10..13, 20..30]).range_pairs(),
             &[(0, 12), (20, 29)],
         );
         // Overlapping and adjacent input round-trips to the same merged set.
@@ -482,18 +457,8 @@ mod tests {
         );
         assert_eq!(format!("{:?}", TokenSet::from_ranges([0..10, 20..30])),
             "TokenSet[0..=9, 20..=29]");
-        assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::RangeInclusive::new(5, 3))).range_pairs(), &[]);
+        assert_eq!(TokenSet::from_ranges(std::iter::once(std::ops::Range { start: 5, end: 3 })).range_pairs(), &[]);
         assert_eq!(TokenSet::from_ranges(std::iter::once(5..5)).range_pairs(), &[]);
-        // An excluded start bound starts after that ID, not at it.
-        assert_eq!(
-            TokenSet::from_ranges([(Bound::Excluded(1), Bound::Included(3))]),
-            TokenSet::from_ranges(std::iter::once(2..=3)),
-        );
-        assert_eq!(
-            TokenSet::from_ranges([(Bound::Excluded(u32::MAX), Bound::Included(u32::MAX))])
-                .range_pairs(),
-            &[],
-        );
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 7])), None);
         assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 9])), Some(9));
     }
@@ -515,7 +480,7 @@ mod compact_token_range_tests {
     #[test]
     fn coverage_validation_handles_gaps_and_u32_endpoint_without_expansion() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, Vec::new()), (1, Vec::new()), (3, Vec::new()), (4, Vec::new()), (u32::MAX, Vec::new())]);
-        assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges(std::iter::once(0..=4))), Some(2));
+        assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges(std::iter::once(0..5))), Some(2));
         let selected = TokenSet::new([3, 4, u32::MAX, 0, 1]);
         assert_eq!(selected.range_pairs(), &[(0, 1), (3, 4), (u32::MAX, u32::MAX)]);
         assert_eq!(vocab.next_available_token_id(0), Some(2));

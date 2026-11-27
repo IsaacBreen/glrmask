@@ -3,7 +3,7 @@ use glrmask::test_modes::MaskMode;
 use glrmask::{CompileOptions, Grammar, InternalMaskStrategy, Module, ParserBackend, TokenTrie, Vocab};
 
 fn vocab() -> Vocab {
-    Vocab::new::<Vec<u8>>(vec![
+    Vocab::new(vec![
         (0, b"(".to_vec()),
         (1, b")".to_vec()),
         (2, b"()".to_vec()),
@@ -122,7 +122,7 @@ fn d_is_lr_quotiented_and_matches_a_on_every_supported_frontend() {
         compare_exhaustive(&a.start(), &d.start(), 3, case.name);
         assert_same_masks(&a, &d);
 
-        let loaded = glrmask::Constraint::load(d.save(), &case.vocab).unwrap();
+        let loaded = glrmask::Constraint::load(&d.save(), &case.vocab).unwrap();
         assert_eq!(loaded.__inner().parser_backend(), ParserBackend::LrTable, "{} D reload", case.name);
         assert!(loaded.__inner().runtime_has_lr_table(), "{} D reload table", case.name);
         assert!(!loaded.__inner().runtime_has_template_parser(), "{} D reload templates", case.name);

@@ -36,8 +36,8 @@ void basic() {
         const auto options = strategy_options(i==0?0:i==1?3:4);
         m.precompile(v, options);
         auto wrong = Vocab({{0,"z"}});
-        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
-        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
         auto c = m.compile(v, options);
         auto s = c.start();
         const auto initial = s.mask();
@@ -68,8 +68,8 @@ void exact_and_unicode() {
         const auto options = strategy_options(i==0?0:i==1?3:4);
         m.precompile(v, options);
         auto wrong = Vocab({{0,"z"}});
-        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
-        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
         auto c = m.compile(v, options);
         auto s = c.start();
         CHECK(allowed(s.mask(),0)); CHECK(allowed(s.mask(),31));
@@ -148,8 +148,8 @@ void composition_and_persistence() {
     auto host = Grammar::from_glrm(R"(glrm 1; start root; extern grammar child; nt root = "x" child "y";)");
     auto host_mod = Module(host);
     auto ext = host_mod.externs();
-    CHECK(ext.size()==1 && (ext.begin()+0)->name=="child");
-    CHECK((ext.begin()+0)->kind==ExternKind::Grammar);
+    CHECK(ext.size()==1 && (ext.begin()+0)->name()=="child");
+    CHECK((ext.begin()+0)->kind()==ExternKind::Grammar);
     CHECK(host_mod.externs().unbound().size()==1);
 
     auto a = Grammar::from_lark(R"(start: "a")");
@@ -297,17 +297,18 @@ void commit_contract() {
         auto moved_closed = std::move(closed); (void)moved_closed;
         throws([&]{ (void)closed.commit_token(0); }, GLRMASK_CLOSED);
     }
-    // The C commits return false for a rejected commit and for a NULL state.
-    CHECK(glrmask_state_commit_token(nullptr, 0) == false);
-    CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0) == false);
+    // A rejected commit is OK with accepted=0; null state is an error.
+    uint32_t accepted=99;
+    CHECK(glrmask_state_commit_token(nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);
+    CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);
     auto c = Module(simple()).compile(v);
     glrmask_state* raw = nullptr;
     CHECK(glrmask_constraint_start(c.native_handle(), &raw) == GLRMASK_OK);
-    CHECK(glrmask_state_commit_token(raw, 1) == false);
+    CHECK(glrmask_state_commit_token(raw, 1, &accepted) == GLRMASK_OK && accepted == 0);
     uint32_t accepting = 1;
     CHECK(glrmask_state_is_accepting(raw, &accepting) == GLRMASK_OK); CHECK(accepting == 0);
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>("a");
-    CHECK(glrmask_state_commit_bytes(raw, bytes, 1) == false);
+    CHECK(glrmask_state_commit_bytes(raw, bytes, 1, &accepted) == GLRMASK_OK && accepted == 0);
     glrmask_state_free(raw);
 }
 
@@ -338,8 +339,8 @@ void artifacts(const std::filesystem::path& directory, bool check) {
         const auto options = strategy_options(i==0?0:i==1?3:4);
         m.precompile(v, options);
         auto wrong = Vocab({{0,"z"}});
-        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
-        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_VOCAB_MISMATCH);
         auto c = m.compile(v, options);
         const auto path = directory/((check?"node-mode-":"cpp-mode-")+std::to_string(i)+".glr");
         if (check) {
@@ -369,8 +370,8 @@ void canonical_modules() {
 
     auto loaded = Module::load(parent.save());
     CHECK(loaded.externs().unbound().empty());
-    CHECK(original.externs().unbound().get("child")->name=="child");
-    CHECK(loaded.externs().get("child")->name=="child");
+    CHECK(original.externs().unbound().get("child")->name()=="child");
+    CHECK(loaded.externs().get("child")->name()=="child");
 
     // Retained work survives without storing per-module settings.
     auto child_bytes = child.save();
@@ -381,7 +382,7 @@ void canonical_modules() {
     CHECK(state.commit_token(3)); CHECK(state.is_accepting());
 
     bool failed = false; try { original.bind("missing", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
-    CHECK(original.externs().unbound().get("child")->name=="child");
+    CHECK(original.externs().unbound().get("child")->name()=="child");
 
     // Qualified paths rejected
     failed = false; try { original.bind("child::nested", Grammar::from_lark("start: \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
@@ -416,23 +417,23 @@ void canonical_modules() {
     CHECK(ext_all.size() == 3);
     CHECK(ext_all == multi_mod.externs());
     CHECK(ext_all == ext_all.unbound());
-    CHECK((ext_all.begin()+0)->name == "first" && (ext_all.begin()+0)->kind == ExternKind::Token);
-    CHECK((ext_all.begin()+1)->name == "second" && (ext_all.begin()+1)->kind == ExternKind::Grammar);
-    CHECK((ext_all.begin()+2)->name == "third" && (ext_all.begin()+2)->kind == ExternKind::Token);
+    CHECK((ext_all.begin()+0)->name() == "first" && (ext_all.begin()+0)->kind() == ExternKind::Token);
+    CHECK((ext_all.begin()+1)->name() == "second" && (ext_all.begin()+1)->kind() == ExternKind::Grammar);
+    CHECK((ext_all.begin()+2)->name() == "third" && (ext_all.begin()+2)->kind() == ExternKind::Token);
 
     multi_mod.bind("second", Grammar::from_lark("start: \"a\""));
     auto ext_unbound = multi_mod.externs().unbound();
     CHECK(ext_unbound.size() == 2);
     CHECK(ext_unbound == ext_unbound.unbound());
     CHECK(ext_all != multi_mod.externs());
-    CHECK((ext_unbound.begin()+0)->name == "first");
-    CHECK((ext_unbound.begin()+1)->name == "third");
+    CHECK((ext_unbound.begin()+0)->name() == "first");
+    CHECK((ext_unbound.begin()+1)->name() == "third");
 
     // A grammar's unbound view carries its own unbound externs.
     auto grammar_externs = Grammar::from_glrm("glrm 1; start start; extern grammar one; extern grammar two; nt start = one two;");
     grammar_externs.bind("one", Expr::literal("a"));
     auto grammar_unbound = grammar_externs.externs().unbound();
-    CHECK(grammar_unbound.size() == 1 && (grammar_unbound.begin()+0)->name == "two");
+    CHECK(grammar_unbound.size() == 1 && (grammar_unbound.begin()+0)->name() == "two");
     CHECK(grammar_externs.externs().size() == 2);
 
     // TokenSet equality compares the normalized ID sets.
@@ -471,15 +472,15 @@ void precompile_vocab_lock() {
         auto root=Module(Grammar::from_glrm("start s extern grammar BODY extern token END nt s = BODY END"));
         root.precompile(v,options);
         auto m=Module::load(root.save());
-        throws([&]{m.precompile(wrong,options);},GLRMASK_INVALID_INPUT);
+        throws([&]{m.precompile(wrong,options);},GLRMASK_VOCAB_MISMATCH);
         m.bind("BODY",Grammar::from_lark(R"(start: "a")"));
         m.bind("END",TokenSet({1}));
         auto outer=Module(Grammar::from_glrm("start s extern grammar INNER nt s = INNER"));
         outer.bind("INNER",m);
         auto loaded=Module::load(outer.save());
         for(auto* candidate : {&m,&outer,&loaded}) {
-            throws([&]{candidate->compile(wrong,options);},GLRMASK_INVALID_INPUT);
-            throws([&]{candidate->precompile(wrong,options);},GLRMASK_INVALID_INPUT);
+            throws([&]{candidate->compile(wrong,options);},GLRMASK_VOCAB_MISMATCH);
+            throws([&]{candidate->precompile(wrong,options);},GLRMASK_VOCAB_MISMATCH);
             auto state=candidate->compile(v,options).start();
             CHECK(state.commit_token(0)); CHECK(state.commit_token(1)); CHECK(state.is_accepting());
         }

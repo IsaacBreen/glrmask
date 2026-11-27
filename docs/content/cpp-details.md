@@ -116,6 +116,8 @@ the vocabulary its precompiled parts were built for; `compile` and `precompile` 
 the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
 load saved bytes from untrusted sources.
 
+Empty ranges are no-ops; reversed ranges are invalid. Externs views are shallow, and bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting. Load only trusted artifacts.
+
 ## Errors
 
 Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message, and `status()` one of:
@@ -128,6 +130,7 @@ Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()
 | `GLRMASK_RESOURCE_LIMIT` | A resource limit was exceeded. |
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
+| `GLRMASK_VOCAB_MISMATCH` | Compiled for a different vocabulary. |
 | `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
 | `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `(mask_bit_len() + 31) / 32`. |
 | `GLRMASK_CLOSED` | The object was moved from. |
@@ -143,7 +146,7 @@ threads at once.
 ## C
 
 `glrmask.h` is the C interface; the C++ header is built on it. Each function returns a `glrmask_status`, and on failure
-`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread. Free each object once
+`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread (except the message accessor); empty when no error is recorded. C commits return a status and write acceptance to an out-parameter; ordinary rejection is GLRMASK_OK with zero acceptance. Free each object once
 with its `_free` function. Initialize a `glrmask_compile_options options` with `glrmask_compile_options_init(&options, sizeof(options))`, or pass a null pointer for the
 defaults. The header documents ownership in full.
 

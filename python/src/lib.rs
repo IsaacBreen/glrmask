@@ -71,6 +71,14 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyException,
     "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
 
+fn catch_python_panic<T>(f: impl FnOnce() -> T) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        let msg = p.downcast_ref::<String>().map(String::as_str)
+            .or_else(|| p.downcast_ref::<&str>().copied()).unwrap_or("unexpected native panic");
+        glrmask_error("internal", msg)
+    })
+}
+
 pub(crate) fn glrmask_error(kind: &str, message: impl Into<String>) -> PyErr {
     let error = GLRMaskError::new_err(message.into());
     Python::attach(|py| {
@@ -88,6 +96,8 @@ fn kind_name(kind: glrmask::ErrorKind) -> &'static str {
         glrmask::ErrorKind::ResourceLimit => "resource_limit",
         glrmask::ErrorKind::StrategyUnsupported => "strategy_unsupported",
         glrmask::ErrorKind::Serialization => "serialization",
+        glrmask::ErrorKind::VocabMismatch => "vocab_mismatch",
+        glrmask::ErrorKind::BufferTooSmall => "buffer_too_small",
         glrmask::ErrorKind::Internal => "internal",
         _ => "internal",
     }
@@ -133,13 +143,15 @@ fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
-/// Extract a Python token ID. `Ok(None)` means the int is outside the `u32`
-/// domain; anything that is not an int stays a `TypeError`.
+/// Validate the integer domain before any state mutation.
 fn resolve_token_id(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyTypeError::new_err("token ID must be an integer, not bool"));
+    }
     match value.extract::<u32>() {
         Ok(id) => Ok(Some(id)),
         Err(error) if error.is_instance_of::<pyo3::exceptions::PyOverflowError>(value.py()) => {
-            Ok(None)
+            Err(PyValueError::new_err("token ID is outside the u32 range"))
         }
         Err(error) => Err(error),
     }
@@ -191,12 +203,16 @@ fn with_mask_buffer(
     let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D uint32 NumPy array; for an int32 array pass arr.view(np.uint32)");
     let checked = |len| {
         if len < required {
-            Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")))
+            Err(glrmask_error("buffer_too_small", format!("the mask array needs at least {required} words")))
         } else {
             Ok(())
         }
     };
     if let Ok(array) = bitmask.cast::<PyArray1<u32>>() {
+        if !bitmask.getattr("flags")?.getattr("aligned")?.extract::<bool>()?
+            || !bitmask.getattr("dtype")?.getattr("isnative")?.extract::<bool>()? {
+            return Err(invalid());
+        }
         let mut array = array.try_readwrite().map_err(|_| invalid())?;
         let slice = array.as_slice_mut().map_err(|_| invalid())?;
         checked(slice.len())?;
@@ -511,10 +527,7 @@ impl PyVocab {
         let mut entries = Vec::new();
         for item in items.try_iter()? {
             let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
-            if !key.is_instance_of::<pyo3::types::PyInt>() {
-                return Err(PyTypeError::new_err("vocab keys must be integers"));
-            }
-            let id = key.extract::<u32>().map_err(|_| glrmask_error("invalid_input", "vocab token ID is outside the u32 range"))?;
+            let id = resolve_token_id(&key)?.expect("validated token ID");
             let bytes = value.cast::<PyBytes>()
                 .map_err(|_| PyTypeError::new_err("vocab values must be bytes"))?;
             entries.push((id, bytes.as_bytes().to_vec()));
@@ -682,7 +695,7 @@ impl PyConstraint {
     }
 
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.detach(|| self.inner.save());
+        let bytes = catch_python_panic(|| py.detach(|| self.inner.save()))?;
         Ok(PyBytes::new(py, &bytes))
     }
 
@@ -692,19 +705,19 @@ impl PyConstraint {
     fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.inner.clone();
-        let loaded = py.detach(move || glrmask::Constraint::load(data, &vocab));
+        let loaded = catch_python_panic(|| py.detach(move || glrmask::Constraint::load(&data, &vocab)))?;
         let inner = loaded.map_err(final_api::api_error)?;
 
         Ok(Self::from_inner(inner))
     }
 
     /// Starts a new sequence.
-    fn start(&self) -> PyConstraintState {
-        PyConstraintState {
-            inner: self.inner.start(),
+    fn start(&self) -> PyResult<PyConstraintState> {
+        Ok(PyConstraintState {
+            inner: catch_python_panic(|| self.inner.start())?,
 
             mask_bit_len: self.mask_bit_len,
-        }
+        })
     }
 
     /// The mask's length in bits (the largest token ID plus one).
@@ -950,7 +963,7 @@ impl PyDynamicConstraintState {
 
     /// Writes the packed mask into `bitmask`, a writable, contiguous 1-D `uint32` array of at least `(mask_bit_len + 31) // 32` words. Extra words are zeroed.
     ///
-    /// Releases the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
+    /// May release the GIL, so other threads can fill masks for other states at the same time. Don't touch `bitmask` from another thread until it returns. Raises `TypeError` for an unsuitable array, or `GLRMaskError` if it's too short.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
@@ -1008,9 +1021,9 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    fn __repr__(&self) -> String {
+    fn __repr__(&self) -> PyResult<String> {
         let boolean = |b| if b { "True" } else { "False" };
-        format!("<glrmask.ConstraintState accepting={} terminated={}>", boolean(self.is_accepting()), boolean(self.is_terminated()))
+        Ok(format!("<glrmask.ConstraintState accepting={} terminated={}>", boolean(self.is_accepting()?), boolean(self.is_terminated()?)))
     }
 
     fn copy(&self) -> Self {
@@ -1032,22 +1045,22 @@ impl PyConstraintState {
     }
 
 
-    /// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead.
-    #[pyo3(signature = (*, dtype=MaskDtype::U32), text_signature = "($self, *, dtype=np.uint32)")]
-    fn mask<'py>(&self, py: Python<'py>, dtype: MaskDtype) -> PyResult<Bound<'py, PyAny>> {
-        allocate_mask(py, self.mask_bit_len, dtype, |buf| with_state(&self.inner, |state| state.fill_mask(buf)))
+    /// Packed uint32 words: token i is bit i % 32 of word i // 32.
+    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let words = catch_python_panic(|| self.inner.mask())?;
+        Ok(PyArray1::from_vec(py, words))
     }
 
-    /// Like `mask()`, but writes the words into `bitmask`. Releases the GIL.
+    /// Like `mask()`, but writes the words into `bitmask`. May release the GIL.
     #[pyo3(signature = (bitmask, /))]
     fn fill_mask(&mut self, py: Python<'_>, bitmask: &Bound<'_, PyAny>) -> PyResult<()> {
         let required = self.mask_bit_len.div_ceil(32);
         // Hold the exclusive PyO3 state borrow and the NumPy write guard for
         // the whole detached call. Other calls on this state fail to borrow.
         let state = &mut self.inner;
-        with_mask_buffer(bitmask, required, |buf| {
+        catch_python_panic(|| with_mask_buffer(bitmask, required, |buf| {
             py.detach(|| state.fill_mask(buf));
-        })
+        }))?
     }
 
     /// Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.
@@ -1057,30 +1070,30 @@ impl PyConstraintState {
             with_state_mut(&mut self.inner, |state| state.reject());
             return Ok(false);
         };
-        Ok(with_state_mut(&mut self.inner, |state| state.commit_token(id)))
+        catch_python_panic(|| with_state_mut(&mut self.inner, |state| state.commit_token(id)))
     }
 
 
     /// Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]
-    fn commit_bytes(&mut self, data: &[u8]) -> bool {
-        with_state_mut(&mut self.inner, |state| state.commit_bytes(data))
+    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<bool> {
+        catch_python_panic(|| with_state_mut(&mut self.inner, |state| state.commit_bytes(data)))
     }
 
     /// The bytes that must come next.
-    fn forced_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let bytes = py.detach(|| with_state(&self.inner, |state| state.forced_bytes()));
-        PyBytes::new(py, &bytes)
+    fn forced_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = catch_python_panic(|| py.detach(|| with_state(&self.inner, |state| state.forced_bytes())))?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// Whether the output so far could end here.
-    fn is_accepting(&self) -> bool {
-        with_state(&self.inner, |state| state.is_accepting())
+    fn is_accepting(&self) -> PyResult<bool> {
+        catch_python_panic(|| with_state(&self.inner, |state| state.is_accepting()))
     }
 
     /// Whether nothing more can be committed.
-    fn is_terminated(&self) -> bool {
-        with_state(&self.inner, |state| state.is_terminated())
+    fn is_terminated(&self) -> PyResult<bool> {
+        catch_python_panic(|| with_state(&self.inner, |state| state.is_terminated()))
     }
 
     #[cfg(feature = "allocation-tracking")]

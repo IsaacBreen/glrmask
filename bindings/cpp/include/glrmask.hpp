@@ -22,11 +22,11 @@ using Bytes = std::vector<std::uint8_t>;
 /// Controls how the constraint is compiled.
 enum class MaskStrategy : std::uint32_t {
     /// The default; currently `FastMasks`.
-    Auto = GLRMASK_MASK_STRATEGY_AUTO,
+    Auto = 0,
     /// Faster compilation, slower masks.
-    FastCompile = GLRMASK_MASK_STRATEGY_FAST_COMPILE,
+    FastCompile = 3,
     /// Faster masks, slower compilation.
-    FastMasks = GLRMASK_MASK_STRATEGY_FAST_MASKS
+    FastMasks = 4
 };
 
 /// What an extern can be bound to.
@@ -46,10 +46,14 @@ public:
 };
 
 /// A named placeholder in a grammar.
-struct Extern {
-    std::string name;
-    ExternKind kind;
-    bool operator==(const Extern& other) const { return name == other.name && kind == other.kind; }
+class Extern {
+    std::string name_;
+    ExternKind kind_;
+public:
+    Extern(std::string name, ExternKind kind) : name_(std::move(name)), kind_(kind) {}
+    const std::string& name() const noexcept { return name_; }
+    ExternKind kind() const noexcept { return kind_; }
+    bool operator==(const Extern& other) const { return name_ == other.name_ && kind_ == other.kind_; }
     bool operator!=(const Extern& other) const { return !(*this == other); }
 };
 
@@ -57,11 +61,13 @@ struct Extern {
 class Externs {
     std::vector<Extern> entries_;
     std::shared_ptr<std::vector<Extern>> unbound_;
-public:
+    friend class Grammar;
+    friend class Module;
     Externs() : entries_{}, unbound_{std::make_shared<std::vector<Extern>>()} {}
     explicit Externs(std::vector<Extern> entries, std::vector<Extern> unbound = {})
         : entries_(std::move(entries)), unbound_(std::make_shared<std::vector<Extern>>(std::move(unbound))) {}
 
+public:
     using const_iterator = std::vector<Extern>::const_iterator;
     const_iterator begin() const noexcept { return entries_.begin(); }
     const_iterator end() const noexcept { return entries_.end(); }
@@ -74,13 +80,13 @@ public:
 
     std::optional<Extern> get(std::string_view name) const {
         for (const auto& item : entries_) {
-            if (item.name == name) return item;
+            if (item.name() == name) return item;
         }
         return std::nullopt;
     }
     bool has(std::string_view name) const {
         for (const auto& item : entries_) {
-            if (item.name == name) return true;
+            if (item.name() == name) return true;
         }
         return false;
     }
@@ -151,10 +157,10 @@ inline std::vector<Extern> take_externs(glrmask_externs* raw) {
     std::size_t len = 0; check(glrmask_externs_len(raw, &len));
     std::vector<Extern> result; result.reserve(len);
     for (std::size_t i = 0; i < len; ++i) {
-        glrmask_extern value{}; check(glrmask_externs_get(raw, i, &value));
-        Extern e; e.name.assign(value.name, value.name_len);
-        e.kind = static_cast<ExternKind>(value.kind);
-        result.push_back(std::move(e));
+        const char* name = nullptr; std::size_t n = 0; std::uint32_t kind = 0;
+        check(glrmask_externs_name(raw, i, &name, &n));
+        check(glrmask_externs_kind(raw, i, &kind));
+        result.emplace_back(std::string(name, n), static_cast<ExternKind>(kind));
     }
     return result;
 }
@@ -342,8 +348,9 @@ public:
     }
 
     /// May fail if saved by a different GLRMask version.
-    static Module load(const Bytes& bytes) {
-        glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes.data(), bytes.size(), &p)); return Module(p);
+    static Module load(const Bytes& bytes) { return load(bytes.data(), bytes.size()); }
+    static Module load(const std::uint8_t* bytes, std::size_t size) {
+        glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes, size, &p)); return Module(p);
     }
 };
 
@@ -364,8 +371,9 @@ public:
 
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
     /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
-    static Constraint load(const Bytes& bytes, const Vocab& vocab) {
-        glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes.data(), bytes.size(), vocab.native_handle(), &p)); return Constraint(p);
+    static Constraint load(const Bytes& bytes, const Vocab& vocab) { return load(bytes.data(), bytes.size(), vocab); }
+    static Constraint load(const std::uint8_t* bytes, std::size_t size, const Vocab& vocab) {
+        glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes, size, vocab.native_handle(), &p)); return Constraint(p);
     }
 };
 
@@ -385,9 +393,9 @@ public:
     /// The mask's length in bits (the largest token ID plus one).
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_token(TokenId id) { return glrmask_state_commit_token(native_handle(), id); }
+    [[nodiscard]] bool commit_token(TokenId id) { uint32_t accepted = 0; detail::check(glrmask_state_commit_token(native_handle(), id, &accepted)); return accepted != 0; }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { return glrmask_state_commit_bytes(native_handle(), bytes, size); }
+    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { uint32_t accepted = 0; detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size, &accepted)); return accepted != 0; }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.

@@ -22,7 +22,7 @@ impl ExactEvent {
         if native {return self.compiled(vocab);}
         let mut artifact=self.lr_artifact.lock().map_err(|_|Error::Internal("LR event adapter construction poisoned".into()))?;
         if let Some(artifact)=artifact.as_ref(){return Ok(artifact.clone());}
-        let source=Grammar::from_token_set(TokenSet::from_ranges(self.ranges.iter().map(|&(a, b)| a..=b)));
+        let source=Grammar::from_token_set(TokenSet::from_ranges(self.ranges.iter().map(|&(a, b)| a..b + 1)));
         let compiled=Arc::new(crate::import::compile_dynamic_named_single_with_backend(
             source.component()?.lower_closed().map_err(crate::error::from_grammar)?,vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false,

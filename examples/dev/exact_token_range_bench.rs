@@ -5,7 +5,7 @@
 //! cold compilation, warm compilation and precompiled linking are distinct.
 use glrmask::test_modes::MaskMode;
 use std::hint::black_box;
-use std::ops::RangeInclusive;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 use glrmask::{Grammar, TokenSet, Vocab};
 use serde_json::{json, Value};
@@ -29,15 +29,15 @@ fn timed<T>(operation: impl FnOnce() -> T) -> (T, f64) {
     (value, ns(start.elapsed()))
 }
 
-fn selection(name: &str, n: u32) -> Vec<RangeInclusive<u32>> {
+fn selection(name: &str, n: u32) -> Vec<Range<u32>> {
     match name {
-        "singleton" => vec![std::ops::RangeInclusive::new(n - 1, n - 1)],
-        "all" => vec![std::ops::RangeInclusive::new(0, n - 1)],
-        "all_except_middle" => vec![0..=n / 2 - 1, n / 2 + 1..=n - 1],
+        "singleton" => vec![n - 1..n],
+        "all" => vec![0..n],
+        "all_except_middle" => vec![0..n / 2, n / 2 + 1..n],
         "eight_disjoint_ranges" => (0..8).map(|i| {
             let start = i * n / 8 + n / 16;
             let end = (i + 1) * n / 8 - 1;
-            start..=end
+            start..end + 1
         }).collect(),
         _ => unreachable!(),
     }
@@ -50,9 +50,9 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskMode)
     // Fresh vocabulary for every case. Input-vector allocation and validation
     // index construction are INCLUDED, not shifted before this timer.
     let (vocab, vocab_ns) = timed(|| match kind {
-        "exact_only" => Vocab::new::<Vec<u8>>(Vec::new()).unwrap(),
+        "exact_only" => Vocab::new(Vec::new()).unwrap(),
         "byte_aliases" => Vocab::new((0..n).map(|id| (id, b"x".to_vec())).collect::<Vec<_>>()).unwrap(),
-        "empty_aliases" => Vocab::new::<Vec<u8>>((0..n).map(|id| (id, Vec::new())).collect::<Vec<_>>()).unwrap(),
+        "empty_aliases" => Vocab::new((0..n).map(|id| (id, Vec::new())).collect::<Vec<_>>()).unwrap(),
         _ => unreachable!(),
     });
     let pairs = || ranges.iter().cloned();
@@ -148,8 +148,8 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskMode, mixed: bool)
         if mixed {
             Ok(Grammar::from_glrm(
                 "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
-            )?.bind_snapshot("A", TokenSet::from_ranges(std::iter::once(0..=n - 1)))?
-                .bind_snapshot("B", TokenSet::from_ranges(std::iter::once(0..=n - 2)))?)
+            )?.bind_snapshot("A", TokenSet::from_ranges(std::iter::once(0..n)))?
+                .bind_snapshot("B", TokenSet::from_ranges(std::iter::once(0..n - 1)))?)
         } else {
             Ok(Grammar::from_glrm("glrm 1; start start; nt start = \"x\" \"x\";")?)
         }

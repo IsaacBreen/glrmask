@@ -177,7 +177,7 @@ impl Task for ModulePrecompileTask {
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<()> {
         call(|| {
             let mut target = live(&self.owner)?;
-            if target.revision != self.revision { return Err(core::Error::invalid("Module changed during precompile; retry with its current snapshot")); }
+            if target.revision != self.revision { return Err(core::Error::new(core::ErrorKind::PrecompileRace, "Module changed during precompile; retry with its current snapshot")); }
             target.module = value;
             target.revision += 1;
             Ok(())

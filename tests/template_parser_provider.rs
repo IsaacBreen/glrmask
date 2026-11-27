@@ -99,7 +99,7 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     let bytes=c.save();let restored=Constraint::load(bytes.clone(), &vocab()).unwrap();
     check_all_prefixes(&restored);assert_eq!(restored.save(),bytes);
     let external=c.save();
-    let wrong=Vocab::new::<Vec<u8>>(vec![(0,b"different".to_vec()),(64,Vec::new())]).unwrap();
+    let wrong=Vocab::new(vec![(0,b"different".to_vec()),(64,Vec::new())]).unwrap();
     assert!(Constraint::load(external.clone(),&wrong).is_err());
     let restored=Constraint::load(external,&v).unwrap();check_all_prefixes(&restored);
     let mut s=c.start();assert!(!s.commit_bytes(b")"));assert!((s.mask().iter().all(|word| *word == 0)));

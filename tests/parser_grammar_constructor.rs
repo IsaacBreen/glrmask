@@ -258,7 +258,7 @@ fn exact_token_extern_mask_cache_agrees_with_commit_and_forcing() {
         let mut m = Module::new(&g);
         m.precompile_with(&v, options.clone()).unwrap();
         m.bind("mark", TokenSet::new([70])).unwrap();
-        let loaded = Module::load(m.save()).unwrap().compile_with(&v, options).unwrap().__into_inner();
+        let loaded = Module::load(&m.save()).unwrap().compile_with(&v, options).unwrap().__into_inner();
         for c in [&direct, &loaded, &Constraint::load(direct.save(), &v).unwrap()] {
             let mut state = c.start();
             for wanted in [70, 1] {

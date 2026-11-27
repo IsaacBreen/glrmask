@@ -405,7 +405,7 @@ fn an_empty_model_vocabulary_has_an_empty_mask_without_an_lr_table() {
         completion: StackTemplate::identity(),
     }).unwrap();
     let l = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-    let v = Vocab::new::<Vec<u8>>(vec![]).unwrap();
+    let v = Vocab::new(vec![]).unwrap();
     let c = compile_static(&p, &l, &v);
     for c in representations(&c, &v) {
         assert!(c.start().is_accepting());

@@ -3,7 +3,7 @@ use glrmask::{DynamicConstraint, Grammar, ConstraintInner as Constraint, Vocab};
 
 #[test]
 fn termination_is_caller_policy_after_acceptance() {
-    let vocab = Vocab::new::<Vec<u8>>(vec![(0, b"a".to_vec()), (64, Vec::new())]).unwrap();
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (64, Vec::new())]).unwrap();
     let grammar = Grammar::ebnf(r#"start ::= "a""#);
     let static_constraint = Constraint::compile(grammar.clone(), &vocab).unwrap();
     let dynamic_constraint = DynamicConstraint::compile(grammar, &vocab).unwrap();

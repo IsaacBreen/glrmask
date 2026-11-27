@@ -1,7 +1,7 @@
 #ifndef GLRMASK_H
 #define GLRMASK_H
 
-/* GLRMask C API, ABI revision 7.
+/* GLRMask C API, ABI revision 8.
  *
  * Lengths count elements, except where a name says bytes. Text is UTF-8 and
  * length-delimited; it doesn't need a NUL terminator. Vocabulary bytes may be
@@ -11,7 +11,7 @@
  * function. Pass NULL for default compile options. Handles and memory you pass in are used only during the call. A
  * state keeps its constraint alive, so you may free the constraint first. A
  * clone is independent of the original. Pointers from *_data and
- * glrmask_externs_get stay valid until you free the handle they came from;
+ * glrmask_externs_name stay valid until you free the handle they came from;
  * don't free them yourself.
  *
  * Pass live handles of the right type and valid, aligned memory; GLRMask can't
@@ -57,6 +57,7 @@ enum {
     GLRMASK_SERIALIZATION=6, ///< Saved bytes could not be loaded.
     GLRMASK_INTERNAL=7, ///< An internal error; discard the affected handle and please report it.
     GLRMASK_BUFFER_TOO_SMALL=8, ///< The buffer is too small; nothing was written.
+    GLRMASK_VOCAB_MISMATCH=10, ///< Artifact or precompiled module is for another vocabulary.
     GLRMASK_CLOSED=9 ///< Closed handle (reported by managed wrappers; raw dangling pointers are invalid).
 };
 /// Controls how the constraint is compiled.
@@ -90,7 +91,7 @@ typedef struct glrmask_expr glrmask_expr;
 typedef struct glrmask_constraint glrmask_constraint;
 typedef struct glrmask_state glrmask_state;
 typedef struct glrmask_bytes glrmask_bytes;
-/// A read-only collection of `glrmask_extern` entries.
+/// A read-only, snapshot of extern declarations.
 typedef struct glrmask_externs glrmask_externs;
 
 /// One vocabulary entry: a token ID and its exact bytes.
@@ -111,12 +112,6 @@ typedef struct {
     uint32_t mask_strategy;           ///< A `GLRMASK_MASK_STRATEGY_*` value; 0 is Auto.
     uint32_t reserved[3];             ///< Reserved; must be zero.
 } glrmask_compile_options;
-/// An extern declared by a grammar. Its `name` stays valid until the externs view
-/// is freed.
-typedef struct {
-    const char *name; size_t name_len;  ///< Declared name (borrowed).
-    uint32_t kind;                      ///< `GLRMASK_EXTERN_GRAMMAR` or `GLRMASK_EXTERN_TOKEN`.
-} glrmask_extern;
 /// One part of an expression; `kind` is a `GLRMASK_OPERAND_*` value.
 typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
 /// The kinds of expression part: grammar, module, expression, token set.
@@ -130,7 +125,8 @@ enum {
 GLRMASK_API uint32_t glrmask_abi_version(void);
 /// The GLRMask version, as a static string.
 GLRMASK_API const char *glrmask_version(void);
-/// The last error on this thread, valid until the next GLRMask call on it.
+/// The last error on this thread (empty string if none). Valid until the next
+/// GLRMask call on this thread, except this error-message accessor.
 GLRMASK_API const char *glrmask_error_message(void);
 /// Initializes the caller-owned options buffer with defaults and its size in bytes.
 GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
@@ -213,12 +209,12 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,uint32_t* out,size_t word_count);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
-/// Commit calls clear the last error on ordinary acceptance or rejection; invalid handles, arguments and internal failures set it.
-/// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. Returns false for a NULL state.
-GLRMASK_API bool glrmask_state_commit_token(glrmask_state* state,uint32_t id);
+/// Advances the state by the token. Writes 1 on acceptance and 0 on ordinary rejection (which terminates the state).
+/// Returns GLRMASK_OK for either outcome, or a non-OK status on native failure. On failure, a valid accepted out-parameter is zeroed.
+GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* state,uint32_t id,uint32_t* accepted);
 
-/// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state. Returns false for a NULL state.
-GLRMASK_API bool glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n);
+/// Advances the state by the bytes, with the same status and accepted contract as commit_token.
+GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n,uint32_t* accepted);
 /// The bytes that must come next.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);
 
@@ -228,7 +224,8 @@ GLRMASK_API void glrmask_bytes_free(glrmask_bytes* bytes);
 
 GLRMASK_API glrmask_status glrmask_externs_len(const glrmask_externs* externs,size_t* out);
 /// Copies the extern at `index`; its name stays valid until the view is freed.
-GLRMASK_API glrmask_status glrmask_externs_get(const glrmask_externs* externs,size_t index,glrmask_extern* out);
+GLRMASK_API glrmask_status glrmask_externs_name(const glrmask_externs* externs,size_t index,const char** out,size_t* n);
+GLRMASK_API glrmask_status glrmask_externs_kind(const glrmask_externs* externs,size_t index,uint32_t* out);
 GLRMASK_API void glrmask_externs_free(glrmask_externs* externs);
 
 #ifdef __cplusplus

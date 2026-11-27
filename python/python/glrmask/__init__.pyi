@@ -40,12 +40,16 @@ output = []
 while True:
     logits = rng.standard_normal(257)  # stand-in for your model
     allowed = np.zeros(257, dtype=bool)
-    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
+    m = state.mask()
+    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)
     allowed[EOS] = state.is_accepting()
+    if not allowed.any():
+        raise RuntimeError("no allowed token and cannot stop")
     token = int(np.argmax(np.where(allowed, logits, -np.inf)))
     if token == EOS:
         break
-    state.commit_token(token)
+    if not state.commit_token(token):
+        raise RuntimeError("allowed token rejected")
     output.append(token)
 
 print(bytes(output).decode())  # e.g. {"color": "blue"}
@@ -58,7 +62,7 @@ print(bytes(output).decode())  # e.g. {"color": "blue"}
 from __future__ import annotations
 from collections.abc import Mapping
 from types import ModuleType
-from typing import Any, ClassVar, Iterable, Literal, final
+from typing import Any, ClassVar, Iterable, SupportsIndex, final
 import numpy as np
 from numpy.typing import NDArray
 
@@ -83,7 +87,7 @@ __all__: list[str] = [
 @final
 class Vocab:
     """Each token ID and its bytes."""
-    def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
+    def __init__(self, id_to_bytes: Mapping[SupportsIndex, bytes], /) -> None:
         ...
 
 @final
@@ -97,7 +101,7 @@ class Grammar:
         """Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source."""
         ...
     @staticmethod
-    def from_json_schema(schema: str | bool | Mapping[str, Any], /) -> Grammar:
+    def from_json_schema(schema: str | bool | dict[str, Any], /) -> Grammar:
         """Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text or a dict."""
         ...
     @staticmethod
@@ -144,12 +148,14 @@ class Expr:
 @final
 class TokenSet:
     """A set of token IDs."""
-    def __init__(self, ids: Iterable[int | range], /) -> None:
+    def __init__(self, ids: Iterable[SupportsIndex | range], /) -> None:
         ...
     def __repr__(self) -> str:
         ...
     def __eq__(self, other: object, /) -> bool:
         ...
+
+    def __hash__(self) -> int: ...
 
 @final
 class Module:
@@ -213,17 +219,17 @@ class Constraint:
 class ConstraintState:
     def __repr__(self) -> str:
         ...
-    def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
-        """Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead."""
+    def mask(self) -> NDArray[np.uint32]:
+        """Packed uint32 words: token i is bit i % 32 of word i // 32."""
         ...
     def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
-        """Like `mask()`, but writes the words into `bitmask`. Releases the GIL."""
+        """Like `mask()`, but writes the words into `bitmask`. May release the GIL."""
         ...
     @property
     def mask_bit_len(self) -> int:
         """The mask's length in bits (the largest token ID plus one)."""
         ...
-    def commit_token(self, token_id: int, /) -> bool:
+    def commit_token(self, token_id: SupportsIndex, /) -> bool:
         """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
@@ -255,6 +261,8 @@ class MaskStrategy:
     FAST_MASKS: ClassVar[MaskStrategy]
     """Faster masks, slower compilation."""
 
+    def __hash__(self) -> int: ...
+
 @final
 class Externs(Mapping[str, "Extern"]):
     """A read-only mapping of extern names to `Extern`."""
@@ -273,13 +281,15 @@ class Extern:
     def name(self) -> str:
         ...
     @property
-    def kind(self) -> Literal["token", "grammar"]:
+    def kind(self) -> str:
         ...
     def __repr__(self) -> str:
         ...
     def __eq__(self, other: object, /) -> bool:
         ...
 
+    def __hash__(self) -> int: ...
+
 class GLRMaskError(Exception):
     kind: str
-    """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`."""
+    """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`."""

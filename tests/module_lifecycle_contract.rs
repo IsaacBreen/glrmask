@@ -3,7 +3,7 @@ use glrmask::test_modes::MaskMode;
 use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
-    Vocab::new::<Vec<u8>>(vec![
+    Vocab::new(vec![
         (0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec()),
         (3, b",".to_vec()), (4, b"a,b".to_vec()), (5, Vec::new()),
     ]).unwrap()
@@ -56,7 +56,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
         let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
         host.bind("E", expr).unwrap();
-        let loaded = Module::load(host.save()).unwrap();
+        let loaded = Module::load(&host.save()).unwrap();
         let root = loaded
             .compile_with(&v, mode.compile_options())
             .unwrap();

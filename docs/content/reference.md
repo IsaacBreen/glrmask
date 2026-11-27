@@ -2,49 +2,16 @@
 
 Each sequence has its own `ConstraintState`. At each step, mask the model's scores, allow EOS when the state is accepting, and choose a token. Stop if EOS is chosen; otherwise commit the token:
 
-```python
-import numpy as np
-import glrmask
+See the quickstart above for the sampling loop and unpacking the packed mask.
 
-chars = b"0123456789+*()"
-eos = len(chars)
-vocab = glrmask.Vocab({i: bytes([c]) for i, c in enumerate(chars)})
-
-arithmetic = glrmask.Grammar.from_glrm(r'''
-    start sum
-    t NUMBER = /[0-9]+/
-    nt sum = product | sum "+" product
-    nt product = atom | product "*" atom
-    nt atom = NUMBER | "(" sum ")"
-''')
-constraint = arithmetic.compile(vocab)
-
-rng = np.random.default_rng(0)
-state = constraint.start()
-text = b""
-while True:
-    logits = rng.standard_normal(eos + 1)  # Your model's scores go here.
-    allowed = np.zeros(len(logits), dtype=bool)
-    allowed[:state.mask_bit_len] = state.mask(dtype=bool)
-    allowed[eos] = state.is_accepting()
-    assert allowed.any()
-    logits[~allowed] = -np.inf
-    token = int(logits.argmax())
-    if token == eos:
-        break
-    assert state.commit_token(token)
-    text += chars[token:token + 1]
-print(text.decode())
-```
 
 Masks indicate which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`.
 Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID plus one, or zero if empty), including gaps.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
-Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` returns exactly
-one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
-To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
+Python `mask()` returns packed uint32 words. Use `mask().view(np.int32)` for signed packed words without copying.
+The constraint and each state have the same constant mask bit length.
 For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
-1-D NumPy uint32 arrays; for an int32 buffer, pass `buf.view(np.uint32)`; surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
+1-D aligned, native-endian NumPy uint32 arrays (including rows of C-contiguous matrices); for an int32 buffer, pass `buf.view(np.uint32)`; all words are written, and surplus words are zeroed on success. Buffer validation errors leave it unchanged; an unexpected internal failure may have partially written it. Mask computation may release the GIL. Compile and precompile run native compilation without the GIL. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
 
 For PyTorch serving with V equal to the logits width (at least every state mask bit length):
 
@@ -62,7 +29,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 token without committing to it, copy the state first.
 
 `is_accepting()` says whether the output so far could end here. More may still be allowed: `1+2` is complete, but
-`1+23` is too. `is_terminated()` says whether nothing more can be committed.
+`1+23` is too. `is_terminated()` says whether nothing more can be committed. Together they distinguish in progress (false, false), may stop (true, false), complete (true, true), and dead (false, true). Treat EOS as a caller-side stop decision; committing an unknown EOS token rejects even an accepting state.
 
 ### Forced bytes
 
@@ -106,9 +73,9 @@ Each grammar keeps its own rules, including the whitespace it ignores, and one m
 between parts.
 
 `bind` changes the grammar or module in place; copy it first to bind the same one in different ways. Each extern is
-bound once, on the grammar or module that declares it. A value can't be bound while it has unbound externs of its own.
+bound once, on the grammar or module that declares it. An unknown name is an error; an unbound name accepts a value of the appropriate kind; an already bound name rejects rebinding. Bindings capture values, not later mutations. A value can't be bound while it has unbound externs of its own.
 `externs` is a read-only mapping of extern names to `Extern`, and `externs.unbound` lists the ones not yet bound (in Rust, `externs()`
-and `externs().unbound()`).
+and `externs().unbound()`). This is a shallow view of the direct declarations, not a recursive search. Qualified names use `::` for scoped declarations.
 
 ### Modules
 
@@ -134,7 +101,7 @@ constraint = call.compile(vocab)
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling or precompiling it with another is an error.
 
 `constraint.save()` and `Constraint.load(data, vocab)` save and load a compiled constraint. The vocabulary isn't saved,
-and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another.
+and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another. Load artifacts only from trusted sources; malformed input is rejected where detected, but this is not a hardened untrusted-data parser.
 
 ### Expressions
 
@@ -145,12 +112,11 @@ token sets. `Grammar.from_expr` makes a grammar from an expression that contains
 ## Token sets
 
 A `TokenSet` is a set of token IDs. In a grammar it matches any one of its tokens. Create one from IDs,
-`TokenSet([1, 2, 3])`, or from ranges, `TokenSet([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes `0..10` or `0..=9`. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
+`TokenSet([1, 2, 3])`, or from ranges, `TokenSet([range(0, 10)])`. Ranges in C and C++ use `{start, end}` with `end` excluded, as in every language. Rust takes only half-open ranges such as `0..10`. Empty ranges contribute no tokens; reversed C/C++/Node ranges are invalid. Sets are normalized, merging overlapping and adjacent ranges. Python ranges may have any step. An ID doesn't need to be in the vocabulary.
 
-Token IDs go from 0 to 16,777,215 (2^24 - 1). A larger ID in a vocabulary, token set or binding
-is an error.
+Token IDs outside the supported range are rejected during vocabulary creation or binding/compilation.
 
-Tokens with no bytes, such as tool-call markers, are special tokens. They never match text, so only a token set can allow one, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
+Tokens with no bytes, such as tool-call markers, are special tokens. They never match text, so only a token set can allow one in a mask, and they don't need to be in the vocabulary. Two tokens with the same bytes are still different tokens to a token set. See [token sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Mask strategies
 
@@ -160,7 +126,7 @@ Tokens with no bytes, such as tool-call markers, are special tokens. They never 
 - `FAST_COMPILE` (Rust/Python), `FastCompile` (Node/C++): Faster compilation, slower masks.
 - `FAST_MASKS` (Rust/Python), `FastMasks` (Node/C++): Faster masks, slower compilation.
 
-These are preferences, not speed guarantees. GLRMask may use another strategy; masks have the same semantics.
+These are preferences, not speed guarantees. GLRMask may use another strategy; masks have the same semantics. AUTO does not reject a grammar merely because a particular strategy is unsupported.
 
 Pass the preference to `compile` on a Grammar or Module, or to `precompile` on a Module.
 
@@ -170,10 +136,10 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 
 ## Errors
 
-Creating, binding, compiling and loading grammars can fail; generating can't, because commits return `false` instead.
+Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
 Each error message says what went wrong, with the line and column in the grammar source when that's the cause.
-In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization` or `Internal`. `source_span()` gives its place in the source.
-Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
+In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`. `source_span()` gives its place in the source.
+Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 
 ## Grammar formats
 
