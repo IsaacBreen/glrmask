@@ -32,7 +32,7 @@ use crate::runtime::artifact::{
 use crate::runtime::artifact::FastTemplateDfasByTerminal;
 use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedRelation {
     pub(crate) source: Arc<CommitTemplateDfas>,
     pub(crate) domain: Arc<TemplateDomain>,
@@ -95,13 +95,33 @@ fn inventory(
     }
     groups.sort_unstable_by_key(|group| group.terminals[0]);
     let mut programs = vec![None; terminals];
-    let mut domain_groups = Vec::with_capacity(groups.len());
+    let mut domain_groups = Vec::<DomainGroup>::with_capacity(groups.len());
+    let mut projection_ids = FxHashMap::<u64, Vec<usize>>::default();
 
-    for group in groups {
+    for mut group in groups {
         if group.terminals.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(invalid());
         }
-        let mut members = Vec::with_capacity(group.terminals.len());
+        // Full relation aliases were already grouped by source identity.
+        // Input admission can be identical even when output suffixes differ.
+        let fingerprint = group.program.domain.projection_fingerprint();
+        let bucket = projection_ids.entry(fingerprint).or_default();
+        let domain_group = if let Some(index) = bucket.iter().copied().find(|&index|
+            domain_groups[index].domain.same_projection(&group.program.domain)) {
+            let canonical = &domain_groups[index].domain;
+            if !Arc::ptr_eq(canonical, &group.program.domain) {
+                Arc::make_mut(&mut group.program).domain = Arc::clone(canonical);
+            }
+            index
+        } else {
+            let index = domain_groups.len();
+            domain_groups.push(DomainGroup {
+                domain: Arc::clone(&group.program.domain), terminals: Vec::new(),
+            });
+            bucket.push(index);
+            index
+        };
+        let members = &mut domain_groups[domain_group].terminals;
         for terminal in group.terminals {
             let terminal = terminal as usize;
             let Some(slot) = programs.get_mut(terminal) else {
@@ -113,11 +133,10 @@ fn inventory(
             *slot = Some(Arc::clone(&group.program));
             members.push(terminal);
         }
-        domain_groups.push(DomainGroup {
-            domain: Arc::clone(&group.program.domain),
-            terminals: members,
-        });
     }
+    // Source groups may interleave their terminal IDs. The sparse bitset
+    // compiler requires increasing members within each predicate group.
+    for group in &mut domain_groups { group.terminals.sort_unstable(); }
     if programs.iter().any(Option::is_none) {
         return Err(invalid());
     }

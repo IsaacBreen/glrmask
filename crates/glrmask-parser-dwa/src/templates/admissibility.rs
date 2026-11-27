@@ -11,6 +11,7 @@
 //! retained when it overrides an otherwise productive DEFAULT transition.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -45,7 +46,7 @@ pub enum TopAdmission {
     DependsOnSuffix,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DomainState {
     // ACCEPT marks unconditional acceptance, REJECT is the missing default.
     // Explicit edges form one contiguous partition of the edge arena.
@@ -69,7 +70,7 @@ impl DomainState {
 ///
 /// Construction validates all component graphs and phase links, including
 /// unreachable nodes. Runtime queries allocate no output stacks or heap scratch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CompactDomain {
     start: u32,
     states: Box<[DomainState]>,
@@ -828,6 +829,60 @@ impl TemplateDomain {
         }
     }
 
+    /// A shallow source projection corresponds exactly to the canonical
+    /// two-state compact wire. Recognize that shape without allocating it.
+    /// A noncanonical standalone wire may miss interning, never alias a
+    /// different predicate.
+    fn shallow_partition(&self) -> Option<(bool, Box<dyn Iterator<Item = (u32, bool)> + '_>)> {
+        match &self.0 {
+            DomainRepresentation::SourceRoot(root) => Some((
+                root.default_accepts(),
+                Box::new(root.exceptions().map(|(label, value)| (label, value == TopAdmission::Always))),
+            )),
+            DomainRepresentation::Compact(domain)
+                if domain.start == 1 && domain.states.len() == 2
+                    && domain.states[0].accepting() && domain.states[0].first_edge == 0
+                    && domain.states[1].first_edge == 0
+                    && matches!(domain.states[1].default_target, 0 | REJECT)
+                    && domain.edges.iter().all(|&(_, target)| matches!(target, 0 | REJECT)) =>
+            {
+                Some((domain.states[1].default_target == 0,
+                    Box::new(domain.edges.iter().map(|&(label, target)| (label, target == 0)))))
+            }
+            _ => None,
+        }
+    }
+
+    /// Fingerprint only the input predicate's canonical projection, not the
+    /// output relation, source allocation, or chosen runtime representation.
+    /// Equality is checked exactly before sharing; collisions are harmless.
+    pub fn projection_fingerprint(&self) -> u64 {
+        let mut hash = rustc_hash::FxHasher::default();
+        if let Some((default, edges)) = self.shallow_partition() {
+            0u8.hash(&mut hash);
+            default.hash(&mut hash);
+            for edge in edges { edge.hash(&mut hash); }
+        } else if let DomainRepresentation::Compact(domain) = &self.0 {
+            1u8.hash(&mut hash);
+            domain.hash(&mut hash);
+        }
+        hash.finish()
+    }
+
+    /// Equality of canonical projections, including their standalone wire
+    /// numbering. This is sufficient for exact predicate sharing. It may
+    /// conservatively leave equivalent noncanonical wire graphs separate.
+    pub fn same_projection(&self, other: &Self) -> bool {
+        if let (DomainRepresentation::Compact(a), DomainRepresentation::Compact(b)) =
+            (&self.0, &other.0) {
+            return a == b;
+        }
+        match (self.shallow_partition(), other.shallow_partition()) {
+            (Some((a, ax)), Some((b, bx))) => a == b && ax.eq(bx),
+            _ => false,
+        }
+    }
+
     /// GTD1 is the standalone canonical compact-domain cache format, not
     /// executable parser artifact authority. Preserve its exact byte layout.
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
@@ -906,6 +961,8 @@ mod tests {
         assert!(matches!(&native.0, DomainRepresentation::SourceRoot(_)));
         assert!(native.heap_payload_bytes() < reference.heap_payload_bytes());
         assert_eq!(native.to_bytes().unwrap(), reference.to_bytes().unwrap());
+        assert_eq!(native.projection_fingerprint(), reference.projection_fingerprint());
+        assert!(native.same_projection(&reference));
         let (a, ax) = native.top_admission_partition();
         let (b, bx) = reference.top_admission_partition();
         assert_eq!(a, b);

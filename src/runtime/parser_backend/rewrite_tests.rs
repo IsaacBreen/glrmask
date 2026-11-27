@@ -125,6 +125,31 @@ fn alias_preparation_shares_domains_and_all_fast_views() {
 }
 
 #[test]
+fn different_outputs_share_exact_admission_without_sharing_execution() {
+    let relation = |label, pushed| {
+        let mut t = pop_word(&[label], false);
+        let end = t.push.add_state();
+        t.push.add_transition(0, encode_negative_label(pushed), end);
+        t.push.set_accepting(end, true);
+        t.pop_to_push = vec![None, Some(0)];
+        Arc::new(t)
+    };
+    let a = relation(3, 7);
+    let b = relation(3, 8);
+    let c = relation(4, 7);
+    let programs = vec![Some(Arc::clone(&a)), Some(Arc::clone(&b)), Some(c),
+        Some(Arc::clone(&b)), Some(a)];
+    let (domains, fast) = prepare_terminal_inventory(&programs, 16, true, false).unwrap();
+    assert!(Arc::ptr_eq(&domains[0], &domains[1]));
+    assert!(Arc::ptr_eq(&domains[1], &domains[3]));
+    assert!(Arc::ptr_eq(&domains[0], &domains[4]));
+    assert!(!Arc::ptr_eq(&domains[0], &domains[2]));
+    assert!(!Arc::ptr_eq(fast[0].as_ref().unwrap(), fast[1].as_ref().unwrap()));
+    assert!(fast[0].as_ref().unwrap().is_for_source(programs[0].as_ref().unwrap()));
+    assert!(fast[1].as_ref().unwrap().is_for_source(programs[1].as_ref().unwrap()));
+}
+
+#[test]
 fn concurrent_inventory_preparation_rejects_invalid_programs_in_terminal_order() {
     let mut programs = (0..8u32)
         .map(|terminal| Some(split(&phase_fixture(terminal))))
