@@ -14,6 +14,8 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 cargo add glrmask
 ```
 
+For the release candidate: `cargo add glrmask@1.0.0-rc.1`.
+
 GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust version; a patch release won't.
 
 ## Usage

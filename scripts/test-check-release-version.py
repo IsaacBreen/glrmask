@@ -99,11 +99,15 @@ class DistributionMetadata(unittest.TestCase):
         wheel = self.root / f"glrmask-{version}-cp39-abi3-win_amd64.whl"
         with zipfile.ZipFile(wheel, "w") as z:
             z.writestr(f"glrmask-{version}.dist-info/METADATA", content)
+            z.writestr("glrmask/py.typed", "")
+            z.writestr("glrmask/__init__.pyi", "")
         sdist = self.root / f"glrmask-{version}.tar.gz"
         with tarfile.open(sdist, "w:gz") as t:
             info = tarfile.TarInfo(f"glrmask-{version}/PKG-INFO")
             info.size = len(content)
             t.addfile(info, io.BytesIO(content))
+            for filename in ("py.typed", "__init__.pyi"):
+                t.addfile(tarfile.TarInfo(f"glrmask-{version}/python/python/glrmask/{filename}"))
         return wheel, sdist
 
     def test_metadata(self):
@@ -112,6 +116,21 @@ class DistributionMetadata(unittest.TestCase):
                 wheels.validate_distribution(path, version)
                 with self.assertRaises(ValueError):
                     wheels.validate_distribution(path, "9.0.0")
+
+    def test_typing_files_required(self):
+        version = "1.0.0rc1"
+        content = f"Name: glrmask\nVersion: {version}\n".encode()
+        for path in self.artifacts(version, version):
+            if path.suffix == ".whl":
+                with zipfile.ZipFile(path, "w") as z:
+                    z.writestr(f"glrmask-{version}.dist-info/METADATA", content)
+            else:
+                with tarfile.open(path, "w:gz") as t:
+                    info = tarfile.TarInfo(f"glrmask-{version}/PKG-INFO")
+                    info.size = len(content)
+                    t.addfile(info, io.BytesIO(content))
+            with self.assertRaisesRegex(ValueError, "missing glrmask/py.typed"):
+                wheels.validate_distribution(path, version)
 
     def test_filename_is_not_sufficient(self):
         for bad in ("1.0.0", "1.0.0rc2", "1.0.0-rc.1"):

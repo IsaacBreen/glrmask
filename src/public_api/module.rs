@@ -105,10 +105,11 @@ impl InternalMaskStrategy {
 pub trait IntoBinding: sealed::ModuleValue {}
 
 pub(super) mod sealed {
-    use super::{Expr, Grammar, Module, TokenSet};
+    use super::{Constraint, Expr, Grammar, Module, TokenSet};
 
     pub enum Binding {
         Module(Module),
+        Constraint(Constraint),
         Grammar(Grammar),
         Expr(Expr),
         TokenSet(TokenSet),
@@ -149,7 +150,51 @@ impl IntoBinding for &TokenSet {}
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
     Module(Module),
+    Compiled(CompiledPart),
     TokenSet(TokenSet),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledPart {
+    Ready(Constraint),
+    Deferred { bytes: Arc<[u8]>, fingerprint: [u8; 32] },
+}
+impl CompiledPart {
+    fn fingerprint(&self) -> [u8; 32] {
+        match self {
+            Self::Ready(c) => c.runtime().vocab_fingerprint(),
+            Self::Deferred { fingerprint, .. } => *fingerprint,
+        }
+    }
+    fn save(&self) -> Vec<u8> {
+        match self {
+            Self::Ready(c) => c.save(),
+            Self::Deferred { bytes, .. } => bytes.to_vec(),
+        }
+    }
+    fn materialize(&self, vocab: &Vocab, boundary_strategy: InternalBoundaryMaskStrategy) -> Result<RuntimeConstraint> {
+        let mut child = match self {
+            Self::Ready(c) => c.runtime().clone(),
+            Self::Deferred { bytes, .. } => Constraint::load(bytes, vocab)?.runtime().clone(),
+        };
+        child.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
+        if !child.has_template_parser() {
+            child.install_template_parser()?;
+        }
+        if child.end_tokens.is_empty() { return Ok(child); }
+        // Root end-token policy originated from an explicit trailing TokenSet.
+        // At an embedded boundary it must consume that token before returning.
+        let ids = child.end_tokens.to_vec();
+        child = child.with_end_tokens(&[])?;
+        let grammar = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END")?;
+        let wrapper = Module::new(&grammar)
+            .bound("BODY", Binding::Constraint(Constraint::from_runtime(child)))?
+            .bound("END", Binding::TokenSet(TokenSet::new(ids)))?;
+        let options = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
+        let mut wrapper = wrapper;
+        wrapper.precompile_for_compile(vocab, &options)?;
+        wrapper.materialize(vocab, &mut HashMap::new(), boundary_strategy)
+    }
 }
 
 /// A partially compiled grammar.
@@ -231,6 +276,7 @@ impl Certificate {
     fn value(&mut self, value: &BoundValue) -> Result<()> {
         match value {
             BoundValue::TokenSet(set) => self.tokens(set)?,
+            BoundValue::Compiled(c) => self.target_fingerprint(c.fingerprint())?,
             BoundValue::Module(m) => {
                 let child = m.certificate()?;
                 self.height = self.height.max(child.height + 1);
@@ -472,6 +518,10 @@ impl Module {
                 Self::bound_module(name, kind, declared, Module::new(&grammar))?
             }
             Binding::Module(child) => Self::bound_module(name, kind, declared, child)?,
+            Binding::Constraint(c) => {
+                check_binding_kind(name, kind, true).map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
+                BoundValue::Compiled(CompiledPart::Ready(c))
+            }
             Binding::Expr(expr) => {
                 check_binding_kind(name, kind, true)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
@@ -702,7 +752,7 @@ impl Module {
         }
         let modules = self.index()?;
         let requested = options.engine()?;
-        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
+        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some() || m.node.bindings.values().any(|v| matches!(v, BoundValue::Compiled(_))));
         let target_b = target_boundary();
         let plan_of = |m: &Module| plan_node(requested, &m.node.prepared, any_retained, options.parser_backend());
         let backend_of = |plan: NodePlan| token_trie_backend(plan.backend);
@@ -828,7 +878,7 @@ impl Module {
                 if resolved.bindings.contains_key(name) { continue; }
                 match value {
                     BoundValue::TokenSet(t) => resolved = resolved.bind_value(name, GrammarValue::TokenSet(t.clone()))?,
-                    BoundValue::Module(_) => {}
+                    BoundValue::Module(_) | BoundValue::Compiled(_) => {}
                 }
             }
             let mut module = Module::new(&resolved);
@@ -855,6 +905,7 @@ impl Module {
                         local.bind(name, child_prep)?;
                     }
                     BoundValue::TokenSet(t) => local.bind(name, t.clone())?,
+                    BoundValue::Compiled(_) => return Err(error("unexpected compiled source binding")),
                 }
             }
             #[cfg(test)]
@@ -1070,7 +1121,7 @@ impl Module {
         // Over retained static work it is mixed: retained parts stay static and
         // every other module is compiled as its own dynamic component.
         let requested = options.engine()?;
-        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some());
+        let any_retained = modules.iter().any(|m| best_retained(&m.node.prepared).is_some() || m.node.bindings.values().any(|v| matches!(v, BoundValue::Compiled(_))));
         // The whole-composition flatten path is only valid when the request is
         // a TokenTrie request and no part owns precompiled machinery.
         let whole = requested.is_token_trie() && !any_retained;
@@ -1267,6 +1318,7 @@ impl Module {
         let children = self.node.bindings.iter().filter(|(name, _)| active.contains(name.as_str())).map(|(name, value)| {
             let child = match value {
                 BoundValue::Module(child) => child.materialize(vocab, cache, boundary_strategy)?,
+                BoundValue::Compiled(c) => c.materialize(vocab, boundary_strategy)?,
                 BoundValue::TokenSet(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
             };
             Ok((name.clone(), Arc::new(child)))
@@ -1373,6 +1425,7 @@ impl Module {
         for (name, value) in &self.node.bindings {
             let value = match value {
                 BoundValue::Module(child) => GrammarValue::Source(Arc::new(child.flatten_source()?)),
+                BoundValue::Compiled(_) => return Err(error("a compiled constraint cannot be flattened into source")),
                 BoundValue::TokenSet(t) => GrammarValue::TokenSet(t.clone()),
             };
             grammar = grammar.bind_value(name, value)?;

@@ -247,6 +247,7 @@ struct ExprOperand {
     glrmask_expr_operand value;
     ExprOperand(const Grammar&);
     ExprOperand(const Module&);
+    ExprOperand(const Constraint&);
     ExprOperand(const Expr&);
     ExprOperand(const TokenSet&);
 };
@@ -368,6 +369,8 @@ public:
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes, size, vocab.native_handle(), &p)); return Constraint(p);
     }
 };
+
+inline ExprOperand::ExprOperand(const Constraint& value) : value{5, value.native_handle()} {}
 
 class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone> {
     using Base = detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone>;

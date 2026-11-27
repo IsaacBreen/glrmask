@@ -2,7 +2,7 @@
 use super::*;
 use super::module::sealed::Binding;
 
-/// A grammar expression.
+/// A grammar expression. Compiled constraints can be used in module-bound expressions with the same vocabulary.
 #[derive(Debug, Clone)]
 pub struct Expr(pub(crate) Arc<ExprNode>);
 
@@ -10,6 +10,7 @@ pub struct Expr(pub(crate) Arc<ExprNode>);
 pub(crate) enum ExprLeaf {
     Grammar(Grammar),
     Module(Module),
+    Constraint(Constraint),
     TokenSet(TokenSet),
 }
 
@@ -33,6 +34,12 @@ impl From<&Module> for Expr {
     fn from(m: &Module) -> Self {
         Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Module(m.clone()))))
     }
+}
+impl From<Constraint> for Expr {
+    fn from(c: Constraint) -> Self { Self(Arc::new(ExprNode::Leaf(ExprLeaf::Constraint(c)))) }
+}
+impl From<&Constraint> for Expr {
+    fn from(c: &Constraint) -> Self { Self::from(c.clone()) }
 }
 impl From<Grammar> for Expr {
     fn from(g: Grammar) -> Self {
@@ -99,6 +106,10 @@ impl Expr {
                                 return Err(Error::InvalidInput("a Grammar expression cannot contain a Module".into()));
                             }
                             (ExternKind::Grammar, Binding::Module(m.clone()))
+                        },
+                        ExprLeaf::Constraint(c) => {
+                            if !allow_modules { return Err(Error::InvalidInput("a Grammar expression cannot contain a Constraint".into())); }
+                            (ExternKind::Grammar, Binding::Constraint(c.clone()))
                         },
                         ExprLeaf::TokenSet(t) => {
                             if !allow_modules {

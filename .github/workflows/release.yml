@@ -46,6 +46,7 @@ on:
 # No token or registry credentials are stored in this workflow.
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: trusted-release-${{ github.ref }}
@@ -102,6 +103,14 @@ jobs:
           if [[ "$RELEASE_TAG" == *-rc.* ]]; then prerelease=true; fi
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" |
             jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$prerelease" '.tag_name == $tag and .draft == false and .prerelease == $prerelease' > /dev/null
+          # Require runs on the actual merged commit, not a PR's synthetic merge.
+          for workflow in rust.yml python-wheels.yml guide-sync.yml; do
+            runs="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" -f head_sha="$(git rev-parse HEAD)" -f per_page=100)"
+            printf '%s' "$runs" | jq -e --arg sha "$(git rev-parse HEAD)" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))]
+              | sort_by(.id) | last | (.status == "completed" and .conclusion == "success")' >/dev/null ||
+              { echo "Required CI not green for exact main commit: ${workflow}" >&2; exit 1; }
+          done
 
 
   native-build:
@@ -572,6 +581,14 @@ jobs:
           SOURCE_TREE="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_COMMIT}" --jq .tree.sha)"
           test "$SOURCE_TREE" = "$RELEASE_TREE"
           echo "Exact source-tree match: ${SOURCE_TREE}"
+          # Require runs on the actual merged commit, not a PR's synthetic merge.
+          for workflow in rust.yml python-wheels.yml guide-sync.yml; do
+            runs="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" -f head_sha="$(git rev-parse HEAD)" -f per_page=100)"
+            printf '%s' "$runs" | jq -e --arg sha "$(git rev-parse HEAD)" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))]
+              | sort_by(.id) | last | (.status == "completed" and .conclusion == "success")' >/dev/null ||
+              { echo "Required CI not green for exact main commit: ${workflow}" >&2; exit 1; }
+          done
       - uses: actions/download-artifact@v7
         with:
           name: python-release-artifacts

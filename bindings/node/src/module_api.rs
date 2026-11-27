@@ -15,6 +15,10 @@ impl NativeExpr {
         call(|| Ok(Self { inner: Handle::new(g::Expr::from(value.snapshot()?)) }))
     }
     #[napi(factory)]
+    pub fn from_constraint(value: &NativeConstraint) -> napi::Result<Self> {
+        call(|| Ok(Self { inner: Handle::new(g::Expr::from(live(&value.inner)?.as_ref())) }))
+    }
+    #[napi(factory)]
     pub fn from_token_set(value: &NativeTokenSet) -> napi::Result<Self> {
         call(|| Ok(Self { inner: Handle::new(g::Expr::from(live(&value.inner)?.clone())) }))
     }

@@ -111,11 +111,15 @@ There was no CPU pinning or SMT sibling reservation, and checkpoint publication 
 python -m pip install glrmask
 ```
 
+For the release candidate: `pip install --pre glrmask` or `pip install glrmask==1.0.0rc1`.
+
 #### Rust
 
 ```bash
 cargo add glrmask
 ```
+
+For the release candidate: `cargo add glrmask@1.0.0-rc.1`.
 
 #### Native C++ and Node.js
 

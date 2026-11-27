@@ -60,6 +60,9 @@ def validate_distribution(path: Path, expected: str) -> None:
             members = [n for n in archive.namelist() if n.count("/") == 1 and n.endswith(".dist-info/METADATA")]
             if len(members) != 1:
                 raise ValueError(f"{path}: expected exactly one wheel METADATA")
+            for filename in ("py.typed", "__init__.pyi"):
+                if f"glrmask/{filename}" not in archive.namelist():
+                    raise ValueError(f"{path}: missing glrmask/{filename}")
             raw = archive.read(members[0])
     else:
         name, version = parse_sdist_filename(path.name)
@@ -67,6 +70,11 @@ def validate_distribution(path: Path, expected: str) -> None:
             members = [m for m in archive.getmembers() if m.isfile() and m.name.count("/") == 1 and m.name.endswith("/PKG-INFO")]
             if len(members) != 1:
                 raise ValueError(f"{path}: expected exactly one root PKG-INFO")
+            root = members[0].name.split("/", 1)[0]
+            paths = {m.name for m in archive.getmembers() if m.isfile()}
+            for filename in ("py.typed", "__init__.pyi"):
+                if not any(p.startswith(root + "/") and p.endswith(f"/glrmask/{filename}") for p in paths):
+                    raise ValueError(f"{path}: missing glrmask/{filename}")
             with archive.extractfile(members[0]) as info:
                 raw = info.read()
     metadata = email.parser.BytesParser().parsebytes(raw, headersonly=True)

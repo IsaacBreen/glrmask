@@ -26,6 +26,7 @@ enum Source {
 enum Value {
     Module(u32),
     Exact(Exact),
+    Compiled(Vec<u8>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,6 +128,7 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
             let value = match value {
                 BoundValue::Module(m) => Value::Module(instance_ids[&(Arc::as_ptr(&m.node) as usize)]),
                 BoundValue::TokenSet(t) => Value::Exact(exact(t)),
+                BoundValue::Compiled(c) => Value::Compiled(c.save()),
             };
             (name.clone(), value)
         }).collect();
@@ -261,6 +263,10 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
             let value = match value {
                 Value::Module(i) => BoundValue::Module(instances[i as usize].clone()),
                 Value::Exact(e) => BoundValue::TokenSet(decode_exact(e)?),
+                Value::Compiled(bytes) => {
+                    let (_, fingerprint) = RuntimeConstraint::load_deferred_budgeted(bytes.as_slice(), true, &budget.child()?)?;
+                    BoundValue::Compiled(CompiledPart::Deferred { bytes: bytes.into(), fingerprint })
+                },
             };
             bindings.insert(name, value);
         }
@@ -281,7 +287,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
             let declared = module.node.source.declarations().map_err(|e| err(e.to_string()))?;
             for (name, value) in &module.node.bindings {
                 let kind = *declared.kinds.get(name).ok_or_else(|| err("Module binding has no declared slot"))?;
-                check_binding_kind(name, kind, matches!(value, BoundValue::Module(_))).map_err(|e| err(e.to_string()))?;
+                check_binding_kind(name, kind, !matches!(value, BoundValue::TokenSet(_))).map_err(|e| err(e.to_string()))?;
             }
             for (&engine, p) in &module.node.prepared {
                 let mut expected = declared.kinds.clone();

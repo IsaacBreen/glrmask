@@ -12,6 +12,7 @@ pub struct Constraint {
 impl Constraint {
     pub(crate) fn from_runtime(inner: RuntimeConstraint) -> Self { Self { inner } }
 
+    pub(crate) fn runtime(&self) -> &RuntimeConstraint { &self.inner }
     /// Starts a new sequence.
     pub fn start(&self) -> ConstraintState { self.inner.start() }
 

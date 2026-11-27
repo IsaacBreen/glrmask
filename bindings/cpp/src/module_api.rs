@@ -131,6 +131,7 @@ unsafe fn parse_expr_operand(item: &glrmask_expr_operand) -> Result<g::Expr> {
             1 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_module>())?.0.clone())),
             2 => Ok(read(item.handle.cast::<glrmask_expr>())?.0.clone()),
             4 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_token_set>())?.0.clone())),
+            5 => Ok(g::Expr::from(read(item.handle.cast::<glrmask_constraint>())?.0.as_ref())),
             _ => Err(Error::invalid("unknown operand kind; expected a GLRMASK_OPERAND_* value")),
         }
     }

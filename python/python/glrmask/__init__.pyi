@@ -8,6 +8,8 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 python -m pip install glrmask
 ```
 
+For the release candidate: `pip install --pre glrmask` or `pip install glrmask==1.0.0rc1`.
+
 ## Usage
 
 GLRMask has four core types:
@@ -137,11 +139,11 @@ class Expr:
         """Matches `value` exactly."""
         ...
     @staticmethod
-    def sequence(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+    def sequence(*parts: Grammar | Module | Constraint | Expr | TokenSet) -> Expr:
         """Matches `parts` in order."""
         ...
     @staticmethod
-    def choice(*parts: Grammar | Module | Expr | TokenSet) -> Expr:
+    def choice(*parts: Grammar | Module | Constraint | Expr | TokenSet) -> Expr:
         """Matches any one of `parts`."""
         ...
 

@@ -347,3 +347,31 @@ fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Mod
     module.bind("VALUE", value)?;
     Ok(module)
 }
+
+#[test]
+fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
+    use glrmask::{Constraint, MaskStrategy};
+    let v = vocab();
+    let modes = [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS];
+    let mut body = Module::new(&Grammar::from_glrm(OPEN).unwrap());
+    body.bind("item", Expr::sequence([Expr::from(a()), Expr::from(TokenSet::new([99]))])).unwrap();
+    for child_mode in modes {
+        let child = body.compile_with(&v, CompileOptions::default().mask_strategy(child_mode)).unwrap();
+        assert!(accepts(&child, &[1, 99]));
+        let loaded = Constraint::load(&child.save(), &v).unwrap();
+        assert!(Grammar::from_expr(&Expr::from(&loaded)).is_err());
+        let mut host = Module::new(&Grammar::from_glrm(HOST).unwrap());
+        host.bind("child", Expr::from(loaded)).unwrap();
+        let saved = Module::load(&host.save()).unwrap();
+        let wrong = Vocab::new(vec![(0, b"z".to_vec())]).unwrap();
+        assert!(matches!(saved.compile(&wrong), Err(glrmask::Error::VocabMismatch(_))));
+        for parent_mode in modes {
+            for m in [&host, &saved] {
+                let compiled = m.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
+                assert!(accepts(&compiled, &[0, 1, 99, 3]));
+                assert!(!accepts(&compiled, &[0, 1, 3]));
+                assert!(!accepts(&compiled, &[0, 1, 99]));
+            }
+        }
+    }
+}

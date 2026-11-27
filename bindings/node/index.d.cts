@@ -46,7 +46,7 @@ export declare class Grammar implements Disposable {
 
 
 /** A value that can be part of an `Expr`. */
-export type ExprPart = Grammar | Module | Expr | TokenSet;
+export type ExprPart = Grammar | Module | Constraint | Expr | TokenSet;
 
 /** A grammar expression. */
 export declare class Expr implements Disposable {
@@ -101,7 +101,7 @@ export declare class Module implements Disposable {
   readonly externs: Externs;
 
   /** Throws if the extern is undeclared, already bound or the wrong kind. */
-  bind(name: string, value: ExprPart): void;
+  bind(name: string, value: Exclude<ExprPart, Constraint>): void;
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
