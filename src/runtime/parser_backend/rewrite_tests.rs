@@ -5,7 +5,7 @@ use super::prepare::prepare_terminal_inventory;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
-use crate::runtime::artifact::FastCommitTemplateDfas;
+use crate::runtime::commit::template_prepare::PreparedExecution;
 
 use glrmask_parser_dwa::__private::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -75,7 +75,7 @@ fn concurrent_inventory_preparation_preserves_domains_and_every_runtime_view() {
                 reference_domains.push(TemplateDomain::from_validated(&validated).unwrap());
                 if runtime {
                     reference_views.push(Some(Arc::new(
-                        FastCommitTemplateDfas::from_prepared(&validated)
+                        PreparedExecution::from_prepared(&validated)
                     )));
                 }
             }
@@ -86,7 +86,7 @@ fn concurrent_inventory_preparation_preserves_domains_and_every_runtime_view() {
                     let relations = pool.install(|| {
                         prepare_terminal_inventory(&programs, 32, runtime, true)
                     }).unwrap();
-                    let views = if runtime { relations.iter().map(|p| p.fast.as_ref()).collect::<Vec<_>>() }
+                    let views = if runtime { relations.iter().map(|p| p.execution.as_ref()).collect::<Vec<_>>() }
                         else { Vec::new() };
                     assert_eq!(format!("{views:?}"), format!("{reference_views:?}"));
                     for (expected, relation) in reference_domains.iter().zip(&relations) {
@@ -118,7 +118,7 @@ fn alias_preparation_shares_domains_and_all_fast_views() {
     let relations = prepare_terminal_inventory(&programs, 32, true, true).unwrap();
     for terminal in 2..65 {
         assert!(Arc::ptr_eq(&relations[terminal], &relations[terminal % 2]));
-        assert!(relations[terminal].fast.is_some());
+        assert!(relations[terminal].execution.is_some());
     }
     assert!(!Arc::ptr_eq(&relations[0].domain, &relations[1].domain));
 }
@@ -147,7 +147,7 @@ fn different_outputs_share_exact_admission_without_sharing_execution() {
     assert!(!Arc::ptr_eq(&relations[0], &relations[1]));
     for id in [0, 1] {
         assert!(Arc::ptr_eq(&relations[id].source, programs[id].as_ref().unwrap()));
-        assert!(relations[id].fast.is_some());
+        assert!(relations[id].execution.is_some());
     }
 }
 
@@ -233,7 +233,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
 fn immutable_relation_keeps_its_source_across_arc_make_mut() {
     let source = split(&phase_fixture(0));
     let relation = PreparedRelation::prepare(Arc::clone(&source), 32, true).unwrap();
-    assert!(relation.fast.is_some());
+    assert!(relation.execution.is_some());
     assert!(Arc::ptr_eq(&relation.source, &source));
     let mut changed = Arc::clone(&source);
     Arc::make_mut(&mut changed).pop.states[0].is_accepting ^= true;

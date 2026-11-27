@@ -5320,7 +5320,7 @@ mod tests {
             .expect("serialized template should survive load");
         let loaded_relation = loaded.template_parser().unwrap().local_relation(1)
             .expect("immutable template relation should survive load");
-        assert!(loaded_relation.fast.is_some());
+        assert!(loaded_relation.execution.is_some());
         assert_eq!(loaded_template.pop, template.pop);
         assert_eq!(loaded_template.read, template.read);
         assert_eq!(loaded_template.push, template.push);

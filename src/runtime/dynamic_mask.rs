@@ -6110,7 +6110,7 @@ fn parser_child(
     if let Some(parser) = constraint.template_parser()
         && !constraint.parser_skip_terminals().contains(&terminal)
         && let Some(relation) = parser.local_relation(terminal as usize)
-        && let Some(fast) = relation.fast.as_ref()
+        && let Some(fast) = relation.execution.as_ref()
         && let Some(advanced) = super::commit::simple_read_shift::apply(fast, stacks)
     {
         parser.record_advance();

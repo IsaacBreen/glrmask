@@ -24,9 +24,7 @@ use crate::automata::unweighted_u32::dfa::DFA;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
-use crate::runtime::artifact::{
-    FastCommitTemplateDfas,
-};
+use crate::runtime::commit::template_prepare::PreparedExecution;
 
 use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 
@@ -34,7 +32,7 @@ use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 pub(crate) struct PreparedRelation {
     pub(crate) source: Arc<CommitTemplateDfas>,
     pub(crate) domain: Arc<TemplateDomain>,
-    pub(crate) fast: Option<FastCommitTemplateDfas>,
+    pub(crate) execution: Option<PreparedExecution>,
 }
 
 impl PreparedRelation {
@@ -47,8 +45,8 @@ impl PreparedRelation {
             crate::runtime::commit::template_prepare::TemplatePreparation::new(&source)?;
         validated.validate_alphabet(symbols)?;
         let domain = Arc::new(TemplateDomain::from_shared_validated(Arc::clone(&source), &validated)?);
-        let fast = runtime.then(|| FastCommitTemplateDfas::from_prepared(&validated));
-        Ok(Self { source, domain, fast })
+        let execution = runtime.then(|| PreparedExecution::from_prepared(&validated));
+        Ok(Self { source, domain, execution })
     }
 }
 
@@ -655,7 +653,7 @@ mod tests {
             let source = built.parser.terminal_source(terminal).unwrap();
             let relation = built.parser.local_relation(terminal).unwrap();
             assert!(Arc::ptr_eq(&relation.source, source));
-            assert!(relation.fast.is_some());
+            assert!(relation.execution.is_some());
         }
     }
 

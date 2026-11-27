@@ -28,7 +28,7 @@ pub(crate) use artifact::{
     BoundaryCandidateFingerprint, BoundaryCandidateSummary, OriginalTokenSet,
     SummaryPrecision, SummaryUnavailable,
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
-    DynamicMaskVocabArtifact, DeferredTerminalExprBytes, FastCommitTemplateDfas,
+    DynamicMaskVocabArtifact, DeferredTerminalExprBytes,
     FastTokenizerTransitions, LateGrammarSlot,
     PreparedMasterProofArtifact,
     BoundaryTsidCoordinate, SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,

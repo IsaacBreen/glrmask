@@ -2,7 +2,8 @@
 //! interpreter. No output cache, phase schedule or GSS sharing is used by
 //! the reference evaluator.
 use super::template_advance::advance_with_prepared_template;
-use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
+use crate::runtime::CommitTemplateDfas;
+use super::template_prepare::PreparedExecution;
 use crate::automata::unweighted_u32::dfa::{DFA, DFAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, negative_to_positive_label};
 use crate::compiler::glr::{accumulator::TerminalsDisallowed, parser::ParserGSS};
@@ -42,7 +43,7 @@ fn literal(t: &CommitTemplateDfas, input: &[u32]) -> BTreeSet<Vec<u32>> {
     }
     output
 }
-fn outputs(t: &CommitTemplateDfas, fast: &FastCommitTemplateDfas, source: &[u32]) -> BTreeSet<Vec<u32>> {
+fn outputs(t: &CommitTemplateDfas, fast: &PreparedExecution, source: &[u32]) -> BTreeSet<Vec<u32>> {
     let input = ParserGSS::from_single_stack(source.to_vec(), TerminalsDisallowed::new());
     advance_with_prepared_template(t, input, Some(fast)).to_stacks(4096)
         .expect("bounded literal fixture").into_iter().map(|(word, _)| word).collect()
@@ -83,7 +84,7 @@ fn generated_acyclic_prepared_relations_match_literal_oracle() {
                 links.push(next(&mut seed).is_multiple_of(2).then(|| next(&mut seed)%4));
             }
         }
-        let fast = FastCommitTemplateDfas::from_template(&t);
+        let fast = PreparedExecution::from_template(&t).unwrap();
         for word in &words {
             let expected = literal(&t, word);
             assert_eq!(outputs(&t, &fast, word), expected, "word={word:?}");
@@ -99,7 +100,7 @@ fn dead_default_shadow_and_read_epsilon_on_empty_are_exact() {
     t.pop.states[1].is_accepting = true;
     t.pop_to_read = vec![Some(0)];
     t.read.states[0].is_accepting = true;
-    let fast = FastCommitTemplateDfas::from_template(&t);
+    let fast = PreparedExecution::from_template(&t).unwrap();
     for source in [vec![], vec![0,1], vec![0,2]] {
         assert_eq!(outputs(&t, &fast, &source), literal(&t, &source));
     }
@@ -113,7 +114,7 @@ fn large_cursor_and_push_languages_complete_after_acceleration_budgets() {
         t.read.states[i].is_accepting = true;
         t.read.states[i].transitions.insert(0, (i+1) as u32);
     }
-    let fast = FastCommitTemplateDfas::from_template(&t);
+    let fast = PreparedExecution::from_template(&t).unwrap();
     assert_eq!(outputs(&t, &fast, &[0]), literal(&t, &[0]));
 
     let mut t = blank(2);
@@ -122,6 +123,6 @@ fn large_cursor_and_push_languages_complete_after_acceleration_budgets() {
         t.push.states[0].transitions.insert(encode_negative_label(symbol), 1);
     }
     t.push.states[1].is_accepting = true;
-    let fast = FastCommitTemplateDfas::from_template(&t);
+    let fast = PreparedExecution::from_template(&t).unwrap();
     assert_eq!(outputs(&t, &fast, &[0; 64]), literal(&t, &[0; 64]));
 }

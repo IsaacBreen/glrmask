@@ -383,15 +383,6 @@ impl<'a> ValidatedTemplate<'a> {
         }
     }
 
-    /// Legacy optional templates may fail complete preparation while their
-    /// PUSH phase remains usable. Reuse the same graph validation and count
-    /// recurrence for that independent bounded accelerator.
-    pub fn push_only_facts(template: &CommitTemplateDfas) -> Result<(Vec<usize>, Arc<[u8]>), String> {
-        let (order, _) = topological_order(&template.push, Phase::Push)?;
-        let counts = push_path_counts(&template.push, &order);
-        Ok((order, counts))
-    }
-
     /// Alphabet checks reuse the maximum observed during graph validation,
     /// including labels in unreachable states. This is not a promise about an
     /// unchecked caller-supplied bound or a flag read from an artifact.

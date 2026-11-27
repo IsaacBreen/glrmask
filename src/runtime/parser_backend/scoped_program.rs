@@ -96,7 +96,7 @@ impl ScopedProgram {
     pub(crate) fn advance(&self, stack: &ParserGSS) -> ParserGSS {
         if let Some(top) = stack.single_exclusive_top_value()
             && let Some(local) = self.local(top)
-            && let Some(symbol) = self.fast.as_ref().and_then(|fast| fast.read_shift.as_ref())
+            && let Some(symbol) = self.execution.as_ref().and_then(|fast| fast.read_shift.as_ref())
                 .and_then(|plan| plan.symbol_for_top(local)) {
             #[cfg(test)]
             crate::runtime::commit::template_advance::PREPARED_RELATION_SHORTCUTS
@@ -112,7 +112,7 @@ impl ScopedProgram {
             owned
         } else { stack.clone() };
         let output = crate::runtime::commit::template_advance::advance_with_prepared_coordinate(
-            &self.source, input, self.fast.as_ref(), (self.offset, self.symbols));
+            &self.source, input, self.execution.as_ref(), (self.offset, self.symbols));
         self.append_push.map_or(output.clone(), |symbol| output.push(symbol))
     }
 }

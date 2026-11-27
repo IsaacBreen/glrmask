@@ -1710,52 +1710,6 @@ mod fast_template_row_construction_tests {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct FastCommitTemplateDfas {
-    pub(crate) read_shift: Option<Box<super::commit::simple_read_shift::PreparedReadShift>>,
-    pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
-    pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
-}
-
-impl std::fmt::Debug for FastCommitTemplateDfas {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Preserve the existing derived-view diagnostic representation.
-        f.debug_struct("FastCommitTemplateDfas")
-            .field("read_shift", &self.read_shift)
-            .field("phase_dag", &self.phase_dag)
-            .field("push_suffixes", &self.push_suffixes)
-            .finish()
-    }
-}
-
-impl FastCommitTemplateDfas {
-    #[cfg(test)]
-    pub(crate) fn from_template(template: &CommitTemplateDfas) -> Self {
-        let prepared = super::commit::template_prepare::TemplatePreparation::new(template).ok();
-        Self::from_preparation(template, prepared.as_ref())
-    }
-
-    pub(crate) fn from_prepared(prepared: &super::commit::template_prepare::TemplatePreparation<'_>) -> Self {
-        Self::from_preparation(prepared.template(), Some(prepared))
-    }
-
-    fn from_preparation(template: &CommitTemplateDfas,
-        prepared: Option<&super::commit::template_prepare::TemplatePreparation<'_>>) -> Self {
-        let phase_dag = prepared.and_then(super::commit::phase_dag::PreparedPhaseDag::from_prepared);
-        let push_suffixes = match prepared {
-            Some(prepared) => super::commit::push_suffixes::from_prepared(prepared),
-            // A legacy malformed optional graph may still have a valid PUSH
-            // language. Preserve this bounded independent fallback.
-            None => super::commit::push_suffixes::prepare(template),
-        };
-        Self {
-            read_shift: prepared.and_then(|_| super::commit::simple_read_shift::PreparedReadShift::prepare(template)),
-            phase_dag,
-            push_suffixes,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SpecialTokenTerminal {
     pub(crate) terminal_id: TerminalID,

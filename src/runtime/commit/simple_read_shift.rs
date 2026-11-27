@@ -13,7 +13,8 @@ use crate::compiler::glr::labels::{is_negative_label, negative_to_positive_label
 use crate::compiler::glr::parser::ParserGSS;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::runtime::artifact::FastTemplateTransitionRow;
-use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
+use crate::runtime::CommitTemplateDfas;
+use super::template_prepare::PreparedExecution;
 
 // An optional derived plan, never the authoritative parser. A large root
 // retains the existing interpreter instead of allocating another large table.
@@ -141,7 +142,7 @@ std::thread_local! {
 
 #[inline]
 pub(crate) fn apply<A>(
-    fast: &FastCommitTemplateDfas,
+    fast: &PreparedExecution,
     input: &LeveledGSS<u32, A>,
 ) -> Option<LeveledGSS<u32, A>>
 where
@@ -246,7 +247,7 @@ mod tests {
 
     fn check(t: &CommitTemplateDfas, input: &ParserGSS) -> Option<ParserGSS> {
         let before = input.to_stacks(4096).unwrap();
-        let fast = FastCommitTemplateDfas::from_template(t);
+        let fast = PreparedExecution::from_template(t)?;
         let actual = apply(&fast, input);
         if let Some(actual) = &actual {
             assert_eq!(
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn simple_read_shift_annotation_erasure_commutes_with_push() {
         let t = fixture(5, 7);
-        let fast = FastCommitTemplateDfas::from_template(&t);
+        let fast = PreparedExecution::from_template(&t).unwrap();
         let inputs = [
             ParserGSS::from_single_stack(vec![0, 5], TerminalsDisallowed::new()),
             ParserGSS::from_single_stack(
@@ -368,7 +369,7 @@ mod tests {
             t.pop.states[2].transitions.insert(top, 3);
             t.read.states[1].transitions.insert(top, 2);
         }
-        let fast = FastCommitTemplateDfas::from_template(&t);
+        let fast = PreparedExecution::from_template(&t).unwrap();
         let plan = fast
             .read_shift
             .as_ref()
@@ -388,7 +389,7 @@ mod tests {
         let top = MAX_READ_SHIFT_ENTRIES as i32;
         t.pop.states[2].transitions.insert(top, 3);
         t.read.states[1].transitions.insert(top, 2);
-        let over_budget = FastCommitTemplateDfas::from_template(&t);
+        let over_budget = PreparedExecution::from_template(&t).unwrap();
         assert!(over_budget.read_shift.is_none());
         let input = ParserGSS::from_single_stack(vec![0, top as u32], TerminalsDisallowed::new());
         assert!(apply(&over_budget, &input).is_none());
@@ -406,12 +407,10 @@ mod tests {
         t.push.states[3]
             .transitions
             .insert(encode_negative_label(2), 3);
-        let fast = FastCommitTemplateDfas::from_template(&t);
-        assert!(fast.read_shift.is_none());
+        assert!(PreparedExecution::from_template(&t).is_none());
         t.push.states[3].transitions.clear();
         t.read.states[3].transitions.insert(DEFAULT_LABEL, 0);
-        let fast = FastCommitTemplateDfas::from_template(&t);
-        assert!(fast.read_shift.is_none());
+        assert!(PreparedExecution::from_template(&t).is_none());
     }
 
     #[test]

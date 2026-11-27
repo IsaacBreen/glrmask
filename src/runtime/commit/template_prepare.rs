@@ -1,7 +1,29 @@
-//! Shared, immutable validation used by both input domains and fast views.
-//! The borrowed proof owns only temporary topological orders; all runtime
-//! indices retain their existing representations and independent fallbacks.
+//! Complete validated stack-relation preparation. The source graph remains
+//! authoritative; these derived execution facts are optional acceleration,
+//! never a second serialized DFA or a partially validated graph.
 pub(crate) use glrmask_parser_dwa::__private::templates::admissibility::ValidatedTemplate as TemplatePreparation;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedExecution {
+    pub(crate) read_shift: Option<Box<super::simple_read_shift::PreparedReadShift>>,
+    pub(crate) schedule: super::phase_dag::PreparedPhaseDag,
+    pub(crate) push_suffixes: Vec<Option<super::push_suffixes::PreparedPushSuffixes>>,
+}
+
+impl PreparedExecution {
+    pub(crate) fn from_prepared(prepared: &TemplatePreparation<'_>) -> Self {
+        Self {
+            read_shift: super::simple_read_shift::PreparedReadShift::prepare(prepared.template()),
+            schedule: super::phase_dag::PreparedPhaseDag::from_prepared(prepared),
+            push_suffixes: super::push_suffixes::from_prepared(prepared),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_template(template: &crate::runtime::CommitTemplateDfas) -> Option<Self> {
+        Some(Self::from_prepared(&TemplatePreparation::new(template).ok()?))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -20,7 +42,7 @@ mod tests {
         // derived field, not only behavior on one exercised stack.
         assert_eq!(
             format!("{:?}", PreparedPhaseDag::prepare(template)),
-            format!("{:?}", PreparedPhaseDag::from_prepared(&prepared))
+            format!("{:?}", Some(PreparedPhaseDag::from_prepared(&prepared)))
         );
         assert_eq!(
             format!("{:?}", push_suffixes::prepare(template)),

@@ -51,11 +51,12 @@ impl PreparedPushSuffixes {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(template: &CommitTemplateDfas) -> Vec<Option<PreparedPushSuffixes>> {
-    let Ok((order, counts)) = super::template_prepare::TemplatePreparation::push_only_facts(template) else {
+    let Ok(prepared) = super::template_prepare::TemplatePreparation::new(template) else {
         return (0..template.push.states.len()).map(|_| None).collect();
     };
-    prepare_with_order(template, &order, &counts)
+    from_prepared(&prepared)
 }
 
 pub(crate) fn from_prepared(

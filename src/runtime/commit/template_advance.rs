@@ -5,7 +5,8 @@ use crate::compiler::glr::labels::{
 };
 use crate::compiler::glr::parser::ParserGSS;
 use crate::grammar::flat::TerminalID;
-use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
+use crate::runtime::CommitTemplateDfas;
+use super::template_prepare::PreparedExecution;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::parser_backend::PreparedRelation;
 use rustc_hash::FxHashMap;
@@ -34,7 +35,7 @@ pub(crate) fn advance_prepared_relation(
     relation: &PreparedRelation,
     stack: &ParserGSS,
 ) -> ParserGSS {
-    let prepared = relation.fast.as_ref();
+    let prepared = relation.execution.as_ref();
     if let Some(output) = prepared.and_then(|fast|
         super::simple_read_shift::apply(fast, stack))
     {
@@ -62,7 +63,7 @@ pub(super) fn advance_stacks_template_dfa_owned(
     }
     let relation = constraint.template_parser()?.local_relation(terminal as usize)?;
     let input = debug_template_literal_enabled().then(|| stack.clone());
-    let fast = relation.fast.as_ref();
+    let fast = relation.execution.as_ref();
     let output = match fast.and_then(|fast| super::simple_read_shift::apply(fast, &stack)) {
         Some(output) => output,
         None => advance_with_prepared_template(&relation.source, stack, fast),
@@ -173,7 +174,7 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
 }
 
 pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stack: ParserGSS,
-    prepared: Option<&FastCommitTemplateDfas>) -> ParserGSS {
+    prepared: Option<&PreparedExecution>) -> ParserGSS {
     advance_relation(template, stack, prepared, None)
 }
 
@@ -200,14 +201,14 @@ pub(super) fn global_symbol(scope: Option<(u32, u32)>, local: u32) -> u32 {
 
 pub(crate) fn advance_with_prepared_coordinate(
     template: &CommitTemplateDfas, stack: ParserGSS,
-    prepared: Option<&FastCommitTemplateDfas>, scope: (u32, u32),
+    prepared: Option<&PreparedExecution>, scope: (u32, u32),
 ) -> ParserGSS {
     advance_relation(template, stack, prepared, Some(scope))
 }
 
 fn advance_relation(
     template: &CommitTemplateDfas, stack: ParserGSS,
-    prepared: Option<&FastCommitTemplateDfas>, scope: Option<(u32, u32)>,
+    prepared: Option<&PreparedExecution>, scope: Option<(u32, u32)>,
 ) -> ParserGSS {
     let global = |symbol| global_symbol(scope, symbol);
     let local = |top| local_symbol(scope, top);
@@ -215,7 +216,7 @@ fn advance_relation(
     // The unprepared scoped reference retains its ordered traversal.
     let sparse_input = (scope.is_none() || prepared.is_some())
         && stack.single_interface_lower_id().is_some();
-    let seeded = prepared.and_then(|index| index.phase_dag.as_ref())
+    let seeded = prepared.map(|index| &index.schedule)
         .and_then(|cursor| cursor.apply_input_cursor(template, &stack, scope));
     let (mut output, mut worklist) = match seeded {
         Some(result) => {
@@ -248,7 +249,7 @@ fn advance_relation(
         // adds no retained input clone or second GSS representation to the
         // normal path. Uniform annotations permit union reassociation.
         if sparse_input && worklist.len() >= 8
-            && let Some(plan) = prepared.and_then(|p| p.phase_dag.as_ref())
+            && let Some(plan) = prepared.map(|p| &p.schedule)
         {
             worklist.push((phase, state_id, gss));
             return plan.apply(template, worklist.drain(..), output, scope);
@@ -391,7 +392,7 @@ fn advance_relation(
                     continue;
                 }
                 if sparse_input
-                    && let Some(plan) = prepared.and_then(|p| p.phase_dag.as_ref())
+                    && let Some(plan) = prepared.map(|p| &p.schedule)
                     && let Some(outputs) = plan.apply_large_push(template, state_id, &gss, scope)
                 {
                     output = output.merge(&outputs);
@@ -596,7 +597,7 @@ mod tests {
             for group in [&paths[..1], &paths[1..2], &paths[2..4], &paths[1..], &paths[..]] {
                 let source = ParserGSS::from_stacks(group);
                 let expected = super::advance_with_template_reference(&template, source.clone());
-                let fast = crate::runtime::FastCommitTemplateDfas::from_template(&template);
+                let fast = super::PreparedExecution::from_template(&template).unwrap();
                 let accelerated = super::advance_with_prepared_template(&template, source.clone(), Some(&fast));
                 let actual = advance_with_template(&template, source);
                 assert_eq!(accelerated.semantically_eq(&expected, 16_384), Some(true),

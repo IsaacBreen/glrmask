@@ -33,27 +33,28 @@ pub(crate) struct PreparedPhaseDag {
 
 const DEAD_RANK: u32 = u32::MAX;
 
-fn ranks_from_order(order: &[usize], mut productive: impl FnMut(usize) -> bool) -> Option<Box<[u32]>> {
+fn ranks_from_order(order: &[usize], mut productive: impl FnMut(usize) -> bool) -> Box<[u32]> {
     let mut rank = vec![DEAD_RANK; order.len()];
     for (i, &id) in order.iter().enumerate() {
-        if productive(id) { rank[id] = u32::try_from(i).ok()?; }
+        if productive(id) { rank[id] = i as u32; } // Validated order length is < u32::MAX.
     }
-    Some(rank.into_boxed_slice())
+    rank.into_boxed_slice()
 }
 
 impl PreparedPhaseDag {
+    #[cfg(test)]
     pub(crate) fn prepare(template: &CommitTemplateDfas) -> Option<Self> {
-        Self::from_prepared(&super::template_prepare::TemplatePreparation::new(template).ok()?)
+        Some(Self::from_prepared(&super::template_prepare::TemplatePreparation::new(template).ok()?))
     }
 
-    pub(crate) fn from_prepared(prepared: &super::template_prepare::TemplatePreparation<'_>) -> Option<Self> {
+    pub(crate) fn from_prepared(prepared: &super::template_prepare::TemplatePreparation<'_>) -> Self {
         let orders = prepared.orders();
         let ranks = [
-            ranks_from_order(&orders[0], |id| prepared.productive(0, id))?,
-            ranks_from_order(&orders[1], |id| prepared.productive(1, id))?,
-            ranks_from_order(&orders[2], |id| prepared.productive(2, id))?,
+            ranks_from_order(&orders[0], |id| prepared.productive(0, id)),
+            ranks_from_order(&orders[1], |id| prepared.productive(1, id)),
+            ranks_from_order(&orders[2], |id| prepared.productive(2, id)),
         ];
-        Some(Self { ranks, push_paths: Arc::clone(prepared.push_paths()) })
+        Self { ranks, push_paths: Arc::clone(prepared.push_paths()) }
     }
 
     pub(super) fn productive(&self, phase: usize, id: u32) -> Option<bool> {
