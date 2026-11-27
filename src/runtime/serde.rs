@@ -52,7 +52,7 @@ const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
 const V30_SECTION_MAGIC: [u8; 4] = *b"S30\0";
 const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
-const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R35\0";
+const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R36\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
 const CURRENT_CORE_MAGIC: [u8; 4] = *b"C25\0";
@@ -2113,7 +2113,6 @@ struct RecursiveSegmentedParserComponentV27Ref<'a> {
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
     local_tsid_to_global_tsids: &'a [Vec<u32>],
-    root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
 }
 
@@ -2125,7 +2124,6 @@ struct RecursiveSegmentedParserComponentV27 {
     terminal_offset: u32,
     global_terminal_aliases: Vec<(u32, u32)>,
     local_tsid_to_global_tsids: Vec<Vec<u32>>,
-    root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
 }
 
@@ -2178,7 +2176,7 @@ struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
     components: Vec<RecursiveSegmentedParserComponentV27Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
     recursive_compiler_table: &'a [u8],
-    recursive_tokenizer_internal_tsids: &'a [Vec<u32>],
+    recursive_tokenizer_internal_tsids: Option<&'a [Vec<u32>]>,
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
@@ -2188,7 +2186,7 @@ struct RecursiveSegmentedRuntimeArtifactV27 {
     components: Vec<RecursiveSegmentedParserComponentV27>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
     recursive_compiler_table: Vec<u8>,
-    recursive_tokenizer_internal_tsids: Vec<Vec<u32>>,
+    recursive_tokenizer_internal_tsids: Option<Vec<Vec<u32>>>,
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27>,
 }
@@ -2791,33 +2789,25 @@ fn segmented_runtime_artifact_ref(
         overlay.recursive_compiler_table.get()
             .expect("LR recursive runtime must retain its compiler table blob").as_ref()
     };
-    if overlay.recursive_tokenizer_internal_tsids.get().is_none() {
-        let compatibility_omission = recursive_compiler_table.is_empty()
-            && !overlay.segmented_parser_components.is_empty()
-            && overlay.segmented_parser_components.iter().all(|component| {
-                component.boundary.as_ref().is_some_and(|shard| {
-                    matches!(
-                        shard.backend,
-                        crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
-                    )
-                })
-            });
-        if !compatibility_omission {
-            panic!("recursive runtime must retain its scoped tokenizer TSID relation");
-        }
-        // Wire compatibility only: old v27 readers require one row per scoped
-        // tokenizer state. The live DynamicDirect coordinator never consumes
-        // this quotient, so materialize the historical all-zero relation only
-        // when serialization is explicitly requested.
-        overlay
-            .recursive_tokenizer_internal_tsids
-            .set(Arc::new(vec![vec![0u32]; layout.total_tokenizer_states as usize]))
-            .expect("recursive serializer compatibility relation initialized twice");
-    }
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()
-        .expect("recursive runtime must retain its scoped tokenizer TSID relation");
+        .map(|relation| relation.as_slice());
+    if let Some(relation) = recursive_tokenizer_internal_tsids {
+        assert_eq!(relation.len(), layout.total_tokenizer_states as usize);
+    } else {
+        assert!(
+            recursive_compiler_table.is_empty()
+                && overlay.recursive_static_observation.is_none()
+                && !overlay.segmented_parser_components.is_empty()
+                && overlay.segmented_parser_components.iter().all(|component| {
+                    component.boundary.as_ref().is_some_and(|shard| {
+                        matches!(shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)
+                    })
+                }),
+            "recursive runtime must retain its scoped tokenizer TSID relation",
+        );
+    }
     let components = overlay
         .segmented_parser_components
         .iter()
@@ -2830,10 +2820,6 @@ fn segmented_runtime_artifact_ref(
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
             local_tsid_to_global_tsids: &component.local_tsid_to_global_tsids,
-            root_entry_terminals: serialized_component_root_entry_terminals(
-                component,
-                constraint.parser_terminal_count() as usize,
-            ),
             root_disallowed_terminal: component.root_disallowed_terminal,
         })
         .collect();
@@ -2888,8 +2874,7 @@ fn segmented_runtime_artifact_ref(
             components,
             segmented_parser_links,
             recursive_compiler_table,
-            recursive_tokenizer_internal_tsids:
-                recursive_tokenizer_internal_tsids.as_slice(),
+            recursive_tokenizer_internal_tsids,
             segmented_mask_authoritative: overlay.segmented_mask_authoritative,
             boundary_shards,
         };
@@ -3724,12 +3709,6 @@ fn restore_recursive_segmented_runtime_v27(
     let mut components = Vec::with_capacity(decoded_components.len());
     let mut expected_tokenizer_state_offset = 0u32;
     for (index, (component, child)) in decoded_components.into_iter().enumerate() {
-        if component.root_entry_terminals.len() != global_terminal_count {
-            return Err(crate::Error::Serialization(format!(
-                "recursive v27 component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
-                component.root_entry_terminals.len(),
-            )));
-        }
         if component
             .terminal_offset
             .checked_add(child.parser_terminal_count())
@@ -3782,11 +3761,22 @@ fn restore_recursive_segmented_runtime_v27(
             global_to_local_parser_state: Vec::new(),
         });
     }
-    if expected_tokenizer_state_offset as usize != recursive_tokenizer_internal_tsids.len() {
-        return Err(crate::Error::Serialization(format!(
-            "recursive v27 tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
-            recursive_tokenizer_internal_tsids.len(),
-        )));
+    if let Some(relation) = recursive_tokenizer_internal_tsids.as_ref() {
+        if expected_tokenizer_state_offset as usize != relation.len() {
+            return Err(crate::Error::Serialization(format!(
+                "recursive tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
+                relation.len(),
+            )));
+        }
+    } else if !recursive_compiler_table.is_empty()
+        || runtime.boundary_shards.len() != components.len()
+        || runtime.boundary_shards.iter().any(|shard| {
+            !matches!(shard.backend, RecursiveSegmentedBoundaryShardBackendV27::DynamicDirect)
+        })
+    {
+        return Err(crate::Error::Serialization(
+            "recursive TSID relation can be omitted only for provider-native DynamicDirect components".to_owned(),
+        ));
     }
     let links = runtime
         .segmented_parser_links
@@ -3832,9 +3822,11 @@ fn restore_recursive_segmented_runtime_v27(
                 "recursive v27 runtime failed to derive its parser layout".to_owned(),
             )
         })?;
-    constraint
-        .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_internal_tsids)
-        .map_err(crate::Error::Serialization)?;
+    if let Some(relation) = recursive_tokenizer_internal_tsids {
+        constraint
+            .install_recursive_tokenizer_internal_tsids(relation)
+            .map_err(crate::Error::Serialization)?;
+    }
     let component_count = constraint
         .static_dynamic_overlay
         .as_ref()

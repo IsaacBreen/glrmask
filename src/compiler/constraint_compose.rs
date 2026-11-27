@@ -9764,6 +9764,13 @@ mod tests {
         let bytes = fast.save();
         let reloaded = Constraint::load(&bytes, &vocab).unwrap();
         assert!(reloaded.uses_compact_segmented_parser_runtime());
+        for constraint in [&fast, &reloaded] {
+            assert!(
+                constraint.static_dynamic_overlay.as_ref().unwrap()
+                    .recursive_tokenizer_internal_tsids.get().is_none(),
+                "saving and loading DynamicDirect must not invent a coordinator TSID relation",
+            );
+        }
         assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
             &fast,
             &reloaded,
