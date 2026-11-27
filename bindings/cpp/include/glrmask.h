@@ -127,6 +127,7 @@ GLRMASK_API uint32_t glrmask_abi_version(void);
 GLRMASK_API const char *glrmask_version(void);
 /// The last error on this thread (empty string if none). Valid until the next
 /// GLRMask call on this thread, except this error-message accessor.
+/// The message text is for humans; its format is not stable.
 GLRMASK_API const char *glrmask_error_message(void);
 /// Initializes the caller-owned options buffer with defaults and its size in bytes.
 GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);

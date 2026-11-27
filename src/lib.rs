@@ -125,7 +125,6 @@ pub use public_api::{
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use runtime::BoundaryTriggerDetail;
-pub use glrmask_vocab::SourceSpan;
 pub use glrmask_grammar::ExternKind;
 
 /// Unstable compatibility surface for repository tooling and benchmark

@@ -37,6 +37,7 @@ enum class ExternKind : std::uint32_t {
     Grammar = GLRMASK_EXTERN_GRAMMAR
 };
 
+/// The message text is for humans; its format is not stable.
 class Error : public std::runtime_error {
     glrmask_status status_;
 public:

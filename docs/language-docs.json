@@ -62,7 +62,7 @@
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "",
     "Extern.kind": "",
-    "GLRMaskError": "",
+    "GLRMaskError": "The message text is for humans; its format is not stable.",
     "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"vocab_mismatch\"`, `\"buffer_too_small\"`, `\"internal\"`."
   },
   "python_releases": {
@@ -178,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "9b69791b5b66431a8462f399a04779869403215dd0f1a01d7943f19d5248870e"
+  "content_sha256": "dbd0929c1a702687e86d4f19065411bbbca9330906a432ada8c6eab5153dbe78"
 }

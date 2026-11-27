@@ -4,6 +4,7 @@
 
 use thiserror::Error as ThisError;
 mod source;
+#[doc(hidden)]
 pub use source::SourceSpan;
 
 #[derive(ThisError, Debug)]

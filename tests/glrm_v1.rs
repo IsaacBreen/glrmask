@@ -897,7 +897,7 @@ fn extern_without_a_kind_is_rejected_at_the_declaration() {
         error.to_string(),
         "grammar error: external declarations require 'extern token NAME' or 'extern grammar NAME' (line 3, column 13)"
     );
-    let span = error.source_span().expect("the rejection points at the declaration");
+    let span = glrmask_vocab::__private::error_source_span(&error).expect("the rejection points at the declaration");
     let declaration = source.find("extern child;").unwrap();
     assert!(span.start() >= declaration, "span {span:?}");
     assert!(span.end() <= declaration + "extern child;".len(), "span {span:?}");
@@ -931,7 +931,7 @@ fn glrm_definition_with_coloncolon_equals_is_rejected_with_message_and_span() {
         error.to_string(),
         "grammar error: definitions use `=`, not `::=` (line 2, column 10)"
     );
-    let span = error.source_span().expect("the rejection points at the '::='");
+    let span = glrmask_vocab::__private::error_source_span(&error).expect("the rejection points at the '::='");
     assert_eq!(&source[span.start()..span.end()], "::=");
 }
 
@@ -976,7 +976,7 @@ fn additional_reserved_words_require_escaping() {
         let source = format!("start s; nt {word} = \"a\"; nt s = {word};");
         let error = Grammar::from_glrm(&source).unwrap_err();
         assert_eq!(error.kind(), glrmask::ErrorKind::Syntax);
-        let span = error.source_span().unwrap();
+        let span = glrmask_vocab::__private::error_source_span(&error).unwrap();
         assert_eq!(&source[span.start()..span.end()], word);
         let escaped = format!("start s; nt `{word}` = \"a\"; nt s = `{word}`;");
         assert!(Grammar::from_glrm(&escaped).is_ok());

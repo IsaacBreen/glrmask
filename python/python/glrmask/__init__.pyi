@@ -291,5 +291,6 @@ class Extern:
     def __hash__(self) -> int: ...
 
 class GLRMaskError(Exception):
+    """The message text is for humans; its format is not stable."""
     kind: str
     """One of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`."""

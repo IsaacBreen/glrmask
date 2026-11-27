@@ -29,6 +29,7 @@ impl fmt::Display for SourceSpan {
     }
 }
 
+/// An error reported by GLRMask. The message text is for humans; its format is not stable.
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,
@@ -65,10 +66,6 @@ impl Error {
         self.kind
     }
 
-    /// Where in the grammar source the error is, if known.
-    pub fn source_span(&self) -> Option<SourceSpan> {
-        self.span
-    }
 }
 
 impl fmt::Display for Error {
@@ -117,6 +114,9 @@ pub(crate) mod internal {
     pub fn error_message(error: &Error) -> &str {
         &error.message
     }
+
+    /// Internal diagnostic coordinates, not part of the stable error API.
+    pub fn error_source_span(error: &Error) -> Option<SourceSpan> { error.span }
 
     /// Sets the source span if it isn't set yet.
     pub fn with_source_span(mut error: Error, span: Option<SourceSpan>) -> Error {

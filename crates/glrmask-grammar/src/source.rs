@@ -1,6 +1,6 @@
 //! Original UTF-8 source coordinates, independent of transformed grammar nodes.
 //! The `SourceSpan` type itself lives in glrmask-vocab, next to the error type.
-pub use glrmask_vocab::SourceSpan;
+pub use glrmask_vocab::__private::SourceSpan;
 
 /// Source-coordinate constructors for the grammar front ends.
 pub(crate) trait SourceSpanExt: Sized {

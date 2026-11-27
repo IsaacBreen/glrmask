@@ -1,10 +1,10 @@
 use glrmask::{ErrorKind, Expr, Grammar, Module, Vocab};
 
 #[test]
-fn syntax_and_source_span() {
+fn syntax_error_message_has_location() {
     let e = Grammar::from_glrm("start s nt s = )").unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Syntax);
-    assert!(e.source_span().is_some());
+    assert!(e.to_string().contains("line 1, column"));
 }
 
 #[test]

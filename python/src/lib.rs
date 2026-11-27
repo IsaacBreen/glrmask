@@ -69,7 +69,7 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // ---------------------------------------------------------------------------
 
 pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyException,
-    "Raised when GLRMask can't do what was asked. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
+    "Raised when GLRMask can't do what was asked. The message text is for humans; its format is not stable. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
 
 fn catch_python_panic<T>(f: impl FnOnce() -> T) -> PyResult<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
