@@ -77,99 +77,145 @@ struct CompactDomain {
     edges: Box<[(u32, u32)]>,
 }
 
-/// A runtime admission projection need not copy the source graph. A shallow
-/// domain inspects at most one top; it can use the existing POP row and exact
-/// READ facts directly. Deeper domains use the hash-consed prefix DAG to
-/// preserve sharing of suffix queries on ambiguous stacks.
+/// The source-backed projection retains no POP topology. Its immutable
+/// source owns transitions; existential PUSH and same-top READ facts are
+/// the only additional state. Keep a compact domain when minimization
+/// substantially reduces suffix work or memory.
 #[derive(Debug, Clone)]
 pub struct TemplateDomain(DomainRepresentation);
 
 #[derive(Debug, Clone)]
 enum DomainRepresentation {
     Compact(CompactDomain),
-    SourceRoot(SourceRootDomain),
+    Source(SourceDomain),
 }
 
 #[derive(Debug, Clone)]
-struct SourceRootDomain {
+struct SourceDomain {
     source: Arc<CommitTemplateDfas>,
-    accepting_pop_targets: Box<[u64]>,
+    // 0 rejects, 1 accepts without input, 2 requires a concrete top.
+    pop_status: Box<[u8]>,
+    read_offsets: Box<[u32]>,
     read_labels: Box<[u32]>,
+    // Shallow projections need no transient minimized graph.
+    deep_shape: Option<(usize, usize, u64)>,
 }
 
-impl SourceRootDomain {
-    fn try_new(source: Arc<CommitTemplateDfas>, facts: &TemplateInputFacts) -> Option<Self> {
-        let start = source.pop.start_state as usize;
-        let row = source.pop.states.get(start)?;
-        if !facts.pop_productive[start] || facts.pop_accepts_empty(&source, start) { return None; }
-        let mut accepting_pop_targets = vec![0u64; source.pop.states.len().div_ceil(64)];
-        for &target in row.transitions.values() {
-            let id = target as usize;
-            if facts.pop_accepts_empty(&source, id) {
-                accepting_pop_targets[id / 64] |= 1 << (id % 64);
-            } else if facts.pop_productive[id] {
-                // This relation might inspect a lower stack symbol. Keep the
-                // compact domain's canonical sharing for arbitrary GSS paths.
-                return None;
+impl SourceDomain {
+    fn new(source: Arc<CommitTemplateDfas>, facts: &TemplateInputFacts) -> Option<Self> {
+        let pop_status = facts.pop_productive.iter().enumerate().map(|(id, &productive)| {
+            if !productive { 0 }
+            else if facts.pop_accepts_empty(&source, id) { 1 }
+            else { 2 }
+        }).collect::<Vec<u8>>().into_boxed_slice();
+        let mut used = vec![false; facts.read_labels.len()];
+        for (id, &status) in pop_status.iter().enumerate() {
+            if status == 2
+                && let Some(read) = source.pop_to_read.get(id).copied().flatten() {
+                used[read as usize] = true;
             }
         }
-        let read_labels = source.pop_to_read.get(start).copied().flatten()
-            .map_or(&[][..], |id| facts.read_labels[id as usize].as_slice())
-            .to_vec().into_boxed_slice();
-        let root = Self { source, accepting_pop_targets: accepting_pop_targets.into_boxed_slice(), read_labels };
-        // Do not replace a tiny minimized row with a wide source sidecar.
-        // The exact exception count needs only a linear merge of two rows.
-        let compact_edges = root.exceptions().count().saturating_mul(8);
-        let retained = root.heap_payload_bytes().saturating_add(std::mem::size_of::<Self>());
-        (compact_edges > retained).then_some(root)
-    }
-
-    #[inline]
-    fn transitions(&self) -> &BTreeMap<i32, u32> {
-        &self.source.pop.states[self.source.pop.start_state as usize].transitions
-    }
-
-    #[inline]
-    fn accepts_target(&self, target: u32) -> bool {
-        let id = target as usize;
-        self.accepting_pop_targets[id / 64] & (1u64 << (id % 64)) != 0
-    }
-
-    #[inline]
-    fn default_accepts(&self) -> bool {
-        self.transitions().get(&DEFAULT_LABEL).is_some_and(|&target| self.accepts_target(target))
-    }
-
-    #[inline]
-    fn accepts_top(&self, top: u32) -> bool {
-        if self.read_labels.binary_search(&top).is_ok() { return true; }
-        let transitions = self.transitions();
-        i32::try_from(top).ok().and_then(|label| transitions.get(&label))
-            .or_else(|| transitions.get(&DEFAULT_LABEL))
-            .is_some_and(|&target| self.accepts_target(target))
-    }
-
-    fn exceptions(&self) -> impl Iterator<Item = (u32, TopAdmission)> + '_ {
-        let default = self.default_accepts();
-        let mut pop = self.transitions().iter().filter(|(label, _)| **label != DEFAULT_LABEL)
-            .map(|(&label, &target)| (label as u32, self.accepts_target(target))).peekable();
-        let mut read = self.read_labels.iter().copied().peekable();
-        std::iter::from_fn(move || loop {
-            let (label, accepts) = match (pop.peek().copied(), read.peek().copied()) {
-                (None, None) => return None,
-                (Some((p, accepts)), Some(r)) if p < r => { pop.next(); (p, accepts) }
-                (Some((p, _)), Some(r)) if p == r => { pop.next(); read.next(); (r, true) }
-                (_, Some(r)) => { read.next(); (r, true) }
-                (Some((p, accepts)), None) => { pop.next(); (p, accepts) }
-            };
-            if accepts != default {
-                return Some((label, if accepts { TopAdmission::Always } else { TopAdmission::Never }));
-            }
+        let mut read_offsets = Vec::with_capacity(used.len() + 1);
+        let mut read_labels = Vec::new();
+        read_offsets.push(0);
+        for (id, needed) in used.into_iter().enumerate() {
+            if needed { read_labels.extend_from_slice(&facts.read_labels[id]); }
+            read_offsets.push(u32::try_from(read_labels.len()).ok()?);
+        }
+        Some(Self {
+            source, pop_status,
+            read_offsets: read_offsets.into_boxed_slice(),
+            read_labels: read_labels.into_boxed_slice(),
+            deep_shape: None,
         })
     }
 
+    #[inline]
+    fn at(&self, id: u32) -> DomainProbe {
+        match self.pop_status.get(id as usize) {
+            Some(1) => DomainProbe::Accept,
+            Some(2) => DomainProbe::NeedMore(id),
+            _ => DomainProbe::Reject,
+        }
+    }
+
+    #[inline]
+    fn start(&self) -> DomainProbe { self.at(self.source.pop.start_state) }
+
+    #[inline]
+    fn transitions(&self, id: u32) -> &BTreeMap<i32, u32> {
+        &self.source.pop.states[id as usize].transitions
+    }
+
+    #[inline]
+    fn read_labels(&self, id: u32) -> &[u32] {
+        let Some(read) = self.source.pop_to_read.get(id as usize).copied().flatten() else {
+            return &[];
+        };
+        let read = read as usize;
+        &self.read_labels[self.read_offsets[read] as usize..self.read_offsets[read + 1] as usize]
+    }
+
+    #[inline]
+    fn default(&self, id: u32) -> DomainProbe {
+        self.transitions(id).get(&DEFAULT_LABEL)
+            .map_or(DomainProbe::Reject, |&target| self.at(target))
+    }
+
+    #[inline]
+    fn step(&self, id: u32, top: u32) -> DomainProbe {
+        match self.at(id) {
+            DomainProbe::NeedMore(_) => {}
+            decision => return decision,
+        }
+        if self.read_labels(id).binary_search(&top).is_ok() {
+            return DomainProbe::Accept;
+        }
+        let transitions = self.transitions(id);
+        i32::try_from(top).ok().and_then(|label| transitions.get(&label))
+            .or_else(|| transitions.get(&DEFAULT_LABEL))
+            .map_or(DomainProbe::Reject, |&target| self.at(target))
+    }
+
+    fn classify(probe: DomainProbe) -> TopAdmission {
+        match probe {
+            DomainProbe::Accept => TopAdmission::Always,
+            DomainProbe::Reject => TopAdmission::Never,
+            DomainProbe::NeedMore(_) => TopAdmission::DependsOnSuffix,
+        }
+    }
+
+    fn root_default(&self) -> TopAdmission {
+        let id = self.source.pop.start_state;
+        Self::classify(self.default(id))
+    }
+
+    fn exceptions(&self) -> impl Iterator<Item = (u32, TopAdmission)> + '_ {
+        let id = self.source.pop.start_state;
+        let default = self.root_default();
+        let mut pop = self.transitions(id).iter().filter(|(label, _)| **label != DEFAULT_LABEL)
+            .map(|(&label, &target)| (label as u32, Self::classify(self.at(target)))).peekable();
+        let mut read = self.read_labels(id).iter().copied().peekable();
+        std::iter::from_fn(move || loop {
+            let (label, certificate) = match (pop.peek().copied(), read.peek().copied()) {
+                (None, None) => return None,
+                (Some((p, cert)), Some(r)) if p < r => { pop.next(); (p, cert) }
+                (Some((p, _)), Some(r)) if p == r => { pop.next(); read.next(); (r, TopAdmission::Always) }
+                (_, Some(r)) => { read.next(); (r, TopAdmission::Always) }
+                (Some((p, cert)), None) => { pop.next(); (p, cert) }
+            };
+            if certificate != default { return Some((label, certificate)); }
+        })
+    }
+
+    fn shallow(&self) -> bool {
+        self.root_default() != TopAdmission::DependsOnSuffix
+            && self.exceptions().all(|(_, cert)| cert != TopAdmission::DependsOnSuffix)
+    }
+
     fn heap_payload_bytes(&self) -> usize {
-        std::mem::size_of_val(self.accepting_pop_targets.as_ref())
+        self.pop_status.len()
+            + std::mem::size_of_val(self.read_offsets.as_ref())
             + std::mem::size_of_val(self.read_labels.as_ref())
     }
 }
@@ -735,7 +781,7 @@ impl TemplateDomain {
     }
 
     /// Native execution already owns the completely validated source. Prefer
-    /// the direct exact one-symbol projection when it saves retained graph
+    /// a source-backed exact input projection when it saves retained graph
     /// storage. The source is immutable and its identity must match the proof.
     pub fn from_shared_validated(
         source: Arc<CommitTemplateDfas>, validated: &ValidatedTemplate<'_>,
@@ -757,17 +803,37 @@ impl TemplateDomain {
                 start, states, edges: Box::new([]),
             })));
         }
-        if let Some(root) = SourceRootDomain::try_new(source, facts) {
-            return Ok(Self(DomainRepresentation::SourceRoot(root)));
+        let Some(mut direct) = SourceDomain::new(source, facts) else {
+            return Self::from_validated(validated);
+        };
+        let retained = direct.heap_payload_bytes().saturating_add(std::mem::size_of::<SourceDomain>());
+        if direct.shallow() {
+            if direct.exceptions().count().saturating_mul(8) > retained {
+                return Ok(Self(DomainRepresentation::Source(direct)));
+            }
+            return Self::from_validated(validated);
         }
-        Self::from_validated(validated)
+        let compact = CompactDomain::from_validated(validated)?;
+        // A source-backed cursor may lose canonical suffix sharing. Limit
+        // that expansion and require substantial savings before choosing it.
+        if retained.saturating_mul(2) < compact.heap_payload_bytes()
+            && direct.pop_status.len() <= compact.state_count().saturating_mul(2)
+        {
+            let mut hash = rustc_hash::FxHasher::default();
+            1u8.hash(&mut hash);
+            compact.hash(&mut hash);
+            direct.deep_shape = Some((compact.state_count(), compact.edge_count(), hash.finish()));
+            Ok(Self(DomainRepresentation::Source(direct)))
+        } else {
+            Ok(Self(DomainRepresentation::Compact(compact)))
+        }
     }
 
     #[inline]
     pub fn start(&self) -> DomainProbe {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.start(),
-            DomainRepresentation::SourceRoot(root) => DomainProbe::NeedMore(root.source.pop.start_state),
+            DomainRepresentation::Source(root) => root.start(),
         }
     }
 
@@ -775,10 +841,7 @@ impl TemplateDomain {
     pub fn step(&self, cursor: u32, top: u32) -> DomainProbe {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.step(cursor, top),
-            DomainRepresentation::SourceRoot(root) => {
-                if cursor == root.source.pop.start_state && root.accepts_top(top) { DomainProbe::Accept }
-                else { DomainProbe::Reject }
-            }
+            DomainRepresentation::Source(root) => root.step(cursor, top),
         }
     }
 
@@ -813,8 +876,8 @@ impl TemplateDomain {
                 let (default, exceptions) = domain.top_admission_partition();
                 (default, Box::new(exceptions))
             }
-            DomainRepresentation::SourceRoot(root) => {
-                let default = if root.default_accepts() { TopAdmission::Always } else { TopAdmission::Never };
+            DomainRepresentation::Source(root) => {
+                let default = root.root_default();
                 (default, Box::new(root.exceptions()))
             }
         }
@@ -826,8 +889,8 @@ impl TemplateDomain {
     /// different predicate.
     fn shallow_partition(&self) -> Option<(bool, Box<dyn Iterator<Item = (u32, bool)> + '_>)> {
         match &self.0 {
-            DomainRepresentation::SourceRoot(root) => Some((
-                root.default_accepts(),
+            DomainRepresentation::Source(root) if root.deep_shape.is_none() => Some((
+                root.root_default() == TopAdmission::Always,
                 Box::new(root.exceptions().map(|(label, value)| (label, value == TopAdmission::Always))),
             )),
             DomainRepresentation::Compact(domain)
@@ -853,9 +916,16 @@ impl TemplateDomain {
             0u8.hash(&mut hash);
             default.hash(&mut hash);
             for edge in edges { edge.hash(&mut hash); }
-        } else if let DomainRepresentation::Compact(domain) = &self.0 {
-            1u8.hash(&mut hash);
-            domain.hash(&mut hash);
+        } else {
+            match &self.0 {
+                DomainRepresentation::Compact(domain) => {
+                    1u8.hash(&mut hash);
+                    domain.hash(&mut hash);
+                }
+                DomainRepresentation::Source(root) => {
+                    return root.deep_shape.expect("deep source projection shape").2;
+                }
+            }
         }
         hash.finish()
     }
@@ -870,6 +940,11 @@ impl TemplateDomain {
         }
         match (self.shallow_partition(), other.shallow_partition()) {
             (Some((a, ax)), Some((b, bx))) => a == b && ax.eq(bx),
+            (None, None) if self.projection_fingerprint() == other.projection_fingerprint() => {
+                // Fingerprints only narrow candidates, never certify them.
+                // Materialize canonical bytes transiently for deep equality.
+                self.to_bytes().ok().zip(other.to_bytes().ok()).is_some_and(|(a,b)| a == b)
+            }
             _ => false,
         }
     }
@@ -879,7 +954,7 @@ impl TemplateDomain {
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.to_bytes(),
-            DomainRepresentation::SourceRoot(root) => CompactDomain::compile(&root.source)?.to_bytes(),
+            DomainRepresentation::Source(root) => CompactDomain::compile(&root.source)?.to_bytes(),
         }
     }
 
@@ -890,21 +965,21 @@ impl TemplateDomain {
     pub fn state_count(&self) -> usize {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.state_count(),
-            DomainRepresentation::SourceRoot(_) => 2,
+            DomainRepresentation::Source(root) => root.deep_shape.map_or(2, |shape| shape.0),
         }
     }
 
     pub fn edge_count(&self) -> usize {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.edge_count(),
-            DomainRepresentation::SourceRoot(root) => root.exceptions().count(),
+            DomainRepresentation::Source(root) => root.deep_shape.map_or_else(|| root.exceptions().count(), |shape| shape.1),
         }
     }
 
     pub fn heap_payload_bytes(&self) -> usize {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.heap_payload_bytes(),
-            DomainRepresentation::SourceRoot(root) => root.heap_payload_bytes(),
+            DomainRepresentation::Source(root) => root.heap_payload_bytes(),
         }
     }
 
@@ -915,7 +990,7 @@ impl TemplateDomain {
     ) -> Result<crate::automata::weighted::nwa::NWA, String> {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.scoped_prefix_program(offset, symbols, guard_owner, classes),
-            DomainRepresentation::SourceRoot(root) => CompactDomain::compile(&root.source)?
+            DomainRepresentation::Source(root) => CompactDomain::compile(&root.source)?
                 .scoped_prefix_program(offset, symbols, guard_owner, classes),
         }
     }
@@ -949,7 +1024,7 @@ mod tests {
         let validated = ValidatedTemplate::new(&source).unwrap();
         let native = TemplateDomain::from_shared_validated(Arc::clone(&source), &validated).unwrap();
         let reference = TemplateDomain::from_validated(&validated).unwrap();
-        assert!(matches!(&native.0, DomainRepresentation::SourceRoot(_)));
+        assert!(matches!(&native.0, DomainRepresentation::Source(_)));
         assert!(native.heap_payload_bytes() < reference.heap_payload_bytes());
         assert_eq!(native.to_bytes().unwrap(), reference.to_bytes().unwrap());
         assert_eq!(native.projection_fingerprint(), reference.projection_fingerprint());
@@ -970,8 +1045,17 @@ mod tests {
         let deeper = Arc::new(deeper);
         let validated = ValidatedTemplate::new(&deeper).unwrap();
         let native = TemplateDomain::from_shared_validated(Arc::clone(&deeper), &validated).unwrap();
-        assert!(matches!(&native.0, DomainRepresentation::Compact(_)));
+        assert!(matches!(&native.0, DomainRepresentation::Source(_)));
+        let reference = TemplateDomain::from_validated(&validated).unwrap();
+        assert!(native.same_projection(&reference));
+        assert_eq!(native.projection_fingerprint(), reference.projection_fingerprint());
         assert!(native.matches_top_first([2, 1]));
+        for top in 0..600 {
+            for lower in 0..3 {
+                assert_eq!(native.matches_top_first([top, lower]),
+                    reference.matches_top_first([top, lower]));
+            }
+        }
     }
 
     #[test]
