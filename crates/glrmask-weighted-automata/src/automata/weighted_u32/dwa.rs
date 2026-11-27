@@ -373,13 +373,6 @@ pub struct PackedRuntimeDwa {
     // to use the flat chunk/location representation above.
     materialized_token_sets: Option<Box<[Arc<RangeSetBlaze<u32>>]>>,
     materialized_token_word_spans: Option<Box<[u32]>>,
-    // Freshly compiled large DWAs can build these while they already traverse
-    // the canonical RangeSetBlaze token sets for runtime metadata.  This avoids
-    // a second multi-million-range traversal on first save.  Loaded artifacts
-    // do not need the cache because unchanged resave uses the whole-artifact
-    // byte cache.
-    fast_wire_token_chunks: Option<Box<[Box<[u8]>]>>,
-    fast_wire_token_chunk_range_counts: Option<Box<[u32]>>,
     geometries: Box<[Vec<(u32, u32)>]>,
     weights: Box<[PackedRuntimeWeight]>,
     weight_token_ids: Box<[u32]>,
@@ -2019,11 +2012,6 @@ impl PackedRuntimeDwa {
     }
 
 
-    #[inline]
-    fn fast_wire_tail_len(&self) -> usize {
-        self.fast_wire_len_for_chunks(&[]).saturating_sub(12)
-    }
-
     fn owned_narrow_fast_wire_len(&self) -> Option<usize> {
         let narrow = self.owned_narrow.as_ref()?;
         let spans = narrow.token_spans.as_ref();
@@ -2231,26 +2219,6 @@ impl PackedRuntimeDwa {
             return self.write_owned_narrow_fast_wire_bytes(dst);
         }
         self.write_runtime_shaped_fast_wire_bytes(dst)
-    }
-
-    /// DWF3 keeps the compact per-token-set varint bodies from DWF2, but adds
-    /// a direct token-id -> (chunk, byte-offset) index and word-span table.
-    /// The fixed-width DWA tail remains byte-for-byte runtime-readable, so a
-    /// current-format loader can retain the artifact backing instead of
-    /// allocating/decoding millions of token ranges and pool entries.
-    fn try_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
-        if let Some(len) = self.owned_narrow_fast_wire_len() {
-            let mut out = vec![0u8; len];
-            self.write_owned_narrow_fast_wire_bytes(&mut out)?;
-            return Some(out);
-        }
-        if self.prefer_runtime_shaped_wire() {
-            let mut out = Vec::with_capacity(self.runtime_shaped_fast_wire_len()?);
-            self.try_append_runtime_shaped_fast_wire_bytes(&mut out)?;
-            return Some(out);
-        }
-        self.try_narrow_backed_fast_wire_bytes()
-            .or_else(|| self.try_backed_fast_wire_bytes_dwf3())
     }
 
     #[inline]
@@ -3136,145 +3104,6 @@ impl PackedRuntimeDwa {
         Some(written)
     }
 
-    fn try_backed_fast_wire_bytes_dwf3(&self) -> Option<Vec<u8>> {
-        let chunks = self.fast_wire_token_chunks.as_deref()?;
-        let word_spans = self.materialized_token_word_spans.as_deref()?;
-        if chunks.len() > u8::MAX as usize || word_spans.len() != self.token_set_count() {
-            return None;
-        }
-
-        #[inline]
-        fn put_u32(out: &mut Vec<u8>, value: u32) {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        #[inline]
-        fn put_u32s(out: &mut Vec<u8>, values: &[u32]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        values.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(values),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &value in values {
-                    put_u32(out, value);
-                }
-            }
-        }
-        #[inline]
-        fn put_i32s(out: &mut Vec<u8>, values: &[i32]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        values.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(values),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &value in values {
-                    out.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-        }
-
-        let token_set_count = word_spans.len();
-        let mut locations = Vec::<u32>::with_capacity(token_set_count);
-        let mut chunk_set_counts = Vec::<u32>::with_capacity(chunks.len());
-        for (chunk_id, body) in chunks.iter().enumerate() {
-            let mut pos = 0usize;
-            let set_count = take_var_u32(body, &mut pos).ok()? as usize;
-            chunk_set_counts.push(u32::try_from(set_count).ok()?);
-            for _ in 0..set_count {
-                if pos >= (1usize << 24) {
-                    return None;
-                }
-                locations.push(((chunk_id as u32) << 24) | pos as u32);
-                let range_count = take_var_u32(body, &mut pos).ok()? as usize;
-                for _ in 0..range_count {
-                    let _ = take_var_u64(body, &mut pos).ok()?;
-                    let _ = take_var_u32(body, &mut pos).ok()?;
-                }
-            }
-            if pos != body.len() {
-                return None;
-            }
-        }
-        if locations.len() != token_set_count {
-            return None;
-        }
-
-        let token_bytes = chunks.iter().map(|chunk| chunk.len()).sum::<usize>();
-        let mut out = Vec::with_capacity(
-            16 + chunks.len() * 8 + token_set_count * 8 + token_bytes + self.fast_wire_tail_len(),
-        );
-        out.extend_from_slice(b"DWF3");
-        put_u32(&mut out, self.start_state);
-        put_u32(&mut out, chunks.len() as u32);
-        put_u32(&mut out, token_set_count as u32);
-        for (body, &set_count) in chunks.iter().zip(&chunk_set_counts) {
-            put_u32(&mut out, body.len() as u32);
-            put_u32(&mut out, set_count);
-        }
-        put_u32s(&mut out, &locations);
-        put_u32s(&mut out, word_spans);
-        for body in chunks {
-            out.extend_from_slice(body);
-        }
-
-        put_u32(&mut out, self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
-            put_u32(&mut out, geometry.len() as u32);
-            for &(start, end) in geometry {
-                put_u32(&mut out, start);
-                put_u32(&mut out, end);
-            }
-        }
-        put_u32(&mut out, self.weights.len() as u32);
-        for weight in self.weights.iter() {
-            put_u32(&mut out, weight.geometry);
-            put_u32(&mut out, weight.token_ids_start);
-            put_u32(&mut out, weight.full);
-        }
-        put_u32(&mut out, self.weight_token_ids.len() as u32);
-        put_u32s(&mut out, &self.weight_token_ids);
-        put_u32(&mut out, self.label_pool.values.len() as u32);
-        put_i32s(&mut out, &self.label_pool.values);
-        put_u32(&mut out, self.label_pool.spans.len() as u32);
-        for &[start, len] in self.label_pool.spans.iter() {
-            put_u32(&mut out, start);
-            put_u32(&mut out, len);
-        }
-        put_u32(&mut out, self.target_pool.values.len() as u32);
-        put_u32s(&mut out, &self.target_pool.values);
-        put_u32(&mut out, self.target_pool.spans.len() as u32);
-        for &[start, len] in self.target_pool.spans.iter() {
-            put_u32(&mut out, start);
-            put_u32(&mut out, len);
-        }
-        put_u32(&mut out, self.weight_id_pool.values.len() as u32);
-        put_u32s(&mut out, &self.weight_id_pool.values);
-        put_u32(&mut out, self.weight_id_pool.spans.len() as u32);
-        for &[start, len] in self.weight_id_pool.spans.iter() {
-            put_u32(&mut out, start);
-            put_u32(&mut out, len);
-        }
-        put_u32(&mut out, self.rows.len() as u32);
-        for row in self.rows.iter() {
-            put_u32(&mut out, row.labels);
-            put_u32(&mut out, row.targets);
-            put_u32(&mut out, row.weights);
-        }
-        put_u32(&mut out, self.states.len() as u32);
-        for state in self.states.iter() {
-            put_u32(&mut out, state.row);
-            put_u32(&mut out, state.final_weight);
-        }
-        Some(out)
-    }
-
     fn fast_wire_len_for_chunks(&self, chunk_bodies: &[Box<[u8]>]) -> usize {
         let token_bytes = chunk_bodies.iter().map(|body| body.len()).sum::<usize>();
         let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
@@ -3307,9 +3136,7 @@ impl PackedRuntimeDwa {
             .saturating_add(self.states.len().saturating_mul(8))
     }
 
-    /// Exact DWF2 size when the token-set wire chunks have already been cached.
-    /// Fresh compiler-produced packed DWAs satisfy this; loaded unchanged
-    /// constraints return their cached whole artifact before reaching here.
+    /// Exact wire size for backed or directly sized owned layouts.
     pub fn fast_wire_len(&self) -> Option<usize> {
         self.backed
             .as_ref()
@@ -3349,11 +3176,7 @@ impl PackedRuntimeDwa {
                         .saturating_add(4 + self.states.len().saturating_mul(4)),
                 )
             })
-            .or_else(|| {
-                self.fast_wire_token_chunks
-                    .as_deref()
-                    .map(|chunks| self.fast_wire_len_for_chunks(chunks))
-            })
+
     }
 
     /// Borrow the canonical runtime wire when this DWA already executes from
@@ -3447,9 +3270,6 @@ impl PackedRuntimeDwa {
                 self.states.iter().filter_map(|state| (state.final_weight != u32::MAX).then_some(state.final_weight)).max().unwrap_or(0),
             );
         }
-        if let Some(out) = self.try_backed_fast_wire_bytes() {
-            return out;
-        }
         let mut out = Vec::new();
         self.append_fast_wire_bytes(&mut out);
         out
@@ -3460,6 +3280,17 @@ impl PackedRuntimeDwa {
     /// constraint serializer avoid allocating and then copying a second
     /// multi-megabyte DWA buffer.
     pub fn append_fast_wire_bytes(&self, out: &mut Vec<u8>) {
+        if let Some(bytes) = self.backed_fast_wire_bytes() {
+            out.extend_from_slice(bytes);
+            return;
+        }
+        if let Some(len) = self.owned_narrow_fast_wire_len() {
+            let start = out.len();
+            out.resize(start + len, 0);
+            self.write_owned_narrow_fast_wire_bytes(&mut out[start..])
+                .expect("valid owned narrow DWA wire layout");
+            return;
+        }
         let profile = std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some();
         if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
             let token_ranges = self
@@ -3582,70 +3413,37 @@ impl PackedRuntimeDwa {
 
         const TOKEN_SET_WIRE_CHUNK: usize = 1024;
         let token_set_count = self.token_set_count();
-        let uncached_chunk_bodies;
-        let computed_chunk_range_counts;
-        let chunk_bodies: &[Box<[u8]>] = if let Some(cached) = &self.fast_wire_token_chunks {
-            cached
-        } else {
-            let chunk_ranges = (0..token_set_count)
-                .step_by(TOKEN_SET_WIRE_CHUNK)
-                .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_set_count)))
-                .collect::<Vec<_>>();
-            let encode_chunk = |&(start_id, end_id): &(usize, usize)| {
-                let mut body = Vec::<u8>::new();
-                put_var_u32(&mut body, (end_id - start_id) as u32);
-                for id in start_id..end_id {
-                    let token_set = self
-                        .token_set(id as u32)
-                        .expect("packed runtime token-set id is valid");
-                    put_var_u32(&mut body, token_set.range_count() as u32);
-                    let mut previous_end_plus_one = 0u64;
-                    token_set.for_each_range(|lo, hi| {
-                        put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
-                        put_var_u32(&mut body, hi - lo);
-                        previous_end_plus_one = hi as u64 + 1;
-                    });
-                }
-                body.into_boxed_slice()
-            };
-            uncached_chunk_bodies = if chunk_ranges.len() >= 4
-                && rayon::current_num_threads() > 1
-            {
-                chunk_ranges
-                    .par_iter()
-                    .map(encode_chunk)
-                    .collect::<Vec<_>>()
-            } else {
-                chunk_ranges
-                    .iter()
-                    .map(encode_chunk)
-                    .collect::<Vec<_>>()
-            };
-            &uncached_chunk_bodies
-        };
-        let chunk_range_counts: &[u32] = if let Some(cached) = &self.fast_wire_token_chunk_range_counts {
-            if cached.len() == chunk_bodies.len() {
-                cached
-            } else {
-                return;
+        let chunk_ranges = (0..token_set_count)
+            .step_by(TOKEN_SET_WIRE_CHUNK)
+            .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_set_count)))
+            .collect::<Vec<_>>();
+        let encode_chunk = |&(start_id, end_id): &(usize, usize)| {
+            let mut body = Vec::<u8>::new();
+            put_var_u32(&mut body, (end_id - start_id) as u32);
+            let mut range_count = 0usize;
+            for id in start_id..end_id {
+                let token_set = self.token_set(id as u32)
+                    .expect("packed runtime token-set id is valid");
+                let count = token_set.range_count();
+                range_count += count;
+                put_var_u32(&mut body, count as u32);
+                let mut previous_end_plus_one = 0u64;
+                token_set.for_each_range(|lo, hi| {
+                    put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
+                    put_var_u32(&mut body, hi - lo);
+                    previous_end_plus_one = hi as u64 + 1;
+                });
             }
-        } else {
-            computed_chunk_range_counts = (0..chunk_bodies.len())
-                .map(|chunk| {
-                    let start = chunk * TOKEN_SET_WIRE_CHUNK;
-                    let end = (start + TOKEN_SET_WIRE_CHUNK).min(token_set_count);
-                    let count = (start..end)
-                        .map(|id| {
-                            self.token_set(id as u32)
-                                .expect("packed runtime token-set id is valid")
-                                .range_count()
-                        })
-                        .sum::<usize>();
-                    u32::try_from(count).expect("packed runtime token chunk range count fits u32")
-                })
-                .collect::<Vec<_>>();
-            &computed_chunk_range_counts
+            (body.into_boxed_slice(), u32::try_from(range_count)
+                .expect("packed runtime token chunk range count fits u32"))
         };
+        let (chunk_bodies, chunk_range_counts): (Vec<_>, Vec<_>) =
+            if chunk_ranges.len() >= 4 && rayon::current_num_threads() > 1 {
+                chunk_ranges.par_iter().map(encode_chunk).collect::<Vec<_>>().into_iter().unzip()
+            } else {
+                chunk_ranges.iter().map(encode_chunk).unzip()
+            };
+        let chunk_bodies = chunk_bodies.as_slice();
 
         // Reserve the exact DWF2 payload. The old approximation implicitly
         // assumed all three sequence pools had the same span count. On large
@@ -3671,7 +3469,7 @@ impl PackedRuntimeDwa {
                 let (frame, rest) = remaining.split_at_mut(frame_len);
                 let mut body_pos = 0usize;
                 let set_count = take_var_u32(body, &mut body_pos)
-                    .expect("cached packed runtime token chunk has valid set count");
+                    .expect("encoded packed runtime token chunk has valid set count");
                 copies.push((chunk, set_count, frame, body.as_ref()));
                 remaining = rest;
             }
@@ -3688,7 +3486,7 @@ impl PackedRuntimeDwa {
             for (chunk, body) in chunk_bodies.iter().enumerate() {
                 let mut body_pos = 0usize;
                 let set_count = take_var_u32(body, &mut body_pos)
-                    .expect("cached packed runtime token chunk has valid set count");
+                    .expect("encoded packed runtime token chunk has valid set count");
                 let frame_end = pos + 12 + body.len();
                 out[pos..pos + 4].copy_from_slice(&(body.len() as u32).to_le_bytes());
                 out[pos + 4..pos + 8].copy_from_slice(&set_count.to_le_bytes());
@@ -3794,8 +3592,6 @@ impl PackedRuntimeDwa {
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
-            fast_wire_token_chunks: None,
-            fast_wire_token_chunk_range_counts: None,
             geometries: Box::new([]),
             weights: Box::new([]),
             weight_token_ids: Box::new([]),
@@ -4592,8 +4388,6 @@ impl PackedRuntimeDwa {
             flat_token_spans,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
-            fast_wire_token_chunks: None,
-            fast_wire_token_chunk_range_counts: None,
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -5007,8 +4801,6 @@ impl PackedRuntimeDwa {
                 .then(|| token_sets.into_boxed_slice()),
             materialized_token_word_spans: (!narrow_token_ranges && !owned_narrow_present)
                 .then(|| token_word_spans.into_boxed_slice()),
-            fast_wire_token_chunks: None,
-            fast_wire_token_chunk_range_counts: None,
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -5263,8 +5055,6 @@ impl PackedRuntimeDwa {
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
-            fast_wire_token_chunks: None,
-            fast_wire_token_chunk_range_counts: None,
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -5595,8 +5385,6 @@ impl PackedRuntimeDwa {
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
-            fast_wire_token_chunks: None,
-            fast_wire_token_chunk_range_counts: None,
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
