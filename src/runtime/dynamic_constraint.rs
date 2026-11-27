@@ -4,8 +4,7 @@ use crate::ErrorExt as _;
 // GLRMask is still pre-release. Historical DynamicConstraint/transfer wire
 // layouts are NOT a compatibility contract and must not constrain the current
 // architecture. Prefer the cleanest exact current representation; legacy
-// readers below are best-effort development conveniences only and may be
-// deleted or broken whenever preserving them would complicate correctness,
+// readers are not retained when preserving them would complicate correctness,
 // performance, or the wire format. Do not add migration machinery unless
 // compatibility becomes an explicit product requirement.
 
@@ -20,10 +19,11 @@ mod remainder_tests;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
-    TerminalProjectedQuotient, Tokenizer, VirtualTokenizerRuntimeMetadata,
+    TerminalProjectedQuotient, Tokenizer,
 };
 use crate::automata::regex::Expr;
-use crate::automata::weighted::dwa::DWA;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::constraint_possible_matches::ConstraintPossibleMatchesComputation;
 use crate::grammar::flat::{DirectRegularAutomaton, GrammarDef, Symbol, Terminal, TerminalID};
@@ -41,7 +41,7 @@ pub(crate) struct DynamicExecutionMetadata {
     terminal_observation_classes: Vec<(TerminalID, Vec<u32>)>,
     projected_terminal_quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
     projected_terminal_quotients_prepared: bool,
-    prepared_master_proofs: crate::runtime::PreparedMasterProofArtifact, 
+    prepared_master_proofs: crate::runtime::PreparedMasterProofArtifact,
     mask_quotient: Option<(CompactTransferTokenizer, Vec<u32>)>,
     pub(crate) residual_oracles: Vec<(TerminalID, Vec<u8>)>,
     pub(crate) master_slices: Vec<crate::automata::lexer::tokenizer::VirtualResidualMasterSliceArtifact>,
@@ -789,7 +789,9 @@ impl DynamicConstraint {
                 .ok_or_else(|| error("dynamic alternative length overflow"))?;
             let body = rest.get(8..end)
                 .ok_or_else(|| error("truncated dynamic alternative"))?;
-            let constraint = Constraint::load_external(body, vocab)?;
+            let mut constraint = Constraint::load_external(body, vocab)?;
+            constraint.materialize_composition_link_metadata_for_compilation()
+                .map_err(crate::Error::Serialization)?;
             if !constraint.uses_dynamic_runtime() {
                 return Err(error("dynamic alternative is not a dynamic constraint"));
             }
@@ -2238,8 +2240,8 @@ mod tests {
             u16::from_le_bytes([saved[8], saved[9]]),
             DYNAMIC_TRANSFER_VERSION,
         );
-        assert_eq!(u32::from_le_bytes(saved[18..22].try_into().unwrap()), 1);
-        let mut loaded = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&saved[30..], &vocab).unwrap()]);
+        assert_eq!(u32::from_le_bytes(saved[50..54].try_into().unwrap()), 1);
+        let mut loaded = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&saved[62..], &vocab).unwrap()]);
         loaded.inner.materialize_composition_link_metadata_for_compilation().unwrap();
         assert_eq!(loaded.inner.late_grammar_slots, constraint.inner.late_grammar_slots);
         assert_eq!(loaded.inner.tokenizer.virtual_runtime_metadata(), metadata);
@@ -2257,7 +2259,7 @@ mod tests {
             DYNAMIC_TRANSFER_VERSION,
         );
         assert!(DynamicConstraint::load_with_vocab(&transfer, &vocab).is_err());
-        let mut transferred = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&transfer[30..], &vocab).unwrap()]);
+        let mut transferred = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&transfer[62..], &vocab).unwrap()]);
         transferred.inner.materialize_composition_link_metadata_for_compilation().unwrap();
         assert_eq!(transferred.inner.tokenizer.virtual_runtime_metadata(), metadata);
         assert!(transferred.inner.dynamic_mask_vocab.has_terminal_observation_classes());
@@ -2278,6 +2280,8 @@ mod tests {
         right_max: usize,
     ) -> crate::grammar::flat::GrammarDef {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let left_body = Expr::Choice(vec![
@@ -2473,6 +2477,8 @@ mod tests {
     #[test]
     fn dynamic_virtual_repeat_intersection_rejects_dead_common_prefix() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar = GrammarDef {
@@ -2551,6 +2557,8 @@ mod tests {
     #[test]
     fn dynamic_billion_bound_variable_width_repeat_is_lazy_end_to_end() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -2621,6 +2629,8 @@ mod tests {
     #[test]
     fn dynamic_billion_nonzero_min_variable_width_repeat_is_lazy_end_to_end() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |min, max| GrammarDef {
@@ -2704,6 +2714,8 @@ mod tests {
     #[test]
     fn dynamic_same_body_nonzero_repeat_intersection_factors_end_to_end() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |left_min, left_max, right_min, right_max| {
@@ -2785,6 +2797,8 @@ mod tests {
     #[test]
     fn dynamic_billion_nonzero_min_unit_repeat_uses_arithmetic_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |min, max| GrammarDef {
@@ -2863,6 +2877,8 @@ mod tests {
     #[test]
     fn dynamic_aligned_nonzero_unit_intersection_uses_arithmetic_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::ds::u8set::U8Set;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -2944,6 +2960,8 @@ mod tests {
     #[test]
     fn dynamic_giant_aligned_unit_empty_intersection_normalizes_before_validation() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |min| GrammarDef {
@@ -2997,6 +3015,8 @@ mod tests {
     #[test]
     fn dynamic_distinct_nonzero_min_giant_intersection_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3060,6 +3080,8 @@ mod tests {
     #[test]
     fn dynamic_multiple_large_plain_repeats_use_exact_virtual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3120,6 +3142,8 @@ mod tests {
     #[test]
     fn dynamic_non_prefix_free_large_repeat_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3172,6 +3196,8 @@ mod tests {
     #[test]
     fn dynamic_general_residual_prunes_semantically_dead_token_prefix() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| {
@@ -3248,6 +3274,8 @@ mod tests {
     #[test]
     fn dynamic_nested_large_repeat_suffix_compiles_lazily_and_exactly() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3297,6 +3325,8 @@ mod tests {
     #[test]
     fn dynamic_nested_large_repeat_in_lazy_intersection_remains_supported() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3377,6 +3407,8 @@ mod tests {
     #[test]
     fn dynamic_general_residual_repeat_supports_u32_max_bound() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3436,6 +3468,8 @@ mod tests {
     #[test]
     fn dynamic_hybrid_unit_repeat_near_state_id_limit_uses_repeat_product() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar = GrammarDef {
@@ -3493,6 +3527,8 @@ mod tests {
     #[test]
     fn dynamic_top_level_large_repeat_inside_finite_intersection_stays_exact() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3569,6 +3605,8 @@ mod tests {
     #[test]
     fn dynamic_top_level_large_repeat_inside_cyclic_intersection_uses_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3623,6 +3661,8 @@ mod tests {
     #[test]
     fn dynamic_nested_giant_with_budgeted_other_repeat_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::ds::u8set::U8Set;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -3749,6 +3789,8 @@ mod tests {
     #[test]
     fn dynamic_nested_giant_with_large_finite_other_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let mut long_body = vec![b'a'; 31];
@@ -3813,6 +3855,8 @@ mod tests {
     #[test]
     fn dynamic_empty_giant_cyclic_intersection_becomes_dead_residual_proxy() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -3865,6 +3909,8 @@ mod tests {
     #[test]
     fn dynamic_two_nested_large_repeat_components_with_disjoint_delimiters_factor_to_empty() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let repeated_suffix = |suffix| {
@@ -3916,6 +3962,8 @@ mod tests {
     #[test]
     fn dynamic_positive_min_giant_suffix_with_disjoint_counts_factors_to_empty() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let component = |min, max| {
@@ -3956,6 +4004,8 @@ mod tests {
     #[test]
     fn dynamic_multiple_giant_terminals_share_exact_virtual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |a_max, b_max| GrammarDef {
@@ -4076,6 +4126,8 @@ mod tests {
     #[test]
     fn dynamic_mixed_specialized_and_general_giants_share_residual_runtime_family() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |max| GrammarDef {
@@ -4158,6 +4210,8 @@ mod tests {
     #[test]
     fn dynamic_multiple_variable_width_giant_terminals_match_small_oracle() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |left_max, right_max| GrammarDef {
@@ -4244,6 +4298,8 @@ mod tests {
     #[test]
     fn dynamic_nested_giant_repeat_body_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
+#[cfg(test)]
+use crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
         let grammar_for = |inner_max, outer_max| GrammarDef {

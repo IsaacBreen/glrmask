@@ -30,39 +30,6 @@ fn compile_dynamic(vocab: &Vocab) -> DynamicConstraint {
     DynamicConstraint::from_constraints(vec![native])
 }
 
-fn old_envelope(dynamic: &DynamicConstraint, external: bool) -> Vec<u8> {
-    let mut payload = Vec::new();
-    let count = dynamic.alternatives.len() + 1;
-    payload.extend_from_slice(&(count as u32).to_le_bytes());
-    for constraint in std::iter::once(&dynamic.inner).chain(&dynamic.alternatives) {
-        let body = if external {
-            constraint.save_template_with_external_vocab()
-        } else {
-            constraint.save()
-        };
-        payload.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        payload.extend_from_slice(&body);
-    }
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(if external {
-        &DYNAMIC_TRANSFER_MAGIC
-    } else {
-        b"GLRDYN\0\0"
-    });
-    bytes.extend_from_slice(
-        &(if external {
-            16u16
-        } else {
-            15u16
-        })
-        .to_le_bytes(),
-    );
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    bytes
-}
-
 fn byte_oracle(bytes: &[u8]) -> (bool, bool) {
     let mut position = 0usize;
     while bytes.get(position) == Some(&b'!') {
@@ -165,17 +132,31 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
 }
 
 #[test]
-fn dynamic_envelope_is_byte_identical_to_previous_assembly() {
+fn dynamic_envelope_preserves_alternatives_and_rejects_corrupt_framing() {
     let vocab = vocab();
     let one = compile_dynamic(&vocab);
     let many = DynamicConstraint::from_alternatives(vec![one.clone(), one.clone()]);
     for dynamic in [&one, &many] {
-        assert_eq!(
-            dynamic.save_template_alternatives(),
-            old_envelope(dynamic, true),
-        );
+        let saved = dynamic.build_external_vocab_artifact_bytes();
+        assert_eq!(&saved[..8], &DYNAMIC_TRANSFER_MAGIC);
+        assert_eq!(&saved[18..50], &crate::compiler::compile::vocab_content_digest(&vocab));
+        assert_eq!(u32::from_le_bytes(saved[50..54].try_into().unwrap()) as usize,
+            dynamic.alternatives.len() + 1);
+        let restored = DynamicConstraint::load_with_vocab(&saved, &vocab).unwrap();
+        assert_eq!(restored.alternatives.len(), dynamic.alternatives.len());
+        assert_eq!(restored.start().mask(), dynamic.start().mask());
+        for (offset, value) in [(0, 0), (18, saved[18] ^ 1)] {
+            let mut invalid = saved.clone();
+            invalid[offset] = value;
+            assert!(DynamicConstraint::load_with_vocab(&invalid, &vocab).is_err());
+        }
+        let mut legacy = saved.clone();
+        legacy[8..10].copy_from_slice(&16u16.to_le_bytes());
+        assert!(DynamicConstraint::load_with_vocab(&legacy, &vocab).is_err());
+        assert!(DynamicConstraint::load_with_vocab(&saved[..saved.len() - 1], &vocab).is_err());
     }
 }
+
 
 #[test]
 fn uniquely_owned_cached_transfer_is_moved_by_into_saved() {

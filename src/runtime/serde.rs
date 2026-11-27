@@ -3119,11 +3119,6 @@ impl Constraint {
         })
     }
 
-    pub(crate) fn save_template_with_external_vocab(&self) -> Vec<u8> {
-        assert!(self.has_template_parser(), "external template save requires a table-free parser");
-        self.save_body_external_artifact()
-    }
-
     fn save_with_vocab_policy(&self) -> Vec<u8> {
         let exact_only_token_ids: Vec<u32> = Vec::new();
         if self.end_tokens.is_empty() && exact_only_token_ids.is_empty() {
@@ -4610,12 +4605,10 @@ impl Constraint {
                         )?;
                 } else if constraint.uses_dynamic_runtime() && external_vocab.is_some()
                     && !constraint.dynamic_mask_vocab.is_initialized()
-                    && !constraint.uses_compact_segmented_parser_runtime()
+                    && runtime.segmented_runtime_v27.is_none()
                 {
-                    // Explicit LR envelopes deliberately
-                    // omit the mask vocabulary artifact and reconstruct the
-                    // exact full-vocabulary mask coordinate from the supplied
-                    // Vocab. The envelope fingerprint already validated it.
+                    // A dynamic leaf without a stored grammar quotient rebuilds
+                    // the exact vocabulary-only coordinate from the bound Vocab.
                     constraint.dynamic_mask_vocab =
                         crate::dynamic_constraint::DynamicConstraint::dynamic_vocab_from_transfer_artifact(
                             None, external_vocab.expect("external envelope requires its Vocab"),
