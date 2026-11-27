@@ -3624,72 +3624,42 @@ fn apply_goto_to_suffix(suffix: &[u32], target: u32, replace: bool) -> Vec<u32> 
     out
 }
 
-fn unguarded_suffix_effect(
-    suffix: &[u32],
+/// Interpret one consuming alternative as a partial relation on a stack
+/// suffix. The unknown prefix is represented by the original-pop coordinate;
+/// known pushed states discharge guards without consulting predecessors.
+fn compose_stack_rewrite(
+    mut frame: StackEffectFrame,
+    guards: &[StackShiftGuard],
     pop: u32,
     pushes: &[u32],
-) -> Result<GuardedStackShift, ()> {
-    suffix_effect(suffix, Vec::new(), pop, pushes)
-}
-
-fn guarded_suffix_effect(
-    suffix: &[u32],
-    shift: &GuardedStackShift,
-) -> Result<Option<GuardedStackShift>, ()> {
-    let suffix_len = suffix.len() as u32;
-    let mut translated_guards = Vec::new();
-
-    for guard in &shift.guards {
-        if guard.pop < suffix_len {
-            let index = suffix.len() - 1 - guard.pop as usize;
-            if guard.states.binary_search(&suffix[index]).is_err() {
+) -> Result<Option<StackEffectFrame>, ()> {
+    let pushed_len = u32::try_from(frame.pushes.len()).map_err(|_| ())?;
+    for guard in guards {
+        if guard.states.is_empty() {
+            return Ok(None);
+        }
+        if guard.pop < pushed_len {
+            let known = frame.pushes[(pushed_len - 1 - guard.pop) as usize];
+            if guard.states.binary_search(&known).is_err() {
                 return Ok(None);
             }
         } else {
-            translated_guards.push(StackShiftGuard {
-                pop: 1 + (guard.pop - suffix_len),
-                states: guard.states.clone(),
-            });
+            let depth = frame.pop.checked_add(guard.pop - pushed_len).ok_or(())?;
+            if !add_guard_to_frame(&mut frame, depth, guard.states.iter().copied()) {
+                return Ok(None);
+            }
         }
     }
-
-    let effect = suffix_effect(suffix, translated_guards, shift.pop, &shift.pushes)?;
-    Ok(Some(effect))
-}
-
-fn suffix_effect(
-    suffix: &[u32],
-    mut guards: Vec<StackShiftGuard>,
-    pop: u32,
-    pushes: &[u32],
-) -> Result<GuardedStackShift, ()> {
-    if suffix.is_empty() {
+    if guards.iter().any(|guard| guard.pop > pop) {
         return Err(());
     }
-    let suffix_len = suffix.len() as u32;
-    let (macro_pop, macro_pushes) = if pop <= suffix_len {
-        let keep = suffix.len() - pop as usize;
-        let mut out = suffix[..keep].to_vec();
-        out.extend_from_slice(pushes);
-        (1, out)
-    } else {
-        (1 + (pop - suffix_len), pushes.to_vec())
-    };
-
-    guards.sort_by_key(|guard| guard.pop);
-    guards.dedup();
-    debug_assert!(guards.iter().all(|guard| guard.pop <= macro_pop));
-
-    Ok(GuardedStackShift {
-        guards,
-        pop: macro_pop,
-        pushes: macro_pushes,
-    })
+    pop_frame(&mut frame, pop)?;
+    frame.pushes.extend_from_slice(pushes);
+    Ok(Some(frame))
 }
 
-/// Apply nonrecursive consuming alternatives to an existing stack frame.
-/// Return the untouched frame for reduction/split/accept actions, whose
-/// traversal and acceptance policies differ between callers.
+/// Observe the same consuming alternatives used by the runtime, with the
+/// forwarded ordinary shift's replace flag interpreted in its source cell.
 fn consume_action_frames(
     table: &GLRTable,
     state: u32,
@@ -3699,46 +3669,24 @@ fn consume_action_frames(
     skip_invalid_guards: bool,
     mut emit: impl FnMut(StackEffectFrame),
 ) -> Result<Option<StackEffectFrame>, ()> {
-    match action {
-        Action::Skip => emit(frame),
-        Action::Shift(target, replace) => {
-            let mut frame = frame;
-            let effective_replace =
-                *replace && !table.forwarded_shifts.contains(&(state, terminal));
-            push_transition_to_frame(&mut frame, *target, effective_replace);
-            emit(frame);
-        }
-        Action::ReplaceShifts(targets) => {
-            for &target in targets.iter() {
-                let mut next = frame.clone();
-                pop_frame(&mut next, 1);
-                next.pushes.push(target);
-                emit(next);
-            }
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                let mut next = frame.clone();
-                pop_frame(&mut next, shift.pop);
-                next.pushes.extend_from_slice(&shift.pushes);
-                emit(next);
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                match compose_guarded_shift_with_frame(frame.clone(), shift) {
-                    Some(Some(next)) => emit(next),
-                    Some(None) => {}
-                    None if skip_invalid_guards => {}
-                    None => return Err(()),
-                }
-            }
-        }
-        Action::Reduce(..) | Action::Split { .. } | Action::Accept => {
-            return Ok(Some(frame));
-        }
+    if matches!(action, Action::Reduce(..) | Action::Split { .. } | Action::Accept) {
+        return Ok(Some(frame));
     }
-    Ok(None)
+    let forwarded = matches!(action, Action::Shift(..))
+        && table.forwarded_shifts.contains(&(state, terminal));
+    let mut invalid = false;
+    action.for_each_stack_effect(|guards, pop, pushes| {
+        if invalid {
+            return;
+        }
+        match compose_stack_rewrite(frame.clone(), guards, if forwarded { 0 } else { pop }, pushes) {
+            Ok(Some(next)) => emit(next),
+            Ok(None) => {}
+            Err(()) if skip_invalid_guards => {}
+            Err(()) => invalid = true,
+        }
+    });
+    if invalid { Err(()) } else { Ok(None) }
 }
 
 // Compile one concrete action row of a synthetic suffix state into an
@@ -3931,50 +3879,23 @@ fn reduce_suffix_frame(
     len: u32,
     goto_sources_by_nonterminal: Option<&[Vec<u32>]>,
 ) -> Result<Vec<StackEffectFrame>, ()> {
-    pop_frame(&mut frame, len);
-
-    let goto_froms: Vec<(u32, Option<Vec<u32>>)> = if let Some(&state) = frame.pushes.last() {
-        vec![(state, None)]
-    } else if let Some(goto_sources_by_nonterminal) = goto_sources_by_nonterminal {
-        goto_sources_by_nonterminal
-            .get(nt as usize)
-            .into_iter()
-            .flatten()
-            .copied()
-            .map(|state| (state, Some(vec![state])))
-            .collect()
+    pop_frame(&mut frame, len)?;
+    if let Some(&state) = frame.pushes.last() {
+        return reduce_exposed_frame(table, frame, nt, &[state], false);
+    }
+    let sources;
+    let candidates = if let Some(index) = goto_sources_by_nonterminal {
+        index.get(nt as usize).map(Vec::as_slice).unwrap_or(&[])
     } else {
-        table
-            .goto
-            .iter()
-            .enumerate()
+        sources = table.goto.iter().enumerate()
             .filter(|(_, row)| row.contains_key(&nt))
-            .map(|(state, _)| (state as u32, Some(vec![state as u32])))
-            .collect()
+            .map(|(state, _)| state as u32)
+            .collect::<Vec<_>>();
+        &sources
     };
-
-    if goto_froms.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let guard_pop = frame.pop;
-    let mut out = Vec::new();
-    for (goto_from, guard_states) in goto_froms {
-        let Some((target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
-            continue;
-        };
-        let mut next = frame.clone();
-        if let Some(states) = guard_states
-            && !add_guard_to_frame(&mut next, guard_pop, states)
-        {
-            continue;
-        }
-        push_transition_to_frame(&mut next, target, replace);
-        out.push(next);
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
+    // Without an origin-specific predecessor certificate, every possible
+    // goto source must be tested against the original stack.
+    reduce_exposed_frame(table, frame, nt, candidates, true)
 }
 
 #[inline]
@@ -5525,7 +5446,7 @@ fn eof_accept_effects_for_action(
                     let mut shifted = frame.clone();
                     let effective_replace =
                         *replace && !table.forwarded_shifts.contains(&(state, EOF));
-                    push_transition_to_frame(&mut shifted, *target, effective_replace);
+                    push_transition_to_frame(&mut shifted, *target, effective_replace).map_err(|()| control_elimination_failure(budget, origin_state, EOF, "EOF stack pop overflow"))?;
                     out.extend(continue_eof_accept_from_frames(
                         table,
                         predecessors,
@@ -6276,27 +6197,20 @@ fn add_guard_to_frame(
     true
 }
 
-fn pop_frame(frame: &mut StackEffectFrame, pop: u32) {
+fn pop_frame(frame: &mut StackEffectFrame, pop: u32) -> Result<(), ()> {
     if pop as usize <= frame.pushes.len() {
-        let keep = frame.pushes.len() - pop as usize;
-        frame.pushes.truncate(keep);
+        frame.pushes.truncate(frame.pushes.len() - pop as usize);
     } else {
-        frame.pop += pop - frame.pushes.len() as u32;
+        frame.pop = frame.pop.checked_add(pop - frame.pushes.len() as u32).ok_or(())?;
         frame.pushes.clear();
     }
+    Ok(())
 }
 
-fn push_transition_to_frame(frame: &mut StackEffectFrame, target: u32, replace: bool) {
-    if replace {
-        if let Some(top) = frame.pushes.last_mut() {
-            *top = target;
-        } else {
-            frame.pop += 1;
-            frame.pushes.push(target);
-        }
-    } else {
-        frame.pushes.push(target);
-    }
+fn push_transition_to_frame(frame: &mut StackEffectFrame, target: u32, replace: bool) -> Result<(), ()> {
+    pop_frame(frame, u32::from(replace))?;
+    frame.pushes.push(target);
+    Ok(())
 }
 
 fn frame_to_guarded_shift(frame: StackEffectFrame) -> GuardedStackShift {
@@ -6320,6 +6234,42 @@ fn stack_effect_action_tag(action: &Action) -> u8 {
     }
 }
 
+/// Reduce after exposing the goto source. A certified candidate set may
+/// omit a guard only if every candidate has exactly the same goto effect.
+/// A suffix-state expansion lacks that certificate and must guard every
+/// unknown source, even when the goto row happens to be unique.
+fn reduce_exposed_frame(
+    table: &GLRTable,
+    frame: StackEffectFrame,
+    nt: NonterminalID,
+    candidates: &[u32],
+    require_guard: bool,
+) -> Result<Vec<StackEffectFrame>, ()> {
+    let mut by_target = BTreeMap::<(u32, bool), Vec<u32>>::new();
+    let mut missing = false;
+    for &source in candidates {
+        if let Some(&(target, replace)) = table.goto.get(source as usize).ok_or(())?.get(&nt) {
+            by_target.entry((target, replace)).or_default().push(source);
+        } else {
+            missing = true;
+        }
+    }
+    let needs_guard = require_guard || missing || by_target.len() > 1;
+    let guard_pop = frame.pop;
+    let mut frames = Vec::new();
+    for ((target, replace), froms) in by_target {
+        let mut next = frame.clone();
+        if needs_guard && !add_guard_to_frame(&mut next, guard_pop, froms) {
+            continue;
+        }
+        push_transition_to_frame(&mut next, target, replace)?;
+        frames.push(next);
+    }
+    frames.sort();
+    frames.dedup();
+    Ok(frames)
+}
+
 fn apply_reduce_to_frame(
     table: &GLRTable,
     predecessors: &[PredecessorSet],
@@ -6330,112 +6280,23 @@ fn apply_reduce_to_frame(
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
     budget: &UnitInlineBudget,
 ) -> Option<ReduceFrameResult> {
-    pop_frame(&mut frame, len);
-
-    let mut origin_dependent = false;
-    let direct_goto_from;
-    let goto_froms = if let Some(&state) = frame.pushes.last() {
-        direct_goto_from = smallvec![state];
-        &direct_goto_from
+    pop_frame(&mut frame, len).ok()?;
+    let origin_dependent = frame.pushes.is_empty();
+    let direct;
+    let candidates = if let Some(&state) = frame.pushes.last() {
+        direct = [state];
+        &direct[..]
     } else {
-        origin_dependent = true;
         states_at_depth(
-            predecessors,
-            origin_state,
-            frame.pop,
-            states_at_depth_cache,
-            budget,
+            predecessors, origin_state, frame.pop, states_at_depth_cache, budget,
         )?
     };
-
-    if goto_froms.len() == 1 {
-        let goto_from = goto_froms
-            .first()
-            .copied()
-            .expect("a singleton set has one element");
-        let Some((target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
-            return Some(ReduceFrameResult::Dead);
-        };
-        push_transition_to_frame(&mut frame, target, replace);
-        return Some(ReduceFrameResult::Frames {
-            frames: vec![frame],
-            origin_dependent,
-        });
-    }
-
-    let guard_pop = frame.pop;
-    let mut by_target: BTreeMap<(u32, bool), BTreeSet<u32>> = BTreeMap::new();
-    let mut missing = 0usize;
-    for &goto_from in goto_froms {
-        let Some((next_target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
-            missing += 1;
-            continue;
-        };
-        by_target
-            .entry((next_target, replace))
-            .or_default()
-            .insert(goto_from);
-    }
-
-    if missing > 0 && by_target.is_empty() {
-        return Some(ReduceFrameResult::Dead);
-    }
-
-    let needs_guard = missing > 0 || by_target.len() > 1;
-    let mut frames = Vec::new();
-    for ((target, replace), froms) in by_target {
-        let mut next_frame = frame.clone();
-        if needs_guard && !add_guard_to_frame(&mut next_frame, guard_pop, froms) {
-            continue;
-        }
-        push_transition_to_frame(&mut next_frame, target, replace);
-        frames.push(next_frame);
-    }
-
+    let frames = reduce_exposed_frame(table, frame, nt, candidates, false).ok()?;
     if frames.is_empty() {
         Some(ReduceFrameResult::Dead)
     } else {
-        frames.sort();
-        frames.dedup();
-        Some(ReduceFrameResult::Frames {
-            frames,
-            origin_dependent,
-        })
+        Some(ReduceFrameResult::Frames { frames, origin_dependent })
     }
-}
-
-fn compose_guarded_shift_with_frame(
-    mut frame: StackEffectFrame,
-    shift: &GuardedStackShift,
-) -> Option<Option<StackEffectFrame>> {
-    let pushed_len = frame.pushes.len() as u32;
-
-    for guard in &shift.guards {
-        if guard.states.is_empty() {
-            return Some(None);
-        }
-
-        if guard.pop < pushed_len {
-            let idx = (pushed_len - 1 - guard.pop) as usize;
-            let known_state = frame.pushes[idx];
-            if guard.states.binary_search(&known_state).is_err() {
-                return Some(None);
-            }
-        } else {
-            let translated_pop = frame.pop + (guard.pop - pushed_len);
-            if !add_guard_to_frame(&mut frame, translated_pop, guard.states.iter().copied()) {
-                return Some(None);
-            }
-        }
-    }
-
-    if shift.pop < shift.guards.iter().map(|guard| guard.pop).max().unwrap_or(0) {
-        return None;
-    }
-
-    pop_frame(&mut frame, shift.pop);
-    frame.pushes.extend_from_slice(&shift.pushes);
-    Some(Some(frame))
 }
 
 fn stack_effects_for_action(
@@ -6586,18 +6447,8 @@ fn stack_effects_for_action(
 }
 
 fn normalize_guarded_effects(effects: &mut Vec<GuardedStackShift>) {
-    for effect in effects.iter_mut() {
-        for guard in effect.guards.iter_mut() {
-            guard.states.sort_unstable();
-            guard.states.dedup();
-        }
-        effect.guards.retain(|guard| !guard.states.is_empty());
-        effect.guards.sort_by_key(|guard| guard.pop);
-        effect.guards.dedup();
-    }
     effects.retain(|effect| !effect.pushes.is_empty());
-    effects.sort();
-    effects.dedup();
+    normalize_guarded_effects_for_suffix_quotient(effects);
 }
 
 fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) -> Option<Action> {
