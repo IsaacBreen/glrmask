@@ -568,7 +568,6 @@ struct RecursiveFullWalkTransitions<'a> {
     // per byte/finalizer/guard. Offsets are the authoritative layout's exact
     // coordinates, so this view requires no DFA or vocabulary preprocessing.
     leaves: SmallVec<[RecursiveFullWalkLeaf<'a>; 4]>,
-    token_boundary_cache: FxHashMap<(u32, u32), bool>,
     parser_advance_cache: FxHashMap<(u32, TerminalID), SmallVec<[(u32, u32); 4]>>,
     cache_parser_gss: bool,
     pre_admitted_original_mask: Option<&'a [u32]>,
@@ -613,7 +612,6 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
             constraint,
             total_states: layout.total_tokenizer_states as usize,
             leaves,
-            token_boundary_cache: FxHashMap::default(),
             parser_advance_cache: FxHashMap::default(),
             cache_parser_gss: env_flag("GLRMASK_PROFILE_PARSER_ACC_CACHE", true),
             pre_admitted_original_mask: None,
@@ -773,8 +771,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         if self.leaves[index].reset == lexer_state {
             return true;
         }
-        let key = (lexer_state, parser_node);
-        if let Some(&cached) = self.token_boundary_cache.get(&key) {
+        if let Some(cached) = parser_cache.nodes[parser_node as usize].boundary.sparse(lexer_state) {
             return cached;
         }
         let allowed = super::commit::native_mask_end_state_may_advance(
@@ -783,7 +780,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
             let parser_gss = self.parser_gss(parser_node, parser_cache);
             super::commit::end_state_may_advance(constraint, &parser_gss, lexer_state)
         });
-        self.token_boundary_cache.insert(key, allowed);
+        parser_cache.nodes[parser_node as usize].boundary.config_mut().sparse.insert(lexer_state, allowed);
         allowed
     }
 
@@ -2072,6 +2069,43 @@ fn bounded_product_cache_keeps_guard_correlations_and_exact_hash_collisions() {
     assert!(cache.view(depths[255].as_ref().unwrap()) == &wide);
 }
 
+#[derive(Default)]
+struct ConfigBoundaryMemo {
+    hot: Option<Box<[u8; FULL_WALK_HOT_CAPACITY]>>,
+    sparse: FxHashMap<u32, bool>,
+}
+
+enum ParserBoundaryMemo {
+    Empty,
+    Physical(boundary_cache::PhysicalBoundaryRow),
+    Config(Box<ConfigBoundaryMemo>),
+}
+
+impl ParserBoundaryMemo {
+    fn config_mut(&mut self) -> &mut ConfigBoundaryMemo {
+        if matches!(self, Self::Empty) {
+            *self = Self::Config(Box::default());
+        }
+        match self {
+            Self::Config(row) => row,
+            _ => unreachable!("walk boundary coordinate changed"),
+        }
+    }
+
+    fn sparse(&self, lexer: u32) -> Option<bool> {
+        match self {
+            Self::Config(row) => row.sparse.get(&lexer).copied(),
+            _ => None,
+        }
+    }
+
+    fn hot(&self, id: u8) -> Option<bool> {
+        let Self::Config(row) = self else { return None; };
+        let value = row.hot.as_ref()?[id as usize];
+        (value != 0).then_some(value == 2)
+    }
+}
+
 struct FullWalkParserNode {
     gss: ParserStacks,
     /// Lazily mapped only for parser operations still requiring commit annotations.
@@ -2080,7 +2114,7 @@ struct FullWalkParserNode {
     admitted_singleton: Option<TerminalID>,
     shared_root_admission: SharedRootAdmission,
     reset_lexer: Option<u32>,
-    token_boundary_allowed: Vec<u8>,
+    boundary: ParserBoundaryMemo,
     children: SmallVec<[(TerminalID, u32); 16]>,
     last_child_terminal: TerminalID,
     last_child_target: u32,
@@ -2094,13 +2128,11 @@ struct FullWalkParserCanonical {
 
 struct FullWalkParserCache {
     nodes: Vec<FullWalkParserNode>,
-    dense_lexer_state_count: Option<usize>,
-    direct_boundary_rows: Option<boundary_cache::FullWalkBoundaryDirectCache>,
+    physical_boundary_policy: Option<boundary_cache::PhysicalBoundaryPolicy>,
     row_liveness_enabled: bool,
     canonicalize: bool,
     canonical: Option<Box<FullWalkParserCanonical>>,
-    sparse_token_boundary_allowed: Vec<FxHashMap<u32, u8>>,
-    hot_token_boundary_allowed: Vec<[u8; FULL_WALK_HOT_CAPACITY]>,
+    pointer_ids: FxHashMap<usize, u32>,
     profile: bool,
     profile_boundary_calls: usize,
     profile_boundary_hits: usize,
@@ -2117,18 +2149,15 @@ impl FullWalkParserCache {
     ) -> (Self, SmallVec<[u32; 4]>) {
         static COMPACT: OnceLock<bool> = OnceLock::new();
         let compact = *COMPACT.get_or_init(|| !env_flag("GLRMASK_DISABLE_COMPACT_BOUNDARY_ROWS", false));
-        let direct_boundary_rows = dense_lexer_state_count
-            .filter(|&count| compact && count > boundary_cache::FullWalkBoundaryDirectCache::compact_row_bytes())
-            .map(boundary_cache::FullWalkBoundaryDirectCache::with_width);
+        let physical_boundary_policy = dense_lexer_state_count
+            .map(|count| boundary_cache::PhysicalBoundaryPolicy::new(count, compact));
         let mut cache = Self {
             nodes: Vec::new(),
-            dense_lexer_state_count,
-            direct_boundary_rows,
+            physical_boundary_policy,
             row_liveness_enabled: !env_flag("GLRMASK_DISABLE_ROW_LIVENESS", false),
             canonicalize: dense_lexer_state_count.is_some() && full_walk_acceleration_enabled(),
             canonical: None,
-            sparse_token_boundary_allowed: Vec::new(),
-            hot_token_boundary_allowed: Vec::new(),
+            pointer_ids: FxHashMap::default(),
             profile: crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             profile_boundary_calls: 0,
             profile_boundary_hits: 0,
@@ -2148,20 +2177,14 @@ impl FullWalkParserCache {
     }
 
     fn intern_stacks(&mut self, stacks: ParserStacks) -> u32 {
-        if let Some((index, _)) = self
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, node)| node.gss.ptr_eq(&stacks))
-        {
-            return index as u32;
-        }
+        if let Some(&id) = self.pointer_ids.get(&stacks.ptr_key()) { return id; }
         self.push_stacks(stacks)
     }
 
     #[inline]
     fn push_stacks(&mut self, stacks: ParserStacks) -> u32 {
         let id = self.nodes.len() as u32;
+        self.pointer_ids.entry(stacks.ptr_key()).or_insert(id);
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
             annotated: OnceLock::new(),
@@ -2169,18 +2192,11 @@ impl FullWalkParserCache {
             admitted_singleton: None,
             shared_root_admission: None,
             reset_lexer: None,
-            token_boundary_allowed: if self.direct_boundary_rows.is_some() {
-                Vec::new()
-            } else {
-                self.dense_lexer_state_count.map_or_else(Vec::new, |count| vec![0; count])
-            },
+            boundary: ParserBoundaryMemo::Empty,
             children: SmallVec::new(),
             last_child_terminal: TerminalID::MAX,
             last_child_target: Self::DEAD,
         });
-        if let Some(cache) = self.direct_boundary_rows.as_mut() { cache.push_row(); }
-        self.sparse_token_boundary_allowed.push(FxHashMap::default());
-        self.hot_token_boundary_allowed.push([0; FULL_WALK_HOT_CAPACITY]);
         id
     }
 
@@ -2408,11 +2424,9 @@ impl FullWalkParserCache {
     ) -> bool {
         if self.profile { self.profile_boundary_calls += 1; }
         let node = parser_node as usize;
-        let lexer = lexer_state as usize;
-        let cached = if let Some(cache) = self.direct_boundary_rows.as_ref() {
-            unsafe { cache.get_physical(node, lexer_state) }
-        } else {
-            self.nodes[node].token_boundary_allowed[lexer]
+        let cached = match &self.nodes[node].boundary {
+            ParserBoundaryMemo::Physical(row) => row.get(lexer_state),
+            _ => 0,
         };
         if cached != 0 {
             if self.profile { self.profile_boundary_hits += 1; }
@@ -2433,11 +2447,13 @@ impl FullWalkParserCache {
                 }
             });
         let value = if allowed { 2 } else { 1 };
-        if let Some(cache) = self.direct_boundary_rows.as_mut() {
-            cache.set(node, lexer_state, value);
-        } else {
-            self.nodes[node].token_boundary_allowed[lexer] = value;
+        let policy = self.physical_boundary_policy.as_mut().expect("fixed lexer domain");
+        let memo = &mut self.nodes[node].boundary;
+        if matches!(memo, ParserBoundaryMemo::Empty) {
+            *memo = ParserBoundaryMemo::Physical(boundary_cache::PhysicalBoundaryRow::new(policy));
         }
+        let ParserBoundaryMemo::Physical(row) = memo else { unreachable!("walk boundary coordinate changed"); };
+        row.insert(lexer_state, value, policy);
         allowed
     }
 
@@ -2475,28 +2491,19 @@ impl FullWalkParserCache {
             self.profile_boundary_calls += 1;
         }
         let node = parser_node as usize;
-        let cached = unsafe {
-            *self
-                .hot_token_boundary_allowed
-                .get_unchecked(node)
-                .get_unchecked(hot_id as usize)
-        };
-        if cached != 0 {
+        if let Some(cached) = self.nodes[node].boundary.hot(hot_id) {
             if self.profile {
                 self.profile_boundary_hits += 1;
             }
-            return cached == 2;
+            return cached;
         }
         if self.profile {
             self.profile_boundary_misses += 1;
         }
         let allowed = self.config_boundary_allowed_uncached(constraint, transitions, lexer_state, parser_node);
-        unsafe {
-            *self
-                .hot_token_boundary_allowed
-                .get_unchecked_mut(node)
-                .get_unchecked_mut(hot_id as usize) = if allowed { 2 } else { 1 };
-        }
+        self.nodes[node].boundary.config_mut().hot
+            .get_or_insert_with(|| Box::new([0; FULL_WALK_HOT_CAPACITY]))[hot_id as usize] =
+            if allowed { 2 } else { 1 };
         allowed
     }
 
@@ -2512,22 +2519,17 @@ impl FullWalkParserCache {
             self.profile_boundary_calls += 1;
         }
         let node = parser_node as usize;
-        let cached = unsafe { self.sparse_token_boundary_allowed.get_unchecked(node) }
-            .get(&lexer_state)
-            .copied()
-            .unwrap_or(0);
-        if cached != 0 {
+        if let Some(cached) = self.nodes[node].boundary.sparse(lexer_state) {
             if self.profile {
                 self.profile_boundary_hits += 1;
             }
-            return cached == 2;
+            return cached;
         }
         if self.profile {
             self.profile_boundary_misses += 1;
         }
         let allowed = self.config_boundary_allowed_uncached(constraint, transitions, lexer_state, parser_node);
-        unsafe { self.sparse_token_boundary_allowed.get_unchecked_mut(node) }
-            .insert(lexer_state, if allowed { 2 } else { 1 });
+        self.nodes[node].boundary.config_mut().sparse.insert(lexer_state, allowed);
         allowed
     }
 

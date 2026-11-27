@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(test)]
-use super::boundary_cache::FullWalkBoundaryDirectCache;
 use crate::runtime::artifact::{AdaptiveByteMemo, DynamicLazyUnionState};
 use rustc_hash::FxHashSet;
 
@@ -2123,45 +2121,6 @@ fn full_walk_row_liveness_bound(
     }
 }
 
-#[cfg(test)]
-mod boundary_direct_cache_tests {
-    use super::FullWalkBoundaryDirectCache;
-
-    #[test]
-    fn full_tags_and_parser_rows_prevent_false_cache_hits() {
-        let mut cache = FullWalkBoundaryDirectCache::new();
-        cache.push_row(); cache.push_row();
-        assert_eq!(cache.get(0, 0), 0);
-        cache.set(0, 0, 2); cache.set(1, 0, 1);
-        assert_eq!(cache.get(0, 0), 2); assert_eq!(cache.get(1, 0), 1);
-        cache.set(0, 16, 1);
-        assert_eq!(cache.get(0, 0), 0); assert_eq!(cache.get(0, 16), 1);
-        assert_eq!(cache.get(1, 0), 1);
-        cache.set(0, u32::MAX, 2);
-        assert_eq!(cache.get(0, u32::MAX), 2);
-        assert_eq!(cache.get(0, 15), 0);
-    }
-
-    #[test]
-    fn dense_promotion_preserves_all_retained_cells_and_unknowns() {
-        for width in [17, 63, 129, 257, 1025] {
-            let mut cache = FullWalkBoundaryDirectCache::new();
-            let mut rows = vec![Vec::new(); 23];
-            for node in 0..rows.len() {
-                cache.push_row();
-                for lexer in 0..width as u32 {
-                    cache.set(node, lexer, 1 + ((node as u32 + lexer) % 2) as u8);
-                }
-            }
-            let expected: Vec<Vec<u8>> = (0..rows.len()).map(|node|
-                (0..width as u32).map(|lexer| cache.get(node, lexer)).collect()).collect();
-            cache.expand_into(&mut rows, width);
-            assert_eq!(rows, expected);
-            assert!(rows.iter().all(|row| row.len() == width));
-        }
-    }
-}
-
 /// Exact direct dynamic-mask path for bounded deterministic lexer coordinates.
 ///
 /// This performs the exact vocabulary walk, skipping only a child subtree once
@@ -3662,7 +3621,7 @@ mod full_walk_acceleration_tests {
                             &DynamicBranches::new(), Some(constraint.tokenizer.num_states() as usize),
                         );
                         cache.row_liveness_enabled = true;
-                        cache.direct_boundary_rows = Some(FullWalkBoundaryDirectCache::new());
+                        cache.physical_boundary_policy = Some(crate::runtime::dynamic_mask::boundary_cache::PhysicalBoundaryPolicy::new(constraint.tokenizer.num_states() as usize, true));
                         let node = cache.push_stacks(stacks.clone());
                         let admitted = exact_parser_admission_for_stacks(constraint, &stacks);
                         for lexer in 0..constraint.tokenizer.num_states() {

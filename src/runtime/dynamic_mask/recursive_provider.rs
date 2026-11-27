@@ -26,7 +26,6 @@ struct RecursiveConfigTransitions<'scan, 'constraint> {
     ids: FxHashMap<(usize, u32), u32>,
     roots: FxHashMap<u32, u32>,
     resets: Vec<Option<u32>>,
-    boundary: FxHashMap<(u32, u32), bool>,
     support_enabled: bool,
     support_cache: FxHashMap<u32, Option<super::super::constraint::ScopedAdmissionMemo<'constraint>>>,
     support_profile: Option<ScopedSupportProfile>,
@@ -415,7 +414,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         if self.resets[leaf] == Some(lexer_state) { return true; }
         let config = self.tables[leaf].generic_config_for_state(local);
         if self.tables[leaf].cache.reset_base(config).is_some() { return true; }
-        if let Some(&value) = self.boundary.get(&(lexer_state, parser_node)) { return value; }
+        if let Some(value) = parser_cache.nodes[parser_node as usize].boundary.sparse(lexer_state) { return value; }
         let ignored = self.routing.leaves[leaf].constraint.ignore_terminal
             .map(|terminal| self.routing.leaves[leaf].terminal_offset + terminal);
         let allowed = ignored.is_some_and(|terminal| self.future_contains(lexer_state, terminal)) || {
@@ -445,7 +444,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
                         profile.exact_entries = self.support_cache.values().filter_map(Option::as_ref)
                             .map(|memo| memo.entry_count()).sum();
                     }
-                    self.boundary.insert((lexer_state, parser_node), result);
+                    parser_cache.nodes[parser_node as usize].boundary.config_mut().sparse.insert(lexer_state, result);
                     return result;
                 }
             }
@@ -464,7 +463,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
                 ).unwrap_or(false)
             }
         };
-        self.boundary.insert((lexer_state, parser_node), allowed);
+        parser_cache.nodes[parser_node as usize].boundary.config_mut().sparse.insert(lexer_state, allowed);
         allowed
     }
 }
@@ -537,7 +536,6 @@ fn with_provider_and_baseline(
         pre_admitted_original_mask: already,
         routing, tables, states: Vec::new(), ids: FxHashMap::default(),
         roots: FxHashMap::default(), resets: vec![None; reset_count],
-        boundary: FxHashMap::default(),
         support_enabled: {
             static ENABLED: OnceLock<bool> = OnceLock::new();
             *ENABLED.get_or_init(|| env_flag("GLRMASK_CLOSED_ADMISSION_SUPPORT", true))
