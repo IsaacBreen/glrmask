@@ -608,7 +608,10 @@ impl RestrictedTopology {
         representative_for_class: Arc<[u32]>,
     ) -> (usize, Arc<[u32]>, Arc<[u32]>) {
         if self.state_for_raw.is_none() {
-            return (self.real_state_count, class_for_state, representative_for_class);
+            let representatives = representative_for_class.iter().map(|&state| {
+                if state as usize >= self.real_state_count { 0 } else { state }
+            }).collect::<Vec<_>>();
+            return (self.real_state_count, Arc::from(&class_for_state[..self.real_state_count]), representatives.into());
         }
         let state_for_raw = self
             .state_for_raw
@@ -648,55 +651,7 @@ impl RestrictedTopology {
         )
     }
 
-    fn scanner_map_from_internal_quotient(
-        &self,
-        class_for_state: Arc<[u32]>,
-        representative_for_class: Arc<[u32]>,
-        source_class_for_target_deviations: Box<[(u32, u32)]>,
-    ) -> Option<TransportScannerStateMap> {
-        if self.nfa_output_rows.is_some() {
-            let state_for_raw = self
-                .state_for_raw
-                .as_ref()
-                .expect("NFA TI topology must retain raw-to-config states");
-            let class_count = class_for_state
-                .iter()
-                .copied()
-                .max()
-                .map_or(0usize, |class| class as usize + 1);
-            let mut raw_representative_for_class = vec![u32::MAX; class_count];
-            for raw_state in 0..self.raw_state_count {
-                let state = state_for_raw[raw_state] as usize;
-                let class = class_for_state[state] as usize;
-                if raw_representative_for_class[class] == u32::MAX {
-                    raw_representative_for_class[class] = raw_state as u32;
-                }
-            }
-            let raw_targets = (0..self.raw_state_count)
-                .map(|raw_state| {
-                    let state = state_for_raw[raw_state] as usize;
-                    let target_class = class_for_state[state];
-                    let source_class = source_class_for_target_deviations
-                        .binary_search_by_key(&target_class, |&(target, _)| target)
-                        .map(|index| source_class_for_target_deviations[index].1)
-                        .unwrap_or(target_class) as usize;
-                    raw_representative_for_class
-                        .get(source_class)
-                        .copied()
-                        .filter(|&representative| representative != u32::MAX)
-                })
-                .collect::<Option<Vec<_>>>()?;
-            return Some(TransportScannerStateMap::Explicit(raw_targets.into()));
-        }
-        let (state_count, class_for_original, representative_for_class) =
-            self.scanner_projection_from_internal_quotient(class_for_state, representative_for_class);
-        Some(TransportScannerStateMap::Quotient {
-            state_count,
-            class_for_original,
-            representative_for_class,
-            source_class_for_target_deviations,
-        })
-    }
+
 }
 
 /// The frozen-output observation made by the root-reachable part of the
@@ -2055,6 +2010,7 @@ struct TiQuotient {
     real: Vec<bool>,
     raw: Vec<bool>,
     scanner_state_count: usize,
+    explicit_raw_transport: bool,
     scanner_class_for_original: Arc<[u32]>,
     scanner_representative_for_class: Arc<[u32]>,
 }
@@ -2145,19 +2101,45 @@ impl TiQuotient {
         }
         let root = classes[topology.initial_state];
         let class_for_state: Arc<[u32]> = classes.into();
-        let (scanner_state_count, scanner_class_for_original, scanner_representative_for_class) =
+        let (scanner_state_count, scanner_class_for_original, mut scanner_representative_for_class) =
             topology.scanner_projection_from_internal_quotient(Arc::clone(&class_for_state), representatives.into());
+        let explicit_raw_transport = topology.nfa_output_rows.is_some();
+        if explicit_raw_transport {
+            // Powerset discovery IDs are not ordered by raw scanner ID.
+            // Preserve the historical first-raw representative convention.
+            let mut first_raw = vec![u32::MAX; n];
+            for (raw, &class) in scanner_class_for_original.iter().enumerate() {
+                let rep = &mut first_raw[class as usize];
+                if *rep == u32::MAX { *rep = raw as u32; }
+            }
+            scanner_representative_for_class = first_raw.into();
+        }
         Self { class_for_state, rows, predecessors, output_sources, root, dead, real, raw,
-            scanner_state_count, scanner_class_for_original, scanner_representative_for_class }
+            scanner_state_count, explicit_raw_transport, scanner_class_for_original, scanner_representative_for_class }
     }
 
     fn transport(&self, deviations: Vec<(u32, u32)>) -> InterchangeMap {
-        InterchangeMap { scanner_state_map: TransportScannerStateMap::Quotient {
-            state_count: self.scanner_state_count,
-            class_for_original: Arc::clone(&self.scanner_class_for_original),
-            representative_for_class: Arc::clone(&self.scanner_representative_for_class),
-            source_class_for_target_deviations: deviations.into_boxed_slice(),
-        }}
+        let scanner_state_map = if self.explicit_raw_transport {
+            // Keep NFA witnesses explicit: downstream coordinate shortcuts
+            // that rely on a direct deterministic scanner quotient must not
+            // infer that property merely from a powerset observation class.
+            let states = self.scanner_class_for_original.iter().map(|&target| {
+                let source = deviations.binary_search_by_key(&target, |&(target, _)| target)
+                    .map(|i| deviations[i].1).unwrap_or(target);
+                let raw = self.scanner_representative_for_class[source as usize];
+                assert_ne!(raw, u32::MAX, "certified TI raw source is absent");
+                raw
+            }).collect::<Vec<_>>();
+            TransportScannerStateMap::Explicit(states.into())
+        } else {
+            TransportScannerStateMap::Quotient {
+                state_count: self.scanner_state_count,
+                class_for_original: Arc::clone(&self.scanner_class_for_original),
+                representative_for_class: Arc::clone(&self.scanner_representative_for_class),
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            }
+        };
+        InterchangeMap { scanner_state_map }
     }
 
     /// A terminal permutation does not change the equality partition of
@@ -2195,8 +2177,12 @@ impl TiQuotient {
             }
         }
         if cone.is_empty() { return Some(self.transport(Vec::new())); }
-        // The root and synthetic dead language are fixed. Root output
-        // equality implies the root cannot reach a changed observation.
+        // The two tagged copies have identical deterministic transitions.
+        // Following any enabled word from their common root visits the
+        // same raw states; equality at the root therefore requires every
+        // reached destination label to be fixed by the transposition.
+        // Quotienting preserves exactly those labelled residuals, so root
+        // membership in the reverse cone is a conclusive rejection.
         if index.contains_key(&self.root) || index.contains_key(&self.dead) { return None; }
 
         let k = cone.len();
@@ -2248,7 +2234,7 @@ impl TiQuotient {
                 || self.raw[source as usize] != self.raw[target as usize] {
                 return None;
             }
-            if source != target { deviations.push((source, target)); }
+            if source != target { deviations.push((target, source)); }
         }
         deviations.sort_unstable();
         Some(self.transport(deviations))
@@ -2425,6 +2411,16 @@ impl InterchangeabilityDfa {
         }
         if sources.len() != targets.len() || sources.iter().any(|c| !targets.contains_key(c)) {
             return None;
+        }
+        if self.topology.nfa_output_rows.is_some() {
+            let raw_to_state = self.topology.state_for_raw.as_ref()?;
+            let mut first_raw = BTreeMap::<u32, u32>::new();
+            for (raw, &state) in raw_to_state.iter().enumerate() {
+                first_raw.entry(classes[n + state as usize]).or_insert(raw as u32);
+            }
+            let states = raw_to_state.iter().map(|&state| first_raw.get(&classes[state as usize]).copied())
+                .collect::<Option<Vec<_>>>()?;
+            return Some(InterchangeMap { scanner_state_map: TransportScannerStateMap::Explicit(states.into()) });
         }
         let targets = (0..self.topology.real_state_count)
             .map(|state| targets[&classes[state]]).collect::<Vec<_>>();
