@@ -3584,35 +3584,29 @@ impl Default for DynamicLazyUnionRow {
     }
 }
 
+/// One canonical exact physical subset, with its lazily computed observations.
+#[derive(Debug)]
+pub(crate) struct DynamicLazyUnionState {
+    pub(crate) members: SmallVec<[u32; 8]>,
+    pub(crate) row: DynamicLazyUnionRow,
+    pub(crate) metadata: Option<DynamicLazyUnionMetadata>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DynamicLazyUnionCache {
     pub(crate) base_state_count: u32,
-    /// Sparse-on-demand physical scalar-dispatch transition rows. Each row is
-    /// allocated only after the first touched byte, and individual cells stay
-    /// UNBUILT until requested by the vocabulary walk. This retains O(1)
-    /// repeated probes without paying to enumerate all 256 bytes of a newly
-    /// encountered physical state.
+    /// Allocated only for physical coordinates without a dense transition slab.
     pub(crate) base_rows: Vec<Option<Box<[u32; 256]>>>,
-    /// Dedicated packed-key index for the overwhelmingly common two-state
-    /// derivatives.  Avoids hashing/cloning a SmallVec on every pair lookup.
-    pub(crate) state_by_pair: Option<Box<FxHashMap<u64, u32>>>,
-    /// Exact union of two *input coordinates*, including virtual subsets.
-    /// Distinct from state_by_pair, whose keys contain physical members only.
-    /// Bounded, runtime-only, and cleared with every extension-ID reset.
-    pub(crate) state_by_union_pair: Option<Box<FxHashMap<u64, u32>>>,
-    pub(crate) state_by_subset: FxHashMap<SmallVec<[u32; 8]>, u32>,
-    pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
-    /// Lazy virtual-state derivatives. Most derived states see only a few
-    /// vocabulary bytes, so keep them sparse and promote only genuinely hot
-    /// rows to a dense 256-cell table.
-    pub(crate) rows: Vec<DynamicLazyUnionRow>,
-    pub(crate) metadata: Vec<Option<DynamicLazyUnionMetadata>>,
-    /// Learned output-polarity hint for exact lazy-union/physical root states.
-    /// 1 = observed non-dense, 2 = observed lexically dense. Runtime-only and
-    /// cleared whenever the lazy-union coordinate space is reset.
+    /// Two-member sets have a lossless packed key. Wider sets are indexed
+    /// by hash with exact equality against their sole owned member list.
+    pub(crate) state_by_pair: FxHashMap<u64, u32>,
+    pub(crate) state_by_hash: FxHashMap<u64, SmallVec<[u32; 1]>>,
+    /// Bounded memo of unions of two physical or derived input coordinates.
+    pub(crate) state_by_union_pair: FxHashMap<u64, u32>,
+    pub(crate) states: Vec<DynamicLazyUnionState>,
+    /// Learned output-polarity hint; cleared with the coordinate space.
     pub(crate) dense_output_hints: FxHashMap<u32, u8>,
 }
-
 /// One overlapping runtime slice language and the residual vocabulary trie
 /// to walk after that language has been proved contained. The slice language
 /// itself is not a compiler partition and may overlap/nest with other slices.
