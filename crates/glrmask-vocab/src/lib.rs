@@ -146,7 +146,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above the maximum supported token ID.
+    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID.
     ///
     /// # Examples
     ///
