@@ -542,7 +542,7 @@ mod tests {
     use super::*;
     use crate::{BuildOptions,Grammar,InternalMaskStrategy,TokenSet,Vocab};
 
-    const MODES:[MaskMode;6]=MaskMode::ALL;
+    const MODES:[MaskMode; 4]=MaskMode::ALL;
     fn ids(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(wi,&word)| (0..32).filter_map(move |bit|
             (word&(1<<bit)!=0).then_some((wi*32+bit) as u32))).collect()
@@ -698,7 +698,7 @@ mod tests {
 mod differential_tests {
     use super::*;
     use crate::{Grammar, TokenSet, Vocab};
-    const MODES:[MaskMode;6]=MaskMode::ALL;
+    const MODES:[MaskMode; 4]=MaskMode::ALL;
     fn allowed(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(word,&bits)| (0..32).filter_map(move |bit|
             (bits&(1u32<<bit)!=0).then_some((word*32+bit) as u32))).collect()

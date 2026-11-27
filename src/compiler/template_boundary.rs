@@ -490,7 +490,7 @@ mod tests {
                 .compile_inner(&vocab).unwrap();
             let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("child",&child).unwrap()
-                .link_with(MaskMode::C.build_options()).unwrap();
+                .link_with(MaskMode::B.build_options()).unwrap();
             let prepared=prepared_root_call_candidates(&dynamic);
             assert_eq!(prepared.is_none(),nullable);
             if let Some(prepared)=prepared {

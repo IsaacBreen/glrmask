@@ -7367,7 +7367,7 @@ mod tests {
         let native = grammar
             .compile_with_build_options(
                 &vocab,
-                MaskMode::C.build_options(),
+                MaskMode::B.build_options(),
             )
             .unwrap();
         let mut native_as_lr = native.save();

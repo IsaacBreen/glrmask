@@ -2,7 +2,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, PreparedGrammar, Vocab};
 
-fn modes() -> [MaskMode; 6] {
+fn modes() -> [MaskMode; 4] {
     MaskMode::ALL
 }
 fn options(mode: MaskMode) -> BuildOptions { mode.build_options() }
@@ -98,7 +98,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
 #[test]
 fn malformed_marker_envelopes_fail_without_panics() {
     let vocab=vocabulary();
-    let bytes=annotated().compile_with_build_options(&vocab,options(MaskMode::C)).unwrap().save();
+    let bytes=annotated().compile_with_build_options(&vocab,options(MaskMode::B)).unwrap().save();
     let mut malformed=Vec::new();
     for length in [0,1,7,8,12,19,20,27,28,bytes.len()-1] {malformed.push(bytes[..length].to_vec());}
     for count in [0,u32::MAX] {let mut v=bytes.clone();v[40+8..40+12].copy_from_slice(&count.to_le_bytes());malformed.push(v);}

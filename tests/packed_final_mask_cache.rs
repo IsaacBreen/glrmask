@@ -96,7 +96,7 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
     let mut transition_checks = 0;
     for schema in schemas {
         let source = schema.to_string();
-        for optimization in [MaskMode::C, MaskMode::ParserDwa] {
+        for optimization in [MaskMode::B, MaskMode::ParserDwa] {
             for explicit_backend in [false, true] {
                 let backend = ParserBackend::TemplateDfa;
                 let options = optimization.build_options();
@@ -167,7 +167,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
     ]).unwrap();
     for explicit_backend in [false, true] {
         let backend = ParserBackend::TemplateDfa;
-        let options = glrmask::test_modes::MaskMode::C.build_options();
+        let options = glrmask::test_modes::MaskMode::B.build_options();
         let options = if explicit_backend { options.parser_backend(backend) } else { options };
         let fresh = Grammar::from_glrm(&source).unwrap()
             .compile_with_build_options(&vocab, options)

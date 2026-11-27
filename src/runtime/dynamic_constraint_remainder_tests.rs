@@ -25,7 +25,7 @@ fn compile_dynamic(vocab: &Vocab) -> DynamicConstraint {
     // Select that representation explicitly so restoring ordinary Dynamic LR
     // does not change the subject or require a process-global environment switch.
     let native = crate::Grammar::glrm(source()).compile_with_build_options(
-        vocab, MaskMode::C.build_options(),
+        vocab, MaskMode::B.build_options(),
     ).unwrap();
     DynamicConstraint::from_constraints(vec![native])
 }
@@ -292,7 +292,7 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
         for constraint in [&direct, &loaded, &external] {
             // A and D are ordinary Dynamic TokenTrie and keep their LR table;
             // every other configuration is table-free.
-            if optimization != MaskMode::A && optimization != MaskMode::D {
+            if optimization != MaskMode::A {
                 assert_eq!(
                     constraint.parser_backend(),
                     crate::ParserBackend::TemplateDfa,

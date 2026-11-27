@@ -193,18 +193,14 @@ fn assemblies() -> Vec<AssemblySpec> {
 enum Precompile {
     None,
     ParserDwa,
-    Merged,
-    MergedLr,
     A,
     B,
 }
 
 impl Precompile {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 4] = [
         Self::None,
         Self::ParserDwa,
-        Self::Merged,
-        Self::MergedLr,
         Self::A,
         Self::B,
     ];
@@ -213,8 +209,6 @@ impl Precompile {
         match self {
             Self::None => None,
             Self::ParserDwa => Some(PARSER_DWA.compile_options()),
-            Self::Merged => Some(MaskMode::C.compile_options()),
-            Self::MergedLr => Some(MaskMode::D.compile_options()),
             Self::A => Some(MaskMode::A.compile_options()),
             Self::B => Some(MaskMode::B.compile_options()),
         }
@@ -222,9 +216,8 @@ impl Precompile {
 
     fn retains_key(self) -> Option<u8> {
         match self {
-            Self::None | Self::MergedLr | Self::A => None,
+            Self::None | Self::A => None,
             Self::ParserDwa => Some(Engine::ParserDwa.key()),
-            Self::Merged => Some(Engine::MergedTokenTrie.key()),
             Self::B => Some(Engine::TokenTrie.key()),
         }
     }
@@ -437,7 +430,6 @@ fn engine_for_key(key: u8) -> Option<Engine> {
     match key {
         1 => Some(Engine::ParserDwa),
         2 => Some(Engine::TokenTrie),
-        3 => Some(Engine::MergedTokenTrie),
         _ => None,
     }
 }
@@ -451,8 +443,6 @@ fn precompiled_work_is_reused_across_every_engine_request() {
         MaskMode::ParserDwa,
         MaskMode::A,
         MaskMode::B,
-        MaskMode::C,
-        MaskMode::D,
     ];
     let mut compiles = 0usize;
     let mut retained_parts = 0usize;

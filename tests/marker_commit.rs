@@ -1,7 +1,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{ConstraintInner as Constraint, MarkerEvent, TokenSet, Vocab};
 
-const MODES: [MaskMode; 6] = MaskMode::ALL;
+const MODES: [MaskMode; 4] = MaskMode::ALL;
 fn vocab(parts: &[&[u8]]) -> Vocab {
     Vocab::new(parts.iter().enumerate().map(|(id, bytes)| (id as u32, bytes.to_vec())).collect::<Vec<_>>()).unwrap()
 }

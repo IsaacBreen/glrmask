@@ -2,7 +2,7 @@
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, InternalMaskStrategy, TokenSet, Vocab};
 
-const MODES: [MaskMode; 6] = MaskMode::ALL;
+const MODES: [MaskMode; 4] = MaskMode::ALL;
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32).is_some_and(|w| w & (1 << (id % 32)) != 0)
 }
@@ -138,7 +138,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
     source.push_str("r30: \"b\"\n");
     let g=Grammar::from_lark(&source).unwrap();
-    let oracle=g.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options().end_tokens([100])).unwrap();
+    let oracle=g.compile_with_build_options(&v,glrmask::test_modes::MaskMode::B.build_options().end_tokens([100])).unwrap();
     let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(InternalMaskStrategy::FAST_COMPILE).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
     for c in [actual.clone(),Constraint::load(actual.save(), &v).unwrap(),

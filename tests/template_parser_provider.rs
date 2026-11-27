@@ -230,10 +230,10 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
         (Grammar::from_json_schema(schema).unwrap(),"\"ab\""),
     ];
     for (source,word) in sources {
-        let c=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options()
+        let c=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::B.build_options()
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_eq!(c.parser_backend(),ParserBackend::TemplateDfa);
-        let ordinary=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::C.build_options()).unwrap();
+        let ordinary=source.compile_with_build_options(&v,glrmask::test_modes::MaskMode::B.build_options()).unwrap();
         let language: &[&[u8]]=if word.starts_with('"') {&[b"\"a\"",b"\"ab\""]} else {&[b"a",b"ab"]};
         for parser in native_representations(&c,&v).into_iter().chain(native_representations(&ordinary,&v)) {
             assert_finite_language(&parser,&v,language);
@@ -279,7 +279,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
     ).unwrap().prepare(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();
-        for optimization in [MaskMode::Auto, MaskMode::ParserDwa, MaskMode::C] {
+        for optimization in [MaskMode::Auto, MaskMode::ParserDwa, MaskMode::B] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 module.bind_snapshot("child", &child).and_then(|bound| bound.link_with(
                     optimization.build_options()))
@@ -401,7 +401,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         .enumerate().map(|(i,byte)|(i as u32,vec![byte])).collect::<Vec<_>>()).unwrap();
     let compiled = glrmask::Grammar::from_json_schema(
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#).unwrap()
-        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()
+        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::B.build_options()
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
     let loaded = glrmask::ConstraintInner::load(compiled.save(), &vocab).unwrap();
     for constraint in [&compiled,&loaded] {
@@ -426,7 +426,7 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::{ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
         (2, b"t".to_vec()), (3, b"rue".to_vec())]).unwrap();
-    for mode in [MaskMode::C, MaskMode::ParserDwa] {
+    for mode in [MaskMode::B, MaskMode::ParserDwa] {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#).unwrap()
             .compile_with_build_options(&vocab, mode.build_options()
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();

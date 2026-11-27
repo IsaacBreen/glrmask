@@ -347,7 +347,7 @@ fn ordinary_template_grammar_matches_exact_oracle() {
     let _serial = serial();
     let case = case(0, 3, &[(0, &[-1]), (0, &[-2, -1])]);
     let reference = compile(&case, MaskMode::A);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
+    for strategy in [MaskMode::B, MaskMode::ParserDwa] {
         let compiled = compile(&case, strategy);
         assert_eq!(
             compiled.parser_backend(),
@@ -379,7 +379,7 @@ fn tiny_budget_returns_typed_decline() {
             (4, &[3, 1]),
         ],
     );
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
+    for strategy in [MaskMode::ParserDwa] {
         {
             let _limit = TestBudgetLimit::set(1);
             expect_strategy_decline(

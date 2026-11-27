@@ -82,7 +82,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
     let vocab = vocabulary();
     let source = schema(2);
     let child = Grammar::from_json_schema(&source).unwrap()
-        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options())
+        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::B.build_options())
         .unwrap();
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,

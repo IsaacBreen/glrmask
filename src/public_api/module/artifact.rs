@@ -63,7 +63,6 @@ fn u8_to_engine(n: u8) -> Result<Engine> {
         0 => Ok(Engine::Auto),
         1 => Ok(Engine::ParserDwa),
         2 => Ok(Engine::TokenTrie),
-        3 => Ok(Engine::MergedTokenTrie),
         _ => Err(err("invalid mask strategy tag")),
     }
 }
@@ -342,6 +341,11 @@ mod tests {
         let mut m = read(&bytes);
         m.prepared[0].bytes.truncate(20);
         assert!(Module::load(write(&m)).is_err());
+    }
+    #[test]
+    fn obsolete_merged_trie_preparation_tag_is_rejected() {
+        assert!(u8_to_engine(3).is_err());
+        assert_eq!(u8_to_engine(2).unwrap(), Engine::TokenTrie);
     }
     #[test]
     fn token_set_ranges_are_validated() {

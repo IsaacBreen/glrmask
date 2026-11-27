@@ -32,7 +32,7 @@ fn compile(vocab: &Vocab, source: &str, backend: ParserBackend) -> Constraint {
             .with_end_tokens(&[END_TOKEN]).expect("end tokens")
     } else {
         Grammar::from_ebnf(source).unwrap().compile_with_build_options(vocab,
-            MaskMode::C.build_options()
+            MaskMode::B.build_options()
                 .end_tokens([END_TOKEN])).expect("O2 template compile")
     }
 }
@@ -384,7 +384,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
     let lr = crate::DynamicConstraint::from_lark(source, &vocab).unwrap()
         .into_constraint().with_end_tokens(&[END_TOKEN]).unwrap();
     let native = Grammar::from_lark(source).unwrap().compile_with_build_options(&vocab,
-        MaskMode::C.build_options().end_tokens([END_TOKEN])).unwrap();
+        MaskMode::B.build_options().end_tokens([END_TOKEN])).unwrap();
     for constraint in [&lr, &native] {
         for loaded in [Constraint::load(constraint.save(), &vocab).unwrap(),
             Constraint::load(constraint.save(), &vocab).unwrap()] {
@@ -409,7 +409,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
     let native = Grammar::from_glrm(source).unwrap().bind_snapshot("MARK", crate::TokenSet::new([9])).unwrap()
-        .compile_with_build_options(&vocab, MaskMode::C.build_options()).unwrap();
+        .compile_with_build_options(&vocab, MaskMode::B.build_options()).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
         assert!(allowed(&state.mask(), 9));

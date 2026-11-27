@@ -335,7 +335,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(InternalMaskStrategy::FAST_COMPILE).engine_backend(ParserBackend::TemplateDfa).merge_equivalent_tokens(true)
+                    .optimization(InternalMaskStrategy::FAST_COMPILE).engine_backend(ParserBackend::TemplateDfa)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();
@@ -375,7 +375,7 @@ mod candidate_tests {
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
-                let options = MaskMode::C.build_options()
+                let options = MaskMode::B.build_options()
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).unwrap().compile_with_build_options(&vocab, options.clone()).unwrap();
                 let linked = Grammar::from_glrm(parent).unwrap().prepare(&vocab).unwrap()
@@ -419,7 +419,7 @@ mod candidate_tests {
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
-            .link_with(MaskMode::C.build_options()).unwrap();
+            .link_with(MaskMode::B.build_options()).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {
             reason: crate::runtime::SummaryUnavailable::Disabled }).unwrap();

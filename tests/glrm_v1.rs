@@ -359,7 +359,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     let loaded_dynamic_bound = loaded_dynamic_parent
         .bind_snapshot("child", &prepared_child)
         .unwrap()
-        .link_with(glrmask::test_modes::MaskMode::C.build_options())
+        .link_with(glrmask::test_modes::MaskMode::B.build_options())
         .unwrap();
     assert_static_xy_matches(&reference, &loaded_dynamic_bound);
 
@@ -646,7 +646,7 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
         Constraint::compile(parent.clone(), &vocab).unwrap();
     assert_lr_composition_rejected(DynamicConstraint::compile(parent.clone(), &vocab));
     let dynamic_constraint =
-        parent.compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()).unwrap();
+        parent.compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::B.build_options()).unwrap();
 
     for token in [0, 1] {
         let mut static_state = static_constraint.start();
@@ -681,7 +681,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
     let constraint = parent.bind_snapshot("MARK", glrmask::TokenSet::new([7])).unwrap()
-        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::C.build_options()).unwrap();
+        .compile_with_build_options(&vocab, glrmask::test_modes::MaskMode::B.build_options()).unwrap();
     let mut state = constraint.start();
     assert!(state.commit_token(7));
     assert!(state.commit_token(8));
@@ -768,7 +768,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     let dynamic_fully_bound = open
         .bind_snapshot("child::nested", &leaf)
         .unwrap()
-        .link_with(glrmask::test_modes::MaskMode::C.build_options())
+        .link_with(glrmask::test_modes::MaskMode::B.build_options())
         .unwrap();
     let mut state = dynamic_fully_bound.start();
     assert!(state.commit_token(0));

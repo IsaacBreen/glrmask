@@ -443,7 +443,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
     let source = crate::Grammar::glrm(
         r#"start root; ignore WS; t WS = " "+; nt root = "a" root "b" | "";"#
     );
-    for optimization in [MaskMode::C, MaskMode::ParserDwa] {
+    for optimization in [MaskMode::B, MaskMode::ParserDwa] {
         let fresh = source.compile_with_build_options(
             &vocab,
             optimization.build_options(),

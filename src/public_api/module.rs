@@ -74,10 +74,6 @@ impl CompileOptions {
         self.selected_strategy().token_trie_backend()
     }
 
-    pub(crate) fn merge_equivalent_tokens(&self) -> bool {
-        self.selected_strategy().merges_tokens()
-    }
-
     /// The TokenTrie parser backend for these options.
     fn token_trie_backend(&self) -> crate::runtime::parser_backend::DynamicParserBackend {
         token_trie_backend(self.selected_strategy().token_trie_backend())
@@ -92,12 +88,6 @@ impl InternalMaskStrategy {
         }
     }
 
-    pub(crate) fn merges_tokens(self) -> bool {
-        match self {
-            Self::TokenTrie(settings) => settings.merges(),
-            _ => false,
-        }
-    }
 }
 
 /// A value that can be bound to an extern.
@@ -261,13 +251,10 @@ fn own_local(grammar: &Grammar) -> Grammar {
 }
 
 /// The best retained preparation, in mask-speed order: `ParserDwa` (key 1),
-/// merged `TokenTrie` (key 3), then a retained template-DFA `TokenTrie` shell
-/// (key 2).
+/// then a retained template-DFA `TokenTrie` shell (key 2).
 fn best_retained(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<Engine> {
     if prepared.contains_key(&Engine::ParserDwa.key()) {
         Some(Engine::ParserDwa)
-    } else if prepared.contains_key(&Engine::MergedTokenTrie.key()) {
-        Some(Engine::MergedTokenTrie)
     } else if prepared.contains_key(&Engine::TokenTrie.key()) {
         Some(Engine::TokenTrie)
     } else {
@@ -280,8 +267,7 @@ fn preparation_strength(engine: Engine) -> u8 {
     match engine {
         Engine::Auto => 0,
         Engine::TokenTrie => 1,
-        Engine::MergedTokenTrie => 2,
-        Engine::ParserDwa => 3,
+        Engine::ParserDwa => 2,
     }
 }
 
@@ -328,17 +314,6 @@ fn plan_node(
             engine: Engine::ParserDwa,
             backend: ParserBackend::TemplateDfa,
         },
-        Engine::MergedTokenTrie => NodePlan {
-            engine: match retained {
-                Some(Engine::ParserDwa) | Some(Engine::MergedTokenTrie) => retained.unwrap(),
-                _ => Engine::MergedTokenTrie,
-            },
-            backend: if any_retained {
-                ParserBackend::TemplateDfa
-            } else {
-                requested_backend
-            },
-        },
         Engine::TokenTrie => match retained {
             Some(engine) => NodePlan {
                 engine,
@@ -356,11 +331,10 @@ fn plan_node(
     }
 }
 
-/// A node plan with an LR-table TokenTrie body retains nothing: an LR merged
-/// body is not kept either, exactly like an unmerged LR TokenTrie build.
+/// A node plan with an LR-table TokenTrie body retains nothing.
 fn retains_nothing(plan: NodePlan) -> bool {
     plan.backend == ParserBackend::LrTable
-        && matches!(plan.engine, Engine::TokenTrie | Engine::MergedTokenTrie)
+        && plan.engine == Engine::TokenTrie
 }
 
 pub(crate) fn target_boundary() -> BoundaryTriggerDetail {
@@ -870,15 +844,6 @@ impl Module {
         let declared = source.declarations()?;
         source.validate_ebnf(vocab)?;
         source.validate_exact_target(vocab)?;
-        // A typed template decline must survive so the public boundary can
-        // attempt the rescue; only real failures are rewrapped.
-        let token_class_error = |e: Error| {
-            if e.is_strategy_decline() {
-                e
-            } else {
-                Error::Compilation(format!("cannot merge equivalent tokens for this grammar: {e}"))
-            }
-        };
         let mut inner = match engine {
             // Only a mixed compile prepares a TOKEN_TRIE module: a dynamic shell
             // on the table-free parser keeps its extern slots, so it composes
@@ -888,37 +853,6 @@ impl Module {
                 vocab,
                 backend,
             )?,
-            Engine::MergedTokenTrie => match source.source {
-                GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
-                    if backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
-                        crate::import::compile_component_shell_balanced_lr(source.component()?, vocab, &[])
-                            .map_err(token_class_error)?
-                    } else {
-                        crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
-                            .map_err(token_class_error)?
-                    }
-                }
-                _ => {
-                    let dynamic = if backend == crate::runtime::parser_backend::DynamicParserBackend::LrTable {
-                        match &source.source {
-                            GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_vocab_partition(s, vocab),
-                            GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_vocab_partition(s, vocab),
-                            _ => unreachable!(),
-                        }
-                    } else {
-                        match &source.source {
-                            GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_bounded_template_parser(s, vocab),
-                            GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_bounded_template_parser(s, vocab),
-                            _ => unreachable!(),
-                        }
-                    }.map_err(token_class_error)?;
-                    let mut components = dynamic.into_constraints();
-                    if components.len() != 1 {
-                        return Err(Error::Compilation("cannot merge equivalent tokens in a grammar made of several parts".into()));
-                    }
-                    components.pop().unwrap()
-                }
-            },
             Engine::Auto | Engine::ParserDwa => {
                 #[cfg(test)]
                 if self
@@ -946,11 +880,6 @@ impl Module {
         };
 
         let _ = inner.late_bind_vocab.set(vocab.clone());
-        if engine == Engine::MergedTokenTrie
-            && backend != crate::runtime::parser_backend::DynamicParserBackend::LrTable
-        {
-            inner.install_template_parser_from_compile()?;
-        }
         if build_boundary {
             inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
         }
@@ -1070,8 +999,6 @@ impl Module {
         }
         // TOKEN_TRIE without retained static work compiles the whole
         // composition as one ordinary Dynamic grammar, inlined at source level.
-        // Merged requests take the same path so that a merged composition from
-        // scratch computes one partition over the flattened grammar.
         // Over retained static work it is mixed: retained parts stay static and
         // every other module is compiled as its own dynamic component.
         let requested = options.engine()?;
@@ -1082,7 +1009,7 @@ impl Module {
         if whole {
             let result = self.flatten_source()?.compile_requested_token_trie(
                     vocab, BoundaryTriggerDetail::TokenSet,
-                    options.parser_backend(), options.merge_equivalent_tokens(),
+                    options.parser_backend(),
                 ).and_then(|c| c.with_end_tokens(end_tokens));
             let result = match result {
                 Err(error) if options.prefers_fast_compile() && options.can_fallback(&error) => {
@@ -1134,7 +1061,6 @@ impl Module {
                                 vocab,
                                 BoundaryTriggerDetail::TokenSet,
                                 options.parser_backend(),
-                                options.merge_equivalent_tokens(),
                             )?
                             .with_end_tokens(end_tokens)?;
                         return Ok(constraint);
@@ -1328,7 +1254,7 @@ pub(crate) mod static_build_probe {
         }
         entry.1 += 1;
     }
-    /// Static preparations (ParserDwa and merged) built so far for this
+    /// Retained preparations (ParserDwa and template-backed TokenTrie) built so far for this
     /// module's grammar.
     pub(crate) fn builds(m: &Module) -> usize {
         let source = key(m);
@@ -1544,27 +1470,27 @@ mod precompile_boundary_tests {
         let vocab = vocab();
         let source = Grammar::from_ebnf(r#"start ::= "x" | "xy""#).unwrap();
         let mut strong = Module::new(&source);
-        let mut merged = Module::new(&source);
+        let mut trie = Module::new(&source);
         let fast = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
         let masks = CompileOptions::default().mask_strategy(MaskStrategy::FAST_MASKS);
         strong.precompile_with(&vocab, masks.clone()).unwrap();
-        merged.precompile_with(&vocab, MaskMode::C.compile_options()).unwrap();
+        trie.precompile_with(&vocab, MaskMode::B.compile_options()).unwrap();
         let strong_artifact = strong.node.prepared[&Engine::ParserDwa.key()].clone();
-        let merged_artifact = merged.node.prepared[&Engine::MergedTokenTrie.key()].clone();
+        let trie_artifact = trie.node.prepared[&Engine::TokenTrie.key()].clone();
         let nstrong = static_build_probe::builds_for(&strong, Engine::ParserDwa);
-        let nmerged = static_build_probe::builds_for(&merged, Engine::MergedTokenTrie);
+        let ntrie = static_build_probe::builds_for(&trie, Engine::TokenTrie);
         let host = Grammar::from_glrm("extern grammar A extern grammar B start s nt s = A B").unwrap();
         let mut parent = Module::new(&host);
         parent.bind("A", strong.clone()).unwrap();
-        parent.bind("B", merged.clone()).unwrap();
+        parent.bind("B", trie.clone()).unwrap();
         parent.precompile_with(&vocab, fast.clone()).unwrap();
         let BoundValue::Module(a) = parent.node.bindings.get("A").unwrap() else { panic!("A"); };
         let BoundValue::Module(b) = parent.node.bindings.get("B").unwrap() else { panic!("B"); };
         assert!(Arc::ptr_eq(&a.node.prepared[&Engine::ParserDwa.key()], &strong_artifact));
         assert!(Arc::ptr_eq(&b.node.prepared[&Engine::ParserDwa.key()], &strong_artifact));
-        assert!(Arc::ptr_eq(&b.node.prepared[&Engine::MergedTokenTrie.key()], &merged_artifact));
+        assert!(Arc::ptr_eq(&b.node.prepared[&Engine::TokenTrie.key()], &trie_artifact));
         assert_eq!(static_build_probe::builds_for(&strong, Engine::ParserDwa), nstrong);
-        assert_eq!(static_build_probe::builds_for(&merged, Engine::MergedTokenTrie), nmerged);
+        assert_eq!(static_build_probe::builds_for(&trie, Engine::TokenTrie), ntrie);
         let actual = parent.compile_inner_with(&vocab, fast).unwrap();
         let mut fresh = Module::new(&host);
         fresh.bind("A", Module::new(&source)).unwrap();
@@ -1578,8 +1504,8 @@ mod precompile_boundary_tests {
         let vocab = vocab();
         let source = Grammar::from_ebnf(r#"start ::= "x" | "xy""#).unwrap();
         let mut child = Module::new(&source);
-        child.precompile_with(&vocab, MaskMode::C.compile_options()).unwrap();
-        let artifact = child.node.prepared[&Engine::MergedTokenTrie.key()].clone();
+        child.precompile_with(&vocab, MaskMode::B.compile_options()).unwrap();
+        let artifact = child.node.prepared[&Engine::TokenTrie.key()].clone();
         let host = Grammar::from_glrm("extern grammar A extern grammar B start s nt s = A B").unwrap();
         let mut parent = Module::new(&host);
         parent.bind("A", child.clone()).unwrap();
@@ -1588,7 +1514,7 @@ mod precompile_boundary_tests {
         parent.precompile_with(&vocab, CompileOptions::default()).unwrap();
         let BoundValue::Module(a) = parent.node.bindings.get("A").unwrap() else { panic!("A"); };
         let BoundValue::Module(b) = parent.node.bindings.get("B").unwrap() else { panic!("B"); };
-        assert!(Arc::ptr_eq(&a.node.prepared[&Engine::MergedTokenTrie.key()], &artifact));
+        assert!(Arc::ptr_eq(&a.node.prepared[&Engine::TokenTrie.key()], &artifact));
         assert!(Arc::ptr_eq(&a.node.prepared[&Engine::ParserDwa.key()], &b.node.prepared[&Engine::ParserDwa.key()]));
         assert_eq!(static_build_probe::builds_for(&child, Engine::ParserDwa), before + 1);
     }

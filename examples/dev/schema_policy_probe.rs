@@ -92,7 +92,6 @@ fn main() {
         None | Some("fast-build") | Some("token-trie") => MaskMode::A,
         Some("fast-runtime") | Some("parser-dwa") => MaskMode::ParserDwa,
         Some("template-dfas") => MaskMode::B,
-        Some("merge-equivalent-tokens") => MaskMode::C,
         Some(other) => { eprintln!("unknown --mode {other:?}"); std::process::exit(2); }
     };
     let vocab = Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect::<Vec<_>>()).unwrap();

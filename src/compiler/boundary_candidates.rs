@@ -1270,7 +1270,7 @@ mod tests {
         use crate::{Grammar, ParserBackend};
         let vocabulary = crate::Vocab::from_entries_unchecked(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
-        let options = || MaskMode::C.build_options()
+        let options = || MaskMode::B.build_options()
             .parser_backend(ParserBackend::TemplateDfa);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#).unwrap()
             .compile_with_build_options(&vocabulary, options()).unwrap();
@@ -1699,7 +1699,7 @@ mod preparation_tests {
             (3, b"b".to_vec()),
             (4, b"ba".to_vec()),
         ]);
-        for optimization in [MaskMode::C, MaskMode::ParserDwa] {
+        for optimization in [MaskMode::B, MaskMode::ParserDwa] {
             let source = crate::Grammar::from_glrm(
                 r#"glrm 1; start document; nt document = "a";"#,
             ).unwrap()
@@ -1732,7 +1732,7 @@ mod preparation_tests {
     fn persisted_pre_nullable_fix_proof_is_rejected_before_composition() {
         let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"X[a]!".to_vec()),
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-        let options = MaskMode::C.build_options()
+        let options = MaskMode::B.build_options()
             .parser_backend(crate::ParserBackend::TemplateDfa);
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options.clone()).unwrap();

@@ -247,9 +247,8 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
     glrmask_json_schema::__private::set_test_compat_mode(enabled);
 }
 
-/// The five mask configurations the test suite exercises: `Auto`, `ParserDwa`,
-/// and TokenTrie with neither switch (A), template DFAs only (B), and both
-/// switches (C). Test scaffold only.
+/// The four mask configurations: Auto, ParserDwa, LR TokenTrie (A),
+/// and template-backed TokenTrie (B). Test scaffold only.
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub mod test_modes {
@@ -261,42 +260,34 @@ pub mod test_modes {
         ParserDwa,
         A,
         B,
-        C,
-        D,
     }
 
     impl MaskMode {
-        pub const ALL: [Self; 6] = [Self::Auto, Self::ParserDwa, Self::A, Self::B, Self::C, Self::D];
+        pub const ALL: [Self; 4] = [Self::Auto, Self::ParserDwa, Self::A, Self::B];
 
         pub fn strategy(self) -> InternalMaskStrategy {
             match self {
                 Self::Auto => InternalMaskStrategy::Auto,
                 Self::ParserDwa => InternalMaskStrategy::ParserDwa,
-                Self::A | Self::B | Self::C | Self::D => InternalMaskStrategy::TokenTrie(
+                Self::A | Self::B => InternalMaskStrategy::TokenTrie(
                     TokenTrie::new()
-                        .parser_backend(self.parser_backend())
-                        .merge_equivalent_tokens(self.merge_equivalent_tokens()),
+                        .parser_backend(self.parser_backend()),
                 ),
             }
         }
 
         pub fn parser_backend(self) -> ParserBackend {
-            if matches!(self, Self::B | Self::C) {
+            if self == Self::B {
                 ParserBackend::TemplateDfa
             } else {
                 ParserBackend::LrTable
             }
         }
 
-        pub fn merge_equivalent_tokens(self) -> bool {
-            matches!(self, Self::C | Self::D)
-        }
-
         pub fn build_options(self) -> BuildOptions {
             BuildOptions::default()
                 .optimization(self.strategy())
                 .engine_backend(self.parser_backend())
-                .merge_equivalent_tokens(self.merge_equivalent_tokens())
         }
 
         pub fn compile_options(self) -> CompileOptions {

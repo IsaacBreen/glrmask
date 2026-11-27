@@ -2,7 +2,7 @@ use glrmask::test_modes::MaskMode;
 use glrmask::{ConstraintInner as Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 
 const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
-const MODES: [MaskMode; 6] = MaskMode::ALL;
+const MODES: [MaskMode; 4] = MaskMode::ALL;
 
 fn allowed(mask: &[u32], token: u32) -> bool {
     mask.get(token as usize / 32).is_some_and(|word| word & (1 << (token % 32)) != 0)

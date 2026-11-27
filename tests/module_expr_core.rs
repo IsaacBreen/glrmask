@@ -72,7 +72,7 @@ fn compile_options_apply_to_the_whole_compile_and_are_atomic() {
     let v = vocab();
     let mut child = Module::new(&a());
     child
-        .precompile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
+        .precompile_with(&v, glrmask::test_modes::MaskMode::B.compile_options())
         .unwrap();
     let _bytes = child.save();
 

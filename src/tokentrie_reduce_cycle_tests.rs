@@ -231,7 +231,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
     let mut compiled_modes = Vec::new();
     let mut modes = vec![MaskMode::A];
     if try_auxiliary_backends {
-        modes.push(MaskMode::C);
+        modes.push(MaskMode::B);
         modes.push(MaskMode::ParserDwa);
     }
     for mode in modes {

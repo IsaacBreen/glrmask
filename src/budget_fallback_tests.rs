@@ -368,7 +368,7 @@ fn fuzz_seeds_return_typed_decline_under_tiny_budget() {
                 .unwrap_or_else(|error| panic!("start={} Auto must fall back: {error}", case.start));
             check_exact_oracle(&auto, case);
         }
-        for strategy in [MaskMode::C, MaskMode::ParserDwa] {
+        for strategy in [MaskMode::ParserDwa] {
             let _ = {
                 let _limit = TestBudgetLimit::set(1_000);
                 expect_strategy_decline(
@@ -389,7 +389,7 @@ fn forced_tiny_budget_returns_typed_decline() {
     };
     let reference = compile_case(SMALL, MaskMode::A);
     check_exact_oracle(&reference, SMALL);
-    for strategy in [MaskMode::C, MaskMode::ParserDwa] {
+    for strategy in [MaskMode::ParserDwa] {
         let _ = {
             let _limit = TestBudgetLimit::set(1);
             expect_strategy_decline(
@@ -468,7 +468,7 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
         10 * REAL_GRAMMAR_MAX_UNITS,
     );
     for (name, source) in REAL_GRAMMARS {
-        for strategy in [MaskMode::C, MaskMode::ParserDwa] {
+        for strategy in [MaskMode::ParserDwa] {
             let grammar = if name.ends_with(".lark") {
                 Grammar::from_lark(source).unwrap()
             } else {

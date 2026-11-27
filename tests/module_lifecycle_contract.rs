@@ -16,7 +16,7 @@ fn construction_and_compile_options_do_not_change_the_source_grammar() {
     let v = vocab();
     let default_mask = module.compile(&v).unwrap().start().mask();
     let explicit_mask = module
-        .compile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
+        .compile_with(&v, glrmask::test_modes::MaskMode::B.compile_options())
         .unwrap()
         .start()
         .mask();

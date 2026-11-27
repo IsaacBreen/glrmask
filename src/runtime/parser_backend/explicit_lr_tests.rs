@@ -28,7 +28,7 @@ fn native(vocab: &crate::Vocab, source: &str) -> crate::runtime::Constraint {
     Grammar::from_ebnf(source).unwrap()
         .compile_with_build_options(
             vocab,
-            MaskMode::C.build_options(),
+            MaskMode::B.build_options(),
         )
         .expect("native template compile")
 }

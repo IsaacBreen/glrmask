@@ -435,7 +435,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 2. Auto reuses retained TokenClassTrie
     let mut m_tct = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
-    m_tct.precompile_with(&v, glrmask::test_modes::MaskMode::C.compile_options())
+    m_tct.precompile_with(&v, glrmask::test_modes::MaskMode::B.compile_options())
         .unwrap();
     let c_tct = m_tct.compile(&v).unwrap();
     let mut s_tct = c_tct.start();
