@@ -5875,8 +5875,6 @@ fn compile_prepared_with_profile_and_table_construction(
             late_bind_vocab: std::sync::OnceLock::from(vocab.clone()),
             pending_vocab_fingerprint: None,
             pending_special_token_ids: None,
-            scoped_ignore_only_tokens: Vec::new(),
-            scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
             packed_parser_dwa: None,
             parser_start_final_override: None,

@@ -7,11 +7,7 @@ use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
-use crate::compiler::glr::parser::{
-    lookahead_reduction_factor,
-    lookahead_reduction_factor_row_subset,
-    ParserGSS,
-};
+use crate::compiler::glr::parser::ParserGSS;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
@@ -239,12 +235,6 @@ fn set_original_mask_bit(buf: &mut [u32], token_id: u32) {
     if let Some(slot) = buf.get_mut(word) {
         *slot |= 1u32 << bit;
     }
-}
-
-#[inline(always)]
-fn original_mask_contains(buf: &[u32], token_id: u32) -> bool {
-    buf.get(token_id as usize / 32)
-        .is_some_and(|word| word & (1u32 << (token_id % 32)) != 0)
 }
 
 /// Test-only switch for the segmented-mask stage trace. Enabled by
@@ -4792,24 +4782,6 @@ impl ConstraintState {
         true
     }
 
-    /// Two-DWA runtime: the ordinary mask hot path evaluates deterministic A
-    /// (`constraint.parser_dwa`) first, then ORs deterministic boundary DWA B.
-    /// The legacy segmented-component experiment already evaluates B inside its
-    /// own path, so only apply this overlay when there are no component
-    /// segments.
-    fn or_two_dwa_boundary_parser_mask(&self, buf: &mut [u32]) -> bool {
-        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
-            return true;
-        };
-        if !overlay.segmented_parser_components.is_empty() {
-            return true;
-        }
-        if !self.or_segmented_boundary_shards_mask(overlay, buf) {
-            return false;
-        }
-        true
-    }
-
     /// Exact overlay for an out-of-vocabulary special token reached only after
     /// a linker control chain. Ordinary parser-DWA weights remain the fast path;
     /// constraints without explicit controls pay nothing here.
@@ -6858,243 +6830,6 @@ impl ConstraintState {
         buf
     }
 
-    // Fill `buf` with the allowed-token mask.
-    //
-    // `buf` must contain at least `constraint.mask_bit_len().div_ceil(32)` words. Any extra
-    // words are cleared.
-    fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {
-        let reset_state = self.constraint.runtime_commit_initial_state();
-        let mut shadow = self.clone();
-        shadow.state.clear();
-        shadow.state.insert_flat_alternative(reset_state, gss.clone());
-        if let Some(factored) = shadow.lookahead_factored_mask_shadow() {
-            factored.fill_mask_uncached(buf);
-        } else {
-            shadow.fill_mask_uncached(buf);
-        }
-        shadow.update_control_special_token_mask(buf);
-    }
-
-    fn add_admissible_scoped_ignore_tokens(&self, buf: &mut [u32]) {
-        if self.constraint.static_dynamic_overlay.is_none()
-            || crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
-        {
-            return;
-        }
-        let reset_state = self.constraint.runtime_commit_initial_state();
-        let use_fusions = crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_FUSIONS").is_some();
-        let use_residual_possible_matches =
-            crate::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_RESIDUAL_PM").is_some();
-        let mut suffix_mask = use_fusions.then(|| vec![0u32; buf.len()]);
-        let mut candidate_mask = use_fusions.then(|| vec![0u32; buf.len()]);
-        for (&tokenizer_state, gss) in self.state.iter() {
-            if use_residual_possible_matches
-                && tokenizer_state != reset_state
-                && gss.all_accs_satisfy(|blocked: &TerminalsDisallowed| blocked.is_empty())
-            {
-                for &terminal in self.constraint.parser_skip_terminals() {
-                    if !super::commit::parser_may_advance_on(&self.constraint, gss, terminal) {
-                        continue;
-                    }
-                    self.constraint.visit_possible_match_original_tokens(
-                        tokenizer_state,
-                        terminal,
-                        |token| set_original_mask_bit(buf, token),
-                    );
-                }
-            }
-            if tokenizer_state != reset_state
-                || !gss.all_accs_satisfy(|blocked: &TerminalsDisallowed| blocked.is_empty())
-            {
-                continue;
-            }
-            for (terminal, tokens) in &self.constraint.scoped_ignore_only_tokens {
-                if !super::commit::parser_may_advance_on(&self.constraint, gss, *terminal) {
-                    continue;
-                }
-                for &token in tokens.iter() {
-                    set_original_mask_bit(buf, token);
-                }
-                if !use_fusions {
-                    continue;
-                }
-                let Some((_, fusions)) = self
-                    .constraint
-                    .scoped_ignore_prefix_fusions
-                    .iter()
-                    .find(|(candidate, _)| candidate == terminal)
-                else {
-                    continue;
-                };
-                let suffix_mask = suffix_mask
-                    .as_deref_mut()
-                    .expect("fusion suffix mask was requested");
-                suffix_mask.fill(0);
-                // A completed Skip inside one model token resets the lexer but
-                // leaves this exact parser GSS unchanged. Test the remaining
-                // suffix against *that branch-local reset state*, never against
-                // the global union mask: another residual tokenizer branch may
-                // admit the same suffix token for unrelated reasons.
-                self.static_mask_for_reset_branch(gss, suffix_mask);
-                for &(fused, suffix) in fusions.iter() {
-                    if original_mask_contains(suffix_mask, suffix) {
-                        set_original_mask_bit(
-                            candidate_mask
-                                .as_deref_mut()
-                                .expect("fusion candidate mask was requested"),
-                            fused,
-                        );
-                    }
-                }
-            }
-        }
-        if let Some(candidate_mask) = candidate_mask.as_deref()
-            && candidate_mask.iter().any(|&word| word != 0)
-        {
-            super::dynamic_mask::or_mask_dynamic_candidate_additions(self, buf, candidate_mask);
-        }
-    }
-
-    fn lookahead_factored_mask_shadow(&self) -> Option<Box<Self>> {
-        if self.constraint.has_template_parser() { return None; }
-        if self.constraint.static_dynamic_overlay.is_none()
-            || crate::env::var_os("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR").is_none()
-        {
-            return None;
-        }
-
-        // Two factors are sufficient to expose the parent continuation for the
-        // nested-subgrammar return shape. Keep the experiment configurable for
-        // differential work, but do not accumulate every intermediate factor:
-        // only the deepest certified subset can add anything the shallower
-        // subset could add, while carrying at least the same lookahead guards.
-        let max_factor_depth = crate::env::var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(2)
-            .min(8);
-        let mut additions = SmallVec::<[(u32, ParserGSS); 4]>::new();
-        for (&tokenizer_state, gss) in self.state.iter() {
-            let mut factor = gss.clone();
-            let mut blocked = SmallVec::<[TerminalID; 8]>::new();
-            let mut deepest = None::<ParserGSS>;
-            let use_fast_factor = crate::env::var_os(
-                "GLRMASK_EXPERIMENT_FAST_LOOKAHEAD_FACTOR",
-            )
-            .is_some();
-            let mut chain_forced = None::<BitSet>;
-            let mut final_after = None::<BitSet>;
-            let mut fast_guard_representable = true;
-            for _ in 0..max_factor_depth {
-                if use_fast_factor
-                    && let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref()
-                    && !overlay.non_parent_only_parser_states.is_empty()
-                {
-                    let Some(top) = factor.single_exclusive_top_value() else {
-                        break;
-                    };
-                    if !overlay
-                        .non_parent_only_parser_states
-                        .get(top as usize)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        break;
-                    }
-                }
-                let next = if use_fast_factor {
-                    let Some((next, forced, after)) =
-                        lookahead_reduction_factor_row_subset(&self.constraint.table, &factor)
-                    else {
-                        break;
-                    };
-                    chain_forced = Some(match chain_forced.take() {
-                        None => forced,
-                        Some(existing) => {
-                            let not_forced = existing.difference(&forced);
-                            existing.difference(&not_forced)
-                        }
-                    });
-                    final_after = Some(after);
-                    next
-                } else {
-                    let Some((next, newly_blocked)) =
-                        lookahead_reduction_factor(&self.constraint.table, &factor)
-                    else {
-                        break;
-                    };
-                    for terminal in newly_blocked {
-                        if !blocked.contains(&terminal) {
-                            blocked.push(terminal);
-                        }
-                    }
-                    next
-                };
-                factor = next;
-                deepest = Some(factor.clone());
-            }
-            let Some(deepest) = deepest else {
-                continue;
-            };
-            if use_fast_factor {
-                blocked.clear();
-                let Some(chain_forced) = chain_forced.as_ref() else {
-                    continue;
-                };
-                let Some(final_after) = final_after.as_ref() else {
-                    continue;
-                };
-                for bit in final_after.difference(chain_forced).iter_ones() {
-                    if bit >= self.constraint.parser_terminal_count() as usize {
-                        fast_guard_representable = false;
-                        break;
-                    }
-                    blocked.push(bit as TerminalID);
-                }
-                if !fast_guard_representable {
-                    continue;
-                }
-            }
-            let guarded = deepest.apply(|acc: &TerminalsDisallowed| {
-                let mut guarded = acc.clone();
-                for &terminal in &blocked {
-                    guarded = guarded.with_insert(tokenizer_state, terminal);
-                }
-                guarded
-            });
-            additions.push((tokenizer_state, guarded));
-        }
-        if additions.is_empty() {
-            return None;
-        }
-
-        // This is a mask-only speculative view. Do not clone the full
-        // ConstraintState: its Clone intentionally rebuilds a complete
-        // MaskScratch tree (including nested component initial masks), and
-        // returning that large state by value also creates a large caller
-        // return slot even when this experiment is disabled. Deep recursive
-        // composition can therefore overflow the test/runtime thread stack
-        // before the early `None` is observed. A boxed shallow shadow needs
-        // only fresh commit scratch and can safely reuse the caller's mask
-        // scratch sequentially.
-        let mut shadow = Box::new(ConstraintState {
-            terminated: false,
-            markers: None,
-            constraint: self.constraint.clone(),
-            state: self.state.clone(),
-            buffers: CommitBuffers::for_constraint(&self.constraint),
-            generation: self.generation,
-            mask_cache: Mutex::new(None),
-            mask_scratch: Arc::clone(&self.mask_scratch),
-        });
-        for (tokenizer_state, factored) in additions {
-            shadow
-                .state
-                .insert_flat_alternative(tokenizer_state, factored);
-        }
-        Some(shadow)
-    }
-
     /// Like `mask()`, but writes the words into `buf`. Extra words are set to 0.
     ///
     /// # Panics
@@ -7252,38 +6987,7 @@ impl ConstraintState {
         }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
-            let factor_profile = crate::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
-            let factor_started = factor_profile.then(Instant::now);
-            if let Some(shadow) = self.lookahead_factored_mask_shadow() {
-                let factor_ns = factor_started.map_or(0, elapsed_ns);
-                let fill_started = factor_profile.then(Instant::now);
-                shadow.fill_mask_uncached(mask);
-                if !shadow.or_two_dwa_boundary_parser_mask(mask) {
-                    mask.fill(0);
-                }
-                if let Some(fill_started) = fill_started {
-                    eprintln!(
-                        "[glrmask/profile][lookahead_factor] built_ns={} fill_ns={} original_branches={} shadow_branches={}",
-                        factor_ns,
-                        elapsed_ns(fill_started),
-                        self.state.len(),
-                        shadow.state.len(),
-                    );
-                }
-                self.store_mask_cache_reuse_dense(mask);
-            } else {
-                if let Some(factor_started) = factor_started {
-                    eprintln!(
-                        "[glrmask/profile][lookahead_factor] built_none_ns={} branches={}",
-                        elapsed_ns(factor_started),
-                        self.state.len(),
-                    );
-                }
-                self.fill_mask_uncached(mask);
-                if !self.or_two_dwa_boundary_parser_mask(mask) {
-                    mask.fill(0);
-                }
-            }
+            self.fill_mask_uncached(mask);
             self.update_control_special_token_mask(mask);
             // Template exact-token admissions are overlaid on the byte DWA.
             // Replace any pre-overlay cached mask before it can be reused.
@@ -7294,7 +6998,6 @@ impl ConstraintState {
                 self.store_mask_cache_reuse_dense(mask);
             }
         }
-        self.add_admissible_scoped_ignore_tokens(mask);
         if crate::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
             super::dynamic_mask::or_mask_dynamic_additions(self, mask);
         }

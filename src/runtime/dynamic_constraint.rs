@@ -1001,8 +1001,6 @@ impl DynamicConstraint {
             late_bind_vocab: std::sync::OnceLock::new(),
             pending_vocab_fingerprint: None,
             pending_special_token_ids: None,
-            scoped_ignore_only_tokens: Vec::new(),
-            scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             packed_parser_dwa: None,
             parser_start_final_override: None,

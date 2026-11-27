@@ -10101,9 +10101,6 @@ mod tests {
         let fast = Constraint::load(std::fs::read(fast_path).unwrap(), &vocab).unwrap();
         let full = Constraint::load(std::fs::read(full_path).unwrap(), &vocab).unwrap();
         unsafe {
-            crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", Some("1"));
-            crate::__private::set_env_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", Some("2"));
-            crate::__private::set_env_var("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY", Some("1"));
             crate::__private::set_env_var("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY", None);
         }
         let prefixes: &[&[u8]] = &[

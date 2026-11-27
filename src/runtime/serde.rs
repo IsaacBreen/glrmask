@@ -55,7 +55,7 @@ const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C26\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C27\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 /// Clone a large already-serialized artifact without forcing one core to move
@@ -6040,8 +6040,6 @@ mod tests {
             assert_eq!(actual.terminal_offset, expected.terminal_offset);
             assert_eq!(actual.tokenizer_state_offset, expected.tokenizer_state_offset);
         }
-        assert_eq!(actual.repair_terminals, expected.repair_terminals);
-        assert_eq!(actual.non_parent_only_parser_states, expected.non_parent_only_parser_states);
         assert_eq!(actual.segmented_parser_components.len(), 2);
         assert_eq!(actual.segmented_parser_links.len(), 1);
         for tokens in [vec![0,1],vec![2]] {
