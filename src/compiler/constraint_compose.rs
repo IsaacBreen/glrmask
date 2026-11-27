@@ -65,7 +65,6 @@ use crate::compiler::stages::templates::compile_dfa::{
 };
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::constraint_possible_matches::{
-    runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
     Action,
@@ -8020,68 +8019,24 @@ pub(crate) fn merged_ignore_terminals(
 
 
 
-fn build_composed_constraint_unfinalized(
-    composed_table: ComposedTable,
-    tokenizer: impl Into<Arc<Tokenizer>>,
+/// A provider-native coordinator owns the shared vocabulary and the global
+/// terminal coordinate, but does not compile a second lexer/parser mask graph.
+fn build_recursive_coordinator(
+    mut table: crate::compiler::glr::table::GLRTable,
+    tokenizer: Arc<Tokenizer>,
     tokenizer_state_offsets: Vec<u32>,
-    parser_state_domain_labels: Vec<i32>,
-    possible_matches: PossibleMatches,
-    internal_ids: InternalIdMap,
+    terminal_offsets: Vec<u32>,
     special_token_terminals: Vec<SpecialTokenTerminal>,
     embedded_end_token_ids: Vec<u32>,
     terminal_display_names: Vec<String>,
-    ignore_terminal: Option<u32>,
-    ignore_expr: Option<crate::automata::regex::Expr>,
-    terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
-    defer_dynamic_mask_vocab: bool,
     vocab: &Vocab,
-    retained_lr_coordinator: bool,
 ) -> ConstraintComposition {
-    let tokenizer = tokenizer.into();
-    let total_started_at = Instant::now();
-    let phase_started_at = Instant::now();
-    let terminal_offsets = composed_table.terminal_offsets.clone();
-    let parser_state_relations = composed_table.state_relations.clone();
-    let relation_clone_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
-    let InternalIdMap {
-        tokenizer_states,
-        vocab_tokens,
-        deferred_vocab_singleton_original_ids,
-    } = internal_ids;
-    debug_assert!(deferred_vocab_singleton_original_ids.is_none());
-    let ManyToOneIdMap {
-        original_to_internal: state_to_internal_tsid,
-        internal_to_originals: internal_tsid_to_states,
-        representative_original_ids: _,
-    } = tokenizer_states;
-    debug_assert!(state_to_internal_tsid.iter().all(|&tsid| tsid != u32::MAX));
-    let ManyToOneIdMap {
-        original_to_internal: original_token_to_internal,
-        internal_to_originals: internal_token_to_tokens,
-        representative_original_ids: _,
-    } = vocab_tokens;
+    let parser_state_relations = vec![Vec::new(); terminal_offsets.len()];
     let tokenizer_has_epsilon_transitions = tokenizer.has_epsilon_transitions();
-    let mut table = composed_table.table;
+    assert!(table.num_states == 0 && table.action.is_empty() && table.goto.is_empty());
     table.set_embedded_end_token_ids(&embedded_end_token_ids);
-    let num_terminals = table.num_terminals as usize;
-    let phase_started_at = Instant::now();
-    let dynamic_mask_vocab = if defer_dynamic_mask_vocab {
-        // The explicit segmented result is a static coordinator: local masks
-        // are authoritative in retained A components and cross-component masks
-        // are authoritative in B. Its own direct-dynamic vocabulary is not on
-        // the normal mask path. Keep it lazy just like a loaded static
-        // constraint; if a future fallback ever requests it,
-        // `dynamic_mask_vocab_for_runtime()` can reconstruct it from
-        // `token_bytes` on demand.
-        crate::runtime::DynamicMaskVocab::default()
-    } else {
-        runtime_dynamic_vocab_for_vocab(vocab)
-    };
-    let dynamic_vocab_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
-    let phase_started_at = Instant::now();
     let token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
-    let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
@@ -8094,45 +8049,30 @@ fn build_composed_constraint_unfinalized(
         pending_vocab_fingerprint: None,
         pending_special_token_ids: None,
         parser_dwa: crate::runtime::ParserDwaStorage::Absent,
-        non_dwa_weights: crate::runtime::NonDwaWeightStorage::Materialized(
-            crate::runtime::NonDwaWeights {
-                // Constraint composition is not allowed to rely on the legacy dynamic
-                // possible-matches fallback. This is the exact transported and
-                // reconciled table from every compiled component.
-                // DO NOT REMOVE OR WEAKEN THIS COMMENT.
-                possible_matches,
-                ..Default::default()
-            },
-        ),
+        non_dwa_weights: Default::default(),
         direct_regular_wide_frontier_acceptance: Vec::new(),
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
         direct_regular_automaton: None,
-        table: if retained_lr_coordinator {
-            // Only a nonexecutable coordinate shell. Actual LR execution stays
-            // in the retained Dynamic leaves; native constructors never use it.
-            assert!(table.num_states==0 && table.action.is_empty() && table.goto.is_empty());
-            crate::runtime::parser_backend::ParserExecutable::explicit(table)
-        } else {table.into()},
+        table: crate::runtime::parser_backend::ParserExecutable::explicit(table),
         terminal_display_names,
         tokenizer,
         boundary_completion_index: None,
         tokenizer_has_epsilon_transitions,
-        ignore_terminal,
+        ignore_terminal: None,
         special_token_terminals,
-        dynamic_mask_vocab,
+        dynamic_mask_vocab: Default::default(),
         lazy_dynamic_mask_vocab: OnceLock::new(),
         empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
         possible_matches_complete: true,
-        tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
-            state_to_internal_tsid, internal_tsid_to_states,
-        ),
+        // No outer TSID quotient is needed by the provider runtime.
+        tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
         composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,
-        terminal_live_states,
-        token_classes: crate::runtime::TokenClasses::mapped(original_token_to_internal, internal_token_to_tokens),
+        terminal_live_states: Vec::new(),
+        token_classes: crate::runtime::TokenClasses::mapped(Vec::new(), Vec::new()),
         token_bytes,
         internal_token_buf_masks: Vec::new(),
         sliding_word_group_buf_masks: Default::default(),
@@ -8167,8 +8107,8 @@ fn build_composed_constraint_unfinalized(
         light_avg_cost_x256: 0,
         internal_token_buf_op_costs: Vec::new(),
         word_group_buf_op_costs: Vec::new(),
-        parser_state_domain_labels,
-        ignore_expr,
+        parser_state_domain_labels: Vec::new(),
+        ignore_expr: None,
         serialized_artifact_cache: None,
         deferred_terminal_exprs_blob: None,
         deferred_terminal_exprs: Default::default(),
@@ -8177,12 +8117,6 @@ fn build_composed_constraint_unfinalized(
         deferred_table_rules_blob: None,
         deferred_table_rules: Default::default(),
     });
-    if compose_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][constraint_unfinalized_build] relation_clone_ms={relation_clone_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} token_bytes_ms={token_bytes_ms:.3} total_ms={:.3}",
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
     ConstraintComposition {
         constraint,
         terminal_offsets,
@@ -8404,58 +8338,21 @@ fn compose_dynamic_recursive_shared_fast(
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers: Vec::new(),
     };
-    let composed_table = ComposedTable {
-        table: shell_table,
-        terminal_offsets: terminal_offsets.clone(),
-        placeholder_terminals: children
-            .iter()
-            .flat_map(CompiledSubgrammarInput::placeholder_terminals)
-            .collect(),
-        placeholder_component_indices: children
-            .iter()
-            .enumerate()
-            .flat_map(|(index, child)| {
-                std::iter::repeat_n(index + 1, 1 + child.additional_placeholder_terminals.len())
-            })
-            .collect(),
-        state_relations: vec![Vec::new(); component_count],
-        boundary_nonterminals: BTreeSet::new(),
-        control_terminals: BTreeSet::new(),
-        appended_parent_action_terminals: BTreeSet::new(),
-    };
     let shell_ms = shell_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let coordinator_started_at = Instant::now();
     let root_tokenizer = parent.tokenizer.clone();
     let root_fast_transitions = parent.tokenizer_fast_transitions.clone();
-    let id_map = InternalIdMap {
-        // DynamicDirect never consumes the coordinator TSID quotient. Keep a
-        // one-class placeholder without building the global state/token partition.
-        tokenizer_states: ManyToOneIdMap {
-            original_to_internal: vec![0],
-            internal_to_originals: vec![vec![0]],
-            representative_original_ids: vec![0],
-        },
-        vocab_tokens: ManyToOneIdMap::empty(),
-        deferred_vocab_singleton_original_ids: None,
-    };
-    let mut result = build_composed_constraint_unfinalized(
-        composed_table,
+    let mut result = build_recursive_coordinator(
+        shell_table,
         root_tokenizer,
         tokenizer_state_offsets.clone(),
-        Vec::new(),
-        Default::default(),
-        id_map,
+        terminal_offsets.clone(),
         special_token_terminals,
         embedded_end_token_ids,
         terminal_display_names,
-        None,
-        None,
-        Vec::new(),
         root_fast_transitions,
-        true,
         vocab,
-        true,
     );
     let coordinator_ms = coordinator_started_at.elapsed().as_secs_f64() * 1000.0;
 
