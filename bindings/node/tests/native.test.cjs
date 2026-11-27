@@ -176,7 +176,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   assert.deepEqual(s.mask(),initial);
   const sharedWords=new Uint32Array(new SharedArrayBuffer(16));
   assert.throws(()=>s.fillMask(sharedWords),/SharedArrayBuffer/);
-  assert.throws(()=>s.fillMask(new Int32Array(new SharedArrayBuffer(16))),TypeError);
+  assert.throws(()=>s.fillMask(new Int32Array(new SharedArrayBuffer(16))),/incorrect typed array element type/);
   const sharedBytes=new Uint8Array(new SharedArrayBuffer(4));
   assert.throws(()=>s.commitBytes(sharedBytes),/SharedArrayBuffer/);
   assert.throws(()=>raw.NativeVocab.fromEntries([0],[sharedBytes],[]),/SharedArrayBuffer/);
