@@ -378,6 +378,30 @@ pub(crate) fn execute_tokenizer_reusable_from_states(
     true
 }
 
+/// The commit kernel only observes end-state and match slices. The common
+/// deterministic path reuses the result's allocation; epsilon execution uses
+/// bounded scratch and declines to the exact lexer on capacity overflow.
+/// Recursive lanes keep their existing alias-aware scoped match normalization.
+pub(super) fn scan_commit_lane<'a>(
+    constraint: &Constraint,
+    bytes: &[u8],
+    start_state: u32,
+    scratch: &'a mut ReusableTokenizerExecScratch,
+    fallback: &'a mut TokenizerExecResult,
+    reference: bool,
+) -> (&'a [u32], &'a [crate::automata::lexer::tokenizer::TokenizerMatch]) {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        *fallback = execute_tokenizer_from_state_small(constraint, bytes, start_state);
+    } else if !reference && constraint.tokenizer_has_epsilon_transitions
+        && execute_tokenizer_reusable(constraint, bytes, start_state, scratch)
+    {
+        return (&scratch.states, &scratch.matches);
+    } else {
+        execute_tokenizer_from_state_small_into(constraint, bytes, start_state, fallback);
+    }
+    (&fallback.end_state, &fallback.matches)
+}
+
 pub(super) fn execute_tokenizer_from_state_small(
     constraint: &Constraint,
     bytes: &[u8],

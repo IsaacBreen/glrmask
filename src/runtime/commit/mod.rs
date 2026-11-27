@@ -57,8 +57,8 @@ use self::profile::{
 use self::template_advance::advance_stacks_template_dfa_owned;
 pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
-    execute_recursive_tokenizer_reusable, execute_tokenizer_from_state_small,
-    execute_tokenizer_reusable, execute_tokenizer_reusable_from_states,
+    execute_tokenizer_from_state_small, scan_commit_lane,
+    execute_tokenizer_reusable_from_states,
 };
 
 /// An offset bucket is usually one or two lexer lanes. Larger frontiers
@@ -1815,29 +1815,6 @@ fn advance_uniform_disallowed_interest_only(
     Some(TerminalsDisallowed::from_map(remapped))
 }
 
-fn collect_unique_actionable_reusable_matches(
-    constraint: &Constraint,
-    actionable_terminals: Option<&ActionableTerminals>,
-    ignore_terminal: Option<u32>,
-    matches: &[TokenizerMatch],
-) -> SmallVec<[NormalizedMatch; 16]> {
-    // `execute_tokenizer_reusable*` canonicalizes to one record per terminal at
-    // its longest width, so no second duplicate-removal pass is needed here.
-    let mut normalized = SmallVec::<[NormalizedMatch; 16]>::new();
-    for matched in matches {
-        let ignored = runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id);
-        if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
-            continue;
-        }
-        normalized.push(NormalizedMatch {
-            terminal_id: matched.id,
-            width: matched.width,
-            ignored,
-        });
-    }
-    normalized
-}
-
 fn collect_unique_actionable_matches(
     constraint: &Constraint,
     actionable_terminals: Option<&ActionableTerminals>,
@@ -2204,20 +2181,6 @@ fn finalize_pending_state(pending_state: &mut ParserStatesByTokenizer) -> Parser
     state
 }
 
-fn apply_future_terminal_disallow(
-    constraint: &Constraint,
-    exec_result: &TokenizerExecResult,
-    terminal: u32,
-    gss: ParserGSS,
-) -> ParserGSS {
-    apply_future_terminal_disallow_for_states(
-        constraint,
-        &exec_result.end_state,
-        terminal,
-        gss,
-    )
-}
-
 fn apply_future_terminal_disallow_for_states(
     constraint: &Constraint,
     end_states: &[u32],
@@ -2391,6 +2354,7 @@ fn apply_single_top_action_fast(
     }
 }
 
+#[cfg(test)]
 fn try_apply_action_to_carried_virtual_stack(
     stack: &mut crate::ds::leveled_gss::VirtualStack<u32, TerminalsDisallowed>,
     action: &Action,
@@ -2587,7 +2551,7 @@ fn advance_terminal_match(
     constraint: &Constraint,
     gss_at_offset: &ParserGSS,
     terminal: u32,
-    exec_result: &TokenizerExecResult,
+    end_states: &[u32],
     advance_result_cache: &mut AdvanceResultCache,
     terminal_result_cache: &mut FxHashMap<u32, ParserGSS>,
 ) -> Option<ParserGSS> {
@@ -2605,7 +2569,7 @@ fn advance_terminal_match(
         advanced
     };
 
-    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
+    let advanced = apply_future_terminal_disallow_for_states(constraint, end_states, terminal, advanced);
     terminal_result_cache.insert(terminal, advanced.clone());
     (!advanced.is_empty()).then_some(advanced)
 }
@@ -2694,7 +2658,7 @@ fn commit_bytes_impl_profiled(
         n_tokenizer_states: state.len() as u64,
         ..CommitProfile::default()
     };
-    commit_worklist(
+    commit_worklist::<_, true>(
         constraint, state, bytes, bufs, &mut NoMarkers,
         Some(&mut profile), advances, !allow_fast_paths,
     )?;
@@ -2774,7 +2738,7 @@ fn commit_bytes_impl_observed<O: CommitObserver>(
     bufs: &mut CommitBuffers,
     observer: &mut O,
 ) -> Result<(), String> {
-    commit_bytes_impl_inner_observed(constraint, state, bytes, bufs, observer)?;
+    commit_worklist::<_, false>(constraint, state, bytes, bufs, observer, None, None, false)?;
     finish_commit_frontier(constraint, state, bytes.len(), observer)
 }
 
@@ -2813,14 +2777,12 @@ fn finish_commit_frontier<O: CommitObserver>(
     Ok(())
 }
 
-fn commit_bytes_impl_inner_observed<O: CommitObserver>(
+fn try_wide_lexer_only(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
-    bufs: &mut CommitBuffers,
-    observer: &mut O,
-) -> Result<(), String> {
-    if bytes.is_empty() { return Ok(()); }
+) -> Option<Result<(), String>> {
+    if bytes.is_empty() { return None; }
     let has_linker_controls = constraint.parser_has_controls()
         || constraint.uses_compact_segmented_parser_runtime();
     // A wide direct-regular frontier already carries its exact actionable
@@ -2847,27 +2809,27 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
                 bytes,
             ) else {
                 state.clear();
-                return Err("commit rejected: no valid parser states remain".to_string());
+                return Some(Err("commit rejected: no valid parser states remain".to_string()));
             };
             if !wide_frontier_end_state_may_advance(constraint, summary, end_state) {
                 state.clear();
-                return Err("commit rejected: no valid parser states remain".to_string());
+                return Some(Err("commit rejected: no valid parser states remain".to_string()));
             }
             if let Some(updated) = gss.with_uniform_accumulator(updated_accumulator) {
                 state.clear();
                 state.insert(end_state, updated);
-                return Ok(());
+                return Some(Ok(()));
             }
         }
     }
 
-    commit_worklist(constraint, state, bytes, bufs, observer, None, None, false)
+    None
 }
 
 /// The correlated frontier is a worklist over byte offset and lexer key.
 /// Each event advances the parser and routes its reset. An unfinished lexeme
 /// instead retains the input parser language, including its delayed guards.
-fn commit_worklist<O: CommitObserver>(
+fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
@@ -2878,11 +2840,25 @@ fn commit_worklist<O: CommitObserver>(
     reference: bool,
 ) -> Result<(), String> {
     if bytes.is_empty() { return Ok(()); }
+    if !reference {
+        let started = if PROFILE { Some(std::time::Instant::now()) } else { None };
+        if let Some(result) = try_wide_lexer_only(constraint, state, bytes) {
+            if let (Some(p), Some(started)) = (profile.as_deref_mut(), started) {
+                p.fast_path_total_ns += started.elapsed().as_nanos() as u64;
+            }
+            return result;
+        }
+        if let (Some(p), Some(started)) = (profile.as_deref_mut(), started) {
+            p.failed_fast_path_probe_ns += started.elapsed().as_nanos() as u64;
+        }
+    }
     state.normalize_duplicate_keys();
     bufs.clear_all();
-    let queue_started = profile.as_ref().map(|_| std::time::Instant::now());
+    let queue_started = if PROFILE { Some(std::time::Instant::now()) } else { None };
     let mut processing_queue = std::mem::take(&mut bufs.processing_queue);
-    processing_queue.resize_with(bytes.len() + 1, ParserStatesByTokenizer::default);
+    if processing_queue.len() <= bytes.len() {
+        processing_queue.resize_with(bytes.len() + 1, ParserStatesByTokenizer::default);
+    }
     for bucket in &mut processing_queue { bucket.clear(); }
     for (key, gss) in std::mem::take(state) { processing_queue[0].merge(key, gss); }
     let result = (|| {
@@ -2890,17 +2866,24 @@ fn commit_worklist<O: CommitObserver>(
             let states_to_process = processing_queue[offset].take_entries();
             for (tokenizer_state, mut gss) in states_to_process {
                 if let Some(p) = profile.as_deref_mut() { p.n_queue_entries += 1; }
-                let started = profile.as_ref().map(|_| std::time::Instant::now());
-                let exec = execute_tokenizer_from_state_small(
+                let started = if PROFILE { Some(std::time::Instant::now()) } else { None };
+                let (end_states, lexer_matches) = scan_commit_lane(
                     constraint, &bytes[offset..], tokenizer_state,
+                    &mut bufs.reusable_tokenizer_exec, &mut bufs.small_exec_result, reference,
                 );
                 if let (Some(p), Some(started)) = (profile.as_deref_mut(), started) {
-                    p.exec_ns += started.elapsed().as_nanos() as u64;
+                    let elapsed = started.elapsed().as_nanos() as u64;
+                    p.exec_ns += elapsed;
+                    p.queue_exec_ns += elapsed;
                 }
                 if offset == 0 && !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
-                    gss = prune_single_initial_state_for_exec(
-                        constraint, gss, tokenizer_state, &exec, bytes,
+                    let started = if PROFILE { Some(std::time::Instant::now()) } else { None };
+                    gss = prune_single_initial_state_for_parts(
+                        constraint, gss, tokenizer_state, end_states, lexer_matches, bytes,
                     );
+                    if let (Some(p), Some(started)) = (profile.as_deref_mut(), started) {
+                        p.prune_ns += started.elapsed().as_nanos() as u64;
+                    }
                     if gss.is_empty() { continue; }
                 }
                 let actionable = if reference { None } else {
@@ -2909,17 +2892,17 @@ fn commit_worklist<O: CommitObserver>(
                 bufs.terminal_result_cache.clear();
                 let matches = collect_unique_actionable_matches(
                     constraint, actionable.as_ref(), constraint.ignore_terminal,
-                    &exec.matches, Some(&mut bufs.seen_matches),
+                    lexer_matches, Some(&mut bufs.seen_matches),
                 );
                 // Admission is a query on the input parser, not the result of
                 // an event. Decide all continuation destinations first.
                 let admission = if reference { None } else {
                     cached_batched_end_state_admission(
-                        constraint, &gss, &exec.end_state, &mut bufs.admission_cache,
+                        constraint, &gss, end_states, &mut bufs.admission_cache,
                     )
                 };
                 let mut continuation = SmallVec::<[u32; 4]>::new();
-                for &end_state in &exec.end_state {
+                for &end_state in end_states {
                     let allowed = if reference {
                         end_state_may_advance(constraint, &gss, end_state)
                     } else if let Some(index) = admission {
@@ -2935,7 +2918,7 @@ fn commit_worklist<O: CommitObserver>(
                 }
                 // A single successor needs no retained source GSS. The same
                 // worklist naturally becomes a linear execution in this case.
-                if !reference && profile.is_none() && matches.len() == 1 && continuation.is_empty() {
+                if !reference && !PROFILE && matches.len() == 1 && continuation.is_empty() {
                     let matched = &matches[0];
                     let end = offset + matched.width;
                     if matched.ignored {
@@ -2960,8 +2943,8 @@ fn commit_worklist<O: CommitObserver>(
                         } else {
                             advance_parser_stacks_owned(constraint, input, matched.terminal_id)
                         };
-                        let advanced = apply_future_terminal_disallow(
-                            constraint, &exec, matched.terminal_id, advanced,
+                        let advanced = apply_future_terminal_disallow_for_states(
+                            constraint, end_states, matched.terminal_id, advanced,
                         );
                         if !advanced.is_empty() {
                             observer.stack(constraint, &advanced, end);
@@ -2993,6 +2976,7 @@ fn commit_worklist<O: CommitObserver>(
                         );
                         p.advance_may_check_ns += attempt.may_ns;
                         p.advance_core_ns += attempt.core_ns;
+                        p.advance_ns += attempt.may_ns + attempt.core_ns;
                         if attempt.advanced.is_empty() { continue; }
                         apply_advance_profile(p, &attempt.profile);
                         if let Some(entries) = advances.as_deref_mut() {
@@ -3003,17 +2987,17 @@ fn commit_worklist<O: CommitObserver>(
                             );
                         }
                         let started = std::time::Instant::now();
-                        let advanced = apply_future_terminal_disallow(
-                            constraint, &exec, matched.terminal_id, attempt.advanced,
+                        let advanced = apply_future_terminal_disallow_for_states(
+                            constraint, end_states, matched.terminal_id, attempt.advanced,
                         );
                         let elapsed = started.elapsed().as_nanos() as u64;
                         p.advance_future_disallow_ns += elapsed;
-                        p.advance_ns += attempt.may_ns + attempt.core_ns + elapsed;
+                        p.advance_ns += elapsed;
                         p.n_advances += 1;
                         advanced
                     } else {
                         let Some(advanced) = advance_terminal_match(
-                            constraint, &gss, matched.terminal_id, &exec,
+                            constraint, &gss, matched.terminal_id, end_states,
                             &mut bufs.advance_result_cache, &mut bufs.terminal_result_cache,
                         ) else { continue; };
                         advanced
@@ -3035,7 +3019,7 @@ fn commit_worklist<O: CommitObserver>(
                 }
             }
         }
-        let started = profile.as_ref().map(|_| std::time::Instant::now());
+        let started = if PROFILE { Some(std::time::Instant::now()) } else { None };
         *state = finalize_pending_state(&mut bufs.pending_state);
         if let (Some(p), Some(started)) = (profile.as_deref_mut(), started) {
             p.fuse_ns += started.elapsed().as_nanos() as u64;

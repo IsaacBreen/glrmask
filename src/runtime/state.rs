@@ -6,7 +6,6 @@ use crate::compiler::glr::parser::{
     ParserGSS, stacks_finished, stacks_finished_control_closed,
 };
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::GssSemanticKeyInterner;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
@@ -356,7 +355,6 @@ pub(crate) struct ParserRelativeMaskEqCacheEntry {
 #[derive(Debug)]
 pub(crate) struct CommitBuffers {
     pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
-    pub semantic_frontier_keys: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
     pub admission_cache: SmallVec<[ParserAdmissionCacheEntry; 8]>,
     pub parser_relative_mask_eq_cache: SmallVec<[ParserRelativeMaskEqCacheEntry; 8]>,
     pub pending_state: crate::runtime::commit::CommitBucket,
@@ -366,7 +364,6 @@ pub(crate) struct CommitBuffers {
     pub reusable_tokenizer_exec:
         crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
     pub processing_queue: Vec<crate::runtime::commit::CommitBucket>,
-    pub template_advance_runtime: crate::runtime::commit::TemplateAdvanceRuntime,
 }
 
 impl Default for CommitBuffers {
@@ -387,7 +384,6 @@ impl CommitBuffers {
     fn with_allocation_policy<const MASK_ONLY: bool>() -> Self {
         Self {
             advance_result_cache: FxHashMap::default(),
-            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(if MASK_ONLY { 0 } else { 256 }),
             admission_cache: SmallVec::new(),
             parser_relative_mask_eq_cache: SmallVec::new(),
             pending_state: Default::default(),
@@ -400,9 +396,6 @@ impl CommitBuffers {
             reusable_tokenizer_exec:
                 crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
             processing_queue: Vec::new(),
-            template_advance_runtime:
-                if MASK_ONLY { crate::runtime::commit::TemplateAdvanceRuntime::for_mask_only_shadow() }
-                else { crate::runtime::commit::TemplateAdvanceRuntime::default() },
         }
     }
 
@@ -421,7 +414,6 @@ impl Clone for CommitBuffers {
 impl CommitBuffers {
     pub fn clear_all(&mut self) {
         self.advance_result_cache.clear();
-        self.semantic_frontier_keys.clear();
         self.pending_state.clear();
         self.seen_matches.clear();
         self.terminal_result_cache.clear();
@@ -438,7 +430,6 @@ impl CommitBuffers {
         self.clear_all();
         self.admission_cache.clear();
         self.parser_relative_mask_eq_cache.clear();
-        self.template_advance_runtime.reset_all();
     }
 }
 
