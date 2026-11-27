@@ -2022,6 +2022,20 @@ pub mod artifact_serde {
         if compact_artifact_serde_enabled() {
             return packed_artifact_serde::serialize(tokenizer, serializer);
         }
+        if tokenizer.has_packed_runtime_transitions() || tokenizer.has_packed_runtime_metadata()
+            || !tokenizer.packed_compressed_transition_segments.is_empty()
+        {
+            let dfa = tokenizer.materialized_noncompressed_dfa();
+            let mut segments = tokenizer.compressed_transition_segments.to_vec();
+            segments.extend(tokenizer.packed_compressed_transition_segments.iter()
+                .map(PackedCompressedTransitionSegment::to_compressed_segment));
+            segments.sort_unstable_by_key(|segment| segment.state_offset);
+            return TokenizerArtifactRef {
+                dfa: &dfa,
+                num_terminals: tokenizer.num_terminals,
+                compressed_transition_segments: &segments,
+            }.serialize(serializer);
+        }
         TokenizerArtifactRef {
             dfa: &tokenizer.dfa,
             num_terminals: tokenizer.num_terminals,
@@ -3256,6 +3270,36 @@ pub mod artifact_serde {
             })
             .collect::<Vec<_>>();
 
+        // Packed metadata covers every physical state. Retire all shadowed
+        // observations and class rows; a contiguous compressed suffix needs
+        // no individual DFA stubs at all.
+        let mut keep = tokenizer.dfa.num_states();
+        for segment in packed_segments.iter().rev() {
+            let end = segment.state_offset as usize + segment.state_count as usize;
+            if end != keep {
+                break;
+            }
+            keep = segment.state_offset as usize;
+        }
+        {
+            let states = tokenizer.dfa.states_mut();
+            states.truncate(keep.max(1));
+            for row in states.iter_mut() {
+                row.finalizers = BitSet::default();
+                row.possible_future_group_ids = BitSet::default();
+                row.epsilon_transitions = Vec::new();
+            }
+            for segment in &packed_segments {
+                let start = segment.state_offset as usize;
+                let end = (start + segment.state_count as usize).min(states.len());
+                if start < end {
+                    for row in &mut states[start..end] {
+                        row.transitions = Default::default();
+                    }
+                }
+            }
+            states.shrink_to_fit();
+        }
         tokenizer.packed_runtime_metadata_segments = Arc::from([PackedTokenizerMetadataSegment { state_offset: 0, metadata }]);
         tokenizer.packed_compressed_transition_segments =
             Arc::from(packed_segments.into_boxed_slice());
@@ -3264,10 +3308,9 @@ pub mod artifact_serde {
         true
     }
 
-    /// Add contiguous runtime transition storage for large ordinary DFAs.  The
-    /// full DFA is retained for compiler/analysis consumers, but runtime byte
-    /// stepping immediately prefers this sidecar.  This is therefore a real
-    /// runtime representation, not serialized-wire precomputation.
+    /// Move large ordinary byte rows into contiguous runtime storage.
+    /// Physical observations remain in the DFA, but byte rows have exactly
+    /// one owner after compaction.
     pub fn compact_large_fast_runtime(tokenizer: &mut Tokenizer) -> bool {
         const MIN_TRANSITIONS: usize = 1_000_000;
         if !tokenizer.packed_runtime_transition_segments.is_empty()
@@ -3327,6 +3370,11 @@ pub mod artifact_serde {
                 targets: PackedRuntimeTargets::U32(Arc::from(targets.into_boxed_slice())),
             }) }]);
         }
+        for row in tokenizer.dfa.states_mut() {
+            row.transitions = Default::default();
+        }
+        tokenizer.invalidate_derived_caches();
+        let _ = tokenizer.transition_count_cache.set(transition_count);
         true
     }
 
@@ -3636,7 +3684,7 @@ pub mod artifact_serde {
             return build_huge_bytes_from_packed_runtime(tokenizer);
         }
         let segments = tokenizer.compressed_transition_segments.as_ref();
-        if segments.is_empty() {
+        if segments.is_empty() || tokenizer.has_packed_runtime_metadata() || tokenizer.has_packed_runtime_transitions() {
             return None;
         }
         let state_count = tokenizer.dfa.num_states();
@@ -4892,7 +4940,7 @@ pub mod compact_artifact_serde {
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
 
-        let state_count = tokenizer.dfa.num_states();
+        let state_count = tokenizer.num_states() as usize;
         let mut transition_offsets = Vec::with_capacity(state_count + 1);
         let mut transition_bytes = Vec::new();
         let mut transition_targets = Vec::new();
@@ -4907,32 +4955,32 @@ pub mod compact_artifact_serde {
         finalizer_offsets.push(0);
         future_offsets.push(0);
 
-        for state in tokenizer.dfa.states() {
-            for (byte, &target) in state.transitions.iter() {
-                transition_bytes.push(byte);
-                transition_targets.push(target);
+        for state in 0..tokenizer.num_states() {
+            if !tokenizer.has_compressed_transition_state(state) {
+                for (byte, target) in tokenizer.physical_transitions_from(state) {
+                    transition_bytes.push(byte);
+                    transition_targets.push(target);
+                }
             }
             transition_offsets.push(
                 offset(transition_bytes.len(), "tokenizer transition")
                     .map_err(S::Error::custom)?,
             );
 
-            epsilon_targets.extend_from_slice(&state.epsilon_transitions);
+            tokenizer.for_each_epsilon_target(state, |target| epsilon_targets.push(target));
             epsilon_offsets.push(
                 offset(epsilon_targets.len(), "tokenizer epsilon transition")
                     .map_err(S::Error::custom)?,
             );
 
-            finalizers.extend(state.finalizers.iter().map(|terminal| terminal as u32));
+            finalizers.extend(tokenizer.physical_finalizers(state).iter().map(|terminal| terminal as u32));
             finalizer_offsets.push(
                 offset(finalizers.len(), "tokenizer finalizer")
                     .map_err(S::Error::custom)?,
             );
 
             futures.extend(
-                state
-                    .possible_future_group_ids
-                    .iter()
+                tokenizer.physical_futures(state).iter()
                     .map(|terminal| terminal as u32),
             );
             future_offsets.push(
@@ -4944,6 +4992,10 @@ pub mod compact_artifact_serde {
         let group_id_to_u8set = (0..tokenizer.dfa.num_groups())
             .map(|group| *tokenizer.dfa.group_id_to_u8set(group as u32))
             .collect();
+        let mut compressed_transition_segments = tokenizer.compressed_transition_segments.to_vec();
+        compressed_transition_segments.extend(tokenizer.packed_compressed_transition_segments.iter()
+            .map(PackedCompressedTransitionSegment::to_compressed_segment));
+        compressed_transition_segments.sort_unstable_by_key(|segment| segment.state_offset);
         CompactTokenizerArtifact {
             num_terminals: tokenizer.num_terminals,
             state_count: u32::try_from(state_count).map_err(S::Error::custom)?,
@@ -4957,7 +5009,7 @@ pub mod compact_artifact_serde {
             finalizers,
             future_offsets,
             futures,
-            compressed_transition_segments: tokenizer.compressed_transition_segments.to_vec(),
+            compressed_transition_segments,
         }
         .serialize(serializer)
     }
@@ -6771,17 +6823,10 @@ impl Tokenizer {
         let merged_exprs = Self::merged_terminal_exprs(&expr_components, total_terminals);
 
         let mut merged_byte_transition_count = parent.transition_count();
-        let mut merged_epsilon_transition_count = parent.dfa.epsilon_transition_count();
-        let mut merged_has_self_loops = parent.dfa.has_self_loops();
         for &(tokenizer, _) in children {
             merged_byte_transition_count = merged_byte_transition_count
                 .checked_add(tokenizer.transition_count())
                 .expect("merged tokenizer byte-transition count overflow");
-            merged_epsilon_transition_count = merged_epsilon_transition_count
-                .checked_add(tokenizer.dfa.epsilon_transition_count())
-                .and_then(|count| count.checked_add(1))
-                .expect("merged tokenizer epsilon-transition count overflow");
-            merged_has_self_loops |= tokenizer.dfa.has_self_loops();
         }
 
         parent
@@ -6912,11 +6957,6 @@ impl Tokenizer {
         parent
             .dfa
             .overwrite_state_metadata(parent.start_state(), root_finalizers, root_futures);
-        parent.dfa.set_derived_stats(
-            merged_byte_transition_count,
-            merged_epsilon_transition_count,
-            merged_has_self_loops,
-        );
         parent.num_terminals = total_terminals;
         parent.compressed_transition_segments =
             Arc::from(compressed_segments.into_boxed_slice());
@@ -8235,7 +8275,8 @@ impl Tokenizer {
     fn materialize_runtime_metadata_for_structural_mutation(&mut self) {
         while self.dfa.num_states() < self.num_states() as usize {
             self.dfa.add_state();
-        }        let segments = std::mem::take(&mut self.packed_runtime_metadata_segments);
+        }
+        let segments = std::mem::take(&mut self.packed_runtime_metadata_segments);
         for segment in segments.iter() {
             for local_state in 0..segment.metadata.state_count {
                 let state = segment.state_offset + local_state;
@@ -8250,20 +8291,10 @@ impl Tokenizer {
                     .expect("packed tokenizer metadata segment covers every state")
                     .clone();
                 self.dfa.overwrite_state_metadata(state, finalizers, futures);
-                for &local_target in segment.metadata.epsilon_targets(local_state) {
-                    let target = segment
-                        .state_offset
-                        .checked_add(local_target)
-                        .expect("packed tokenizer epsilon target overflow");
-                    let already_present = self
-                        .dfa
-                        .states()
-                        .get(state as usize)
-                        .is_some_and(|row| row.epsilon_transitions.contains(&target));
-                    if !already_present {
-                        self.dfa.add_epsilon_transition(state, target);
-                    }
-                }
+                self.dfa.states_mut()[state as usize].epsilon_transitions = segment.metadata
+                    .epsilon_targets(local_state).iter().map(|&target| {
+                        segment.state_offset.checked_add(target).expect("packed tokenizer epsilon target overflow")
+                    }).collect();
             }
         }
     }
@@ -8284,9 +8315,8 @@ impl Tokenizer {
                     segment.metadata.finalizers(local_state).expect("packed metadata segment covers every state").clone(),
                     segment.metadata.futures(local_state).expect("packed metadata segment covers every state").clone(),
                 );
-                for &target in segment.metadata.epsilon_targets(local_state) {
-                    dfa.add_epsilon_transition(state, segment.state_offset + target);
-                }
+                dfa.states_mut()[state as usize].epsilon_transitions = segment.metadata
+                    .epsilon_targets(local_state).iter().map(|&target| segment.state_offset + target).collect();
             }
         }
         for segment in self.packed_runtime_transition_segments.iter() {
@@ -12663,10 +12693,7 @@ impl Tokenizer {
     }
 
     pub fn initial_epsilon_branch_count(&self) -> usize {
-        self.dfa
-            .states()
-            .get(self.start_state() as usize)
-            .map_or(0, |state| state.epsilon_transitions.len())
+        self.physical_epsilon_count(self.start_state())
     }
 
     /// Return the deterministic scanner roots behind the special epsilon
@@ -12790,7 +12817,7 @@ impl Tokenizer {
     /// but no byte or epsilon edge may cross between returned sets.
     pub fn disjoint_dispatch_components(&self) -> Option<Vec<Vec<u32>>> {
         let roots = self.deterministic_dispatch_roots()?;
-        let mut owner = vec![usize::MAX; self.dfa.states().len()];
+        let mut owner = vec![usize::MAX; self.num_states() as usize];
         owner[self.start_state() as usize] = roots.len();
         let mut components = Vec::with_capacity(roots.len());
 
@@ -12810,9 +12837,8 @@ impl Tokenizer {
                 }
                 *slot = component_index;
                 states.push(state);
-                let dfa_state = self.dfa.states().get(state as usize)?;
-                stack.extend(dfa_state.transitions.iter().map(|(_, &target)| target));
-                stack.extend(dfa_state.epsilon_transitions.iter().copied());
+                stack.extend(self.physical_transitions_from(state).map(|(_, target)| target));
+                self.for_each_epsilon_target(state, |target| stack.push(target));
             }
             if states.is_empty() {
                 return None;
@@ -13376,18 +13402,24 @@ impl Tokenizer {
     /// terminals as matched at state 0.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
         let start = self.start_state();
-        let initial_closure = self.dfa.epsilon_closure(&[start]);
+        let initial_closure = self.epsilon_closure_states(&[start]);
         let mut nullable = BTreeSet::new();
         for &state in &initial_closure {
             nullable.extend(
-                self.dfa
-                    .finalizers(state)
+                self.physical_finalizers(state)
                     .iter()
                     .map(|terminal| terminal as TerminalID),
             );
         }
         if nullable.is_empty() {
             return nullable;
+        }
+        if self.has_any_physical_sidecars() {
+            self.dfa = self.materialized_dfa();
+            self.packed_runtime_metadata_segments = Arc::from([]);
+            self.packed_runtime_transition_segments = Arc::from([]);
+            self.compressed_transition_segments = Arc::from([]);
+            self.packed_compressed_transition_segments = Arc::from([]);
         }
         self.invalidate_derived_caches();
 
@@ -13733,7 +13765,7 @@ impl Tokenizer {
     fn compute_forced_minimized_state_count(&self) -> usize {
         *self
             .forced_minimized_state_count_cache
-            .get_or_init(|| self.dfa.minimize().num_states())
+            .get_or_init(|| if self.has_any_physical_sidecars() { self.materialized_dfa().minimize().num_states() } else { self.dfa.minimize().num_states() })
     }
 
     fn execute_from_state_all_widths(
