@@ -5644,26 +5644,23 @@ impl ConstraintState {
         };
         let debug_boundary = crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
-            let boundary_tsids = if recursive_parser && boundary.uses_composed_tsid_coordinate {
-                self.constraint
+            let boundary_tsids = match &boundary.coordinate {
+                crate::runtime::BoundaryTsidCoordinate::Composed if recursive_parser => self.constraint
                     .runtime_internal_tsids_for_tokenizer_state(global_tokenizer_state)
-                    .unwrap_or_default()
-            } else if boundary.uses_composed_tsid_coordinate {
-                self.constraint
+                    .unwrap_or_default(),
+                crate::runtime::BoundaryTsidCoordinate::Composed => self.constraint
                     .state_to_internal_tsid
                     .get(global_tokenizer_state as usize)
                     .copied()
                     .filter(|&tsid| tsid != u32::MAX)
                     .into_iter()
-                    .collect::<SmallVec<[u32; 4]>>()
-            } else {
-                boundary
-                    .tokenizer_state_to_tsid
+                    .collect::<SmallVec<[u32; 4]>>(),
+                crate::runtime::BoundaryTsidCoordinate::ShardLocal(map) => map
                     .get(global_tokenizer_state as usize)
                     .copied()
                     .filter(|&tsid| tsid != u32::MAX)
                     .into_iter()
-                    .collect::<SmallVec<[u32; 4]>>()
+                    .collect::<SmallVec<[u32; 4]>>(),
             };
             if debug_boundary {
                 eprintln!(

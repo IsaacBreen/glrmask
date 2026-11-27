@@ -2625,7 +2625,7 @@ fn boundary_parser_artifact_ref(
     let parser_dwa = Cow::Borrowed(&boundary.parser_dwa);
     SegmentedBoundaryParserV20Ref {
         parser_dwa,
-        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+        tokenizer_state_to_tsid: boundary.coordinate.private_map(),
         internal_token_to_originals: &boundary.internal_token_to_originals,
     }
 }
@@ -2636,8 +2636,8 @@ fn boundary_parser_v23_ref(
     let parser_dwa = Cow::Borrowed(&boundary.parser_dwa);
     SegmentedBoundaryParserV23Ref {
         parser_dwa,
-        uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
-        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+        uses_composed_tsid_coordinate: boundary.coordinate.is_composed(),
+        tokenizer_state_to_tsid: boundary.coordinate.private_map(),
         internal_token_to_originals: &boundary.internal_token_to_originals,
     }
 }
@@ -2873,8 +2873,8 @@ fn segmented_runtime_artifact_ref(
                     RecursiveSegmentedBoundaryShardBackendV27Ref::StaticParser(
                         RecursiveSegmentedBoundaryParserV27Ref {
                             parser_dwa,
-                            uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
-                            tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+                            uses_composed_tsid_coordinate: boundary.coordinate.is_composed(),
+                            tokenizer_state_to_tsid: boundary.coordinate.private_map(),
                             internal_token_to_originals: &boundary.internal_token_to_originals,
                         },
                     )
@@ -3259,8 +3259,11 @@ fn restore_boundary_parser_v23(
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
         parser_dwa: boundary.parser_dwa,
         recursive_parser_dwa: None,
-        uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
-        tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
+        coordinate: if boundary.uses_composed_tsid_coordinate {
+            crate::runtime::BoundaryTsidCoordinate::Composed
+        } else {
+            crate::runtime::BoundaryTsidCoordinate::ShardLocal(boundary.tokenizer_state_to_tsid)
+        },
         internal_token_to_originals: boundary.internal_token_to_originals,
     })
 }
@@ -3366,8 +3369,11 @@ fn restore_recursive_boundary_parser_v27(
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
         parser_dwa: crate::automata::weighted_u32::dwa::DWA::new(0, 0),
         recursive_parser_dwa: Some(boundary.parser_dwa),
-        uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
-        tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
+        coordinate: if boundary.uses_composed_tsid_coordinate {
+            crate::runtime::BoundaryTsidCoordinate::Composed
+        } else {
+            crate::runtime::BoundaryTsidCoordinate::ShardLocal(boundary.tokenizer_state_to_tsid)
+        },
         internal_token_to_originals: boundary.internal_token_to_originals,
     })
 }

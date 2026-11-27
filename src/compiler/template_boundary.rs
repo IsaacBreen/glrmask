@@ -9,9 +9,8 @@ use crate::test_modes::MaskMode;
 use std::{collections::BTreeMap, sync::Arc};
 use crate::{runtime::Constraint, Error, Result, Vocab};
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
-use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::boundary_walk::{BoundaryShardLinkInputs, BoundaryShardWalkPlan};
-use crate::compiler::constraint_compose::{WalkBoundaryShardWork, merged_retained_terminal_exprs};
+use crate::compiler::constraint_compose::{BoundaryShardMetadata, BoundaryTsidLayout, merged_retained_terminal_exprs};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::ImmediateComponentId;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::compiler::constraint_possible_matches as pm;
@@ -375,6 +374,20 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
             &templates,Some(&admissions),&classes)
             .ok_or_else(|| fail(format!("{} prepared classed program budget exceeded", TEMPLATE_DECLINE_PREFIX)))?)
     };
+    let boundary_coordinate = if projected {
+        if tokenizer_offsets.len() != state_counts.len() {
+            return Err(fail("projected boundary tokenizer layout mismatch"));
+        }
+        for (&offset, &count) in tokenizer_offsets.iter().zip(&state_counts) {
+            let end = offset.checked_add(count).ok_or_else(|| fail("projected boundary tokenizer range overflow"))?;
+            if end > merged.num_states() {
+                return Err(fail("projected boundary tokenizer range outside observation coordinate"));
+            }
+        }
+        BoundaryTsidLayout::Composed
+    } else {
+        BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &state_counts }
+    };
     let mut published = Vec::with_capacity(walks.len());
     for walk in walks {
         let mut output = super::boundary_transfer::template_program::compile_classed_with_admissions(
@@ -390,16 +403,14 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
                 .remap_into_existing_common(&target).into_artifact();
             id_map = target;
         }
-        let work = WalkBoundaryShardWork { start_component: walk.start_component as u32,
-            terminal_automaton: TerminalAutomaton::Dwa(walk.output.dwa), id_map,
-            candidate_tokens: Arc::from(walk.candidate_tokens.into_iter().collect::<Vec<_>>()) };
-        let (mut shard, _) = super::boundary_transfer::publish_signed_shard(work, output,
-            &tokenizer_offsets, &state_counts).map_err(fail)?;
-        if projected {
-            let boundary = Arc::make_mut(&mut shard.boundary);
-            boundary.uses_composed_tsid_coordinate = true;
-            boundary.tokenizer_state_to_tsid.clear();
-        }
+        let work = BoundaryShardMetadata {
+            start_component: walk.start_component as u32,
+            id_map,
+            candidate_tokens: Arc::from(walk.candidate_tokens.into_iter().collect::<Vec<_>>()),
+        };
+        let (shard, _) = super::boundary_transfer::publish_signed_shard(
+            work, output, boundary_coordinate,
+        ).map_err(fail)?;
         if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=shard_done component={} elapsed_ms={:.3}",
             shard.start_component, started.elapsed().as_secs_f64() * 1000.0); }
         published.push(shard);

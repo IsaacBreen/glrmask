@@ -9791,24 +9791,35 @@ pub(crate) struct SegmentedBoundaryTerminalTrie {
     pub(crate) symbolic_nwa: Option<BoundaryTerminalNwa>,
 }
 
+/// Scanner coordinate used by a boundary parser's weights.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BoundaryTsidCoordinate {
+    Composed,
+    /// Leaf-packed tokenizer states, without the artificial merged reset state.
+    ShardLocal(Vec<u32>),
+}
+
+impl BoundaryTsidCoordinate {
+    pub(crate) fn is_composed(&self) -> bool {
+        matches!(self, Self::Composed)
+    }
+
+    pub(crate) fn private_map(&self) -> &[u32] {
+        match self {
+            Self::Composed => &[],
+            Self::ShardLocal(map) => map,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
     /// Exact deterministic boundary parser in the generic weight algebra.
     pub(crate) parser_dwa: DWA,
-    /// Provider-native static boundary parser in the recursive leaf parser-state
-    /// coordinate. New v25 compositions compile and serialize this coordinate
-    /// directly. Legacy v24 static boundaries retain only `parser_dwa` and stay
-    /// on their materialized runtime when loaded.
+    /// Provider-native parser in the recursive leaf parser-state coordinate.
     #[serde(skip, default)]
     pub(crate) recursive_parser_dwa: Option<DWA>,
-    /// New static boundary shards are compiled directly in the authoritative
-    /// composed constraint TSID coordinate. They therefore need no private
-    /// raw-tokenizer-state map; runtime reads `Constraint::state_to_internal_tsid`
-    /// instead. Legacy/global boundary artifacts keep this false and retain the
-    /// explicit private map below.
-    #[serde(skip, default)]
-    pub(crate) uses_composed_tsid_coordinate: bool,
-    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
+    pub(crate) coordinate: BoundaryTsidCoordinate,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
 

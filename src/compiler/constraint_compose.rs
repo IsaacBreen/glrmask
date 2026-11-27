@@ -2097,15 +2097,9 @@ pub(crate) struct PublishedStaticBoundaryShard {
 }
 
 
-/// Walk-built boundary shard work: a crossing terminal DWA over shard-local
-/// TSIDs, published late (after the overlay exists) against the spliced
-/// control-free boundary table. Produced by `boundary_walk` (link-shared
-/// equivalence + seeded standard walks + NWA crossing filter), one per start
-/// component with a nonempty crossing set. Components with empty crossings
-/// get no shard (the runtime skips missing shards).
-pub(crate) struct WalkBoundaryShardWork {
+/// Publication metadata for a completed boundary parser.
+pub(crate) struct BoundaryShardMetadata {
     pub(crate) start_component: u32,
-    pub(crate) terminal_automaton: TerminalAutomaton,
     pub(crate) id_map: InternalIdMap,
     pub(crate) candidate_tokens: Arc<[u32]>,
 }
@@ -2147,18 +2141,13 @@ pub(crate) struct WalkShardPublishProfile {
 /// state and silently misroutes queries (inner-6 over-admission +
 /// inner-7 under-admission were both this bug).
 pub(crate) fn publish_walk_boundary_shard_work(
-    work: WalkBoundaryShardWork,
+    work: BoundaryShardMetadata,
+    crossing: DWA,
     boundary_table: &Arc<crate::compiler::glr::table::GLRTable>,
     tokenizer_offsets: &[u32],
     component_state_counts: &[u32],
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     let num_terminals = boundary_table.num_terminals;
-    let TerminalAutomaton::Dwa(ref crossing) = work.terminal_automaton else {
-        return Err(format!(
-            "walk boundary shard {} must carry a DWA terminal automaton",
-            work.start_component,
-        ));
-    };
     let mut selected = vec![false; num_terminals as usize];
     for state in crossing.states() {
         for &label in state.transitions.keys() {
@@ -2179,7 +2168,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
     let templates = Templates::from_characterizations(&characterizations);
     let templates_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
     let parser_work = BoundaryParserWork::DeferredTerminalCount {
-        terminal_automaton: work.terminal_automaton,
+        terminal_automaton: TerminalAutomaton::Dwa(crossing),
         id_map: work.id_map,
         num_terminals,
         templates,
@@ -2208,7 +2197,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
         work.start_component,
         work.candidate_tokens,
         parser_dwa,
-        &id_map,
+        id_map,
         WalkShardPublishProfile {
             templates_ms,
             materialize_ms,
@@ -2217,8 +2206,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
             parser_states: 0,
             parser_trans: 0,
         },
-        tokenizer_offsets,
-        component_state_counts,
+        BoundaryTsidLayout::Scoped { offsets: tokenizer_offsets, counts: component_state_counts },
     )
 }
 
@@ -2229,11 +2217,10 @@ pub(crate) fn publish_walk_boundary_shard_work(
 /// `StaticParser` format (shard-local TSID map in the scoped tokenizer
 /// coordinate) is shared with the table-built path.
 pub(crate) fn publish_signed_boundary_shard_work(
-    work: WalkBoundaryShardWork,
+    work: BoundaryShardMetadata,
     parser_dwa: DWA,
     profile: WalkShardPublishProfile,
-    tokenizer_offsets: &[u32],
-    component_state_counts: &[u32],
+    coordinate: BoundaryTsidLayout<'_>,
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     ensure_positive_runtime_parser_dwa(&parser_dwa)?;
     if compose_profile_enabled() {
@@ -2252,60 +2239,59 @@ pub(crate) fn publish_signed_boundary_shard_work(
         work.start_component,
         work.candidate_tokens,
         parser_dwa,
-        &work.id_map,
+        work.id_map,
         profile,
-        tokenizer_offsets,
-        component_state_counts,
+        coordinate,
     )
 }
 
-/// Shared tail of walk-shard publication: builds the scoped-coordinate TSID
-/// map and wraps the parser DWA as a `StaticParser` boundary shard.
+/// The selected parser-weight coordinate determines which scanner mapping is needed.
+#[derive(Clone, Copy)]
+pub(crate) enum BoundaryTsidLayout<'a> {
+    Composed,
+    Scoped {
+        offsets: &'a [u32],
+        counts: &'a [u32],
+    },
+}
+
 fn finish_walk_shard_publication(
     start_component: u32,
     candidate_tokens: Arc<[u32]>,
     parser_dwa: DWA,
-    id_map: &InternalIdMap,
+    id_map: InternalIdMap,
     mut profile: WalkShardPublishProfile,
-    tokenizer_offsets: &[u32],
-    component_state_counts: &[u32],
+    coordinate: BoundaryTsidLayout<'_>,
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
-    // The private TSID map is indexed by the installing runtime's scoped
-    // tokenizer coordinate (leaves back-to-back from 0, no reset state) and
-    // must cover every scoped link-time state exactly once; gaps would
-    // silently drop boundary contributions at runtime.
-    if tokenizer_offsets.len() != component_state_counts.len() {
-        return Err(format!(
-            "walk boundary shard {start_component} tokenizer layout mismatch: {} offsets vs {} components",
-            tokenizer_offsets.len(),
-            component_state_counts.len(),
-        ));
-    }
-    let total_scoped: usize =
-        component_state_counts.iter().map(|&count| count as usize).sum();
-    let mut tokenizer_state_to_tsid = Vec::with_capacity(total_scoped);
-    for (component, &count) in component_state_counts.iter().enumerate() {
-        let base = tokenizer_offsets[component] as usize;
-        for local in 0..count as usize {
-            let merged = base.checked_add(local).ok_or_else(|| {
-                format!(
-                    "walk boundary shard {start_component} scoped state (component {component}, local {local}) overflows",
-                )
-            })?;
-            let tsid = id_map
-                .tokenizer_states
-                .original_to_internal
-                .get(merged)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if tsid == u32::MAX {
+    let coordinate = match coordinate {
+        BoundaryTsidLayout::Composed => crate::runtime::BoundaryTsidCoordinate::Composed,
+        BoundaryTsidLayout::Scoped { offsets, counts } => {
+            if offsets.len() != counts.len() {
                 return Err(format!(
-                    "walk boundary shard {start_component} scoped state (component {component}, local {local}) has no TSID (merged {merged})",
+                    "walk boundary shard {start_component} tokenizer layout mismatch: {} offsets vs {} components",
+                    offsets.len(), counts.len(),
                 ));
             }
-            tokenizer_state_to_tsid.push(tsid);
+            let mut map = Vec::with_capacity(counts.iter().map(|&count| count as usize).sum());
+            for (component, (&base, &count)) in offsets.iter().zip(counts).enumerate() {
+                let start = base as usize;
+                let end = start.checked_add(count as usize).ok_or_else(|| {
+                    format!("walk boundary shard {start_component} component {component} tokenizer range overflows")
+                })?;
+                let row = id_map.tokenizer_states.original_to_internal.get(start..end).ok_or_else(|| {
+                    format!("walk boundary shard {start_component} component {component} tokenizer range lies outside map")
+                })?;
+                if let Some(local) = row.iter().position(|&tsid| tsid == u32::MAX) {
+                    return Err(format!(
+                        "walk boundary shard {start_component} scoped state (component {component}, local {local}) has no TSID (merged {})",
+                        start + local,
+                    ));
+                }
+                map.extend_from_slice(row);
+            }
+            crate::runtime::BoundaryTsidCoordinate::ShardLocal(map)
         }
-    }
+    };
     profile.parser_states = parser_dwa.num_states() as usize;
     profile.parser_trans = parser_dwa.num_transitions();
     Ok((
@@ -2315,9 +2301,8 @@ fn finish_walk_shard_publication(
             boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
                 parser_dwa: DWA::new(0, 0),
                 recursive_parser_dwa: Some(parser_dwa),
-                uses_composed_tsid_coordinate: false,
-                tokenizer_state_to_tsid,
-                internal_token_to_originals: id_map.vocab_tokens.internal_to_originals.clone(),
+                coordinate,
+                internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
             }),
         },
         profile,
@@ -14949,13 +14934,8 @@ table: &child_table,
             let right_parser = &right_shards[component];
             eprintln!("[minimize-eq] start_component={component}: checking");
             assert_eq!(
-                left_parser.uses_composed_tsid_coordinate,
-                right_parser.uses_composed_tsid_coordinate,
-                "component {component}: composed-TSID coordinate assumption differs",
-            );
-            assert_eq!(
-                left_parser.tokenizer_state_to_tsid, right_parser.tokenizer_state_to_tsid,
-                "component {component}: tokenizer_state_to_tsid differs; incomparable weights",
+                left_parser.coordinate, right_parser.coordinate,
+                "component {component}: scanner coordinate differs; incomparable weights",
             );
             assert_eq!(
                 left_parser.internal_token_to_originals,

@@ -53,7 +53,7 @@ use crate::automata::weighted_u32::minimize_acyclic::{
 };
 use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
 use crate::compiler::constraint_compose::{
-    CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
+    BoundaryShardMetadata, BoundaryTsidLayout, CompiledSubgrammarInput, PublishedStaticBoundaryShard,
     WalkShardPublishProfile, build_segmented_parser_links, publish_signed_boundary_shard_work,
 };
 use crate::compiler::glr::analysis::EOF;
@@ -2528,10 +2528,9 @@ fn compile_signed_shard_parser_fallback(
 /// Publish one signed-compiled shard through the shared `StaticParser`
 /// publication (shard-local TSID map in the scoped tokenizer coordinate).
 pub(crate) fn publish_signed_shard(
-    work: WalkBoundaryShardWork,
+    work: BoundaryShardMetadata,
     output: SignedShardOutput,
-    tokenizer_offsets: &[u32],
-    component_state_counts: &[u32],
+    coordinate: BoundaryTsidLayout<'_>,
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     publish_signed_boundary_shard_work(
         work,
@@ -2544,8 +2543,7 @@ pub(crate) fn publish_signed_shard(
             parser_states: 0,
             parser_trans: 0,
         },
-        tokenizer_offsets,
-        component_state_counts,
+        coordinate,
     )
 }
 

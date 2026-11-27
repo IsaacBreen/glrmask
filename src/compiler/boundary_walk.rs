@@ -23,7 +23,7 @@ use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::minimize_acyclic::minimize_acyclic_owned;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
-    CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
+    CompiledSubgrammarInput, PublishedStaticBoundaryShard, BoundaryShardMetadata,
     accepted_original_tokens, build_segmented_parser_links, compose_profile_enabled,
     component_ignores_are_globally_erasable, eliminate_composed_runtime_controls,
     leaf_ignores_are_globally_erasable, merged_ignore_terminals,
@@ -2647,9 +2647,8 @@ pub(crate) fn build_walk_static_boundary_link(
             eprintln!("[glrmask/validate][boundary_scoped_adjacency] component={start_component} exact=true pairs={} branches={}",comparison.product_states,comparison.compared_branches);
         }
 
-        let work = WalkBoundaryShardWork {
+        let work = BoundaryShardMetadata {
             start_component: start_component as u32,
-            terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
             candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
@@ -2657,8 +2656,7 @@ pub(crate) fn build_walk_static_boundary_link(
         let (published, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
             work,
             compiled,
-            &tokenizer_offsets,
-            &component_state_counts,
+            crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &component_state_counts },
         )?;
         let shard_publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
         let _ = publish_profile;
@@ -3565,9 +3563,8 @@ fn build_walk_static_boundary_link_nested(
             start_component as u32,
         )?;
         let parser_dwa_ms = parser_started.elapsed().as_secs_f64() * 1000.0;
-        let work = WalkBoundaryShardWork {
+        let work = BoundaryShardMetadata {
             start_component: start_component as u32,
-            terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
             candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
@@ -3576,8 +3573,7 @@ fn build_walk_static_boundary_link_nested(
             crate::compiler::boundary_transfer::publish_signed_shard(
                 work,
                 compiled,
-                &tokenizer_offsets,
-                &leaf_state_counts,
+                crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &leaf_state_counts },
             )?;
         let publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
         Ok(ProcessedNestedShard {
@@ -3758,13 +3754,12 @@ mod tests {
     }
 
     use super::*;
-    use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
     use crate::compiler::constraint_compose::{
         CompiledSubgrammarInput, SegmentedBoundaryBackend,
         compose_constraints_owned_parent_segmented,
         eliminate_composed_runtime_controls, install_published_static_boundary_shards,
         load_vocab, merged_retained_terminal_exprs,
-        merged_terminal_display_names, publish_walk_boundary_shard_work, WalkBoundaryShardWork,
+        merged_terminal_display_names, publish_walk_boundary_shard_work, BoundaryShardMetadata,
     };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
@@ -5364,9 +5359,8 @@ mod tests {
             )
             .expect("signed shard compile");
             parser_ms += compiled.compose_ms + compiled.resolve_ms + compiled.normalize_ms;
-            let work = WalkBoundaryShardWork {
+            let work = BoundaryShardMetadata {
                 start_component: shard.start_component as u32,
-                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
                 id_map: shard.output.id_map,
                 candidate_tokens: shard
                     .candidate_tokens
@@ -5377,8 +5371,7 @@ mod tests {
             let (one, _publish_profile) = publish_signed_shard(
                 work,
                 compiled,
-                &composed.tokenizer_offsets,
-                &counts,
+                crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &composed.tokenizer_offsets, counts: &counts },
             )
             .expect("publish signed shard");
             published.push(one);
@@ -5681,9 +5674,8 @@ mod tests {
 
         let publish_against = |table: &Arc<GLRTable>| {
             let shard = &built[0];
-            let work = WalkBoundaryShardWork {
+            let work = BoundaryShardMetadata {
                 start_component: shard.start_component as u32,
-                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa.clone()),
                 id_map: shard.output.id_map.clone(),
                 candidate_tokens: shard
                     .candidate_tokens
@@ -5693,7 +5685,7 @@ mod tests {
                     .into(),
             };
             let (one, _) =
-                publish_walk_boundary_shard_work(work, table, &composed.tokenizer_offsets, &counts)
+                publish_walk_boundary_shard_work(work, shard.output.dwa.clone(), table, &composed.tokenizer_offsets, &counts)
                     .expect("publish walk shard");
             let mut installed = static_shell.clone();
             install_published_static_boundary_shards(
@@ -6493,17 +6485,15 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .into();
-            let work = WalkBoundaryShardWork {
+            let work = BoundaryShardMetadata {
                 start_component: start,
-                terminal_automaton: TerminalAutomaton::Dwa(dwa.clone()),
                 id_map: id_map.clone(),
                 candidate_tokens: candidates,
             };
             crate::compiler::boundary_transfer::publish_signed_shard(
                 work,
                 compiled,
-                tok_offsets,
-                leaf_counts,
+                crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: tok_offsets, counts: leaf_counts },
             )
             .expect("nested shard publish")
             .0

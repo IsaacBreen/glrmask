@@ -32,7 +32,7 @@ pub(crate) use artifact::{
     DynamicMaskVocabArtifact, DeferredTerminalExprBytes, FastCommitTemplateDfas,
     FastTokenizerTransitions, LateGrammarSlot,
     PreparedMasterProofArtifact,
-    SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,
+    BoundaryTsidCoordinate, SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,
     SegmentedBoundaryTerminalTrie, SegmentedParserComponent, SegmentedParserComponentTables,
     SegmentedParserLink, SpecialTokenTerminal, StaticDynamicOverlayMetadata,
     dynamic_mask_llg_master_is_whitespace,
