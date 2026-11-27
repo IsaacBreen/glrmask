@@ -990,10 +990,10 @@ mod clone_and_scratch_tests {
         ] { profile(name,&js,bytes); }
         let nested = Grammar::from_json_schema(r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}},"required":["id","name","tags"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false}"#).unwrap()
             .compile_with(&vocab,opts.clone()).unwrap();
-        profile("json-nested",&nested,br#"{"items":[{"id":123,"name":"alpha","tags":["x","y"]},{"id":456,"name":"beta","tags":["z"]}]}"#);
+        profile("json-nested",&nested,br#"{"items": [{"id": 123, "name": "alpha", "tags": ["x", "y"]}, {"id": 456, "name": "beta", "tags": ["z"]}]}"#);
         let union = Grammar::from_json_schema(r#"{"type":"array","items":{"anyOf":[{"type":"string","pattern":"^ab[0-9]+$"},{"type":"string","pattern":"^abc.*$"},{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"integer"}},"required":["key","value"],"additionalProperties":false},{"type":"integer"}]}}"#).unwrap()
             .compile_with(&vocab,opts).unwrap();
-        profile("json-union",&union,br#"["ab123","abcxyz",{"key":"word","value":-12},42,"ab456"]"#);
+        profile("json-union",&union,br#"["ab123", "abcxyz", {"key": "word", "value": -12}, 42, "ab456"]"#);
     }
 
 
