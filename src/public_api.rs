@@ -167,8 +167,7 @@ impl InternalBoundaryMaskStrategy {
     pub const FAST_MASKS: Self = Self::ParserDwa;
 }
 
-/// Internal mask engine. The wire tags are unchanged so `GLRASM03` module
-/// artifacts keep their meaning.
+/// Internal mask engine. The wire tags are stable within the module artifact format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum Engine {
     /// Reuses retained work; otherwise [`ParserDwa`](Self::ParserDwa).

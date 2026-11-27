@@ -1,18 +1,13 @@
 //! Matched public-API setup/scaling probe. Not a model-token mask benchmark.
 //!
-//! The small Apply implementations let the *same source* measure both the old
-//! return-new bind contract and the mutable contract. They compile to assignment
-//! for the old API and to a no-op for the new API; no runtime version detection.
-use glrmask::{BuildOptions, Grammar, InternalMaskStrategy, PreparedGrammar, TokenSet, Vocab};
+//! Token-set source bindings use an unprecompiled Module. The Apply helper
+//! supports the historical prepared-grammar bind contracts.
+use glrmask::{BuildOptions, Grammar, InternalMaskStrategy, Module, PreparedGrammar, TokenSet, Vocab};
 use rayon::prelude::*;
 use serde_json::json;
 use std::{error::Error, hint::black_box, time::Instant};
 
 trait Apply<G> { fn apply(self, receiver: &mut G); }
-impl Apply<Grammar> for Grammar {
-    fn apply(self, receiver: &mut Grammar) { *receiver = self; }
-}
-impl Apply<Grammar> for () { fn apply(self, _: &mut Grammar) {} }
 impl Apply<PreparedGrammar> for PreparedGrammar {
     fn apply(self, receiver: &mut PreparedGrammar) { *receiver = self; }
 }
@@ -24,9 +19,8 @@ fn source(slots: usize) -> Grammar {
     Grammar::from_glrm(text).unwrap()
 }
 
-fn bind_source(g: &mut Grammar, name: &str, id: u32) -> glrmask::Result<()> {
-    g.bind(name, TokenSet::new([id]))?.apply(g);
-    Ok(())
+fn bind_source(g: &mut Module, name: &str, id: u32) -> glrmask::Result<()> {
+    g.bind(name, TokenSet::new([id]))
 }
 fn bind_prepared(g: &mut PreparedGrammar, name: &str, id: u32) -> glrmask::Result<()> {
     g.bind(name, TokenSet::new([id]))?.apply(g);
@@ -70,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for slots in [1,32,128,512] {
         let g = source(slots);
         let p = g.prepare(&v)?;
+        let g = Module::new(&g);
         let names = (0..slots).map(|i|format!("E{i}")).collect::<Vec<_>>();
         for &threads in &workers {
             rows.push(measure("source_clone_one_bind", slots, threads, jobs, || {
@@ -85,7 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         rows.push(measure("source_bind_all", slots, 1, (jobs/8).max(1), || {
             let mut request = g.clone();
             for name in &names {bind_source(&mut request,name,2)?;}
-            assert!(request.requirements()?.is_empty());black_box(request);Ok(())
+            assert!(request.externs().unbound().is_empty());black_box(request);Ok(())
         })?);
     }
     let tiny=Grammar::from_glrm("start root nt root=\"ab\"")?;
@@ -109,6 +104,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         "notes":["Persistent caller-owned Rayon pool per measured case; pool creation excluded.",
             "Weak scaling: fixed jobs per worker; five trials, median wall time.",
             "Setup/requirements/compile/link, not token-mask latency. Hardware oversubscription is reported, not extra physical cores.",
-            "Same benchmark source supports return-new and mutable bind APIs."],"rows":rows}))?);
+            "Source binding uses an unprecompiled Module; token sets cannot bind to Grammar."],"rows":rows}))?);
     Ok(())
 }

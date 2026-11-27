@@ -44,6 +44,30 @@ test('Module: precompile requires the same vocabulary in sync and async calls', 
   }
 });
 
+test('Module: vocabulary lock survives end-token delegation and roundtrip',async()=>{
+  const v=new Vocab([[0,Buffer.from('a')],[1,Buffer.from('')],[2,Buffer.from('b')]]);
+  const wrong=new Vocab([[0,Buffer.from('b')],[1,Buffer.from('')],[2,Buffer.from('a')]]);
+  for (const maskStrategy of Object.values(MaskStrategy)) {
+    const options={maskStrategy};
+    const root=new Module(Grammar.fromGlrm('start s extern grammar BODY extern token END nt s = BODY END'));
+    await root.precompile(v,options);
+    for (const m of [root.clone(),Module.loadSync(root.saveSync())]) {
+      await assert.rejects(m.precompile(wrong,options),/vocabular/);
+      m.bind('BODY',source());m.bind('END',new TokenSet([1]));
+      const outer=new Module(Grammar.fromGlrm('start s extern grammar INNER nt s = INNER'));
+      outer.bind('INNER',m);
+      for (const nested of [m,Module.loadSync(m.saveSync()),outer,Module.loadSync(outer.saveSync())]) {
+        assert.throws(()=>nested.compileSync(wrong,options),/vocabular/);
+        await assert.rejects(nested.compile(wrong,options),/vocabular/);
+        assert.throws(()=>nested.precompileSync(wrong,options),/vocabular/);
+        await assert.rejects(nested.precompile(wrong,options),/vocabular/);
+        const state=nested.compileSync(v,options).start();
+        assert.ok(state.commitToken(0));assert.ok(state.commitToken(1));assert.ok(state.isAccepting());
+      }
+    }
+  }
+});
+
 test('Module: precompile retains work',async()=>{
   const v=vocab();
   const child=source();

@@ -463,6 +463,28 @@ void canonical_modules() {
 
 }
 
+void precompile_vocab_lock() {
+    Vocab v({{0,"a"},{1,""},{2,"b"}}), wrong({{0,"b"},{1,""},{2,"a"}});
+    for(auto mode : {MaskStrategy::Auto, MaskStrategy::FastCompile, MaskStrategy::FastMasks}) {
+        CompileOptions options; options.mask_strategy=mode;
+        auto root=Module(Grammar::from_glrm("start s extern grammar BODY extern token END nt s = BODY END"));
+        root.precompile(v,options);
+        auto m=Module::load(root.save());
+        throws([&]{m.precompile(wrong,options);},GLRMASK_INVALID_INPUT);
+        m.bind("BODY",Grammar::from_lark(R"(start: "a")"));
+        m.bind("END",TokenSet({1}));
+        auto outer=Module(Grammar::from_glrm("start s extern grammar INNER nt s = INNER"));
+        outer.bind("INNER",m);
+        auto loaded=Module::load(outer.save());
+        for(auto* candidate : {&m,&outer,&loaded}) {
+            throws([&]{candidate->compile(wrong,options);},GLRMASK_INVALID_INPUT);
+            throws([&]{candidate->precompile(wrong,options);},GLRMASK_INVALID_INPUT);
+            auto state=candidate->compile(v,options).start();
+            CHECK(state.commit_token(0)); CHECK(state.commit_token(1)); CHECK(state.is_accepting());
+        }
+    }
+}
+
 void mask_bit_domain_lengths() {
     for (std::size_t n : {0u,33u,63u,64u}) {
         std::vector<VocabEntry> entries;
@@ -494,6 +516,7 @@ int main(int argc, char** argv) {
         if (argc==3 && std::string(argv[1])=="--check") { artifacts(argv[2], true); return 0; }
         CHECK(argc==1);
         canonical_modules();
+        precompile_vocab_lock();
         basic();
         mask_bit_domain_lengths();
         exact_and_unicode();

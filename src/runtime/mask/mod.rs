@@ -8771,7 +8771,7 @@ impl ConstraintState {
     ///
     /// Panics if `buf` is shorter than `self.mask_bit_len().div_ceil(32)`.
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        assert!(buf.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by mask_bit_len()");
+        assert!(buf.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by the mask bit length");
         if self.terminated {
             buf.fill(0);
             return;

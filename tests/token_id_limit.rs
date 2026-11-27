@@ -41,9 +41,9 @@ fn duplicate_vocab_ids_are_invalid_input() {
 fn binding_a_huge_token_id_is_an_error() {
     for id in HUGE_IDS {
         let mut grammar = token_extern();
-        let error = grammar.bind("E", glrmask::TokenSet::new([id])).unwrap_err();
+        let error = grammar.bind("E", Expr::from(glrmask::TokenSet::new([id]))).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
-        let error = grammar.bind("E", TokenSet::new([1, id])).unwrap_err();
+        let error = grammar.bind("E", Expr::from(TokenSet::new([1, id]))).unwrap_err();
         assert!(is_invalid_input(&error), "{id}: {error}");
 
         let mut module = Module::new(&token_extern());
@@ -86,6 +86,6 @@ fn ordinary_token_bindings_still_compile() {
 #[test]
 fn a_constructed_above_cap_range_is_rejected_on_use() {
     let tokens = TokenSet::from_ranges(std::iter::once(MAX_TOKEN_ID..=MAX_TOKEN_ID + 1));
-    assert!(is_invalid_input(&token_extern().bind("E", tokens.clone()).unwrap_err()));
+    assert!(is_invalid_input(&Module::new(&token_extern()).bind("E", tokens.clone()).unwrap_err()));
     assert!(is_invalid_input(&Grammar::from_expr(tokens).unwrap_err()));
 }

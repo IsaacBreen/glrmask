@@ -352,6 +352,31 @@ def test_precompile_requires_same_vocab(strategy):
     module.compile(v, mask_strategy=strategy)
 
 
+@pytest.mark.parametrize("strategy", [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS])
+def test_precompile_vocab_lock_survives_end_token_delegation_and_roundtrip(strategy):
+    v = glrmask.Vocab({0: b"a", 1: b"", 2: b"b"})
+    wrong = glrmask.Vocab({0: b"b", 1: b"", 2: b"a"})
+    root = glrmask.Module(glrmask.Grammar.from_glrm(
+        "start s extern grammar BODY extern token END nt s = BODY END"))
+    root.precompile(v, mask_strategy=strategy)
+    for module in (root.copy(), glrmask.Module.load(root.save())):
+        with pytest.raises(glrmask.GLRMaskError, match="vocabular"):
+            module.precompile(wrong, mask_strategy=strategy)
+        module.bind("BODY", glrmask.Grammar.from_lark('start: "a"'))
+        module.bind("END", glrmask.TokenSet([1]))
+        outer = glrmask.Module(glrmask.Grammar.from_glrm("start s extern grammar INNER nt s = INNER"))
+        outer.bind("INNER", module)
+        for nested in (module, glrmask.Module.load(module.save()), outer, glrmask.Module.load(outer.save())):
+            with pytest.raises(glrmask.GLRMaskError, match="vocabular"):
+                nested.compile(wrong, mask_strategy=strategy)
+            with pytest.raises(glrmask.GLRMaskError, match="vocabular"):
+                nested.precompile(wrong, mask_strategy=strategy)
+            state = nested.compile(v, mask_strategy=strategy).start()
+            assert state.commit_token(0)
+            assert state.commit_token(1)
+            assert state.is_accepting()
+
+
 def test_signed_mask_sign_bit_and_repr():
     v = glrmask.Vocab({31: b"a", 63: b"a", 255: b"b"})
     constraint = glrmask.Grammar.from_lark('start: "a"').compile(v)

@@ -29,8 +29,79 @@ fn precompile_requires_same_vocab() {
         m.precompile_with(&v, options.clone()).unwrap();
         assert!(m.precompile_with(&wrong, options.clone()).unwrap_err().to_string().contains("vocabular"));
         m.bind("child", Grammar::from_ebnf(r#"start ::= "a""#).unwrap()).unwrap();
-        assert!(m.compile_with(&wrong, options.clone()).err().unwrap().to_string().contains("vocabular"));
+        assert!(m.compile_with(&wrong, options.clone()).unwrap_err().to_string().contains("vocabular"));
         assert!(m.compile_with(&v, options).is_ok());
+    }
+}
+
+#[test]
+fn precompile_vocab_lock_survives_end_token_delegation_and_roundtrip() {
+    let v = Vocab::new([(0, b"a".as_slice()), (1, b"".as_slice()), (2, b"b".as_slice())]).unwrap();
+    let wrong = Vocab::new([(0, b"b".as_slice()), (1, b"".as_slice()), (2, b"a".as_slice())]).unwrap();
+    let same = Vocab::new([(0, b"a".as_slice()), (1, b"".as_slice()), (2, b"b".as_slice())]).unwrap();
+    let grammar = Grammar::from_glrm("start s extern grammar BODY extern token END nt s = BODY END").unwrap();
+    let wrapper = Grammar::from_glrm("start s extern grammar INNER nt s = INNER").unwrap();
+    for strategy in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        let options = CompileOptions::default().mask_strategy(strategy);
+        let mut root = Module::new(&grammar);
+        root.precompile_with(&v, options.clone()).unwrap();
+        let assert_wrong = |module: &mut Module| {
+            let before = module.save();
+            for requested in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+                let opts = CompileOptions::default().mask_strategy(requested);
+                let error = module.precompile_with(&wrong, opts.clone()).unwrap_err();
+                assert_eq!(error.kind(), glrmask::ErrorKind::InvalidInput);
+                assert!(error.to_string().contains("vocabular"));
+                let error = module.compile_with(&wrong, opts).unwrap_err();
+                assert_eq!(error.kind(), glrmask::ErrorKind::InvalidInput);
+                assert!(error.to_string().contains("vocabular"));
+                assert_eq!(module.save(), before);
+            }
+        };
+        let assert_same = |module: &Module| {
+            let constraint = module.compile_with(&same, options.clone()).unwrap();
+            let mut state = constraint.start();
+            assert!(allowed(&state.mask(), 0));
+            assert!(!allowed(&state.mask(), 2));
+            assert!(state.commit_token(0));
+            assert!(allowed(&state.mask(), 1));
+            assert!(state.commit_token(1));
+            assert!(state.is_accepting());
+        };
+        for mut open in [root.clone(), Module::load(root.save()).unwrap()] {
+            assert_wrong(&mut open);
+            open.bind("BODY", Grammar::from_ebnf(r#"start ::= "a""#).unwrap()).unwrap();
+            open.bind("END", TokenSet::new([1])).unwrap();
+            for mut closed in [open.clone(), Module::load(open.save()).unwrap()] {
+                assert_wrong(&mut closed);
+                assert_same(&closed);
+                let mut outer = Module::new(&wrapper);
+                outer.bind("INNER", &closed).unwrap();
+                for mut nested in [outer.clone(), Module::load(outer.save()).unwrap()] {
+                    assert_wrong(&mut nested);
+                    assert_same(&nested);
+                }
+            }
+        }
+        // The outer precompile itself can be the only lock before a fresh
+        // end-token expression is bound and delegated through.
+        let mut outer = Module::new(&wrapper);
+        outer.precompile_with(&v, options.clone()).unwrap();
+        let mut fresh = Module::new(&grammar);
+        fresh.bind("BODY", Grammar::from_ebnf(r#"start ::= "a""#).unwrap()).unwrap();
+        fresh.bind("END", TokenSet::new([1])).unwrap();
+        outer.bind("INNER", fresh).unwrap();
+        for mut nested in [outer.clone(), Module::load(outer.save()).unwrap()] {
+            assert_wrong(&mut nested);
+            assert_same(&nested);
+        }
+
+        // A saved, incompatible child must not bind to a precompiled parent.
+        let mut other = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
+        other.precompile_with(&wrong, options.clone()).unwrap();
+        let mut parent = Module::new(&wrapper);
+        parent.precompile_with(&v, options.clone()).unwrap();
+        assert!(parent.bind("INNER", Module::load(other.save()).unwrap()).is_err());
     }
 }
 
@@ -176,7 +247,7 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     module.precompile(&v).unwrap();
     let bytes = module.save();
     assert!(Constraint::load(bytes.clone(), &vocab()).is_err());
-    assert!(bytes.starts_with(b"GLRASM03"));
+    assert!(bytes.starts_with(b"GLRASM04"));
 
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&v).unwrap();
     assert!(Module::load(constraint.save()).is_err());

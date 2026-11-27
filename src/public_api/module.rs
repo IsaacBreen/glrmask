@@ -171,6 +171,8 @@ pub struct Module {
 pub(crate) struct Node {
     pub(crate) source: Arc<Grammar>,
     pub(crate) prepared: BTreeMap<u8, Arc<dyn RetainedPreparation>>,
+    // The vocabulary identity survives even a precompile that retains no body.
+    pub(crate) precompiled_vocab: Option<[u8; 32]>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
     #[cfg(test)]
@@ -211,18 +213,21 @@ pub(crate) struct Certificate {
     height: usize,
     instances: u128,
     ports: u128,
-    target: Option<Vocab>,
+    target: Option<[u8; 32]>,
     pending_sets: Vec<TokenSet>,
 }
 impl Certificate {
     fn target(&mut self, vocab: &Vocab) -> Result<()> {
-        if self.target.as_ref().is_some_and(|v| !v.same_model_vocab(vocab)) {
+        self.target_fingerprint(crate::compiler::compile::vocab_fingerprint(vocab))
+    }
+    fn target_fingerprint(&mut self, fingerprint: [u8; 32]) -> Result<()> {
+        if self.target.is_some_and(|v| v != fingerprint) {
             return Err(invalid("the bound modules were precompiled for different vocabularies"));
         }
         if self.target.is_none() {
             // The first supplied vocabulary must validate every pending token
             // set. Set the target first so `tokens` checks rather than requeues.
-            self.target = Some(vocab.clone());
+            self.target = Some(fingerprint);
             for set in std::mem::take(&mut self.pending_sets) {
                 self.tokens(&set)?;
             }
@@ -238,7 +243,7 @@ impl Certificate {
             BoundValue::Module(m) => {
                 let child = m.certificate()?;
                 self.height = self.height.max(child.height + 1);
-                if let Some(v) = &child.target { self.target(v)?; }
+                if let Some(v) = child.target { self.target_fingerprint(v)?; }
                 for set in &child.pending_sets { self.tokens(set)?; }
             }
         }
@@ -411,6 +416,7 @@ impl Module {
                 node: Arc::new(Node {
                     source: Arc::new(own_local(grammar)),
                     prepared: BTreeMap::new(),
+                    precompiled_vocab: None,
                     bindings,
                     certificate: Arc::new(OnceLock::new()),
                     #[cfg(test)]
@@ -536,13 +542,13 @@ impl Module {
             #[cfg(test)]
             BIND_WORK.with(|c| c.set(c.get() + 1));
             let mut c = Certificate { instances: 1, ports: self.node.bindings.len() as u128, ..Certificate::default() };
+            if let Some(fingerprint) = self.node.precompiled_vocab {
+                c.target_fingerprint(fingerprint)?;
+            }
             for p in self.node.prepared.values() {
-                // A vocabulary-free retained body has no token bytes yet; its
-                // vocabulary is checked in `validate_retained_vocab` at
-                // compile/precompile time.
-                if p.inner.pending_vocab_fingerprint.is_none() {
-                    c.target(&constraint_vocab(&p.inner))?;
-                }
+                // A loaded retained body may not have its vocabulary bytes yet.
+                c.target_fingerprint(p.retained_vocab_fingerprint
+                    .unwrap_or_else(|| p.inner.vocab_fingerprint()))?;
             }
             if let Some(t) = &self.node.source.exact_value { c.tokens(t)?; }
             for value in self.node.bindings.values() {
@@ -786,12 +792,14 @@ impl Module {
         }
 
         let mut instances = HashMap::<usize, Module>::new();
+        let fingerprint = crate::compiler::compile::vocab_fingerprint(vocab);
         for m in modules {
             let mut next = m.clone();
             let mut c = m.certificate()?.as_ref().clone();
-            c.target(vocab)?;
+            c.target_fingerprint(fingerprint)?;
             let source = local_preparation_key(&m);
             let node = Arc::make_mut(&mut next.node);
+            node.precompiled_vocab = Some(fingerprint);
             if let Some((engine, prepared)) = locals.get(&source)
                 && node.prepared.get(&engine.key()).is_none_or(|old| old.prepared().boundary_trigger < target_b)
             {
@@ -1043,6 +1051,8 @@ impl Module {
 
     fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions, end_tokens: &[u32]) -> Result<RuntimeConstraint> {
         crate::error::check_vocab_token_ids(vocab)?;
+        self.validate_targets(Some(vocab))?;
+        self.validate_retained_vocab(vocab)?;
         if let Some(slot) = self.externs().unbound().iter().next() {
             return Err(invalid(format!("extern {:?} is unbound; bind it before compiling, or precompile to leave it open", slot.name())));
         }
@@ -1051,8 +1061,6 @@ impl Module {
         {
             return body.compile_with_on_stack(vocab, options, &ids);
         }
-        self.validate_targets(Some(vocab))?;
-        self.validate_retained_vocab(vocab)?;
         let modules = self.index()?;
         for module in &modules {
             module.node.source.validate_ebnf(vocab)?;

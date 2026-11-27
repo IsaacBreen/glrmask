@@ -3,7 +3,7 @@ use super::*;
 use bincode::Options;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-const MAGIC: &[u8; 8] = b"GLRASM03";
+const MAGIC: &[u8; 8] = b"GLRASM04";
 const MAX_BYTES: u64 = 1 << 30;
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +30,7 @@ enum Value {
 #[derive(Serialize, Deserialize)]
 struct Instance {
     source: u32,
+    precompiled_vocab: Option<[u8; 32]>,
     #[serde(deserialize_with = "artifact_limits::items")]
     prepared: Vec<(u8, u32)>,
     #[serde(deserialize_with = "artifact_limits::items")]
@@ -131,6 +132,7 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
         instance_ids.insert(Arc::as_ptr(node) as usize, instances.len() as u32);
         instances.push(Instance {
             source: source_id,
+            precompiled_vocab: node.precompiled_vocab,
             prepared: preps,
             bindings,
         });
@@ -258,6 +260,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
             node: Arc::new(Node {
                 source,
                 prepared: retained_map,
+                precompiled_vocab: node.precompiled_vocab,
                 bindings,
                 certificate: Arc::new(OnceLock::new()),
                 #[cfg(test)]
