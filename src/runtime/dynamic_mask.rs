@@ -3064,6 +3064,7 @@ fn full_walk_append_scalar_finalizer(
     constraint: &Constraint,
 ) {
     let code = transitions.finalizer_code(target);
+    debug_assert_ne!(code, u32::MAX);
     full_walk_emit_finalizer_resets::<_, true>(
         next,
         &FullWalkPruneGuard::Passed,
