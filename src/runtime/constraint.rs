@@ -7517,67 +7517,9 @@ impl Constraint {
         &self,
         support: &DirectRegularTerminalSupport,
     ) -> Vec<DirectRegularDynamicHotFrontier> {
-        const MIN_AUTOMATON_STATES: usize = 16_384;
         const MIN_PRIMARY_WORK: u64 = 64;
         const MIN_SECONDARY_FRONTIER_STATES: usize = 64;
-        if !self.uses_sparse_direct_regular_runtime() {
-            return Vec::new();
-        }
-        let Some(automaton) = self.direct_regular_automaton.as_ref() else {
-            return Vec::new();
-        };
-        if automaton.states.len() < MIN_AUTOMATON_STATES {
-            return Vec::new();
-        }
-
-        let mut parents = vec![Vec::<u32>::new(); automaton.states.len()];
-        let mut remaining_children = Vec::<u32>::with_capacity(automaton.states.len());
-        let mut queue = std::collections::VecDeque::<u32>::new();
-        for (source, state) in automaton.states.iter().enumerate() {
-            remaining_children.push(state.epsilons.len() as u32);
-            if state.epsilons.is_empty() {
-                queue.push_back(source as u32);
-            }
-            for &child in &state.epsilons {
-                parents[child as usize].push(source as u32);
-            }
-        }
-        let mut transition_work = vec![0u64; automaton.states.len()];
-        let mut processed = 0usize;
-        while let Some(raw) = queue.pop_front() {
-            let state = &automaton.states[raw as usize];
-            let own = state
-                .transitions
-                .values()
-                .map(|targets| targets.len() as u64)
-                .sum::<u64>();
-            transition_work[raw as usize] = state.epsilons.iter().fold(own, |work, child| {
-                work.saturating_add(transition_work[*child as usize])
-            });
-            processed += 1;
-            for &parent in &parents[raw as usize] {
-                let remaining = &mut remaining_children[parent as usize];
-                *remaining -= 1;
-                if *remaining == 0 {
-                    queue.push_back(parent);
-                }
-            }
-        }
-        if processed != automaton.states.len() {
-            return Vec::new();
-        }
-        let Some((primary_raw, primary_work)) = transition_work
-            .iter()
-            .copied()
-            .enumerate()
-            .max_by_key(|&(state, work)| {
-                (
-                    support.state_terminal_count(state as u32).unwrap_or(0),
-                    work,
-                    state,
-                )
-            })
-        else {
+        let Some((primary_raw, primary_work, primary_support)) = support.hot_primary() else {
             return Vec::new();
         };
         if primary_work < MIN_PRIMARY_WORK {
@@ -7611,7 +7553,7 @@ impl Constraint {
             eprintln!(
                 "[glrmask/profile][dynamic_hot_frontiers] primary_state={} primary_support={} primary_work={} summaries={} widths={:?}",
                 primary_raw + 1,
-                support.state_terminal_count(primary_raw as u32).unwrap_or(0),
+                primary_support,
                 primary_work,
                 summaries.len(),
                 summaries

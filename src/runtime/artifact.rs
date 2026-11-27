@@ -2691,205 +2691,133 @@ pub(crate) fn dynamic_mask_state_key_hash(state: &DynamicMaskStateKey) -> u64 {
 }
 
 
-#[derive(Debug, Clone, Copy)]
-enum DirectRegularSupportNode {
-    Leaf(u64),
-    Branch(u32, u32),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DirectRegularSmallSupport {
-    len: u8,
-    terminals: [u16; 4],
-}
-
-impl DirectRegularSmallSupport {
-    const UNAVAILABLE: u8 = u8::MAX;
-
-    fn unavailable() -> Self {
-        Self {
-            len: Self::UNAVAILABLE,
-            terminals: [0; 4],
-        }
-    }
-
-    fn from_leaf(mut value: u64) -> Self {
-        if value.count_ones() > 4 {
-            return Self::unavailable();
-        }
-        let mut result = Self {
-            len: 0,
-            terminals: [0; 4],
-        };
-        while value != 0 {
-            result.terminals[result.len as usize] = value.trailing_zeros() as u16;
-            result.len += 1;
-            value &= value - 1;
-        }
-        result
-    }
-
-    fn combine(left: Self, right: Self, right_offset: usize) -> Self {
-        if left.len == Self::UNAVAILABLE
-            || right.len == Self::UNAVAILABLE
-            || usize::from(left.len) + usize::from(right.len) > 4
-            || right_offset > u16::MAX as usize
-        {
-            return Self::unavailable();
-        }
-        let mut result = Self {
-            len: left.len + right.len,
-            terminals: [0; 4],
-        };
-        result.terminals[..left.len as usize]
-            .copy_from_slice(&left.terminals[..left.len as usize]);
-        for (index, &terminal) in right.terminals[..right.len as usize].iter().enumerate() {
-            let Some(terminal) = usize::from(terminal).checked_add(right_offset) else {
-                return Self::unavailable();
-            };
-            let Ok(terminal) = u16::try_from(terminal) else {
-                return Self::unavailable();
-            };
-            result.terminals[left.len as usize + index] = terminal;
-        }
-        result
-    }
-
-    fn terminals(&self) -> Option<&[u16]> {
-        (self.len != Self::UNAVAILABLE).then(|| &self.terminals[..self.len as usize])
-    }
-}
+/// Interned binary unions of terminal bitsets. Zero denotes the empty set
+/// at every height; nonzero nodes have a unique height by construction.
+/// A leaf stores its bits, and a branch stores two child IDs in one u64.
+const SMALL_SUPPORT_TAG: u32 = 1 << 31;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DirectRegularTerminalSupport {
     roots: Vec<u32>,
-    nodes: Vec<DirectRegularSupportNode>,
-    node_counts: Vec<u16>,
-    node_small_support: Vec<DirectRegularSmallSupport>,
-    dense_state_rows: FxHashMap<u32, Arc<[u64]>>,
-    zero: Vec<u32>,
+    nodes: Vec<u64>,
+    small_sets: Vec<[TerminalID; 4]>,
+    dense_roots: FxHashMap<u32, Arc<[u64]>>,
     levels: u8,
     num_terminals: usize,
+    hot_primary: Option<(u32, u64, u16)>,
 }
 
-struct DirectRegularTerminalSupportBuilder {
-    nodes: Vec<DirectRegularSupportNode>,
-    node_counts: Vec<u16>,
-    node_small_support: Vec<DirectRegularSmallSupport>,
-    leaf_intern: FxHashMap<u64, u32>,
-    branch_intern: Vec<FxHashMap<(u32, u32), u32>>,
-    union_memo: Vec<FxHashMap<(u32, u32), u32>>,
-    zero: Vec<u32>,
+struct SupportBuilder {
+    nodes: Vec<u64>,
+    counts: Vec<u16>,
+    leaves: FxHashMap<u64, u32>,
+    branches: FxHashMap<(u32, u32), u32>,
+    unions: FxHashMap<(u32, u32), u32>,
 }
 
-impl DirectRegularTerminalSupportBuilder {
-    fn new(levels: usize) -> Self {
-        let mut builder = Self {
-            nodes: Vec::new(),
-            node_counts: Vec::new(),
-            node_small_support: Vec::new(),
-            leaf_intern: FxHashMap::default(),
-            branch_intern: (0..=levels).map(|_| FxHashMap::default()).collect(),
-            union_memo: (0..=levels).map(|_| FxHashMap::default()).collect(),
-            zero: Vec::with_capacity(levels + 1),
-        };
-        let leaf = builder.intern_leaf(0);
-        builder.zero.push(leaf);
-        for level in 1..=levels {
-            let child = builder.zero[level - 1];
-            let root = builder.intern_branch(level, child, child);
-            builder.zero.push(root);
+impl SupportBuilder {
+    fn new() -> Self {
+        Self {
+            nodes: vec![0],
+            counts: vec![0],
+            leaves: FxHashMap::default(),
+            branches: FxHashMap::default(),
+            unions: FxHashMap::default(),
         }
-        builder
     }
 
-    fn intern_leaf(&mut self, value: u64) -> u32 {
-        if let Some(&id) = self.leaf_intern.get(&value) {
-            return id;
-        }
+    fn leaf(&mut self, bits: u64) -> u32 {
+        if bits == 0 { return 0; }
+        if let Some(&id) = self.leaves.get(&bits) { return id; }
         let id = self.nodes.len() as u32;
-        self.nodes.push(DirectRegularSupportNode::Leaf(value));
-        self.node_counts.push(value.count_ones() as u16);
-        self.node_small_support
-            .push(DirectRegularSmallSupport::from_leaf(value));
-        self.leaf_intern.insert(value, id);
+        self.nodes.push(bits);
+        self.counts.push(bits.count_ones() as u16);
+        self.leaves.insert(bits, id);
         id
     }
 
-    fn intern_branch(&mut self, level: usize, left: u32, right: u32) -> u32 {
-        if let Some(&id) = self.branch_intern[level].get(&(left, right)) {
-            return id;
-        }
+    fn branch(&mut self, left: u32, right: u32) -> u32 {
+        if left == 0 && right == 0 { return 0; }
+        if let Some(&id) = self.branches.get(&(left, right)) { return id; }
         let id = self.nodes.len() as u32;
-        self.nodes
-            .push(DirectRegularSupportNode::Branch(left, right));
-        self.node_counts.push(
-            self.node_counts[left as usize].saturating_add(self.node_counts[right as usize]),
-        );
-        let right_offset = 64usize << (level - 1);
-        self.node_small_support.push(DirectRegularSmallSupport::combine(
-            self.node_small_support[left as usize],
-            self.node_small_support[right as usize],
-            right_offset,
-        ));
-        self.branch_intern[level].insert((left, right), id);
+        self.nodes.push(pack_support_children(left, right));
+        self.counts.push(self.counts[left as usize].saturating_add(self.counts[right as usize]));
+        self.branches.insert((left, right), id);
         id
     }
 
     fn union(&mut self, level: usize, left: u32, right: u32) -> u32 {
-        if left == right {
-            return left;
-        }
-        if left == self.zero[level] {
-            return right;
-        }
-        if right == self.zero[level] {
-            return left;
-        }
-        let key = if left < right {
-            (left, right)
+        if left == right || right == 0 { return left; }
+        if left == 0 { return right; }
+        let key = (left.min(right), left.max(right));
+        if let Some(&id) = self.unions.get(&key) { return id; }
+        let id = if level == 0 {
+            self.leaf(self.nodes[left as usize] | self.nodes[right as usize])
         } else {
-            (right, left)
+            let (la, lb) = unpack_support_children(self.nodes[left as usize]);
+            let (ra, rb) = unpack_support_children(self.nodes[right as usize]);
+            let a = self.union(level - 1, la, ra);
+            let b = self.union(level - 1, lb, rb);
+            self.branch(a, b)
         };
-        if let Some(&id) = self.union_memo[level].get(&key) {
-            return id;
-        }
-        let result = if level == 0 {
-            let DirectRegularSupportNode::Leaf(left_value) = self.nodes[left as usize] else {
-                unreachable!()
-            };
-            let DirectRegularSupportNode::Leaf(right_value) = self.nodes[right as usize] else {
-                unreachable!()
-            };
-            self.intern_leaf(left_value | right_value)
-        } else {
-            let DirectRegularSupportNode::Branch(left_a, left_b) = self.nodes[left as usize] else {
-                unreachable!()
-            };
-            let DirectRegularSupportNode::Branch(right_a, right_b) = self.nodes[right as usize]
-            else {
-                unreachable!()
-            };
-            let a = self.union(level - 1, left_a, right_a);
-            let b = self.union(level - 1, left_b, right_b);
-            self.intern_branch(level, a, b)
-        };
-        self.union_memo[level].insert(key, result);
-        result
+        self.unions.insert(key, id);
+        id
     }
 
     fn singleton(&mut self, levels: usize, terminal: usize) -> u32 {
         let word = terminal / 64;
-        let mut node = self.intern_leaf(1u64 << (terminal % 64));
-        for level in 1..=levels {
-            let zero = self.zero[level - 1];
-            node = if ((word >> (level - 1)) & 1) == 0 {
-                self.intern_branch(level, node, zero)
+        let mut node = self.leaf(1u64 << (terminal % 64));
+        for level in 0..levels {
+            node = if word & (1 << level) == 0 {
+                self.branch(node, 0)
             } else {
-                self.intern_branch(level, zero, node)
+                self.branch(0, node)
             };
         }
         node
+    }
+
+    fn copy_reachable(&self, level: usize, node: u32, remap: &mut [u32], output: &mut Vec<u64>) -> u32 {
+        if node == 0 { return 0; }
+        let known = remap[node as usize];
+        if known != u32::MAX { return known; }
+        let payload = self.nodes[node as usize];
+        let payload = if level == 0 {
+            payload
+        } else {
+            let (left, right) = unpack_support_children(payload);
+            let left = self.copy_reachable(level - 1, left, remap, output);
+            let right = self.copy_reachable(level - 1, right, remap, output);
+            pack_support_children(left, right)
+        };
+        let id = output.len() as u32;
+        output.push(payload);
+        remap[node as usize] = id;
+        id
+    }
+}
+
+#[inline]
+fn pack_support_children(left: u32, right: u32) -> u64 {
+    u64::from(left) | (u64::from(right) << 32)
+}
+
+#[inline]
+fn unpack_support_children(payload: u64) -> (u32, u32) {
+    (payload as u32, (payload >> 32) as u32)
+}
+
+/// Visit nonzero leaf words only; the shared DAG does not enumerate paths
+/// through the parser epsilon graph.
+fn visit_support_words(nodes: &[u64], node: u32, level: usize, base: usize, visit: &mut impl FnMut(usize, u64)) {
+    if node == 0 { return; }
+    let payload = nodes[node as usize];
+    if level == 0 {
+        visit(base, payload);
+    } else {
+        let (left, right) = unpack_support_children(payload);
+        visit_support_words(nodes, left, level - 1, base, visit);
+        visit_support_words(nodes, right, level - 1, base + (1 << (level - 1)), visit);
     }
 }
 
@@ -2898,31 +2826,34 @@ impl DirectRegularTerminalSupport {
         if automaton.states.is_empty() || num_terminals == 0 {
             return Self::default();
         }
-        let word_count = num_terminals.div_ceil(64).next_power_of_two();
-        let levels = word_count.trailing_zeros() as usize;
-        let mut builder = DirectRegularTerminalSupportBuilder::new(levels);
+        let levels = num_terminals.div_ceil(64).next_power_of_two().trailing_zeros() as usize;
+        let mut builder = SupportBuilder::new();
         let singletons = (0..num_terminals)
             .map(|terminal| builder.singleton(levels, terminal))
             .collect::<Vec<_>>();
 
         let mut parents = vec![Vec::<u32>::new(); automaton.states.len()];
-        let mut remaining_children = Vec::<u32>::with_capacity(automaton.states.len());
+        let mut remaining_children = Vec::<usize>::with_capacity(automaton.states.len());
         let mut queue = VecDeque::<u32>::new();
         for (source, state) in automaton.states.iter().enumerate() {
-            remaining_children.push(state.epsilons.len() as u32);
-            if state.epsilons.is_empty() {
-                queue.push_back(source as u32);
-            }
+            remaining_children.push(state.epsilons.len());
+            if state.epsilons.is_empty() { queue.push_back(source as u32); }
             for &child in &state.epsilons {
-                parents[child as usize].push(source as u32);
+                let Some(incoming) = parents.get_mut(child as usize) else { return Self::default(); };
+                incoming.push(source as u32);
             }
         }
 
-        let mut roots = vec![builder.zero[levels]; automaton.states.len()];
+        // The hot frontier heuristic uses exactly the same epsilon order.
+        // Retain only its winner, not a second traversal or per-node work.
+        let mut transition_work = (automaton.states.len() >= 16_384)
+            .then(|| vec![0u64; automaton.states.len()]);
+        let mut hot_primary = None::<(u32, u64, u16)>;
+        let mut roots = vec![0; automaton.states.len()];
         let mut processed = 0usize;
         while let Some(raw) = queue.pop_front() {
             let state = &automaton.states[raw as usize];
-            let mut root = builder.zero[levels];
+            let mut root = 0;
             for &terminal in state.transitions.keys() {
                 if (terminal as usize) < num_terminals {
                     root = builder.union(levels, root, singletons[terminal as usize]);
@@ -2932,35 +2863,69 @@ impl DirectRegularTerminalSupport {
                 root = builder.union(levels, root, roots[child as usize]);
             }
             roots[raw as usize] = root;
+            if let Some(work) = &mut transition_work {
+                let own = state.transitions.values().map(|targets| targets.len() as u64).sum::<u64>();
+                let count = state.epsilons.iter().fold(own, |sum, &child| sum.saturating_add(work[child as usize]));
+                work[raw as usize] = count;
+                let terminals = builder.counts[root as usize];
+                if hot_primary.is_none_or(|(old_raw, old_work, old_terminals)| {
+                    (terminals, count, raw) > (old_terminals, old_work, old_raw)
+                }) {
+                    hot_primary = Some((raw, count, terminals));
+                }
+            }
             processed += 1;
             for &parent in &parents[raw as usize] {
                 let remaining = &mut remaining_children[parent as usize];
                 *remaining -= 1;
-                if *remaining == 0 {
-                    queue.push_back(parent);
-                }
+                if *remaining == 0 { queue.push_back(parent); }
             }
         }
-        if processed != automaton.states.len() {
+        if processed != automaton.states.len() || builder.nodes.len() >= SMALL_SUPPORT_TAG as usize {
             return Self::default();
         }
+        // Small roots need no DAG traversal in the hot admission path.
+        // Repack only nodes reachable from large roots; discard all builder
+        // union temporaries, counts, and singleton-only interior nodes.
         let mut support = Self {
             roots,
-            nodes: builder.nodes,
-            node_counts: builder.node_counts,
-            node_small_support: builder.node_small_support,
-            dense_state_rows: FxHashMap::default(),
-            zero: builder.zero,
+            nodes: vec![0],
+            small_sets: Vec::new(),
+            dense_roots: FxHashMap::default(),
             levels: levels as u8,
             num_terminals,
+            hot_primary,
         };
-        let dense_word_count = num_terminals.div_ceil(64);
-        for &raw_state in &automaton.start_states {
-            let mut words = vec![0u64; dense_word_count];
-            support.or_state_into(raw_state, &mut words);
-            support
-                .dense_state_rows
-                .insert(raw_state, Arc::from(words));
+        let mut remap = vec![u32::MAX; builder.nodes.len()];
+        for root in &mut support.roots {
+            let old = *root;
+            if remap[old as usize] != u32::MAX {
+                *root = remap[old as usize];
+                continue;
+            }
+            if builder.counts[old as usize] <= 4 {
+                let mut terminals = [TerminalID::MAX; 4];
+                let mut len = 0;
+                visit_support_words(&builder.nodes, old, levels, 0, &mut |word, mut bits| {
+                    while bits != 0 {
+                        terminals[len] = (word * 64 + bits.trailing_zeros() as usize) as TerminalID;
+                        len += 1;
+                        bits &= bits - 1;
+                    }
+                });
+                *root = SMALL_SUPPORT_TAG | support.small_sets.len() as u32;
+                support.small_sets.push(terminals);
+                remap[old as usize] = *root;
+            } else {
+                *root = builder.copy_reachable(levels, old, &mut remap, &mut support.nodes);
+            }
+        }
+        for &raw in &automaton.start_states {
+            let Some(&root) = support.roots.get(raw as usize) else { continue; };
+            if root & SMALL_SUPPORT_TAG != 0 || support.dense_roots.contains_key(&root) { continue; }
+            let mut words = vec![0u64; num_terminals.div_ceil(64)];
+            support.or_state_into(raw, &mut words);
+            support.dense_roots.insert(root, Arc::from(words));
         }
         support
     }
@@ -2969,144 +2934,80 @@ impl DirectRegularTerminalSupport {
         !self.roots.is_empty()
     }
 
-    pub(crate) fn for_each_small_state_terminal(
-        &self,
-        raw_state: u32,
-        mut visit: impl FnMut(TerminalID),
-    ) -> bool {
-        let Some(root) = self.root_id(raw_state) else {
+    pub(crate) fn hot_primary(&self) -> Option<(u32, u64, u16)> {
+        self.hot_primary
+    }
+
+    #[inline]
+    fn small_set(&self, root: u32) -> Option<&[TerminalID]> {
+        if root & SMALL_SUPPORT_TAG == 0 { return None; }
+        let row = &self.small_sets[(root & !SMALL_SUPPORT_TAG) as usize];
+        let len = row.iter().position(|&id| id == TerminalID::MAX).unwrap_or(4);
+        Some(&row[..len])
+    }
+
+    pub(crate) fn for_each_small_state_terminal(&self, raw: u32, mut visit: impl FnMut(TerminalID)) -> bool {
+        let Some(terminals) = self.roots.get(raw as usize).and_then(|&root| self.small_set(root)) else {
             return false;
         };
-        let Some(terminals) = self.node_small_support[root as usize].terminals() else {
-            return false;
-        };
-        for &terminal in terminals {
-            let terminal = TerminalID::from(terminal);
-            if (terminal as usize) < self.num_terminals {
-                visit(terminal);
-            }
-        }
+        for &terminal in terminals { visit(terminal); }
         true
     }
 
     #[inline]
-    pub(crate) fn contains(&self, raw_state: u32, terminal: TerminalID) -> bool {
-        let terminal = terminal as usize;
-        if terminal >= self.num_terminals {
-            return false;
-        }
-        let Some(&mut_node) = self.roots.get(raw_state as usize) else {
-            return false;
-        };
-        let mut node = mut_node;
+    pub(crate) fn contains(&self, raw: u32, terminal: TerminalID) -> bool {
+        if terminal as usize >= self.num_terminals { return false; }
+        let Some(&root) = self.roots.get(raw as usize) else { return false; };
+        if let Some(terminals) = self.small_set(root) { return terminals.contains(&terminal); }
+        let mut node = root;
         let mut level = self.levels as usize;
-        let word = terminal / 64;
-        while level != 0 {
-            let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
-                return false;
-            };
-            node = if ((word >> (level - 1)) & 1) == 0 {
-                left
-            } else {
-                right
-            };
+        let word = terminal as usize / 64;
+        while node != 0 && level != 0 {
+            let (left, right) = unpack_support_children(self.nodes[node as usize]);
             level -= 1;
+            node = if word & (1 << level) == 0 { left } else { right };
         }
-        let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
-            return false;
-        };
-        value & (1u64 << (terminal % 64)) != 0
+        node != 0 && self.nodes[node as usize] & (1u64 << (terminal % 64)) != 0
     }
 
-    fn or_node(&self, node: u32, level: usize, word_base: usize, output: &mut [u64]) {
-        if node == self.zero[level] {
-            return;
-        }
-        if level == 0 {
-            let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
-                return;
-            };
-            if let Some(word) = output.get_mut(word_base) {
-                *word |= value;
+    pub(crate) fn or_state_into(&self, raw: u32, output: &mut [u64]) {
+        let Some(&root) = self.roots.get(raw as usize) else { return; };
+        if let Some(terminals) = self.small_set(root) {
+            for &terminal in terminals {
+                if let Some(word) = output.get_mut(terminal as usize / 64) {
+                    *word |= 1u64 << (terminal % 64);
+                }
             }
-            return;
-        }
-        let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
-            return;
-        };
-        let half = 1usize << (level - 1);
-        self.or_node(left, level - 1, word_base, output);
-        self.or_node(right, level - 1, word_base + half, output);
-    }
-
-    pub(crate) fn or_state_into(&self, raw_state: u32, output: &mut [u64]) {
-        if let Some(words) = self.dense_state_rows.get(&raw_state) {
-            for (target, source) in output.iter_mut().zip(words.iter()) {
-                *target |= *source;
-            }
-            return;
-        }
-        if let Some(&root) = self.roots.get(raw_state as usize) {
-            self.or_node(root, self.levels as usize, 0, output);
+        } else if let Some(words) = self.dense_roots.get(&root) {
+            for (target, source) in output.iter_mut().zip(words.iter()) { *target |= *source; }
+        } else {
+            visit_support_words(&self.nodes, root, self.levels as usize, 0, &mut |base, bits| {
+                if let Some(word) = output.get_mut(base) { *word |= bits; }
+            });
         }
     }
 
-    #[inline]
-    pub(crate) fn root_id(&self, raw_state: u32) -> Option<u32> {
-        self.roots.get(raw_state as usize).copied()
-    }
-
-    #[inline]
-    pub(crate) fn state_terminal_count(&self, raw_state: u32) -> Option<u16> {
-        let root = *self.roots.get(raw_state as usize)?;
-        self.node_counts.get(root as usize).copied()
-    }
-
-    pub(crate) fn singleton_terminal(&self, raw_state: u32) -> Option<TerminalID> {
-        let root = self.root_id(raw_state)?;
-        let terminals = self.node_small_support[root as usize].terminals()?;
-        let [terminal] = terminals else {
-            return None;
-        };
-        Some(TerminalID::from(*terminal))
-    }
-
-    fn intersects_node(
-        &self,
-        node: u32,
-        level: usize,
-        word_base: usize,
-        terminals: &[u64],
-    ) -> bool {
-        if node == self.zero[level] {
-            return false;
-        }
+    fn intersects_node(&self, node: u32, level: usize, base: usize, terminals: &[u64]) -> bool {
+        if node == 0 { return false; }
+        let payload = self.nodes[node as usize];
         if level == 0 {
-            let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
-                return false;
-            };
-            return terminals
-                .get(word_base)
-                .is_some_and(|word| (*word & value) != 0);
+            return terminals.get(base).is_some_and(|word| *word & payload != 0);
         }
-        let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
-            return false;
-        };
-        let half = 1usize << (level - 1);
-        self.intersects_node(left, level - 1, word_base, terminals)
-            || self.intersects_node(right, level - 1, word_base + half, terminals)
+        let (left, right) = unpack_support_children(payload);
+        self.intersects_node(left, level - 1, base, terminals)
+            || self.intersects_node(right, level - 1, base + (1 << (level - 1)), terminals)
     }
 
-    pub(crate) fn intersects(&self, raw_state: u32, terminals: &[u64]) -> bool {
-        if let Some(words) = self.dense_state_rows.get(&raw_state) {
-            return words
-                .iter()
-                .zip(terminals)
-                .any(|(left, right)| (*left & *right) != 0);
-        }
-        self.roots.get(raw_state as usize).is_some_and(|&root| {
+    pub(crate) fn intersects(&self, raw: u32, terminals: &[u64]) -> bool {
+        let Some(&root) = self.roots.get(raw as usize) else { return false; };
+        if let Some(small) = self.small_set(root) {
+            small.iter().any(|&terminal| terminals.get(terminal as usize / 64)
+                .is_some_and(|word| *word & (1u64 << (terminal % 64)) != 0))
+        } else if let Some(words) = self.dense_roots.get(&root) {
+            words.iter().zip(terminals).any(|(left, right)| *left & *right != 0)
+        } else {
             self.intersects_node(root, self.levels as usize, 0, terminals)
-        })
+        }
     }
 }
 
