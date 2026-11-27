@@ -9,7 +9,6 @@ use crate::grammar::flat::TerminalID;
 
 use super::artifact::Constraint;
 
-\\?\C:\Users\isaacbreen\AppData\Local\Temp\glrmask-token-classes-47284.rs:
 
 /// The final token coordinate shared by parser weights and mask fragments.
 /// Identity has no quotient; empty explicit quotients remain distinct from it.
