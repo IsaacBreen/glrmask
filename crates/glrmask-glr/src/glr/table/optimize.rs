@@ -3658,59 +3658,34 @@ fn compose_stack_rewrite(
     Ok(Some(frame))
 }
 
-/// Observe the same consuming alternatives used by the runtime, with the
-/// forwarded ordinary shift's replace flag interpreted in its source cell.
-fn consume_action_frames(
+/// The consuming alternatives of a cell are stack relations, independent of
+/// how the caller treats reduction continuations or acceptance.
+fn compose_action_rewrites(
     table: &GLRTable,
     state: u32,
     terminal: TerminalID,
     action: &Action,
-    frame: StackEffectFrame,
+    frame: &StackEffectFrame,
     skip_invalid_guards: bool,
-    mut emit: impl FnMut(StackEffectFrame),
-) -> Result<Option<StackEffectFrame>, ()> {
-    if matches!(action, Action::Reduce(..) | Action::Split { .. } | Action::Accept) {
-        return Ok(Some(frame));
-    }
-    let forwarded = matches!(action, Action::Shift(..))
+) -> Result<SmallVec<[StackEffectFrame; 2]>, ()> {
+    let forwarded = matches!(action, Action::Shift(..) | Action::Split { .. })
         && table.forwarded_shifts.contains(&(state, terminal));
+    let mut out = SmallVec::new();
     let mut invalid = false;
     action.for_each_stack_effect(|guards, pop, pushes| {
         if invalid {
             return;
         }
         match compose_stack_rewrite(frame.clone(), guards, if forwarded { 0 } else { pop }, pushes) {
-            Ok(Some(next)) => emit(next),
+            Ok(Some(next)) => out.push(next),
             Ok(None) => {}
             Err(()) if skip_invalid_guards => {}
             Err(()) => invalid = true,
         }
     });
-    if invalid { Err(()) } else { Ok(None) }
+    if invalid { Err(()) } else { Ok(out) }
 }
 
-// Compile one concrete action row of a synthetic suffix state into an
-// equivalent macro stack effect.
-//
-// Invariant.  A synthetic suffix state Q_S denotes the finite set S of concrete
-// LR stack suffixes.  If the lower stack is alpha, a concrete member suffix s in
-// S denotes alpha·s, while the synthetic stack denotes alpha·Q_S.  A macro
-// effect produced here is correct when applying it to alpha·Q_S yields exactly
-// the same lower-stack result as applying the original LR action sequence to
-// alpha·s, for every alpha satisfying its guards.
-//
-// Shifts and existing stack effects are translated by replacing the synthetic
-// state with the concrete suffix, applying the concrete pop/push operation, and
-// then re-encoding the result as one macro pop plus pushes.  Reductions are the
-// only subtle case: the reduce pop may expose a state inside the represented
-// suffix, or it may cross below Q_S into alpha.  In the first case the exposed
-// predecessor is known statically.  In the second case the predecessor is not
-// known until runtime, so we enumerate table goto sources for the reduced
-// nonterminal and add a guard at the exposed depth.  The guarded alternatives
-// are disjoint by predecessor state, and states without the goto simply produce
-// no branch, matching ordinary LR reduce failure.  After goto, we recursively
-// continue on the same terminal until a consuming shift/stack-effect/accept is
-// reached, exactly as the GLR interpreter does for reductions.
 fn collect_suffix_effects_from_frame(
     table: &GLRTable,
     terminal: TerminalID,
@@ -3722,109 +3697,19 @@ fn collect_suffix_effects_from_frame(
     effects: &mut Vec<GuardedStackShift>,
     accepts: &mut usize,
 ) -> Result<(), ()> {
-    let key = StackEffectVisitKey {
-        state,
-        tid: terminal,
-        action_tag: stack_effect_action_tag(action),
-        frame: frame.clone(),
-    };
-    if !visiting.insert(key.clone()) {
-        return Err(());
-    }
-
-    let result = (|| {
-        let Some(frame) = consume_action_frames(
-            table,
-            state,
-            terminal,
-            action,
-            frame,
-            false,
-            |next| effects.push(frame_to_guarded_shift(next)),
-        )? else {
-            return Ok(());
-        };
-        match action {
-            Action::Reduce(nt, len) => {
-                for frame in reduce_suffix_frame(
-                    table,
-                    frame,
-                    *nt,
-                    *len,
-                    goto_sources_by_nonterminal,
-                )? {
-                    let Some(&next_state) = frame.pushes.last() else {
-                        continue;
-                    };
-                    let Some(next_action) = table.action[next_state as usize].get(&terminal) else {
-                        continue;
-                    };
-                    collect_suffix_effects_from_frame(
-                        table,
-                        terminal,
-                        next_state,
-                        next_action,
-                        frame,
-                        goto_sources_by_nonterminal,
-                        visiting,
-                        effects,
-                        accepts,
-                    )?;
-                }
-                Ok(())
-            }
-            Action::Split { shift, reduces, accept } => {
-                if *accept {
-                    *accepts += 1;
-                }
-                if let Some((target, replace)) = shift {
-                    let shift_action = Action::Shift(*target, *replace);
-                    collect_suffix_effects_from_frame(
-                        table,
-                        terminal,
-                        state,
-                        &shift_action,
-                        frame.clone(),
-                        goto_sources_by_nonterminal,
-                        visiting,
-                        effects,
-                        accepts,
-                    )?;
-                }
-                for &(nt, len) in reduces {
-                    let reduce_action = Action::Reduce(nt, len);
-                    collect_suffix_effects_from_frame(
-                        table,
-                        terminal,
-                        state,
-                        &reduce_action,
-                        frame.clone(),
-                        goto_sources_by_nonterminal,
-                        visiting,
-                        effects,
-                        accepts,
-                    )?;
-                }
-                Ok(())
-            }
-            Action::Accept => {
-                *accepts += 1;
-                Ok(())
-            }
-            _ => unreachable!("consuming action already handled"),
-        }
-    })();
-
-    visiting.remove(&key);
-    result
+    StackWalk {
+        table,
+        terminal,
+        endpoint: StackEndpoint::Suffix,
+        domain: StackWalkDomain::Suffix(goto_sources_by_nonterminal),
+        visiting,
+        effects,
+        accepts,
+        origin_dependent: false,
+    }.walk(state, action, frame)
 }
 
-/// Contextual-sharing specialization of `collect_suffix_effects_from_frame`.
-///
-/// Nonrecursive consuming actions are exact one-step stack algebra and cannot
-/// revisit an action/frame pair, so allocating a fresh cycle-detection hash set
-/// for them is pure overhead. Reduction-bearing actions retain the generic
-/// recursive compiler unchanged.
+/// Nonrecursive cells need neither a predecessor domain nor a visit set.
 fn collect_context_share_effects_from_frame(
     table: &GLRTable,
     terminal: TerminalID,
@@ -3835,40 +3720,16 @@ fn collect_context_share_effects_from_frame(
     effects: &mut Vec<GuardedStackShift>,
     accepts: &mut usize,
 ) -> Result<(), ()> {
-    // A split containing only a shift has no recursive work here either.
-    let pure_shift;
-    let action = match action {
-        Action::Split {
-            shift: Some((target, replace)),
-            reduces,
-            accept: false,
-        } if reduces.is_empty() => {
-            pure_shift = Action::Shift(*target, *replace);
-            &pure_shift
-        }
-        _ => action,
-    };
-    let Some(frame) = consume_action_frames(
-        table,
-        state,
-        terminal,
-        action,
-        frame,
-        false,
-        |next| effects.push(frame_to_guarded_shift(next)),
-    )? else {
+    if !matches!(action, Action::Reduce(..) | Action::Accept | Action::Split { .. })
+        || matches!(action, Action::Split { reduces, accept: false, .. } if reduces.is_empty())
+    {
+        effects.extend(compose_action_rewrites(table, state, terminal, action, &frame, false)?
+            .into_iter().map(frame_to_guarded_shift));
         return Ok(());
-    };
+    }
     collect_suffix_effects_from_frame(
-        table,
-        terminal,
-        state,
-        action,
-        frame,
-        Some(goto_sources_by_nonterminal),
-        &mut FxHashSet::default(),
-        effects,
-        accepts,
+        table, terminal, state, action, frame, Some(goto_sources_by_nonterminal),
+        &mut FxHashSet::default(), effects, accepts,
     )
 }
 
@@ -5324,49 +5185,8 @@ fn control_effect_closure(
     Ok(seen.into_iter().collect())
 }
 
-fn continue_eof_accept_from_frames(
-    table: &GLRTable,
-    predecessors: &[PredecessorSet],
-    origin_state: u32,
-    frames: Vec<StackEffectFrame>,
-    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
-    visiting: &mut FxHashSet<StackEffectVisitKey>,
-    budget: &UnitInlineBudget,
-) -> Result<Vec<GuardedStackShift>, String> {
-    let mut out = Vec::new();
-    for frame in frames {
-        for (top_state, top_frame) in frame_top_branches(
-            predecessors,
-            origin_state,
-            &frame,
-            states_at_depth_cache,
-            budget,
-        )? {
-            let Some(next) = table.action[top_state as usize].get(&EOF) else {
-                continue;
-            };
-            out.extend(eof_accept_effects_for_action(
-                table,
-                predecessors,
-                origin_state,
-                top_state,
-                next,
-                top_frame,
-                states_at_depth_cache,
-                visiting,
-                budget,
-            )?);
-        }
-    }
-    Ok(out)
-}
-
-/// Compile an EOF reduction/control path into the stack rewrite which reaches
-/// the table's unique canonical `Accept` state. EOF is never committed as a
-/// model token, so shifts and stack shifts on this column are zero-width
-/// completion rewrites and must be followed until `Accept` rather than treated
-/// as consuming endpoints. Keeping only the canonical state as `Action::Accept`
-/// preserves the standalone-table embedding contract for nested composition.
+/// EOF rewrites are zero-width: follow them and reductions until Accept.
+/// A repeated completion frame contributes no additional accepting effect.
 fn eof_accept_effects_for_action(
     table: &GLRTable,
     predecessors: &[PredecessorSet],
@@ -5378,132 +5198,22 @@ fn eof_accept_effects_for_action(
     visiting: &mut FxHashSet<StackEffectVisitKey>,
     budget: &UnitInlineBudget,
 ) -> Result<Vec<GuardedStackShift>, String> {
-    if !budget.record_stack_effect_visit() {
-        return Err(control_elimination_failure(
-            budget,
-            origin_state,
-            EOF,
-            "EOF stack-effect traversal exceeded its compile budget",
-        ));
-    }
-    let key = StackEffectVisitKey {
-        state,
-        tid: EOF,
-        action_tag: stack_effect_action_tag(action),
-        frame: frame.clone(),
-    };
-    if !visiting.insert(key.clone()) {
-        // A cyclic completion branch contributes no new accepting effect. Any
-        // acyclic sibling branch remains live and is collected independently.
-        return Ok(Vec::new());
-    }
-
-    let result = (|| -> Result<Vec<GuardedStackShift>, String> {
-        match action {
-            Action::Accept => Ok(vec![frame_to_guarded_shift(frame)]),
-            Action::Reduce(nonterminal, len) => {
-                let frames = match apply_reduce_to_frame(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frame,
-                    *nonterminal,
-                    *len,
-                    states_at_depth_cache,
-                    budget,
-                ) {
-                    Some(ReduceFrameResult::Dead) => return Ok(Vec::new()),
-                    Some(ReduceFrameResult::Frames { frames, .. }) => frames,
-                    None => {
-                        return Err(control_elimination_failure(
-                            budget,
-                            origin_state,
-                            EOF,
-                            "EOF reduction traversal failed",
-                        ));
-                    }
-                };
-                continue_eof_accept_from_frames(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frames,
-                    states_at_depth_cache,
-                    visiting,
-                    budget,
-                )
-            }
-            Action::Split {
-                shift,
-                reduces,
-                accept,
-            } => {
-                let mut out = Vec::new();
-                if *accept {
-                    out.push(frame_to_guarded_shift(frame.clone()));
-                }
-                if let Some((target, replace)) = shift {
-                    let mut shifted = frame.clone();
-                    let effective_replace =
-                        *replace && !table.forwarded_shifts.contains(&(state, EOF));
-                    push_transition_to_frame(&mut shifted, *target, effective_replace).map_err(|()| control_elimination_failure(budget, origin_state, EOF, "EOF stack pop overflow"))?;
-                    out.extend(continue_eof_accept_from_frames(
-                        table,
-                        predecessors,
-                        origin_state,
-                        vec![shifted],
-                        states_at_depth_cache,
-                        visiting,
-                        budget,
-                    )?);
-                }
-                for &(nonterminal, len) in reduces {
-                    out.extend(eof_accept_effects_for_action(
-                        table,
-                        predecessors,
-                        origin_state,
-                        state,
-                        &Action::Reduce(nonterminal, len),
-                        frame.clone(),
-                        states_at_depth_cache,
-                        visiting,
-                        budget,
-                    )?);
-                }
-                Ok(out)
-            }
-            _ => {
-                let capacity = match action {
-                    Action::ReplaceShifts(targets) => targets.len(),
-                    Action::StackShifts(shifts) => shifts.len(),
-                    _ => 1,
-                };
-                let mut frames = Vec::with_capacity(capacity);
-                let remaining = consume_action_frames(
-                    table,
-                    state,
-                    EOF,
-                    action,
-                    frame,
-                    true,
-                    |next| frames.push(next),
-                ).expect("EOF ignores invalid guarded alternatives");
-                debug_assert!(remaining.is_none());
-                continue_eof_accept_from_frames(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frames,
-                    states_at_depth_cache,
-                    visiting,
-                    budget,
-                )
-            }
-        }
-    })();
-
-    visiting.remove(&key);
-    let mut effects = result?;
+    let mut effects = Vec::new();
+    StackWalk {
+        table,
+        terminal: EOF,
+        endpoint: StackEndpoint::Eof,
+        domain: StackWalkDomain::Origin {
+            state: origin_state, predecessors, states_at_depth_cache,
+            dependencies: &mut Vec::new(), budget,
+        },
+        visiting,
+        effects: &mut effects,
+        accepts: &mut 0,
+        origin_dependent: false,
+    }.walk(state, action, frame).map_err(|()| control_elimination_failure(
+        budget, origin_state, EOF, "EOF stack-effect traversal failed",
+    ))?;
     effects.sort();
     effects.dedup();
     Ok(effects)
@@ -6299,6 +6009,172 @@ fn apply_reduce_to_frame(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StackEndpoint {
+    /// A cell must consume the symbol; an Accept branch is not representable.
+    Consume,
+    /// A reconstructed suffix may accept, but its caller must establish
+    /// whether accepting and consuming alternatives can coexist.
+    Suffix,
+    /// All rewrites are zero-width until canonical acceptance is reached.
+    Eof,
+}
+
+enum StackWalkDomain<'a> {
+    Origin {
+        state: u32,
+        predecessors: &'a [PredecessorSet],
+        states_at_depth_cache: &'a mut FxHashMap<(u32, u32), Option<StateSubset>>,
+        dependencies: &'a mut Vec<(UnitInlineCell, UnitInlineCell)>,
+        budget: &'a UnitInlineBudget,
+    },
+    Suffix(Option<&'a [Vec<u32>]>),
+}
+
+/// One interpreter for a partial relation over the unknown original stack
+/// prefix and a known, written suffix. Domain selection determines which
+/// exposed goto sources need guards; endpoint selection determines when
+/// to stop. Neither changes the composition of stack rewrites themselves.
+struct StackWalk<'a> {
+    table: &'a GLRTable,
+    terminal: TerminalID,
+    endpoint: StackEndpoint,
+    domain: StackWalkDomain<'a>,
+    visiting: &'a mut FxHashSet<StackEffectVisitKey>,
+    effects: &'a mut Vec<GuardedStackShift>,
+    accepts: &'a mut usize,
+    origin_dependent: bool,
+}
+
+impl StackWalk<'_> {
+    fn charge(&self) -> Result<(), ()> {
+        match &self.domain {
+            StackWalkDomain::Origin { budget, .. } if !budget.record_stack_effect_visit() => Err(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn reduce(
+        &mut self,
+        frame: StackEffectFrame,
+        nt: NonterminalID,
+        len: u32,
+    ) -> Result<Vec<StackEffectFrame>, ()> {
+        match &mut self.domain {
+            StackWalkDomain::Origin { state, predecessors, states_at_depth_cache, budget, .. } => {
+                match apply_reduce_to_frame(
+                    self.table, predecessors, *state, frame, nt, len, states_at_depth_cache, budget,
+                ).ok_or(())? {
+                    ReduceFrameResult::Dead => Ok(Vec::new()),
+                    ReduceFrameResult::Frames { frames, origin_dependent } => {
+                        self.origin_dependent |= origin_dependent;
+                        Ok(frames)
+                    }
+                }
+            }
+            StackWalkDomain::Suffix(sources) => reduce_suffix_frame(
+                self.table, frame, nt, len, *sources,
+            ),
+        }
+    }
+
+    fn continue_frame(&mut self, frame: StackEffectFrame) -> Result<(), ()> {
+        let table = self.table;
+        let terminal = self.terminal;
+        if self.endpoint == StackEndpoint::Eof {
+            let StackWalkDomain::Origin { state, predecessors, states_at_depth_cache, budget, .. }
+                = &mut self.domain else { return Err(()); };
+            let tops = frame_top_branches(
+                predecessors, *state, &frame, states_at_depth_cache, budget,
+            ).map_err(|_| ())?;
+            for (state, frame) in tops {
+                if let Some(action) = table.action.get(state as usize).ok_or(())?.get(&terminal) {
+                    self.walk(state, action, frame)?;
+                }
+            }
+        } else if let Some(&state) = frame.pushes.last()
+            && let Some(action) = table.action.get(state as usize).ok_or(())?.get(&terminal)
+        {
+            if let StackWalkDomain::Origin { state: origin, dependencies, .. } = &mut self.domain {
+                dependencies.push(((*origin, terminal), (state, terminal)));
+            }
+            self.walk(state, action, frame)?;
+        }
+        Ok(())
+    }
+
+    fn walk(
+        &mut self,
+        state: u32,
+        action: &Action,
+        frame: StackEffectFrame,
+    ) -> Result<(), ()> {
+        self.charge()?;
+        let key = StackEffectVisitKey {
+            state,
+            tid: self.terminal,
+            action_tag: stack_effect_action_tag(action),
+            frame: frame.clone(),
+        };
+        if !self.visiting.insert(key.clone()) {
+            return if self.endpoint == StackEndpoint::Eof { Ok(()) } else { Err(()) };
+        }
+        let result = self.walk_cell(state, action, frame);
+        self.visiting.remove(&key);
+        result
+    }
+
+    fn walk_cell(
+        &mut self,
+        state: u32,
+        action: &Action,
+        frame: StackEffectFrame,
+    ) -> Result<(), ()> {
+        if matches!(action, Action::Accept | Action::Split { accept: true, .. }) {
+            match self.endpoint {
+                StackEndpoint::Consume => return Err(()),
+                StackEndpoint::Suffix => *self.accepts += 1,
+                StackEndpoint::Eof => self.effects.push(frame_to_guarded_shift(frame.clone())),
+            }
+        }
+        // Preserve the historical branch visit charge for split cells.
+        let split = matches!(action, Action::Split { .. });
+        if split && self.endpoint != StackEndpoint::Eof
+            && matches!(action, Action::Split { shift: Some(_), .. })
+        {
+            self.charge()?;
+        }
+        let rewritten = compose_action_rewrites(
+            self.table, state, self.terminal, action, &frame,
+            self.endpoint == StackEndpoint::Eof,
+        )?;
+        for next in rewritten {
+            if self.endpoint == StackEndpoint::Eof {
+                self.continue_frame(next)?;
+            } else {
+                self.effects.push(frame_to_guarded_shift(next));
+            }
+        }
+
+        let mut result = Ok(());
+        action.for_each_reduce(|nt, len| {
+            if result.is_err() {
+                return;
+            }
+            result = (|| {
+                if split {
+                    self.charge()?;
+                }
+                for next in self.reduce(frame.clone(), nt, len)? {
+                    self.continue_frame(next)?;
+                }
+                Ok(())
+            })();
+        });
+        result
+    }
+}
+
 fn stack_effects_for_action(
     table: &GLRTable,
     predecessors: &[PredecessorSet],
@@ -6312,138 +6188,25 @@ fn stack_effects_for_action(
     dependencies: &mut Vec<(UnitInlineCell, UnitInlineCell)>,
     budget: &UnitInlineBudget,
 ) -> Option<StackEffectResult> {
-    if !budget.record_stack_effect_visit() {
-        return None;
-    }
-    let key = StackEffectVisitKey {
-        state,
-        tid,
-        action_tag: stack_effect_action_tag(action),
-        frame: frame.clone(),
+    let mut effects = Vec::new();
+    let mut accepts = 0;
+    let mut walk = StackWalk {
+        table,
+        terminal: tid,
+        endpoint: StackEndpoint::Consume,
+        domain: StackWalkDomain::Origin {
+            state: origin_state, predecessors, states_at_depth_cache, dependencies, budget,
+        },
+        visiting,
+        effects: &mut effects,
+        accepts: &mut accepts,
+        origin_dependent: false,
     };
-    if !visiting.insert(key.clone()) {
-        return None;
-    }
-
-    let result = (|| {
-        let mut out = Vec::new();
-        let mut origin_dependent = false;
-        if let Some(frame) = consume_action_frames(
-            table,
-            state,
-            tid,
-            action,
-            frame,
-            false,
-            |next| out.push(frame_to_guarded_shift(next)),
-        ).ok()? {
-            match action {
-                Action::Reduce(nt, len) => {
-                    let frames = match apply_reduce_to_frame(
-                        table,
-                        predecessors,
-                        origin_state,
-                        frame,
-                        *nt,
-                        *len,
-                        states_at_depth_cache,
-                        budget,
-                    )? {
-                        ReduceFrameResult::Dead => {
-                            return Some(StackEffectResult {
-                                effects: Vec::new(),
-                                origin_dependent,
-                            })
-                        }
-                        ReduceFrameResult::Frames {
-                            frames,
-                            origin_dependent: reduce_origin_dependent,
-                        } => {
-                            origin_dependent |= reduce_origin_dependent;
-                            frames
-                        }
-                    };
-                    for frame in frames {
-                        let Some(&next_state) = frame.pushes.last() else {
-                            continue;
-                        };
-                        let Some(next) = table.action[next_state as usize].get(&tid) else {
-                            continue;
-                        };
-                        dependencies.push(((origin_state, tid), (next_state, tid)));
-                        let next_result = stack_effects_for_action(
-                            table,
-                            predecessors,
-                            origin_state,
-                            tid,
-                            next_state,
-                            next,
-                            frame,
-                            states_at_depth_cache,
-                            visiting,
-                            dependencies,
-                            budget,
-                        )?;
-                        origin_dependent |= next_result.origin_dependent;
-                        out.extend(next_result.effects);
-                    }
-                }
-                Action::Split { shift, reduces, accept } => {
-                    if *accept {
-                        return None;
-                    }
-                    if let Some((target, replace)) = shift {
-                        let shift_action = Action::Shift(*target, *replace);
-                        let shift_result = stack_effects_for_action(
-                            table,
-                            predecessors,
-                            origin_state,
-                            tid,
-                            state,
-                            &shift_action,
-                            frame.clone(),
-                            states_at_depth_cache,
-                            visiting,
-                            dependencies,
-                            budget,
-                        )?;
-                        origin_dependent |= shift_result.origin_dependent;
-                        out.extend(shift_result.effects);
-                    }
-                    for &(nt, len) in reduces {
-                        let reduce_action = Action::Reduce(nt, len);
-                        let reduce_result = stack_effects_for_action(
-                            table,
-                            predecessors,
-                            origin_state,
-                            tid,
-                            state,
-                            &reduce_action,
-                            frame.clone(),
-                            states_at_depth_cache,
-                            visiting,
-                            dependencies,
-                            budget,
-                        )?;
-                        origin_dependent |= reduce_result.origin_dependent;
-                        out.extend(reduce_result.effects);
-                    }
-                }
-                Action::Accept => return None,
-                _ => unreachable!("consuming action already handled"),
-            }
-        }
-
-        out.sort();
-        out.dedup();
-        Some(StackEffectResult {
-            effects: out,
-            origin_dependent,
-        })
-    })();
-
-    visiting.remove(&key);
-    result
+    walk.walk(state, action, frame).ok()?;
+    let origin_dependent = walk.origin_dependent;
+    effects.sort();
+    effects.dedup();
+    Some(StackEffectResult { effects, origin_dependent })
 }
 
 fn normalize_guarded_effects(effects: &mut Vec<GuardedStackShift>) {
