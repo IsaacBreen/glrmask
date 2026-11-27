@@ -95,42 +95,75 @@ struct AnyOfObjectVariant {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfFixedObjectCursor {
-    variant_idx: u16,
+enum ObjectPhase { Fixed, Pattern, Additional }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ObjectCursor {
+    variant: u16,
     cursor: u16,
+    phase: ObjectPhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfFixedObjectMergedState {
-    cursors: Vec<AnyOfFixedObjectCursor>,
+struct ObjectFrontier {
+    cursors: Vec<ObjectCursor>,
     has_content: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum AnyOfObjectPhase {
-    Fixed,
-    Pattern,
-    Additional,
+/// A member transition label is the entire emitted key/value path. It is
+/// safe to merge target cursors only for exactly equal labels, including
+/// the separator and any lexical key policy.
+#[derive(Clone, Copy)]
+struct MemberLabels([usize; 2]);
+
+impl MemberLabels {
+    fn select(self, has_content: bool) -> usize { self.0[usize::from(has_content)] }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum ShadowOwnerState {
-    None,
-    Impossible,
-    Possible {
-        variant_idx: u16,
-        cursor: u16,
-        phase: AnyOfObjectPhase,
-    },
+struct ObjectVariantPlan {
+    fixed: Vec<MemberLabels>,
+    next_required: Vec<usize>,
+    patterns: Vec<MemberLabels>,
+    additional: Vec<MemberLabels>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfObjectState {
-    variant_idx: u16,
-    cursor: u16,
-    has_content: bool,
-    phase: AnyOfObjectPhase,
-    shadow_owner: ShadowOwnerState,
+struct ObjectUnionPlan {
+    variants: Vec<ObjectVariantPlan>,
+    labels: Vec<Vec<GrammarExpr>>,
+}
+
+impl ObjectVariantPlan {
+    fn can_close(&self, cursor: ObjectCursor) -> bool {
+        cursor.phase != ObjectPhase::Fixed
+            || self.next_required[cursor.cursor as usize] == self.fixed.len()
+    }
+
+    fn for_each_member(&self, cursor: ObjectCursor, has_content: bool,
+        mut visit: impl FnMut(usize, ObjectCursor))
+    {
+        if cursor.phase == ObjectPhase::Fixed {
+            let start = cursor.cursor as usize;
+            let end = (self.next_required[start] + 1).min(self.fixed.len());
+            for i in start..end {
+                visit(self.fixed[i].select(has_content), ObjectCursor {
+                    cursor: (i + 1) as u16, ..cursor
+                });
+            }
+        }
+        if !self.can_close(cursor) { return; }
+        if cursor.phase != ObjectPhase::Additional {
+            for &label in &self.patterns {
+                visit(label.select(has_content), ObjectCursor {
+                    cursor: self.fixed.len() as u16, phase: ObjectPhase::Pattern, ..cursor
+                });
+            }
+        }
+        for &label in &self.additional {
+            visit(label.select(has_content), ObjectCursor {
+                cursor: self.fixed.len() as u16, phase: ObjectPhase::Additional, ..cursor
+            });
+        }
+    }
 }
 
 fn is_obviously_object_valued_property(schema: &Schema) -> bool {
@@ -162,49 +195,6 @@ fn is_unconstrained_open_object_schema(schema: &ObjectSchema) -> bool {
         && schema.property_names.is_none()
         && schema.property_dependencies.is_empty()
         && matches!(schema.additional_properties, AdditionalProperties::AllowAny)
-}
-
-impl AnyOfObjectVariant {
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
-        let idx = self.items[cursor..]
-            .iter()
-            .position(|item| item.key == key)
-            .map(|offset| cursor + offset)?;
-        if self.items[cursor..idx].iter().any(|item| item.required) {
-            return None;
-        }
-        Some(idx + 1)
-    }
-
-    fn close_allowed(&self, cursor: usize) -> bool {
-        !self.items[cursor..].iter().any(|item| item.required)
-    }
-
-    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
-        let mut keys = Vec::new();
-        for item in &self.items[cursor..] {
-            keys.push(item.key.as_str());
-            if item.required {
-                break;
-            }
-        }
-        keys
-    }
-
-    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
-        self.items
-            .iter()
-            .find(|item| item.key == key)
-            .map(|item| item.value_expr.clone())
-    }
-
-    fn has_required_items(&self) -> bool {
-        self.items.iter().any(|item| item.required)
-    }
 }
 
 impl<'a> Lowerer<'a> {
@@ -1477,89 +1467,161 @@ impl<'a> Lowerer<'a> {
         variants: &[AnyOfFixedObjectVariant],
         include_untyped_non_object_alts: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
-        if variants.is_empty() || variants.len() > u16::MAX as usize {
-            return Ok(None);
-        }
-        // Sharing exact lowered value observations is a subset construction
-        // on ordered property cursors. If its frontier exceeds the cap, the
-        // same transition algebra can emit singleton alternatives instead.
-        for share in [true, false] {
-            let Some(builder) = self.build_closed_variant_frontier(variants, share)? else { continue; };
-            let rule_name = self.fresh_rule_name("json_anyof_object_body");
-            let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-            self.add_nonterminal_rule(&rule_name, body);
-            return Ok(Some(Self::object_union_result(&rule_name, include_untyped_non_object_alts)));
-        }
-        Ok(None)
+        self.lower_object_union(variants, include_untyped_non_object_alts, true)
     }
 
-    fn build_closed_variant_frontier(
+    fn prepare_object_union(
         &mut self,
         variants: &[AnyOfObjectVariant],
-        share: bool,
-    ) -> ImportResult<Option<ExprNfaBuilder>> {
+        closed: bool,
+    ) -> ImportResult<ObjectUnionPlan> {
+        let mut plan = ObjectUnionPlan { variants: Vec::with_capacity(variants.len()), labels: Vec::new() };
+        let mut ids = HashMap::<Vec<GrammarExpr>, usize>::new();
+        let mut intern = |path: Vec<GrammarExpr>| {
+            *ids.entry(path).or_insert_with_key(|path| {
+                let label = plan.labels.len();
+                plan.labels.push(path.clone());
+                label
+            })
+        };
+        let separator = self.item_separator_expr();
+        let mut key_paths = HashMap::<String, [GrammarExpr; 2]>::new();
+        for variant in variants {
+            let n = variant.items.len();
+            let mut next_required = vec![n; n + 1];
+            for i in (0..n).rev() {
+                next_required[i] = if variant.items[i].required { i } else { next_required[i + 1] };
+            }
+            let mut fixed = Vec::with_capacity(n);
+            for item in &variant.items {
+                let keys = key_paths.entry(item.key.clone()).or_insert_with(|| {
+                    let first = self.lower_literal_key_colon(&item.key);
+                    let next = if closed {
+                        self.lower_literal_key_colon_with_prefix(b", ", &item.key)
+                    } else { first.clone() };
+                    [first, next]
+                });
+                let first = intern(vec![keys[0].clone(), item.value_expr.clone()]);
+                let mut next = Vec::with_capacity(3);
+                if !closed { next.push(separator.clone()); }
+                next.extend([keys[1].clone(), item.value_expr.clone()]);
+                fixed.push(MemberLabels([first, intern(next)]));
+            }
+            let mut tail_labels = |path: Vec<GrammarExpr>| {
+                let mut next = Vec::with_capacity(path.len() + 1);
+                next.push(separator.clone());
+                next.extend(path.iter().cloned());
+                MemberLabels([intern(path), intern(next)])
+            };
+            let mut patterns = Vec::new();
+            for pair in &variant.pattern_pairs {
+                for [key, value] in Self::split_object_pair_symbol_paths(pair)? {
+                    patterns.push(tail_labels(Self::object_pair_path_symbols(key, value)));
+                }
+            }
+            let mut additional = Vec::new();
+            if let Some(value) = &variant.additional_value_expr {
+                let key = if self.llguidance_compat_enabled() && variant.fixed_keys.is_empty()
+                    && variant.pattern_keys.is_empty()
+                {
+                    seq(vec![r(json_key_string_rule()), self.key_separator_expr()])
+                } else {
+                    self.lower_additional_key_colon(&variant.fixed_keys, &variant.pattern_keys)?
+                };
+                for mut path in Self::split_key_colon_symbol_paths(key) {
+                    path.push(value.clone());
+                    additional.push(tail_labels(path));
+                }
+            }
+            plan.variants.push(ObjectVariantPlan { fixed, next_required, patterns, additional });
+        }
+        Ok(plan)
+    }
+
+    fn build_object_union(plan: &ObjectUnionPlan, share: bool) -> Option<ExprNfaBuilder> {
+        const MAX_FRONTIER_CELLS: usize = 262_144;
         let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
         let mut state_ids = BTreeMap::new();
         let mut queue = VecDeque::new();
-        let cursors = (0..variants.len()).map(|i| AnyOfFixedObjectCursor {
-            variant_idx: i as u16, cursor: 0,
+        let mut cells = 0usize;
+        let mut intern = |builder: &mut ExprNfaBuilder, ids: &mut BTreeMap<ObjectFrontier, u32>,
+            pending: &mut VecDeque<ObjectFrontier>, frontier: ObjectFrontier| -> Option<u32> {
+            if let Some(&id) = ids.get(&frontier) { return Some(id); }
+            cells = cells.checked_add(frontier.cursors.len())?;
+            if cells > MAX_FRONTIER_CELLS || ids.len() >= ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
+                return None;
+            }
+            let id = builder.add_state();
+            ids.insert(frontier.clone(), id);
+            pending.push_back(frontier);
+            Some(id)
+        };
+        let cursors = (0..plan.variants.len()).map(|i| ObjectCursor {
+            variant: i as u16, cursor: 0, phase: ObjectPhase::Fixed,
         }).collect::<Vec<_>>();
         let starts = if share { vec![cursors] } else {
             cursors.into_iter().map(|cursor| vec![cursor]).collect()
         };
         for cursors in starts {
-            let start = merged_closed_any_of_state_id(&mut builder, &mut state_ids, &mut queue,
-                AnyOfFixedObjectMergedState { cursors, has_content: false });
+            let start = intern(&mut builder, &mut state_ids, &mut queue,
+                ObjectFrontier { cursors, has_content: false })?;
             builder.add_epsilon(builder.start_state(), start);
         }
-        while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES { return Ok(None); }
-            let source = state_ids[&state];
-            let mut by_key = BTreeMap::<&str, Vec<(&GrammarExpr, AnyOfFixedObjectCursor)>>::new();
-            for cursor in &state.cursors {
-                let variant = &variants[cursor.variant_idx as usize];
-                let remaining = &variant.items[cursor.cursor as usize..];
-                if remaining.iter().all(|item| !item.required) {
-                    builder.add_epsilon(source, accept);
-                }
-                for (offset, item) in remaining.iter().enumerate() {
-                    by_key.entry(&item.key).or_default().push((&item.value_expr,
-                        AnyOfFixedObjectCursor { variant_idx: cursor.variant_idx,
-                            cursor: cursor.cursor + offset as u16 + 1 }));
-                    if item.required { break; }
-                }
+        while let Some(frontier) = queue.pop_front() {
+            let source = state_ids[&frontier];
+            let mut outgoing = BTreeMap::<usize, Vec<ObjectCursor>>::new();
+            let mut accepts = false;
+            for cursor in frontier.cursors {
+                let variant = &plan.variants[cursor.variant as usize];
+                accepts |= variant.can_close(cursor);
+                variant.for_each_member(cursor, frontier.has_content, |label, target| {
+                    outgoing.entry(label).or_default().push(target);
+                });
             }
-            for (key, edges) in by_key {
-                let mut groups: Vec<(&GrammarExpr, Vec<AnyOfFixedObjectCursor>)> = Vec::new();
-                let mut index = HashMap::new();
-                for (value, cursor) in edges {
-                    if share {
-                        let group = *index.entry(value).or_insert_with(|| {
-                            groups.push((value, Vec::new()));
-                            groups.len() - 1
-                        });
-                        groups[group].1.push(cursor);
-                    } else {
-                        groups.push((value, vec![cursor]));
-                    }
-                }
-                let key_expr = if state.has_content {
-                    self.lower_literal_key_colon_with_prefix(b", ", key)
-                } else {
-                    self.lower_literal_key_colon(key)
+            if accepts { builder.set_accepting(source); }
+            for (label, mut cursors) in outgoing {
+                cursors.sort_unstable();
+                cursors.dedup();
+                let groups = if share { vec![cursors] } else {
+                    cursors.into_iter().map(|cursor| vec![cursor]).collect()
                 };
-                for (value, mut cursors) in groups {
-                    cursors.sort_unstable();
-                    cursors.dedup();
-                    let target = merged_closed_any_of_state_id(&mut builder, &mut state_ids, &mut queue,
-                        AnyOfFixedObjectMergedState { cursors, has_content: true });
-                    Self::add_expr_nfa_symbol_path(&mut builder, source, vec![key_expr.clone(), value.clone()], target);
+                for cursors in groups {
+                    let target = intern(&mut builder, &mut state_ids, &mut queue,
+                        ObjectFrontier { cursors, has_content: true })?;
+                    Self::add_expr_nfa_symbol_path(&mut builder, source, plan.labels[label].clone(), target);
                 }
             }
         }
-        Ok(Some(builder))
+        Some(builder)
+    }
+
+    fn lower_object_union(
+        &mut self,
+        variants: &[AnyOfObjectVariant],
+        include_nonobjects: bool,
+        closed: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if variants.is_empty() || variants.len() > u16::MAX as usize { return Ok(None); }
+        let plan = self.prepare_object_union(variants, closed)?;
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let started = profile.then(std::time::Instant::now);
+        // Ordinary anyOf is union, not subtraction. The old shadow-owner
+        // route suppressed acceptance using a speculative match of a broader
+        // value/key against an owner's narrower language. No such implication
+        // follows from a shared key. Instead, preserve both cursors until a
+        // complete identical emitted label proves a safe subset transition.
+        let Some(builder) = Self::build_object_union(&plan, true)
+            .or_else(|| Self::build_object_union(&plan, false)) else { return Ok(None); };
+        let graph_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        let started = profile.then(std::time::Instant::now);
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        if let Some(t) = started {
+            eprintln!("[glrmask/profile][json_schema_object_union_build] graph_ms={:.3} determinize_minimize_ms={:.3}",
+                graph_ms, t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let name = self.fresh_rule_name("json_anyof_object_body");
+        self.add_nonterminal_rule(&name, body);
+        Ok(Some(Self::object_union_result(&name, include_nonobjects)))
     }
 
     fn object_union_result(rule_name: &str, include_nonobjects: bool) -> GrammarExpr {
@@ -1568,162 +1630,10 @@ impl<'a> Lowerer<'a> {
         choice(vec![object, r(JSON_ARRAY_RULE), r(JSON_STRING_RULE),
             r(JSON_NUMBER_RULE), r(JSON_BOOL_RULE), r(JSON_NULL_RULE)])
     }
+
     fn is_json_value_expr(expr: &GrammarExpr) -> bool {
         matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_VALUE_RULE)
     }
-
-    fn is_json_string_expr(expr: &GrammarExpr) -> bool {
-        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_STRING_RULE)
-    }
-
-    fn is_json_string_constrained_expr(expr: &GrammarExpr) -> bool {
-        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name.starts_with("json_string_constrained"))
-    }
-
-    fn non_string_json_value_expr() -> GrammarExpr {
-        choice(vec![
-            r(JSON_NULL_RULE),
-            r(JSON_BOOL_RULE),
-            r(JSON_NUMBER_RULE),
-            r(JSON_OBJECT_RULE),
-            r(JSON_ARRAY_RULE),
-        ])
-    }
-
-    fn invalid_residual_value_for_owner(owner_value_expr: &GrammarExpr) -> Option<GrammarExpr> {
-        if Self::is_json_string_expr(owner_value_expr) {
-            return Some(Self::non_string_json_value_expr());
-        }
-        if Self::is_json_string_constrained_expr(owner_value_expr) {
-            return Some(choice(vec![
-                Self::non_string_json_value_expr(),
-                GrammarExpr::Exclude {
-                    expr: Box::new(r(JSON_STRING_RULE)),
-                    exclude: Box::new(owner_value_expr.clone()),
-                },
-            ]));
-        }
-        None
-    }
-
-    fn select_shadow_owner_for_variant(
-        variants: &[AnyOfObjectVariant],
-        residual_idx: usize,
-    ) -> Option<usize> {
-        let residual = &variants[residual_idx];
-        if !residual.pattern_pairs.is_empty()
-            || !residual.pattern_keys.is_empty()
-            || !residual
-                .additional_value_expr
-                .as_ref()
-                .is_some_and(Self::is_json_value_expr)
-            || residual.items.iter().any(|item| item.required)
-        {
-            return None;
-        }
-
-        let mut candidate = None;
-        for (owner_idx, owner) in variants.iter().enumerate() {
-            if owner_idx == residual_idx
-                || !owner.pattern_pairs.is_empty()
-                || !owner.pattern_keys.is_empty()
-                || !owner
-                    .additional_value_expr
-                    .as_ref()
-                    .is_some_and(Self::is_json_value_expr)
-                || !owner.has_required_items()
-            {
-                continue;
-            }
-            if owner
-                .items
-                .iter()
-                .any(|item| item.required && Self::invalid_residual_value_for_owner(&item.value_expr).is_none())
-            {
-                continue;
-            }
-            if candidate.replace(owner_idx).is_some() {
-                return None;
-            }
-        }
-        candidate
-    }
-
-    fn shadow_owner_suppresses_close(
-        variants: &[AnyOfObjectVariant],
-        shadow_owner: ShadowOwnerState,
-    ) -> bool {
-        match shadow_owner {
-            ShadowOwnerState::Possible {
-                variant_idx,
-                cursor,
-                phase,
-            } => {
-                let owner = &variants[variant_idx as usize];
-                phase != AnyOfObjectPhase::Fixed || owner.close_allowed(cursor as usize)
-            }
-            ShadowOwnerState::None | ShadowOwnerState::Impossible => false,
-        }
-    }
-
-    fn shadow_owner_can_take_additional(
-        owner: &AnyOfObjectVariant,
-        cursor: usize,
-        phase: AnyOfObjectPhase,
-    ) -> bool {
-        owner.additional_value_expr.as_ref().is_some_and(Self::is_json_value_expr)
-            && match phase {
-                AnyOfObjectPhase::Fixed => owner.close_allowed(cursor),
-                AnyOfObjectPhase::Additional => true,
-                AnyOfObjectPhase::Pattern => false,
-            }
-    }
-
-    fn advance_shadow_owner_on_key(
-        variants: &[AnyOfObjectVariant],
-        shadow_owner: ShadowOwnerState,
-        key: &str,
-        value_expr: &GrammarExpr,
-    ) -> ShadowOwnerState {
-        let ShadowOwnerState::Possible {
-            variant_idx,
-            cursor,
-            phase,
-        } = shadow_owner
-        else {
-            return shadow_owner;
-        };
-        if !Self::is_json_value_expr(value_expr) {
-            return ShadowOwnerState::Impossible;
-        }
-
-        let owner = &variants[variant_idx as usize];
-        let cursor = cursor as usize;
-        if phase == AnyOfObjectPhase::Fixed
-            && let Some(next_cursor) = owner.advance_cursor(cursor, key)
-            && owner.value_expr_for_key(key).is_some()
-        {
-            return ShadowOwnerState::Possible {
-                variant_idx,
-                cursor: next_cursor as u16,
-                phase: AnyOfObjectPhase::Fixed,
-            };
-        }
-
-        if !owner.fixed_keys.contains(key)
-            && Self::shadow_owner_can_take_additional(owner, cursor, phase)
-        {
-            return ShadowOwnerState::Possible {
-                variant_idx,
-                cursor: owner.len() as u16,
-                phase: AnyOfObjectPhase::Additional,
-            };
-        }
-
-        ShadowOwnerState::Impossible
-    }
-
-
     fn try_lower_discriminator_value_open_any_of_object(
         &mut self,
         variants: &[AnyOfObjectVariant],
@@ -1766,7 +1676,7 @@ impl<'a> Lowerer<'a> {
             let mut seen = BTreeSet::new();
             let mut all_singleton = true;
             for variant in variants {
-                let Some(value) = singleton_string_enum_value(&variant.items[index].schema) else {
+                let Some(value) = plain_singleton_string_enum_value(&variant.items[index].schema) else {
                     all_singleton = false;
                     break;
                 };
@@ -1797,7 +1707,7 @@ impl<'a> Lowerer<'a> {
         for variant in variants {
             let discriminator = &variant.items[discriminator_index];
             let payload = &variant.items[value_index];
-            let Some(discriminator_value) = singleton_string_enum_value(&discriminator.schema) else {
+            let Some(discriminator_value) = plain_singleton_string_enum_value(&discriminator.schema) else {
                 return Ok(None);
             };
             let payload_expr = payload.value_expr.clone();
@@ -1829,373 +1739,15 @@ impl<'a> Lowerer<'a> {
         variants: &[AnyOfObjectVariant],
         include_untyped_non_object_alts: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
-        if variants.is_empty() {
-            return Ok(None);
-        }
+        if variants.is_empty() { return Ok(None); }
         if !discriminator_anyof_fastpath_disabled()
             && let Some(expr) = self.try_lower_discriminator_value_open_any_of_object(
-                variants,
-                include_untyped_non_object_alts,
+                variants, include_untyped_non_object_alts,
             )? {
                 return Ok(Some(expr));
             }
-
-        let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
-        let shadow_owners = (0..variants.len())
-            .map(|variant_idx| Self::select_shadow_owner_for_variant(variants, variant_idx))
-            .collect::<Vec<_>>();
-        let mut state_ids = BTreeMap::<AnyOfObjectState, u32>::new();
-        let mut queue = VecDeque::<AnyOfObjectState>::new();
-        let profile_open = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
-        let graph_started = profile_open.then(std::time::Instant::now);
-        for (variant_idx, _) in variants.iter().enumerate() {
-            let shadow_owner = shadow_owners[variant_idx]
-                .map(|owner_idx| ShadowOwnerState::Possible {
-                    variant_idx: owner_idx as u16,
-                    cursor: 0,
-                    phase: AnyOfObjectPhase::Fixed,
-                })
-                .unwrap_or(ShadowOwnerState::None);
-            let state = AnyOfObjectState {
-                variant_idx: variant_idx as u16,
-                cursor: 0,
-                has_content: false,
-                phase: AnyOfObjectPhase::Fixed,
-                shadow_owner,
-            };
-            let state_id = builder.add_state();
-            builder.add_epsilon(builder.start_state(), state_id);
-            state_ids.insert(state, state_id);
-            queue.push_back(state);
-        }
-
-        while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
-                return Ok(None);
-            }
-
-            let state_id = state_ids[&state];
-            let variant = &variants[state.variant_idx as usize];
-            let cursor = state.cursor as usize;
-            let fixed_phase = state.phase == AnyOfObjectPhase::Fixed;
-            let can_leave_fixed_tail = !fixed_phase || variant.close_allowed(cursor);
-
-            if can_leave_fixed_tail
-                && !Self::shadow_owner_suppresses_close(variants, state.shadow_owner)
-            {
-                builder.add_epsilon(state_id, accept);
-            }
-
-            if can_leave_fixed_tail
-                && state.phase != AnyOfObjectPhase::Additional
-                && !variant.pattern_pairs.is_empty()
-            {
-                let next_state = AnyOfObjectState {
-                    variant_idx: state.variant_idx,
-                    cursor: variant.len() as u16,
-                    has_content: true,
-                    phase: AnyOfObjectPhase::Pattern,
-                    shadow_owner: ShadowOwnerState::Impossible,
-                };
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-                for pattern_pair in &variant.pattern_pairs {
-                    for [key_symbol, value_symbol] in Self::split_object_pair_symbol_paths(pattern_pair)? {
-                        let mut symbols = Vec::new();
-                        if state.has_content {
-                            symbols.push(self.item_separator_expr());
-                        }
-                        symbols.extend(Self::object_pair_path_symbols(key_symbol, value_symbol));
-                        Self::add_expr_nfa_symbol_path(
-                            &mut builder,
-                            state_id,
-                            symbols,
-                            next_state_id,
-                        );
-                    }
-                }
-            }
-
-            if can_leave_fixed_tail
-                && let Some(value_expr) = &variant.additional_value_expr
-            {
-                let excluded_fixed_keys = variant.fixed_keys.clone();
-                let mut owner_fixed_keys = Vec::<(String, bool)>::new();
-                if let ShadowOwnerState::Possible {
-                    variant_idx: owner_idx,
-                    cursor: owner_cursor,
-                    phase: owner_phase,
-                } = state.shadow_owner
-                {
-                    let owner = &variants[owner_idx as usize];
-                    match owner_phase {
-                        AnyOfObjectPhase::Fixed => {
-                            for owner_key in owner.legal_next_keys(owner_cursor as usize) {
-                                if !variant.fixed_keys.contains(owner_key) {
-                                    let can_split = owner
-                                        .value_expr_for_key(owner_key)
-                                        .as_ref()
-                                        .and_then(Self::invalid_residual_value_for_owner)
-                                        .is_some();
-                                    owner_fixed_keys.push((owner_key.to_string(), can_split));
-                                }
-                            }
-                        }
-                        AnyOfObjectPhase::Additional => {
-                            for owner_key in &owner.fixed_keys {
-                                if !variant.fixed_keys.contains(owner_key) {
-                                    owner_fixed_keys.push((owner_key.clone(), false));
-                                }
-                            }
-                        }
-                        AnyOfObjectPhase::Pattern => {}
-                    }
-                }
-
-                let broad_key_shadow = match state.shadow_owner {
-                    ShadowOwnerState::Possible {
-                        variant_idx,
-                        cursor,
-                        phase,
-                    } if Self::shadow_owner_can_take_additional(
-                        &variants[variant_idx as usize],
-                        cursor as usize,
-                        phase,
-                    ) =>
-                    {
-                        ShadowOwnerState::Possible {
-                            variant_idx,
-                            cursor: variants[variant_idx as usize].len() as u16,
-                            phase: AnyOfObjectPhase::Additional,
-                        }
-                    }
-                    ShadowOwnerState::Possible { .. } => ShadowOwnerState::Impossible,
-                    other => other,
-                };
-                let next_state = AnyOfObjectState {
-                    variant_idx: state.variant_idx,
-                    cursor: variant.len() as u16,
-                    has_content: true,
-                    phase: AnyOfObjectPhase::Additional,
-                    shadow_owner: broad_key_shadow,
-                };
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-
-                // Match llguidance's gen_json_object() distinction exactly:
-                // with no fixed or pattern names, an open object uses
-                // json_simple_string() for its key; once any names are taken,
-                // the additional-property path uses CHAR_REGEX minus those
-                // names.  The fused anyOf representation must retain that
-                // per-variant distinction instead of treating every broad tail
-                // as an additional-property key path.
-                let key_symbol = if self.llguidance_compat_enabled()
-                    && excluded_fixed_keys.is_empty()
-                    && variant.pattern_keys.is_empty()
-                {
-                    seq(vec![r(json_key_string_rule()), self.key_separator_expr()])
-                } else {
-                    self.lower_additional_key_colon(
-                        &excluded_fixed_keys,
-                        &variant.pattern_keys,
-                    )?
-                };
-                for key_path in Self::split_key_colon_symbol_paths(key_symbol) {
-                    let mut symbols = Vec::new();
-                    if state.has_content {
-                        symbols.push(self.item_separator_expr());
-                    }
-                    symbols.extend(key_path);
-                    symbols.push(value_expr.clone());
-                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
-                }
-
-                for (owner_key, owner_fixed_key_can_advance) in owner_fixed_keys {
-                    let ShadowOwnerState::Possible {
-                        variant_idx: owner_idx,
-                        cursor: owner_cursor,
-                        phase: owner_phase,
-                    } = state.shadow_owner
-                    else {
-                        continue;
-                    };
-                    let owner = &variants[owner_idx as usize];
-                    if !owner_fixed_key_can_advance || owner_phase != AnyOfObjectPhase::Fixed {
-                        let invalid_state = AnyOfObjectState {
-                            variant_idx: state.variant_idx,
-                            cursor: variant.len() as u16,
-                            has_content: true,
-                            phase: AnyOfObjectPhase::Additional,
-                            shadow_owner: ShadowOwnerState::Impossible,
-                        };
-                        let invalid_state_id =
-                            if let Some(&existing) = state_ids.get(&invalid_state) {
-                                existing
-                            } else {
-                                let id = builder.add_state();
-                                state_ids.insert(invalid_state, id);
-                                queue.push_back(invalid_state);
-                                id
-                            };
-                        let mut symbols = Vec::new();
-                        if state.has_content {
-                            symbols.push(self.item_separator_expr());
-                        }
-                        symbols.push(self.lower_literal_key_colon(&owner_key));
-                        symbols.push(value_expr.clone());
-                        Self::add_expr_nfa_symbol_path(
-                            &mut builder,
-                            state_id,
-                            symbols,
-                            invalid_state_id,
-                        );
-                        continue;
-                    }
-                    let Some(next_owner_cursor) = owner.advance_cursor(owner_cursor as usize, &owner_key) else {
-                        continue;
-                    };
-                    let Some(owner_value_expr) = owner.value_expr_for_key(&owner_key) else {
-                        continue;
-                    };
-                    let Some(invalid_residual_value_expr) =
-                        Self::invalid_residual_value_for_owner(&owner_value_expr)
-                    else {
-                        continue;
-                    };
-
-                    let owner_valid_state = AnyOfObjectState {
-                        variant_idx: state.variant_idx,
-                        cursor: variant.len() as u16,
-                        has_content: true,
-                        phase: AnyOfObjectPhase::Additional,
-                        shadow_owner: ShadowOwnerState::Possible {
-                            variant_idx: owner_idx,
-                            cursor: next_owner_cursor as u16,
-                            phase: AnyOfObjectPhase::Fixed,
-                        },
-                    };
-                    let owner_valid_state_id =
-                        if let Some(&existing) = state_ids.get(&owner_valid_state) {
-                            existing
-                        } else {
-                            let id = builder.add_state();
-                            state_ids.insert(owner_valid_state, id);
-                            queue.push_back(owner_valid_state);
-                            id
-                        };
-                    let mut symbols = Vec::new();
-                    if state.has_content {
-                        symbols.push(self.item_separator_expr());
-                    }
-                    symbols.push(self.lower_literal_key_colon(&owner_key));
-                    symbols.push(owner_value_expr);
-                    Self::add_expr_nfa_symbol_path(
-                        &mut builder,
-                        state_id,
-                        symbols,
-                        owner_valid_state_id,
-                    );
-
-                    let invalid_state = AnyOfObjectState {
-                        variant_idx: state.variant_idx,
-                        cursor: variant.len() as u16,
-                        has_content: true,
-                        phase: AnyOfObjectPhase::Additional,
-                        shadow_owner: ShadowOwnerState::Impossible,
-                    };
-                    let invalid_state_id = if let Some(&existing) = state_ids.get(&invalid_state) {
-                        existing
-                    } else {
-                        let id = builder.add_state();
-                        state_ids.insert(invalid_state, id);
-                        queue.push_back(invalid_state);
-                        id
-                    };
-                    let mut symbols = Vec::new();
-                    if state.has_content {
-                        symbols.push(self.item_separator_expr());
-                    }
-                    symbols.push(self.lower_literal_key_colon(&owner_key));
-                    symbols.push(invalid_residual_value_expr);
-                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, invalid_state_id);
-                }
-            }
-
-            if !fixed_phase {
-                continue;
-            }
-
-            for key in variant.legal_next_keys(cursor) {
-                let Some(next_cursor) = variant.advance_cursor(cursor, key) else {
-                    continue;
-                };
-                let Some(value_expr) = variant.value_expr_for_key(key) else {
-                    continue;
-                };
-
-                let next_state = AnyOfObjectState {
-                    variant_idx: state.variant_idx,
-                    cursor: next_cursor as u16,
-                    has_content: true,
-                    phase: AnyOfObjectPhase::Fixed,
-                    shadow_owner: Self::advance_shadow_owner_on_key(
-                        variants,
-                        state.shadow_owner,
-                        key,
-                        &value_expr,
-                    ),
-                };
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-
-                let mut symbols = Vec::new();
-                if state.has_content {
-                    symbols.push(self.item_separator_expr());
-                }
-                symbols.push(self.lower_literal_key_colon(key));
-                symbols.push(value_expr);
-                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
-            }
-        }
-
-        let graph_ms = graph_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        let determinize_started = profile_open.then(std::time::Instant::now);
-        let expr_nfa = builder.build().into_determinized_and_minimized();
-        let body = GrammarExpr::ExprNFA(Box::new(expr_nfa));
-        if let Some(started) = determinize_started {
-            eprintln!(
-                "[glrmask/profile][json_schema_open_anyof_build] graph_ms={:.3} determinize_minimize_ms={:.3}",
-                graph_ms,
-                started.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        self.add_nonterminal_rule(&rule_name, body);
-
-        Ok(Some(Self::object_union_result(&rule_name, include_untyped_non_object_alts)))
+        self.lower_object_union(variants, include_untyped_non_object_alts, false)
     }
-
     fn fixed_object_template_symbols(
         items: &[ObjectItem],
         item_symbols: &[[GrammarExpr; 2]],
@@ -3540,16 +3092,6 @@ impl<'a> Lowerer<'a> {
 }
 
 
-fn singleton_string_enum_value(schema: &Schema) -> Option<String> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    match assertions.enum_values.as_deref() {
-        Some([serde_json::Value::String(value)]) => Some(value.clone()),
-        _ => None,
-    }
-}
-
 /// A singleton string enum with no sibling assertion that can narrow or widen
 /// its language.  Unlike `singleton_string_enum_value`, this is suitable for a
 /// direct language-preserving discriminator construction.
@@ -3583,22 +3125,6 @@ fn plain_singleton_string_enum_value(schema: &Schema) -> Option<String> {
         Some(value.clone())
     } else {
         None
-    }
-}
-
-fn merged_closed_any_of_state_id(
-    builder: &mut ExprNfaBuilder,
-    state_ids: &mut BTreeMap<AnyOfFixedObjectMergedState, u32>,
-    queue: &mut VecDeque<AnyOfFixedObjectMergedState>,
-    state: AnyOfFixedObjectMergedState,
-) -> u32 {
-    if let Some(&existing) = state_ids.get(&state) {
-        existing
-    } else {
-        let id = builder.add_state();
-        state_ids.insert(state.clone(), id);
-        queue.push_back(state);
-        id
     }
 }
 
