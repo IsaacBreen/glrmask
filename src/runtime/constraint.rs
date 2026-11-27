@@ -39,7 +39,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
-use crate::grammar::flat::TerminalID;
+use crate::grammar::flat::{DirectRegularAutomaton, DirectRegularState, TerminalID};
 
 use super::artifact::{
     NonDwaWeightStorage, ParserDwaStorage,
@@ -67,6 +67,52 @@ use super::artifact::{
 pub(crate) use super::artifact::Constraint;
 use super::state::ConstraintState;
 
+/// Exact depth-one parser coordinates all enter the same raw epsilon graph.
+/// The synthetic initial state expands to the automaton's start set.
+#[derive(Clone, Copy)]
+enum RegularRoots<'a> {
+    Single(u32),
+    Frontier(&'a Arc<[u32]>),
+    Gss(&'a ParserGSS),
+}
+
+impl RegularRoots<'_> {
+    fn for_each(self, mut visit: impl FnMut(u32)) {
+        match self {
+            Self::Single(state) => visit(state),
+            Self::Frontier(states) => states.iter().copied().for_each(visit),
+            Self::Gss(gss) => gss.for_each_top_value(visit),
+        }
+    }
+}
+
+/// One exact epsilon-closure walk for unprepared admission/completion and
+/// target collection. A prepared support predicate may skip dead branches
+/// without changing the relation. A visitor returns true for early success.
+fn visit_regular_epsilon_closure(
+    automaton: &DirectRegularAutomaton,
+    roots: RegularRoots<'_>,
+    mut include: impl FnMut(u32) -> bool,
+    mut visit: impl FnMut(&DirectRegularState) -> bool,
+) -> Option<bool> {
+    let mut stack = Vec::new();
+    roots.for_each(|state| {
+        if state == 0 {
+            stack.extend(automaton.start_states.iter().copied().filter(|&raw| include(raw)));
+        } else if include(state - 1) {
+            stack.push(state - 1);
+        }
+    });
+    let mut seen = BitSet::new(automaton.states.len());
+    while let Some(raw) = stack.pop() {
+        let state = automaton.states.get(raw as usize)?;
+        if seen.contains(raw as usize) { continue; }
+        seen.set(raw as usize);
+        if visit(state) { return Some(true); }
+        stack.extend(state.epsilons.iter().copied().filter(|&raw| include(raw)));
+    }
+    Some(false)
+}
 struct RecursiveSegmentedParserTables<'a> {
     root: &'a Constraint,
     layout: &'a RecursiveParserLayout,
@@ -7441,56 +7487,29 @@ impl Constraint {
     }
     fn direct_regular_frontier_advances(
         &self,
-        parser_states: &Arc<[u32]>,
-    ) -> Arc<[(TerminalID, Arc<[u32]>)]> {
-        let Some(automaton) = self.direct_regular_automaton.as_ref() else {
-            return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
-        };
-        let mut seen = vec![false; automaton.states.len()];
-        let mut stack = Vec::with_capacity(parser_states.len());
-        for &parser_state in parser_states.iter() {
-            let Some(raw_state) = parser_state.checked_sub(1) else {
-                return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
-            };
-            if raw_state as usize >= automaton.states.len() {
-                return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
-            }
-            stack.push(raw_state);
-        }
-
+        roots: RegularRoots<'_>,
+    ) -> Option<Arc<[(TerminalID, Arc<[u32]>)]>> {
+        let automaton = self.direct_regular_automaton.as_ref()?;
         let mut targets_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
-        while let Some(raw_state) = stack.pop() {
-            let index = raw_state as usize;
-            if seen[index] {
-                continue;
-            }
-            seen[index] = true;
-            let state = &automaton.states[index];
-            stack.extend(state.epsilons.iter().copied());
+        visit_regular_epsilon_closure(automaton, roots, |_| true, |state| {
             for (&terminal, targets) in &state.transitions {
-                let entry = targets_by_terminal.entry(terminal).or_default();
-                entry.extend(targets.iter().map(|target| target + 1));
+                if terminal >= self.parser_terminal_count() { continue; }
+                targets_by_terminal.entry(terminal).or_default()
+                    .extend(targets.iter().map(|target| target + 1));
             }
-        }
-
-        targets_by_terminal
-            .into_iter()
-            .filter_map(|(terminal, mut targets)| {
-                targets.sort_unstable();
-                targets.dedup();
-                (!targets.is_empty()).then(|| {
-                    let targets: Arc<[u32]> = if targets.as_slice() == parser_states.as_ref() {
-                        Arc::clone(parser_states)
-                    } else {
-                        targets.into()
-                    };
-                    (terminal, targets)
-                })
-            })
-            .collect::<Vec<_>>()
-            .into()
+            false
+        })?;
+        Some(targets_by_terminal.into_iter().filter_map(|(terminal, mut targets)| {
+            targets.sort_unstable();
+            targets.dedup();
+            if targets.is_empty() { return None; }
+            let targets: Arc<[u32]> = match roots {
+                RegularRoots::Frontier(source) if source.as_ref() == targets.as_slice() => Arc::clone(source),
+                _ => targets.into(),
+            };
+            Some((terminal, targets))
+        }).collect::<Vec<_>>().into())
     }
-
     fn direct_regular_dynamic_hot_frontier_summary(
         &self,
         frontier_states: Arc<[u32]>,
@@ -7526,7 +7545,7 @@ impl Constraint {
             return Vec::new();
         }
         let primary_states: Arc<[u32]> = Arc::from([primary_raw as u32 + 1]);
-        let primary_advances = self.direct_regular_frontier_advances(&primary_states);
+        let primary_advances = self.direct_regular_frontier_advances(RegularRoots::Frontier(&primary_states)).unwrap_or_default();
         let widest_frontier = primary_advances
             .iter()
             .map(|(_, targets)| Arc::clone(targets))
@@ -7541,7 +7560,7 @@ impl Constraint {
         if let Some(widest_frontier) = widest_frontier
             && widest_frontier.as_ref() != primary_states.as_ref()
         {
-            let advances = self.direct_regular_frontier_advances(&widest_frontier);
+            let advances = self.direct_regular_frontier_advances(RegularRoots::Frontier(&widest_frontier)).unwrap_or_default();
             summaries.push(self.direct_regular_dynamic_hot_frontier_summary(
                 widest_frontier,
                 advances,
@@ -7723,7 +7742,7 @@ impl Constraint {
                 &frontier_states,
                 TerminalsDisallowed::new(),
             );
-            let advance_by_terminal = self.direct_regular_frontier_advances(&frontier_states);
+            let advance_by_terminal = self.direct_regular_frontier_advances(RegularRoots::Frontier(&frontier_states)).unwrap_or_default();
             summaries.push(DirectRegularWideFrontierAcceptance {
                 action_origins: action_origin.into_iter().collect(),
                 state_count,
@@ -9931,25 +9950,12 @@ impl Constraint {
             }
             return found;
         }
-        let mut stack = Vec::new();
-        if parser_state == 0 {
-            stack.extend(automaton.start_states.iter().copied());
-        } else if let Some(raw) = parser_state.checked_sub(1) {
-            stack.push(raw);
-        }
-        let mut seen = vec![false; automaton.states.len()];
-        let mut terminals = crate::ds::bitset::BitSet::new(self.parser_terminal_count() as usize);
-        while let Some(raw) = stack.pop() {
-            let Some(state) = automaton.states.get(raw as usize) else {
-                return false;
-            };
-            if std::mem::replace(&mut seen[raw as usize], true) {
-                continue;
-            }
-            stack.extend(state.epsilons.iter().copied());
-            for &terminal in state.transitions.keys() {
-                terminals.set(terminal as usize);
-            }
+        let mut terminals = BitSet::new(self.parser_terminal_count() as usize);
+        if visit_regular_epsilon_closure(automaton, RegularRoots::Single(parser_state), |_| true, |state| {
+            for &terminal in state.transitions.keys() { terminals.set(terminal as usize); }
+            false
+        }).is_none() {
+            return false;
         }
         let mut found = false;
         for terminal in terminals.iter_ones() {
@@ -9974,26 +9980,7 @@ impl Constraint {
             gss.for_each_top_value(|state| complete |= support.is_complete(state));
             return Some(complete);
         }
-        let mut stack = Vec::new();
-        gss.for_each_top_value(|state| {
-            if state == 0 {
-                stack.extend(automaton.start_states.iter().copied());
-            } else if let Some(raw) = state.checked_sub(1) {
-                stack.push(raw);
-            }
-        });
-        let mut seen = vec![false; automaton.states.len()];
-        while let Some(raw) = stack.pop() {
-            let state = automaton.states.get(raw as usize)?;
-            if std::mem::replace(&mut seen[raw as usize], true) {
-                continue;
-            }
-            if state.is_accepting {
-                return Some(true);
-            }
-            stack.extend(state.epsilons.iter().copied());
-        }
-        Some(false)
+        visit_regular_epsilon_closure(automaton, RegularRoots::Gss(gss), |_| true, |state| state.is_accepting)
     }
 
     fn direct_regular_dynamic_frontier(
@@ -10003,7 +9990,6 @@ impl Constraint {
         if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
             return None;
         }
-        let automaton = self.direct_regular_automaton.as_ref()?;
         let cache_key = gss.single_interface_lower_id();
         if let Some(key) = cache_key
             && let Some(cached) = self
@@ -10013,59 +9999,20 @@ impl Constraint {
             return Some(cached);
         }
 
-        let mut roots = Vec::new();
-        gss.for_each_top_value(|state| {
-            if state == 0 {
-                roots.extend(automaton.start_states.iter().copied());
-            } else if let Some(raw) = state.checked_sub(1) {
-                roots.push(raw);
-            }
-        });
-        let mut seen = vec![false; automaton.states.len()];
-        let mut stack = roots;
-        let mut targets_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
-        while let Some(raw) = stack.pop() {
-            let state = automaton.states.get(raw as usize)?;
-            if std::mem::replace(&mut seen[raw as usize], true) {
-                continue;
-            }
-            stack.extend(state.epsilons.iter().copied());
-            for (&terminal, targets) in &state.transitions {
-                if (terminal as usize) >= self.parser_terminal_count() as usize {
-                    continue;
-                }
-                targets_by_terminal
-                    .entry(terminal)
-                    .or_default()
-                    .extend(targets.iter().map(|target| target + 1));
-            }
-        }
-
-        let mut actionable_terminals =
-            crate::ds::bitset::BitSet::new(self.parser_terminal_count() as usize);
-        let advance_by_terminal = targets_by_terminal
-            .into_iter()
-            .filter_map(|(terminal, mut targets)| {
-                targets.sort_unstable();
-                targets.dedup();
-                if targets.is_empty() {
-                    return None;
-                }
-                actionable_terminals.set(terminal as usize);
-                Some((terminal, Arc::<[u32]>::from(targets)))
-            })
-            .collect::<Vec<_>>();
+        let advance_by_terminal = self.direct_regular_frontier_advances(RegularRoots::Gss(gss))?;
+        let mut actionable_terminals = BitSet::new(self.parser_terminal_count() as usize);
+        for &(terminal, _) in advance_by_terminal.iter() { actionable_terminals.set(terminal as usize); }
         let entry = DirectRegularDynamicFrontierCacheEntry {
             source: gss.clone(),
             actionable_terminals,
-            advance_by_terminal: Arc::from(advance_by_terminal),
+            advance_by_terminal,
         };
-        Some(cache_key.map_or(entry.clone(), |key| {
-            self.initialized_dynamic_mask_vocab_for_runtime()
-                .map_or(entry.clone(), |vocab| {
-                    vocab.cache_direct_regular_frontier(key, entry)
-                })
-        }))
+        if let Some(key) = cache_key
+            && let Some(vocab) = self.initialized_dynamic_mask_vocab_for_runtime()
+        {
+            return Some(vocab.cache_direct_regular_frontier(key, entry));
+        }
+        Some(entry)
     }
 
     pub(crate) fn direct_regular_may_advance_on(
@@ -10089,26 +10036,8 @@ impl Constraint {
             return Some(found);
         }
 
-        let mut stack = Vec::new();
-        gss.for_each_top_value(|state| {
-            if state == 0 {
-                stack.extend(automaton.start_states.iter().copied());
-            } else if let Some(raw) = state.checked_sub(1) {
-                stack.push(raw);
-            }
-        });
-        let mut seen = vec![false; automaton.states.len()];
-        while let Some(raw) = stack.pop() {
-            let state = automaton.states.get(raw as usize)?;
-            if std::mem::replace(&mut seen[raw as usize], true) {
-                continue;
-            }
-            if state.transitions.contains_key(&terminal) {
-                return Some(true);
-            }
-            stack.extend(state.epsilons.iter().copied());
-        }
-        Some(false)
+        visit_regular_epsilon_closure(automaton, RegularRoots::Gss(gss), |_| true,
+            |state| state.transitions.contains_key(&terminal))
     }
 
     pub(crate) fn direct_regular_may_advance_on_any(
@@ -10148,44 +10077,12 @@ impl Constraint {
             return Some(found);
         }
 
-        let sparse_terminals = sparse_terminals.map(|terminals| {
-            terminals
-                .into_iter()
-                .collect::<SmallVec<[u32; 8]>>()
-        });
-        let mut stack = Vec::new();
-        gss.for_each_top_value(|state| {
-            if state == 0 {
-                stack.extend(automaton.start_states.iter().copied());
-            } else if let Some(raw) = state.checked_sub(1) {
-                stack.push(raw);
-            }
-        });
-        let mut seen = vec![false; automaton.states.len()];
-        while let Some(raw) = stack.pop() {
-            let state = automaton.states.get(raw as usize)?;
-            if std::mem::replace(&mut seen[raw as usize], true) {
-                continue;
-            }
-            let found = sparse_terminals.as_ref().map_or_else(
-                || {
-                    state
-                        .transitions
-                        .keys()
-                        .any(|terminal| terminals.contains(*terminal as usize))
-                },
-                |candidates| {
-                    candidates
-                        .iter()
-                        .any(|terminal| state.transitions.contains_key(terminal))
-                },
-            );
-            if found {
-                return Some(true);
-            }
-            stack.extend(state.epsilons.iter().copied());
-        }
-        Some(false)
+        visit_regular_epsilon_closure(automaton, RegularRoots::Gss(gss), |_| true, |state| {
+            sparse_terminals.as_ref().map_or_else(
+                || state.transitions.keys().any(|terminal| terminals.contains(*terminal as usize)),
+                |candidates| candidates.iter().any(|terminal| state.transitions.contains_key(terminal)),
+            )
+        })
     }
 
     pub(crate) fn direct_regular_admissible_terminals(
@@ -10283,45 +10180,17 @@ impl Constraint {
             let automaton = self.direct_regular_automaton.as_ref()?;
             let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
             if support.is_initialized() {
-                let mut stack = Vec::<u32>::new();
-                gss.for_each_top_value(|state| {
-                    if state == 0 {
-                        stack.extend(
-                            automaton
-                                .start_states
-                                .iter()
-                                .copied()
-                                .filter(|&raw| support.contains(raw + 1, terminal)),
-                        );
-                    } else if let Some(raw) = state.checked_sub(1)
-                        && support.contains(state, terminal)
-                    {
-                        stack.push(raw);
-                    }
-                });
-                let mut seen = crate::ds::bitset::BitSet::new(automaton.states.len());
-                let mut target_bits =
-                    crate::ds::bitset::BitSet::new(automaton.states.len() + 1);
-                while let Some(raw) = stack.pop() {
-                    let raw_index = raw as usize;
-                    if seen.contains(raw_index) {
-                        continue;
-                    }
-                    seen.set(raw_index);
-                    let state = automaton.states.get(raw_index)?;
-                    if let Some(state_targets) = state.transitions.get(&terminal) {
-                        for &target in state_targets {
-                            target_bits.set(target as usize + 1);
+                let mut target_bits = BitSet::new(automaton.states.len() + 1);
+                visit_regular_epsilon_closure(
+                    automaton, RegularRoots::Gss(gss),
+                    |raw| support.contains(raw + 1, terminal),
+                    |state| {
+                        if let Some(targets) = state.transitions.get(&terminal) {
+                            for &target in targets { target_bits.set(target as usize + 1); }
                         }
-                    }
-                    stack.extend(
-                        state
-                            .epsilons
-                            .iter()
-                            .copied()
-                            .filter(|&child| support.contains(child + 1, terminal)),
-                    );
-                }
+                        false
+                    },
+                )?;
                 let target_count = target_bits.count_ones();
                 if target_count == 0 {
                     return Some(ParserGSS::empty());
