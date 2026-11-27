@@ -4215,7 +4215,7 @@ fn restore_recursive_segmented_runtime_v27(
         .components
         .into_par_iter()
         .map(|component| {
-            let child = Constraint::load_body_external_budgeted(component.constraint_artifact, vocab, &budget.child()?)?;
+            let child = Constraint::load_body_external_budgeted(component.constraint_artifact.as_slice(), vocab, &budget.child()?)?;
             Ok::<_, crate::Error>((component, child))
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -6188,6 +6188,7 @@ impl Constraint {
         let budget = LoadBudget::new(bytes.len());
         crate::with_deep_stack(|| {
             let (body, recorded) = Self::decode_artifact_envelope(bytes)?;
+            let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
                 return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),

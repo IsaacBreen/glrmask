@@ -1,4 +1,5 @@
 //! Shared, conservative admission budget for native artifact decoding.
+use crate::ErrorExt as _;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 const MAX_BYTES: usize = 1 << 30;
