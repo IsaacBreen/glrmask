@@ -4988,7 +4988,7 @@ impl Constraint {
             constraint.backed_internal_token_buf_flat = None;
         }
         if let Some(vocab) = external_vocab {
-            constraint.token_bytes = vocab.entries_arc();
+            constraint.token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
         }
         Ok(DecodedNativeArtifactLoad {
             constraint,

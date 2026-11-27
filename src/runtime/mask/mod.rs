@@ -3680,12 +3680,10 @@ impl ConstraintState {
         // composition-build work is needed. Copy this proven prefix with the
         // same word-wise OR used by the ordinary mask path, and retain exact
         // pointwise membership for sparse IDs / private-special-token tails.
-        let (byte_count, max_byte_id) = self.constraint.packed_token_bytes.as_ref()
-            .map(|packed| (packed.len(), packed.max_token_id()))
-            .unwrap_or_else(|| (
-                self.constraint.token_bytes.len(),
-                self.constraint.token_bytes.last_key_value().map(|(&id, _)| id),
-            ));
+        let (byte_count, max_byte_id) = (
+            self.constraint.token_bytes.len(),
+            self.constraint.token_bytes.max_token_id(),
+        );
         let dense_byte_count = if byte_count != 0
             && max_byte_id.is_some_and(|id| u64::from(id) + 1 == byte_count as u64)
         { byte_count } else { 0 };

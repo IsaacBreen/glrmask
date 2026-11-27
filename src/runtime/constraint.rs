@@ -2137,64 +2137,26 @@ impl Constraint {
     }
 
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
-        let vocab_entries = vocab.entries_arc();
-        if Arc::ptr_eq(&self.token_bytes, &vocab_entries) {
-            return true;
-        }
-        if let Some(packed) = &self.packed_token_bytes {
-            // Both prepared indexes are deterministic views of immutable
-            // Vocab entries. Compare contiguous arrays instead of traversing
-            // the pointer-heavy maps when both indexes already exist.
-            if let Some(vocab_packed) =
-                crate::compiler::compile::prepared_vocab_packed_token_bytes(vocab)
-                && packed.as_ref() == vocab_packed.as_ref()
-            {
-                return true;
-            }
-            return packed.len() == vocab.entries_map().len()
-                && packed.iter().eq(
-                    vocab
-                        .entries_map()
-                        .iter()
-                        .map(|(&token_id, bytes)| (token_id, bytes.as_slice())),
-                );
-        }
-        self.token_bytes.as_ref() == vocab.entries_map()
+        self.token_bytes.matches_vocab(vocab)
     }
 
     #[inline]
     pub(crate) fn token_bytes_for_id(&self, token_id: u32) -> Option<&[u8]> {
-        self.packed_token_bytes
-            .as_ref()
-            .and_then(|packed| packed.get(token_id))
-            .or_else(|| self.token_bytes.get(&token_id).map(Vec::as_slice))
+        self.token_bytes.get(token_id)
     }
 
     #[inline]
     pub(crate) fn token_bytes_count(&self) -> usize {
-        self.packed_token_bytes
-            .as_ref()
-            .map_or_else(|| self.token_bytes.len(), |packed| packed.len())
+        self.token_bytes.len()
     }
 
     #[inline]
     pub(crate) fn max_token_byte_len(&self) -> usize {
-        self.packed_token_bytes.as_ref().map_or_else(
-            || self.token_bytes.values().map(Vec::len).max().unwrap_or(0),
-            |packed| packed.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0),
-        )
+        self.token_bytes.max_byte_len()
     }
 
     pub(crate) fn token_bytes_iter(&self) -> Box<dyn Iterator<Item = (u32, &[u8])> + '_> {
-        if let Some(packed) = &self.packed_token_bytes {
-            Box::new(packed.iter())
-        } else {
-            Box::new(
-                self.token_bytes
-                    .iter()
-                    .map(|(&token_id, bytes)| (token_id, bytes.as_slice())),
-            )
-        }
+        self.token_bytes.iter()
     }
 
     /// Bind a loaded constraint to an exact model vocabulary once.
@@ -2210,20 +2172,11 @@ impl Constraint {
                 "constraint was not compiled for the supplied exact vocabulary".to_string(),
             );
         }
-        let entries = vocab.entries_arc();
-        if Arc::ptr_eq(&self.token_bytes, &entries) {
-            self.late_bind_vocab = OnceLock::from(vocab.clone());
-        } else {
-            if !self.token_bytes_match_vocab(vocab) {
-                return Err("constraint was not compiled for the supplied vocabulary".to_string());
-            }
-            self.token_bytes = entries;
-            // A successful exact bind establishes the precise public vocabulary
-            // for every later late-subgrammar bind as well. Keep the caller's
-            // already-built `Vocab` (and its pure derived-artifact cache) instead
-            // of reconstructing the same bytes again in `constraint_vocab()`.
-            self.late_bind_vocab = OnceLock::from(vocab.clone());
+        if !self.token_bytes.bind_exact(vocab) {
+            return Err("constraint was not compiled for the supplied vocabulary".to_string());
         }
+        // Preserve the caller's model metadata and derived-artifact cache.
+        self.late_bind_vocab = OnceLock::from(vocab.clone());
         if let Some(overlay) = self.static_dynamic_overlay.as_mut() {
             for component in &mut overlay.segmented_parser_components {
                 Arc::make_mut(&mut component.constraint).bind_vocab_exact(vocab)?;
@@ -5754,6 +5707,7 @@ impl Constraint {
                 {
                     let vocab_bytes = constraint
                         .token_bytes
+                        .entries()
                         .values()
                         .map(Vec::as_slice)
                         .collect::<BTreeSet<_>>();
@@ -5766,7 +5720,7 @@ impl Constraint {
                     let mut all_match_suffix_pairs = 0usize;
                     let mut suffix_counts = FxHashMap::<Vec<u8>, usize>::default();
                     let mut full_match_states = FxHashMap::<u32, usize>::default();
-                    for bytes in constraint.token_bytes.values() {
+                    for bytes in constraint.token_bytes.entries().values() {
                         let execution = tokenizer.execute_from_state_all_widths(bytes, source_state);
                         let first_match_width = execution
                             .matches
@@ -5804,7 +5758,7 @@ impl Constraint {
                             .possible_future_terminals(source_state)
                             .contains(*terminal as usize)
                     {
-                        for bytes in constraint.token_bytes.values() {
+                        for bytes in constraint.token_bytes.entries().values() {
                             let execution = constraint
                                 .tokenizer
                                 .execute_from_state_all_widths(bytes, source_state);
@@ -6071,7 +6025,7 @@ impl Constraint {
                 .map(|special| special.token_ids())
                 .collect::<range_set_blaze::RangeSetBlaze<_>>();
             let mut ordinary_token_by_bytes = FxHashMap::<&[u8], u32>::default();
-            for (&token, bytes) in self.token_bytes.iter() {
+            for (&token, bytes) in self.token_bytes.entries().iter() {
                 if !special_tokens.contains(token) {
                     ordinary_token_by_bytes
                         .entry(bytes.as_slice())
@@ -6108,7 +6062,7 @@ impl Constraint {
                 let mut all_suffix_entries = Vec::<(usize, &[u8])>::new();
                 let mut common_match_state = None::<u32>;
                 let mut conflicting_match_state = false;
-                for (&fused_token, bytes) in self.token_bytes.iter() {
+                for (&fused_token, bytes) in self.token_bytes.entries().iter() {
                     if bytes.is_empty() {
                         continue;
                     }
@@ -6304,7 +6258,7 @@ impl Constraint {
                     BTreeMap::<TerminalID, Vec<u32>>::new();
                 let mut known_reject = 0usize;
 
-                for (&token_id, bytes) in self.token_bytes.iter() {
+                for (&token_id, bytes) in self.token_bytes.entries().iter() {
                     if special_tokens.contains(token_id) || bytes.is_empty() {
                         continue;
                     }
@@ -6522,7 +6476,7 @@ impl Constraint {
                 let mut reset_entries = Vec::<(u32, Vec<u8>)>::new();
                 let mut unresolved = BTreeSet::<u32>::new();
                 for &token_id in &unknown_tokens {
-                    let Some(bytes) = self.token_bytes.get(&token_id) else {
+                    let Some(bytes) = self.token_bytes.entries().get(&token_id) else {
                         unresolved.insert(token_id);
                         continue;
                     };
@@ -6694,7 +6648,7 @@ impl Constraint {
                         depth
                     }
                     for &token_id in projection.first_match_step_unknown_tokens.iter() {
-                        let Some(bytes) = self.token_bytes.get(&token_id) else {
+                        let Some(bytes) = self.token_bytes.entries().get(&token_id) else {
                             continue;
                         };
                         let execution = self
@@ -6852,7 +6806,7 @@ impl Constraint {
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(4_096);
             let mut first_byte_tokens = [0usize; 256];
-            for bytes in self.token_bytes.values() {
+            for bytes in self.token_bytes.entries().values() {
                 if let Some(&byte) = bytes.first() {
                     first_byte_tokens[byte as usize] += 1;
                 }
@@ -9028,6 +8982,7 @@ impl Constraint {
         let start = self.tokenizer.start_state();
         let mut rows = self
             .token_bytes
+            .entries()
             .par_iter()
             .fold(empty, |mut rows, (&token_id, bytes)| {
                 if bytes.is_empty() {
@@ -12836,14 +12791,7 @@ impl Constraint {
 
     pub(crate) fn body_max_original_token_id(&self) -> Option<u32> {
         self.token_bytes
-            .keys()
-            .next_back()
-            .copied()
-            .or_else(|| {
-                self.packed_token_bytes
-                    .as_ref()
-                    .and_then(|packed| packed.max_token_id())
-            })
+            .max_token_id()
             .into_iter()
             .chain(
                 self.special_token_terminals
@@ -13915,9 +13863,9 @@ mod dense_internal_token_mask_tests {
         )
         .unwrap();
 
-        assert!(!Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+        assert!(!Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
         constraint.bind_vocab_exact(&vocab_b).unwrap();
-        assert!(Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+        assert!(Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
         assert!(constraint.late_bind_vocab.get().is_some());
         assert!(Arc::ptr_eq(
             &constraint
@@ -13928,9 +13876,9 @@ mod dense_internal_token_mask_tests {
             &vocab_b.entries_arc(),
         ));
 
-        let bound = Arc::clone(&constraint.token_bytes);
+        let bound = constraint.token_bytes.entries_arc();
         assert!(constraint.bind_vocab_exact(&vocab_bad).is_err());
-        assert!(Arc::ptr_eq(&constraint.token_bytes, &bound));
+        assert!(Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &bound));
     }
 
     #[test]
@@ -13953,7 +13901,7 @@ mod dense_internal_token_mask_tests {
         let mut loaded = Constraint::load(saved.clone(), &vocab_a).unwrap();
         assert_eq!(loaded.token_bytes.len(), vocab_a.len());
         loaded.bind_vocab_exact(&vocab_b).unwrap();
-        assert!(Arc::ptr_eq(&loaded.token_bytes, &vocab_b.entries_arc()));
+        assert!(Arc::ptr_eq(&loaded.token_bytes.entries_arc(), &vocab_b.entries_arc()));
 
         let _ = crate::compiler::compile::vocab_packed_token_bytes(&vocab_bad);
         let mut mismatched = Constraint::load(saved, &vocab_a).unwrap();

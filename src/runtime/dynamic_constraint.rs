@@ -1033,8 +1033,7 @@ impl DynamicConstraint {
             fast_template_dfas_by_terminal: Vec::new(),
             template_parser: None,
             token_classes: Default::default(),
-            token_bytes: payload.token_bytes,
-            packed_token_bytes: None,
+            token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),
             internal_token_buf_masks: Vec::new(),
             sliding_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),
@@ -1369,7 +1368,7 @@ impl DynamicConstraint {
                 tokenizer: constraint.tokenizer.as_ref().clone(),
                 ignore_terminal: constraint.ignore_terminal,
                 direct_regular_automaton: constraint.direct_regular_automaton.clone(),
-                token_bytes: Arc::clone(&constraint.token_bytes),
+                token_bytes: constraint.token_bytes.entries_arc(),
                 ignore_expr: constraint.ignore_expr.clone(),
                 terminal_exprs,
             },
@@ -2970,7 +2969,7 @@ impl DynamicConstraint {
                     &vocab,
                 )?;
                 let same_vocab = loaded.token_bytes_count() == inner.token_bytes_count()
-                    && inner.token_bytes.iter().all(|(&token_id, bytes)| {
+                    && inner.token_bytes.entries().iter().all(|(&token_id, bytes)| {
                         loaded.token_bytes_for_id(token_id) == Some(bytes.as_slice())
                     });
                 if !same_vocab {
@@ -7114,7 +7113,7 @@ mod tests {
                     tokenizer: constraint.inner.tokenizer.as_ref().clone(),
                     ignore_terminal: constraint.inner.ignore_terminal,
                     direct_regular_automaton: constraint.inner.direct_regular_automaton.clone(),
-                    token_bytes: Arc::clone(&constraint.inner.token_bytes),
+                    token_bytes: constraint.inner.token_bytes.entries_arc(),
                 },
                 special_token_terminals: constraint.inner.special_token_terminals.clone(),
             }],
@@ -7150,7 +7149,7 @@ mod tests {
                     tokenizer: constraint.inner.tokenizer.as_ref().clone(),
                     ignore_terminal: constraint.inner.ignore_terminal,
                     direct_regular_automaton: constraint.inner.direct_regular_automaton.clone(),
-                    token_bytes: Arc::clone(&constraint.inner.token_bytes),
+                    token_bytes: constraint.inner.token_bytes.entries_arc(),
                     ignore_expr: constraint.inner.ignore_expr.clone(),
                 },
                 special_token_terminals: constraint.inner.special_token_terminals.clone(),
@@ -7606,7 +7605,7 @@ nt start = A;
         let loaded = DynamicConstraint::load_with_vocab(&original.save(), &vocab).unwrap();
 
         assert!(std::sync::Arc::ptr_eq(
-            &loaded.inner.token_bytes,
+            &loaded.inner.token_bytes.entries_arc(),
             &vocab.entries_arc(),
         ));
         assert!(std::sync::Arc::ptr_eq(

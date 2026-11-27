@@ -38,7 +38,7 @@ pub(crate) use artifact::{
     dynamic_mask_llg_master_layout_class,
     dynamic_mask_llg_master_safe_chars,
     DYNAMIC_MASK_LLG_MASTER_CACHE_ID,};
-pub(crate) use artifact::PackedTokenBytes;
+pub(crate) use artifact::{PackedTokenBytes, TokenByteDomain};
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]

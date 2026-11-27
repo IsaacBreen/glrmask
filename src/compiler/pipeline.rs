@@ -5802,8 +5802,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
-        let token_bytes = vocab.entries_arc();
-        let packed_token_bytes = Some(super::compile::vocab_packed_token_bytes(vocab));
+        let token_bytes = crate::runtime::TokenByteDomain::from_indexed_vocab(vocab);
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let ignore_expr = prepared_grammar
             .ignore_terminal
@@ -5901,7 +5900,6 @@ fn compile_prepared_with_profile_and_table_construction(
             fast_template_dfas_by_terminal: prepared_parser.runtime,
             template_parser: Some(Arc::new(prepared_parser.parser)),
             token_bytes,
-            packed_token_bytes,
             internal_token_buf_masks: Vec::new(),
             sliding_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),

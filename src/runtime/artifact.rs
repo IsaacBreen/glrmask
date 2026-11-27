@@ -8842,6 +8842,94 @@ impl PackedTokenBytes {
     }
 }
 
+/// One immutable model-token domain, with an optional derived lookup index.
+/// The index is constructed from these exact entries and remains valid when
+/// binding an equal vocabulary. Neither representation is persisted.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TokenByteDomain {
+    entries: Arc<BTreeMap<u32, Vec<u8>>>,
+    index: Option<Arc<PackedTokenBytes>>,
+}
+
+impl TokenByteDomain {
+    pub(crate) fn from_entries(entries: Arc<BTreeMap<u32, Vec<u8>>>) -> Self {
+        Self { entries, index: None }
+    }
+
+    pub(crate) fn from_indexed_vocab(vocab: &crate::Vocab) -> Self {
+        Self {
+            entries: vocab.entries_arc(),
+            index: Some(crate::compiler::compile::vocab_packed_token_bytes(vocab)),
+        }
+    }
+
+    pub(crate) fn entries(&self) -> &BTreeMap<u32, Vec<u8>> {
+        &self.entries
+    }
+
+    pub(crate) fn entries_arc(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
+        Arc::clone(&self.entries)
+    }
+
+    pub(crate) fn matches_vocab(&self, vocab: &crate::Vocab) -> bool {
+        let entries = vocab.entries_arc();
+        if Arc::ptr_eq(&self.entries, &entries) {
+            return true;
+        }
+        if let Some(index) = &self.index {
+            if let Some(other) =
+                crate::compiler::compile::prepared_vocab_packed_token_bytes(vocab)
+            {
+                return index.as_ref() == other.as_ref();
+            }
+            return index.len() == entries.len()
+                && index.iter().eq(entries.iter().map(|(&id, bytes)| (id, bytes.as_slice())));
+        }
+        self.entries.as_ref() == entries.as_ref()
+    }
+
+    pub(crate) fn bind_exact(&mut self, vocab: &crate::Vocab) -> bool {
+        if !self.matches_vocab(vocab) {
+            return false;
+        }
+        self.entries = vocab.entries_arc();
+        true
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, id: u32) -> Option<&[u8]> {
+        match &self.index {
+            Some(index) => index.get(id),
+            None => self.entries.get(&id).map(Vec::as_slice),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn max_token_id(&self) -> Option<u32> {
+        match &self.index {
+            Some(index) => index.max_token_id(),
+            None => self.entries.last_key_value().map(|(&id, _)| id),
+        }
+    }
+
+    pub(crate) fn max_byte_len(&self) -> usize {
+        self.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0)
+    }
+
+    pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = (u32, &[u8])> + '_> {
+        match &self.index {
+            Some(index) => Box::new(index.iter()),
+            None => Box::new(self.entries.iter().map(|(&id, bytes)| (id, bytes.as_slice()))),
+        }
+    }
+}
 #[cfg(test)]
 mod packed_token_bytes_tests {
     use super::*;
@@ -9528,10 +9616,7 @@ constraint_data_schema! {
     @serde(skip, default)
     pub(crate) token_classes: crate::runtime::TokenClasses,
     @serde(skip, default)
-    pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
-    /// Derived contiguous lookup index of the immutable model vocabulary.
-    @serde(skip, default)
-    pub(crate) packed_token_bytes: Option<Arc<PackedTokenBytes>>,
+    pub(crate) token_bytes: TokenByteDomain,
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.

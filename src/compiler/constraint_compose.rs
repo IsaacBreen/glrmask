@@ -8083,7 +8083,7 @@ fn build_composed_constraint_unfinalized(
     };
     let dynamic_vocab_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let phase_started_at = Instant::now();
-    let token_bytes = vocab.entries_arc();
+    let token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
@@ -8140,7 +8140,6 @@ fn build_composed_constraint_unfinalized(
             template_parser: None,
         token_classes: crate::runtime::TokenClasses::mapped(original_token_to_internal, internal_token_to_tokens),
         token_bytes,
-        packed_token_bytes: None,
         internal_token_buf_masks: Vec::new(),
         sliding_word_group_buf_masks: Default::default(),
         word_group_sparse_masks: Vec::new(),
