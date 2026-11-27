@@ -11,7 +11,6 @@
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
-mod native_boundary;
 mod native_pipeline;
 pub(super) mod native_identity;
 pub mod postprocess;
@@ -1844,13 +1843,13 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 && !path_conditioned_after_preminimize
                 && max_structural_label_depth_to_final(&nwa).is_some_and(|depth| depth > 2)
                 && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none();
-            let native = native_eligible.then(|| native_boundary::compile_sparse(&nwa)).flatten();
+            let native = native_eligible.then(|| native_pipeline::compile_sparse(&nwa)).flatten();
             let native_ms = native_started.elapsed().as_secs_f64() * 1000.0;
             let (dwa, determinize_ms, minimize_ms) = if let Some((dwa, stats)) = native {
                 if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some() {
                     let reference = minimize_owned(determinize(&nwa)
                         .expect("reference boundary determinization failed"));
-                    let states = native_boundary::graph_isomorphism(&dwa, &reference)
+                    let states = native_pipeline::graph_isomorphism(&dwa, &reference)
                         .expect("native terminal graph differs from the ordinary compiler");
                     eprintln!("[glrmask/validate][boundary_native_terminal] exact_graph=true states={states}");
                 }
@@ -1931,7 +1930,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             if let Some(native)=native_pipeline {
                 if validate_native_pipeline {
                     let reference=ordinary();
-                    native_boundary::graph_isomorphism(&native.0,&reference.0)
+                    native_pipeline::graph_isomorphism(&native.0,&reference.0)
                         .expect("native full event pipeline graph differs from the original constructor");
                     eprintln!("[glrmask/validate][native_event_pipeline] exact_raw_graph=true exact_final_graph=true tokens={internal_vocab_count}");
                 }

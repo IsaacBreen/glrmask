@@ -51,6 +51,28 @@ pub struct Profile {
     pub token_sets: usize,
     pub runs: usize,
 }
+/// Preserve the ordinary-NWA boundary path's work limits and discovery order.
+/// The full native event path can opt into its separately tuned optimizations.
+#[derive(Clone, Copy, Default)]
+struct NativePolicy {
+    bulk: bool,
+    early_leaves: bool,
+    single_class: bool,
+    reuse_scratch: bool,
+    dense_targets: bool,
+}
+impl NativePolicy {
+    fn event_pipeline() -> Self {
+        use crate::terminal_dwa::env_policy::enabled;
+        Self {
+            bulk: enabled("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA"),
+            early_leaves: enabled("GLRMASK_BOUNDARY_NATIVE_EARLY_LEAVES"),
+            single_class: enabled("GLRMASK_BOUNDARY_NATIVE_SINGLE_CLASS"),
+            reuse_scratch: enabled("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH"),
+            dense_targets: true,
+        }
+    }
+}
 #[derive(Default)]
 struct Pool {
     failed: bool,
@@ -74,8 +96,11 @@ struct Pool {
 }
 impl Pool {
     fn new() -> Self {
+        Self::with_bulk(NativePolicy::event_pipeline().bulk)
+    }
+    fn with_bulk(bulk: bool) -> Self {
         let mut p = Self {
-            bulk: crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA"),
+            bulk,
             ..Self::default()
         };
         p.intern_bits([0; WORDS]);
@@ -487,12 +512,8 @@ fn closure(states: &[State], p: &mut Pool, seeds: Vec<(u32, u32)>) -> Subset {
     pairs.sort_unstable();
     pairs
 }
-#[cfg(test)]
-fn determinize_sparse(nwa: &NWA) -> Option<(DWA, Profile)> {
-    run(nwa, false)
-}
 pub(super) fn compile_sparse(nwa: &NWA) -> Option<(DWA, Profile)> {
-    run(nwa, true)
+    run(nwa, true, NativePolicy::default())
 }
 fn policy_supported()->bool { !std::env::vars_os().any(|(key, _)| {
         key.to_str().is_some_and(|key| {
@@ -504,7 +525,7 @@ fn policy_supported()->bool { !std::env::vars_os().any(|(key, _)| {
                 || key == "GLRMASK_WEIGHT_UNION_COALESCE_TOKEN_RANGES"
         })
     }) }
-fn run(nwa: &NWA, minimize: bool) -> Option<(DWA, Profile)> {
+fn run(nwa: &NWA, minimize: bool, policy: NativePolicy) -> Option<(DWA, Profile)> {
     if !policy_supported(){return None;}
     let n = nwa.states().len();
     if n == 0
@@ -549,7 +570,7 @@ fn run(nwa: &NWA, minimize: bool) -> Option<(DWA, Profile)> {
         }
     }
     let t = Instant::now();
-    let mut p = Pool::new();
+    let mut p = Pool::with_bulk(policy.bulk);
     let mut states = Vec::new();
     for s in nwa.states() {
         let fw = if let Some(w) = &s.final_weight {
@@ -598,16 +619,23 @@ fn run(nwa: &NWA, minimize: bool) -> Option<(DWA, Profile)> {
         return None;
     }
     let import_ms=t.elapsed().as_secs_f64()*1000.;
-    run_imported(states,nwa.start_states(),p,minimize,import_ms)
+    run_imported(states, nwa.start_states(), p, minimize, import_ms, policy)
 }
 
-fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_ms:f64)->Option<(DWA,Profile)>{
+fn run_imported(
+    states: Vec<State>,
+    starts: &[u32],
+    mut p: Pool,
+    minimize: bool,
+    import_ms: f64,
+    policy: NativePolicy,
+) -> Option<(DWA, Profile)> {
     let mut prof = Profile {
         import_ms,
         ..Default::default()
     };
     let t = Instant::now();
-    let leaf_fused=minimize&&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EARLY_LEAVES");
+    let leaf_fused = minimize && policy.early_leaves;
     let mut leaf_id=None::<u32>;let mut leaf_weights=Vec::new();
     let start = closure(
         &states,
@@ -731,7 +759,7 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
     prof.compute_ms = t.elapsed().as_secs_f64() * 1000.;
     let t = Instant::now();
     let (out, start) = if minimize {
-        minimize_sparse_graph(out, &mut p,leaf_id)?
+        minimize_sparse_graph(out, &mut p, leaf_id, policy)?
     } else {
         (out, 0)
     };
@@ -917,13 +945,15 @@ impl RowMap {
     }
 }
 
-fn minimize_sparse_graph(graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
-    minimize_sparse_graph_policy(graph,p,leaf,crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_SINGLE_CLASS"))
-}
-fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,single_class:bool) -> Option<(Graph, u32)> {
+fn minimize_sparse_graph(
+    mut graph: Graph,
+    p: &mut Pool,
+    leaf: Option<u32>,
+    policy: NativePolicy,
+) -> Option<(Graph, u32)> {
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
-    let reuse_scratch=crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH");
+    let reuse_scratch = policy.reuse_scratch;
     let profiling = std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NATIVE_TERMINAL").is_some();
     let total = Instant::now();
     let mut phase = Instant::now();
@@ -1022,7 +1052,12 @@ fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,
         .max()
         .filter(|&hi| hi < 8192)
         .map(|hi| hi as usize + 1);
-    let target_slots=graph.iter().flat_map(|(_,edges)|edges.iter().map(|&(l,_,_)|l)).max().filter(|&l|(0..4096).contains(&l)).map(|l|l as usize+1);
+    let target_slots = if policy.dense_targets {
+        graph.iter().flat_map(|(_, edges)| edges.iter().map(|&(l, _, _)| l))
+            .max().filter(|&l| (0..4096).contains(&l)).map(|l| l as usize + 1)
+    } else {
+        None
+    };
     for (h, candidates) in levels.iter().enumerate() {
         if candidates.is_empty() {
             continue;
@@ -1088,7 +1123,7 @@ fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,
         // A sole exact class has no compatibility decision. The ordinary
         // profile-expansion/reconstruction cycle is precisely the identity on
         // its canonical coefficients. Retain the same logical-work budget.
-        if h>0 && classes.len()==1 && single_class{
+        if h > 0 && classes.len() == 1 && policy.single_class {
             let members=classes.pop().unwrap();let s=members[0];
             let mut work=0u64;
             for w in std::iter::once(graph[s].0).chain(graph[s].1.iter().map(|e|e.2)){
@@ -1363,26 +1398,28 @@ mod tests {
     }
     #[test]
     fn exact_algebra_and_hashes_correlated_sparse_extremes() {
-        let mut seed = 190257;
-        let mut p = Pool::new();
-        for case in 0..512 {
-            let a = weight(&mut seed);
-            let b = weight(&mut seed);
-            let ai = p.import(&a).unwrap();
-            let bi = p.import(&b).unwrap();
-            assert_eq!(p.export(ai), a);
-            assert_eq!(p.export(bi), b);
-            assert_eq!(p.structural_hash(ai), a.structural_hash_cached());
-            assert_eq!(p.structural_hash(bi), b.structural_hash_cached());
-            let meet = p.meet(ai, bi);
-            let union = p.join(ai, bi);
-            assert_eq!(p.export(meet), a.intersection(&b), "intersection{case}");
-            assert_eq!(p.export(union), a.union(&b), "union{case}");
-            let words = (0..20).map(|_| weight(&mut seed)).collect::<Vec<_>>();
-            let ids = words.iter().map(|w| p.import(w).unwrap()).collect();
-            let all = p.join_all(ids);
-            assert_eq!(p.export(all), Weight::union_all(&words));
-            assert!(!p.failed);
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut seed = 190257;
+            let mut p = Pool::with_bulk(policy.bulk);
+            for case in 0..512 {
+                let a = weight(&mut seed);
+                let b = weight(&mut seed);
+                let ai = p.import(&a).unwrap();
+                let bi = p.import(&b).unwrap();
+                assert_eq!(p.export(ai), a);
+                assert_eq!(p.export(bi), b);
+                assert_eq!(p.structural_hash(ai), a.structural_hash_cached());
+                assert_eq!(p.structural_hash(bi), b.structural_hash_cached());
+                let meet = p.meet(ai, bi);
+                let union = p.join(ai, bi);
+                assert_eq!(p.export(meet), a.intersection(&b), "intersection{case}");
+                assert_eq!(p.export(union), a.union(&b), "union{case}");
+                let words = (0..20).map(|_| weight(&mut seed)).collect::<Vec<_>>();
+                let ids = words.iter().map(|w| p.import(w).unwrap()).collect();
+                let all = p.join_all(ids);
+                assert_eq!(p.export(all), Weight::union_all(&words));
+                assert!(!p.failed);
+            }
         }
     }
     #[test]
@@ -1406,120 +1443,124 @@ mod tests {
     }
     #[test]
     fn region_overlay_matches_exact_bitwise_partial_functions() {
-        let mut seed = 2519;
-        let mut p = Pool::new();
-        let mut r = Regions::default();
-        for case in 0..512 {
-            let mut side = || {
-                (0..5)
-                    .filter_map(|label| {
-                        let mut bits = [0; WORDS];
-                        bits[0] = (next(&mut seed) % 65536) as u64;
-                        bits[4] = (next(&mut seed) % 65536) as u64;
-                        let id = p.intern_bits(bits);
-                        (id != 0).then_some((label, id))
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let a = side();
-            let b = side();
-            let ai = r.intern(a.clone().into(), &mut p);
-            let bi = r.intern(b.clone().into(), &mut p);
-            let result = r.merge(ai, bi, &mut p);
-            let da = p.bits[r.values[ai as usize].0 as usize];
-            let db = p.bits[r.values[bi as usize].0 as usize];
-            let mut compatible = true;
-            for tok in 0..WORDS * 64 {
-                if da[tok / 64] & db[tok / 64] & (1 << (tok % 64)) == 0 {
-                    continue;
-                }
-                let obs = |v: &Vec<(i32, u32)>| {
-                    v.iter()
-                        .filter(|(_, b)| p.bits[*b as usize][tok / 64] & (1 << (tok % 64)) != 0)
-                        .map(|(l, _)| *l)
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut seed = 2519;
+            let mut p = Pool::with_bulk(policy.bulk);
+            let mut r = Regions::default();
+            for case in 0..512 {
+                let mut side = || {
+                    (0..5)
+                        .filter_map(|label| {
+                            let mut bits = [0; WORDS];
+                            bits[0] = (next(&mut seed) % 65536) as u64;
+                            bits[4] = (next(&mut seed) % 65536) as u64;
+                            let id = p.intern_bits(bits);
+                            (id != 0).then_some((label, id))
+                        })
                         .collect::<Vec<_>>()
                 };
-                if obs(&a) != obs(&b) {
-                    compatible = false;
+                let a = side();
+                let b = side();
+                let ai = r.intern(a.clone().into(), &mut p);
+                let bi = r.intern(b.clone().into(), &mut p);
+                let result = r.merge(ai, bi, &mut p);
+                let da = p.bits[r.values[ai as usize].0 as usize];
+                let db = p.bits[r.values[bi as usize].0 as usize];
+                let mut compatible = true;
+                for tok in 0..WORDS * 64 {
+                    if da[tok / 64] & db[tok / 64] & (1 << (tok % 64)) == 0 {
+                        continue;
+                    }
+                    let obs = |v: &Vec<(i32, u32)>| {
+                        v.iter()
+                            .filter(|(_, b)| p.bits[*b as usize][tok / 64] & (1 << (tok % 64)) != 0)
+                            .map(|(l, _)| *l)
+                            .collect::<Vec<_>>()
+                    };
+                    if obs(&a) != obs(&b) {
+                        compatible = false;
+                    }
                 }
-            }
-            assert_eq!(result.is_some(), compatible, "case{case}");
-            if let Some(c) = result {
-                let expected = da.iter().zip(db).map(|(x, y)| x | y).collect::<Vec<_>>();
-                assert_eq!(p.bits[r.values[c as usize].0 as usize].as_slice(), expected);
+                assert_eq!(result.is_some(), compatible, "case{case}");
+                if let Some(c) = result {
+                    let expected = da.iter().zip(db).map(|(x, y)| x | y).collect::<Vec<_>>();
+                    assert_eq!(p.bits[r.values[c as usize].0 as usize].as_slice(), expected);
+                }
             }
         }
     }
     #[test]
     fn generated_nwas_preserve_determinized_graph_and_weighted_language() {
-        let mut seed = 129851;
-        let mut accepted = 0;
-        let mut iso_min = 0;
-        let mut shape_diff = 0;
-        let mut first_shape = None;
-        for case in 0..256 {
-            let n = 4 + next(&mut seed) % 9;
-            let mut nwa = NWA::new(0, 0);
-            for _ in 0..n {
-                nwa.add_state();
-            }
-            nwa.set_start_states(vec![0]);
-            for dst in 1..n {
-                if next(&mut seed).is_multiple_of(3) {
-                    let w = weight(&mut seed);
-                    nwa.add_epsilon(0, dst as u32, w);
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut seed = 129851;
+            let mut accepted = 0;
+            let mut iso_min = 0;
+            let mut shape_diff = 0;
+            let mut first_shape = None;
+            for case in 0..256 {
+                let n = 4 + next(&mut seed) % 9;
+                let mut nwa = NWA::new(0, 0);
+                for _ in 0..n {
+                    nwa.add_state();
                 }
-            }
-            for s in 0..n {
-                if next(&mut seed).is_multiple_of(2) {
-                    let w = weight(&mut seed);
-                    nwa.set_final_weight(s as u32, w)
-                }
-                for d in s + 1..n {
-                    if !next(&mut seed).is_multiple_of(3) {
-                        continue;
+                nwa.set_start_states(vec![0]);
+                for dst in 1..n {
+                    if next(&mut seed).is_multiple_of(3) {
+                        let w = weight(&mut seed);
+                        nwa.add_epsilon(0, dst as u32, w);
                     }
-                    for label in 0..3 {
-                        if next(&mut seed).is_multiple_of(2) {
-                            nwa.add_transition(s as u32, label, d as u32, weight(&mut seed));
+                }
+                for s in 0..n {
+                    if next(&mut seed).is_multiple_of(2) {
+                        let w = weight(&mut seed);
+                        nwa.set_final_weight(s as u32, w)
+                    }
+                    for d in s + 1..n {
+                        if !next(&mut seed).is_multiple_of(3) {
+                            continue;
+                        }
+                        for label in 0..3 {
+                            if next(&mut seed).is_multiple_of(2) {
+                                nwa.add_transition(s as u32, label, d as u32, weight(&mut seed));
+                            }
                         }
                     }
                 }
-            }
-            let original = (nwa.start_states().to_vec(), nwa.states().to_vec());
-            let reference = determinize(&nwa).unwrap();
-            let (native, _) = determinize_sparse(&nwa).unwrap();
-            assert!(
-                graph_isomorphism(&native, &reference).is_ok(),
-                "determinantgraph case{case}: {:?}",
-                graph_isomorphism(&native, &reference)
-            );
-            if let Some((fused, _)) = compile_sparse(&nwa) {
-                let baseline = minimize_owned(reference);
-                assert_eq!(
-                    find_difference(&fused, &baseline).unwrap(),
-                    None,
-                    "language case{case}"
+                let original = (nwa.start_states().to_vec(), nwa.states().to_vec());
+                let reference = determinize(&nwa).unwrap();
+                let (native, _) = run(&nwa, false, policy).unwrap();
+                assert!(
+                    graph_isomorphism(&native, &reference).is_ok(),
+                    "determinantgraph case{case}: {:?}",
+                    graph_isomorphism(&native, &reference)
                 );
-                accepted += 1;
-                if graph_isomorphism(&fused, &baseline).is_ok() {
-                    iso_min += 1
-                } else {
-                    shape_diff += 1;
-                    if first_shape.is_none() {
-                        first_shape = Some(case)
+                if let Some((fused, _)) = run(&nwa, true, policy) {
+                    let baseline = minimize_owned(reference);
+                    assert_eq!(
+                        find_difference(&fused, &baseline).unwrap(),
+                        None,
+                        "language case{case}"
+                    );
+                    accepted += 1;
+                    if graph_isomorphism(&fused, &baseline).is_ok() {
+                        iso_min += 1
+                    } else {
+                        shape_diff += 1;
+                        if first_shape.is_none() {
+                            first_shape = Some(case)
+                        }
                     }
                 }
+                assert_eq!(
+                    original,
+                    (nwa.start_states().to_vec(), nwa.states().to_vec())
+                );
             }
-            assert_eq!(
-                original,
-                (nwa.start_states().to_vec(), nwa.states().to_vec())
+            eprintln!(
+                "GENERATED256 eligiblemin={accepted} isomorphicmin={iso_min} shapedifferent={shape_diff} first={first_shape:?}"
             );
+            assert!(accepted >= 100);
         }
-        eprintln!(
-            "GENERATED256 eligiblemin={accepted} isomorphicmin={iso_min} shapedifferent={shape_diff} first={first_shape:?}"
-        );
-        assert!(accepted >= 100);
     }
     #[test]
     #[cfg_attr(
@@ -1527,134 +1568,140 @@ mod tests {
         ignore = "slow (~65s); run with --features slow-tests"
     )]
     fn wide_layered_nwas_match_original_constructor() {
-        let mut seed = 672955;
-        let mut eligible = 0;
-        let mut iso_count = 0;
-        let mut maxdet = 0;
-        let mut first = None;
-        for case in 0..32 {
-            let width = 8 + case % 17;
-            let layers = 6;
-            let n = 1 + width * layers;
-            let mut nwa = NWA::new(0, 0);
-            for _ in 0..n {
-                nwa.add_state();
-            }
-            nwa.set_start_states(vec![0]);
-            for k in 0..width {
-                let rows = [0u32, 1, 2, 3, 4, 5, 6, 7];
-                let ts = Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
-                    if next(&mut seed).is_multiple_of(3) {
-                        return None;
-                    }
-                    Some((r, (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect()))
-                }));
-                nwa.add_epsilon(0, 1 + k as u32, ts);
-            }
-            for level in 0..layers {
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut seed = 672955;
+            let mut eligible = 0;
+            let mut iso_count = 0;
+            let mut maxdet = 0;
+            let mut first = None;
+            for case in 0..32 {
+                let width = 8 + case % 17;
+                let layers = 6;
+                let n = 1 + width * layers;
+                let mut nwa = NWA::new(0, 0);
+                for _ in 0..n {
+                    nwa.add_state();
+                }
+                nwa.set_start_states(vec![0]);
                 for k in 0..width {
-                    let st = 1 + level * width + k;
-                    let finalw = Weight::from_uniform(
-                        0..=7,
-                        (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
-                    );
-                    if level == layers - 1 || next(&mut seed).is_multiple_of(3) {
-                        nwa.set_final_weight(st as u32, finalw);
-                    }
-                    if level + 1 == layers {
-                        continue;
-                    }
-                    for label in 0..4 {
-                        for _ in 0..2 {
-                            let dst = 1 + (level + 1) * width + next(&mut seed) % width;
-                            let ew = Weight::from_uniform(
-                                0..=7,
-                                (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
-                            );
-                            nwa.add_transition(st as u32, label, dst as u32, ew);
+                    let rows = [0u32, 1, 2, 3, 4, 5, 6, 7];
+                    let ts = Weight::from_per_tsid_token_sets(rows.into_iter().filter_map(|r| {
+                        if next(&mut seed).is_multiple_of(3) {
+                            return None;
+                        }
+                        Some((r, (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect()))
+                    }));
+                    nwa.add_epsilon(0, 1 + k as u32, ts);
+                }
+                for level in 0..layers {
+                    for k in 0..width {
+                        let st = 1 + level * width + k;
+                        let finalw = Weight::from_uniform(
+                            0..=7,
+                            (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
+                        );
+                        if level == layers - 1 || next(&mut seed).is_multiple_of(3) {
+                            nwa.set_final_weight(st as u32, finalw);
+                        }
+                        if level + 1 == layers {
+                            continue;
+                        }
+                        for label in 0..4 {
+                            for _ in 0..2 {
+                                let dst = 1 + (level + 1) * width + next(&mut seed) % width;
+                                let ew = Weight::from_uniform(
+                                    0..=7,
+                                    (0..8u32).filter(|_| !next(&mut seed).is_multiple_of(3)).collect(),
+                                );
+                                nwa.add_transition(st as u32, label, dst as u32, ew);
+                            }
                         }
                     }
                 }
-            }
-            let old = determinize(&nwa).unwrap();
-            maxdet = maxdet.max(old.num_states());
-            let (det, _) = determinize_sparse(&nwa).expect("widelayered eligibility");
-            assert!(
-                graph_isomorphism(&det, &old).is_ok(),
-                "wide det{case}: {:?}",
-                graph_isomorphism(&det, &old)
-            );
-            if let Some((fused, _)) = compile_sparse(&nwa) {
-                eligible += 1;
-                let baseline = minimize_owned(old);
-                assert_eq!(
-                    find_difference(&fused, &baseline).unwrap(),
-                    None,
-                    "wide language{case}"
+                let old = determinize(&nwa).unwrap();
+                maxdet = maxdet.max(old.num_states());
+                let (det, _) = run(&nwa, false, policy).expect("widelayered eligibility");
+                assert!(
+                    graph_isomorphism(&det, &old).is_ok(),
+                    "wide det{case}: {:?}",
+                    graph_isomorphism(&det, &old)
                 );
-                if graph_isomorphism(&fused, &baseline).is_ok() {
-                    iso_count += 1
-                } else if first.is_none() {
-                    first = Some(case);
+                if let Some((fused, _)) = run(&nwa, true, policy) {
+                    eligible += 1;
+                    let baseline = minimize_owned(old);
+                    assert_eq!(
+                        find_difference(&fused, &baseline).unwrap(),
+                        None,
+                        "wide language{case}"
+                    );
+                    if graph_isomorphism(&fused, &baseline).is_ok() {
+                        iso_count += 1
+                    } else if first.is_none() {
+                        first = Some(case);
+                    }
                 }
             }
+            eprintln!(
+                "WIDE32 eligible={eligible} graph_isomorphic={iso_count} maxdet={maxdet} first_shape_difference={first:?}"
+            );
+            assert_eq!(eligible, 32);
+            assert_eq!(iso_count, eligible);
         }
-        eprintln!(
-            "WIDE32 eligible={eligible} graph_isomorphic={iso_count} maxdet={maxdet} first_shape_difference={first:?}"
-        );
-        assert_eq!(eligible, 32);
-        assert_eq!(iso_count, eligible);
     }
     #[test]
     fn failure_budgets_do_not_publish_partial_output() {
-        let mut p = Pool::new();
-        p.total_runs = MAX_RUNS;
-        let id = p.intern(smallvec![Run { lo: 0, hi: 0, b: 0 }]);
-        assert_eq!(id, 0);
-        assert!(p.failed);
-        let mut n = NWA::new(0, 0);
-        n.add_state();
-        n.set_start_states(vec![0]);
-        n.add_transition(0, 7, 100, Weight::all());
-        assert!(compile_sparse(&n).is_none());
-        let mut n = NWA::new(0, 0);
-        n.add_state();
-        n.set_start_states(vec![99]);
-        assert!(compile_sparse(&n).is_none());
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut p = Pool::with_bulk(policy.bulk);
+            p.total_runs = MAX_RUNS;
+            let id = p.intern(smallvec![Run { lo: 0, hi: 0, b: 0 }]);
+            assert_eq!(id, 0);
+            assert!(p.failed);
+            let mut n = NWA::new(0, 0);
+            n.add_state();
+            n.set_start_states(vec![0]);
+            n.add_transition(0, 7, 100, Weight::all());
+            assert!(run(&n, true, policy).is_none());
+            let mut n = NWA::new(0, 0);
+            n.add_state();
+            n.set_start_states(vec![99]);
+            assert!(run(&n, true, policy).is_none());
+        }
     }
     #[test]
     fn unsupported_inputs_decline_without_mutation() {
-        let mut n = NWA::new(0, 0);
-        n.add_state();
-        n.add_state();
-        n.add_state();
-        n.set_start_states(vec![0]);
-        n.set_final_weight(
-            2,
-            Weight::from_token_set_for_tsid(0, [1].into_iter().collect()),
-        );
-        n.add_transition(0, 7, 1, Weight::all());
-        n.add_epsilon(1, 2, Weight::all());
-        assert!(compile_sparse(&n).is_none());
-        let mut cycle = NWA::new(0, 0);
-        cycle.add_state();
-        cycle.set_start_states(vec![0]);
-        cycle.add_transition(0, 0, 0, Weight::all());
-        assert!(compile_sparse(&cycle).is_none());
-        let mut high = NWA::new(0, 0);
-        high.add_state();
-        high.add_state();
-        high.set_start_states(vec![0]);
-        high.add_transition(
-            0,
-            0,
-            1,
-            Weight::from_token_set_for_tsid(0, [512].into_iter().collect()),
-        );
-        assert!(compile_sparse(&high).is_none());
-        let mut empty = NWA::new(0, 0);
-        empty.add_state();
-        assert!(compile_sparse(&empty).is_none());
+        for policy in [NativePolicy::default(), NativePolicy::event_pipeline()] {
+            let mut n = NWA::new(0, 0);
+            n.add_state();
+            n.add_state();
+            n.add_state();
+            n.set_start_states(vec![0]);
+            n.set_final_weight(
+                2,
+                Weight::from_token_set_for_tsid(0, [1].into_iter().collect()),
+            );
+            n.add_transition(0, 7, 1, Weight::all());
+            n.add_epsilon(1, 2, Weight::all());
+            assert!(run(&n, true, policy).is_none());
+            let mut cycle = NWA::new(0, 0);
+            cycle.add_state();
+            cycle.set_start_states(vec![0]);
+            cycle.add_transition(0, 0, 0, Weight::all());
+            assert!(run(&cycle, true, policy).is_none());
+            let mut high = NWA::new(0, 0);
+            high.add_state();
+            high.add_state();
+            high.set_start_states(vec![0]);
+            high.add_transition(
+                0,
+                0,
+                1,
+                Weight::from_token_set_for_tsid(0, [512].into_iter().collect()),
+            );
+            assert!(run(&high, true, policy).is_none());
+            let mut empty = NWA::new(0, 0);
+            empty.add_state();
+            assert!(run(&empty, true, policy).is_none());
+        }
     }
 }
 
@@ -1677,7 +1724,7 @@ fn sole_class_minimization_is_exact_without_profile_roundtrip(){
         let mut outputs=Vec::new();
         for enabled in [false,true]{let mut pool=Pool::new();let aw=pool.import(&a).unwrap();let bw=pool.import(&b).unwrap();let both=pool.join(aw,bw);
             let graph=vec![(0,smallvec![(3,1,aw),(7,2,bw)]),(aw,smallvec![(4,3,aw)]),(0,smallvec![(9,3,bw)]),(both,Edges::new())];
-            let (g,start)=minimize_sparse_graph_policy(graph,&mut pool,None,enabled).unwrap();outputs.push(exported(g,start,&mut pool));
+            let (g,start)=minimize_sparse_graph(graph,&mut pool,None,NativePolicy { single_class: enabled, ..NativePolicy::event_pipeline() }).unwrap();outputs.push(exported(g,start,&mut pool));
         }
         assert_eq!(outputs[0].start_state(),outputs[1].start_state());assert_eq!(outputs[0].states(),outputs[1].states());
     }}

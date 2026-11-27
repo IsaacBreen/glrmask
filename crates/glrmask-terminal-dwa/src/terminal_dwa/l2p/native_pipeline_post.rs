@@ -129,7 +129,7 @@ fn finish_arena(a:Arena,p:Pool,stats:PostProfile)->Option<(DWA,PostProfile,Profi
   for(l,bs)in row.edges{let direct=bs.len()==1;for(d,w)in bs{let group=if let Some(&g)=keys.get(&w){g}else{let g=groups.len();groups.push(SourceGroup{weight:w,edges:Vec::new()});keys.insert(w,g);g};groups[group].edges.push((l,d,direct));}}
   states.push(State{final_w:row.final_w.unwrap_or(0),groups,eps:row.eps.into_vec()});
  }
- let(dwa,core)=run_imported(states,&a.starts,p,true,ms(t))?;Some((dwa,stats,core))
+ let(dwa,core)=run_imported(states,&a.starts,p,true,ms(t),NativePolicy::event_pipeline())?;Some((dwa,stats,core))
 }
 
 
@@ -236,7 +236,7 @@ fn w(seed:&mut u64)->Weight{
   let(candidate,_)=prepare_export(&nwa,&rows,count,ignore,transparent,&owner,start).expect("bounded supported input");
   assert_eq!(baseline.start_states(),candidate.start_states(),"starts case={case}");assert_eq!(baseline.states(),candidate.states(),"every row case={case}");
   if let Some((a,_,_))=compile(&nwa,&rows,count,ignore,transparent,&owner,start){
-   let b=super::super::compile_sparse(&baseline).expect("same native eligibility").0;
+   let b=run(&baseline, true, NativePolicy::event_pipeline()).expect("same native eligibility").0;
    assert!(super::super::graph_isomorphism(&a,&b).is_ok(),"fused case={case}");fused_eligible+=1;
   }
   assert_eq!(before,(nwa.start_states().to_vec(),nwa.states().to_vec()),"mutation case={case}");
