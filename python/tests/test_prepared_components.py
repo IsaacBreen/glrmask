@@ -162,7 +162,7 @@ def test_grammar_compile_sugar():
     assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())
 
     # Grammar is source-only
-    assert hasattr(g, "bind")
+    assert not hasattr(g, "bind")
     assert not hasattr(g, "prepare")
     assert not hasattr(g, "module")
     assert not hasattr(g, "unbound")

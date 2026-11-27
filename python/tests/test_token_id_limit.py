@@ -20,10 +20,6 @@ def test_vocab_rejects_a_huge_id(token_id):
 
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_binding_a_huge_id_is_an_error(token_id):
-    grammar = token_extern()
-    with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
-        grammar.bind("E", glrmask.TokenSet([token_id]))
-    assert exc.value.kind == "invalid_input"
     module = glrmask.Module(token_extern())
     with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
         module.bind("E", glrmask.TokenSet([token_id]))
