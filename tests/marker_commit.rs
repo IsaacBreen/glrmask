@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use glrmask::test_modes::MaskMode;
 use glrmask::{ConstraintInner as Constraint, MarkerEvent, TokenSet, Vocab};
 
@@ -139,4 +141,40 @@ fn exact_model_events_and_marker_ids_are_distinct_namespaces() {
 fn public_event_is_copy_and_contains_no_per_event_string() {
     let e=MarkerEvent{id:7,byte_offset:12};let copied=e;assert_eq!(e,copied);
     assert!(std::mem::size_of::<MarkerEvent>()<=16);
+}
+
+
+#[test]
+fn cloned_marker_branches_keep_independent_observations_across_threads() {
+    let v = vocab(&[b"a", b"b", b"c"]);
+    for mode in MODES {
+        let c = compile("start root; nt root = @mark(0) \"a\" @mark(1) (\"b\" @mark(2) | \"c\" @mark(3));", &v, mode);
+        let mut original = c.start();
+        assert!(original.commit_token(0));
+        let expected = original.mask();
+        let observed = events(&original);
+        assert_eq!(observed, [(1, 1)]);
+        std::thread::scope(|scope| {
+            for (id, marker) in [(1, 2), (2, 3)] {
+                let mut branch = original.clone();
+                let expected = &expected;
+                scope.spawn(move || {
+                    assert_eq!(&branch.mask(), expected);
+                    assert!(branch.commit_token(id));
+                    assert_eq!(events(&branch), [(marker, 2)]);
+                    assert!(branch.is_accepting());
+                });
+            }
+            scope.spawn(|| {
+                let mut rejected = original.clone();
+                assert!(!rejected.commit_token(0));
+                assert!(events(&rejected).is_empty());
+                assert!(rejected.is_terminated());
+                assert!(!rejected.is_accepting());
+            });
+        });
+        assert_eq!(events(&original), observed);
+        assert_eq!(original.mask(), expected);
+        assert!(!original.is_accepting());
+    }
 }

@@ -22,8 +22,10 @@ use crate::runtime::constraint::{
     Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
 };
 use crate::runtime::state::{
-    CommitBuffers, ConstraintState, MaskCacheData, MaskScratch, ParserStateMap,
+    ConstraintState, MaskCacheData, ParserStateMap, mask_scratch,
 };
+#[cfg(test)]
+use crate::runtime::state::CommitBuffers;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -2128,7 +2130,7 @@ mod tests {
                 let mut cached = vec![0; mask.len()];
                 assert!(state.try_fill_mask_from_cache(&mut cached));
                 assert_eq!(cached, mask);
-                let before = state.state.clone();
+                let before = state.state.snapshot();
                 assert!(state.commit_token(token));
                 if before == state.state {
                     assert!(state.try_fill_mask_from_cache(&mut cached));
@@ -2284,7 +2286,7 @@ mod tests {
         let mut buffers = super::CommitBuffers::default();
         let mut output = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
         let mut stack = vec![None; usize::from(trie.full_walk_max_parent_depth()) + 2];
-        stack[0] = Some(state.state.clone());
+        stack[0] = Some(state.state.snapshot());
         let mark = |node, output: &mut [u32]| {
             if let Some(canonical) = trie.node(node).token_id {
                 for &id in vocab.token_ids(canonical).unwrap() {
@@ -2565,7 +2567,7 @@ mod tests {
         state.state = crate::runtime::state::ParserStateMap::singleton(
             tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
-        );
+        ).into();
 
         let mut expected = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut expected);
@@ -2582,7 +2584,7 @@ mod tests {
         loaded_state.state = crate::runtime::state::ParserStateMap::singleton(
             loaded_tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], loaded_disallowed)]),
-        );
+        ).into();
         let mut loaded_expected = vec![0u32; loaded.body_mask_len()];
         loaded_state.fill_mask_dynamic(&mut loaded_expected);
         let mut loaded_actual = vec![0u32; loaded.body_mask_len()];
@@ -4641,8 +4643,8 @@ impl ConstraintState {
             .max()
             .unwrap_or(0)
             .max(buf.len());
+        let mut scratch = mask_scratch(&self.constraint);
         let mut component_buf = if projected_states.iter().any(|state| !state.is_empty()) {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             let mut reusable = std::mem::take(&mut scratch.output_buf);
             reusable.resize(required_component_mask_len, 0);
             Some(reusable)
@@ -4668,22 +4670,9 @@ impl ConstraintState {
             terminated: false,
             markers: None,
                 constraint: component.constraint.as_ref().clone(),
-                state,
-                buffers: CommitBuffers::for_mask_only_shadow(),
+                state: state.into(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
-                mask_scratch: {
-                    let scratch = self.mask_scratch.lock().unwrap();
-                    scratch
-                        .segmented_component_scratch
-                        .get(component_index)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            Arc::new(Mutex::new(MaskScratch::for_constraint(
-                                component.constraint.as_ref(),
-                            )))
-                        })
-                },
             };
             // Dispatch through the retained component itself. Static source
             // constraints therefore keep their parser DWA and precomputed mask
@@ -4698,8 +4687,9 @@ impl ConstraintState {
 
         if let Some(mut reusable) = component_buf.take() {
             reusable.clear();
-            self.mask_scratch.lock().unwrap().output_buf = reusable;
+            scratch.output_buf = reusable;
         }
+        drop(scratch);
         let boundary_started_at = profile.then(Instant::now);
         if !self.or_segmented_boundary_shards_mask(overlay, buf) {
             return false;
@@ -4832,6 +4822,7 @@ impl ConstraintState {
         } else {
             buf.fill(0);
         }
+        let mut scratch = mask_scratch(&self.constraint);
         let mut component_buf = None::<Vec<u32>>;
         let mut component_times = SmallVec::<[u64; 4]>::new();
         for (component_index, (component, state)) in overlay
@@ -4846,7 +4837,6 @@ impl ConstraintState {
             }
             let component_started_at = profile.then(Instant::now);
             let reused_initial = {
-                let scratch = self.mask_scratch.lock().unwrap();
                 match (
                     scratch.segmented_component_initial_states.get(component_index),
                     scratch.segmented_component_initial_masks.get(component_index),
@@ -4863,7 +4853,6 @@ impl ConstraintState {
                 continue;
             }
             if component_buf.is_none() {
-                let mut scratch = self.mask_scratch.lock().unwrap();
                 let mut reusable = std::mem::take(&mut scratch.output_buf);
                 reusable.resize(
                     buf.len().max(component.constraint.body_mask_len()),
@@ -4883,22 +4872,9 @@ impl ConstraintState {
             terminated: false,
             markers: None,
                 constraint: component.constraint.as_ref().clone(),
-                state,
-                buffers: CommitBuffers::for_mask_only_shadow(),
+                state: state.into(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
-                mask_scratch: {
-                    let scratch = self.mask_scratch.lock().unwrap();
-                    scratch
-                        .segmented_component_scratch
-                        .get(component_index)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            Arc::new(Mutex::new(MaskScratch::for_constraint(
-                                component.constraint.as_ref(),
-                            )))
-                        })
-                },
             };
             // Preserve the supplied component's runtime backend. A static
             // component reuses its compiled parser-DWA/mask machinery; a
@@ -4919,8 +4895,9 @@ impl ConstraintState {
         }
         if let Some(mut reusable) = component_buf.take() {
             reusable.clear();
-            self.mask_scratch.lock().unwrap().output_buf = reusable;
+            scratch.output_buf = reusable;
         }
+        drop(scratch);
         let boundary_started_at = profile.then(Instant::now);
         if !self.or_segmented_boundary_shards_mask(overlay, buf) {
             return false;
@@ -5105,11 +5082,9 @@ impl ConstraintState {
                                     terminated: self.terminated,
             markers: None,
                                     constraint: self.constraint.clone(),
-                                    state: frontier,
-                                    buffers: CommitBuffers::for_mask_only_shadow(),
+                                    state: frontier.into(),
                                     generation: self.generation,
                                     mask_cache: Mutex::new(None),
-                                    mask_scratch: Arc::clone(&self.mask_scratch),
                                 };
                                 vocab.or_mask(&view, buf).expect("exact vocabulary mask failed")
                             })
@@ -5201,7 +5176,7 @@ impl ConstraintState {
         let mut transitions = RecursiveMaskTransitions::new(state_budget, alphabet);
         state_stack[0] = Some(match transitions.intern(&self.state) {
             Some(id) => RecursiveMaskFrontier::Cached(id),
-            None => RecursiveMaskFrontier::Uncached(self.state.clone()),
+            None => RecursiveMaskFrontier::Uncached(self.state.snapshot()),
         });
 
         let mark_node = |node: u32, live: bool, buf: &mut [u32]| {
@@ -6932,8 +6907,8 @@ impl ConstraintState {
 
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
+        let mut scratch = mask_scratch(&self.constraint);
         let (mut merged, mut output_scratch, mut single_path_aux, mut single_path_acc) = {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             (
                 std::mem::take(&mut scratch.merged_dense),
                 std::mem::take(&mut scratch.output_buf),
@@ -6946,13 +6921,12 @@ impl ConstraintState {
         let mut used_direct_final = false;
         let mut direct_buf_dirty = false;
 
-        let restore_scratch = |
+        let mut restore_scratch = |
             merged: Vec<u64>,
             output_scratch: Vec<u32>,
             single_path_aux: Vec<u64>,
             single_path_acc: Vec<u64>,
         | {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             scratch.merged_dense = merged;
             scratch.chain_merged_dense.clear();
             scratch.output_buf = output_scratch;
@@ -7756,8 +7730,8 @@ impl ConstraintState {
         let total_started = profile.then(Instant::now);
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
+        let mut scratch = mask_scratch(&self.constraint);
         let (mut merged, mut indexed_runtime) = {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             (
                 std::mem::take(&mut scratch.merged_dense),
                 std::mem::take(&mut scratch.indexed_dag_mask),
@@ -7994,7 +7968,6 @@ impl ConstraintState {
         let accumulator_entries_total = indexed_runtime.accumulators.len();
         indexed_runtime.prune_stale_sources_if_needed();
         {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             scratch.merged_dense = merged;
             scratch.indexed_dag_mask = indexed_runtime;
         }
@@ -8108,8 +8081,8 @@ impl ConstraintState {
             FxHashMap::default();
         let mut transition_intersection_cache = DenseTokenSetIntersectionSmallCache::new();
 
+        let mut scratch = mask_scratch(&self.constraint);
         let mut merged = {
-            let mut scratch = self.mask_scratch.lock().unwrap();
             std::mem::take(&mut scratch.merged_dense)
         };
 
@@ -8513,8 +8486,6 @@ impl ConstraintState {
                 }
             out
         });
-
-        let mut scratch = self.mask_scratch.lock().unwrap();
         scratch.merged_dense = merged;
         scratch.chain_merged_dense.clear();
 
@@ -8738,24 +8709,14 @@ impl ConstraintState {
             return None;
         }
 
-        // This is a mask-only speculative view. Do not clone the full
-        // ConstraintState: its Clone intentionally rebuilds a complete
-        // MaskScratch tree (including nested component initial masks), and
-        // returning that large state by value also creates a large caller
-        // return slot even when this experiment is disabled. Deep recursive
-        // composition can therefore overflow the test/runtime thread stack
-        // before the early `None` is observed. A boxed shallow shadow needs
-        // only fresh commit scratch and can safely reuse the caller's mask
-        // scratch sequentially.
+        // A mask-only speculative view shares the immutable frontier until written.
         let mut shadow = Box::new(ConstraintState {
             terminated: false,
             markers: None,
             constraint: self.constraint.clone(),
             state: self.state.clone(),
-            buffers: CommitBuffers::for_constraint(&self.constraint),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Arc::clone(&self.mask_scratch),
         });
         for (tokenizer_state, factored) in additions {
             shadow

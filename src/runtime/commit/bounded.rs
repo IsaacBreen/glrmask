@@ -492,7 +492,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> 
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
         let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
-            .map(|s|Cursor {constraint:&s.constraint,state:s.state.clone(),buffers:CommitBuffers::for_mask_only_shadow()})
+            .map(|s|Cursor {constraint:&s.constraint,state:s.state.snapshot(),buffers:CommitBuffers::for_mask_only_shadow()})
             .collect::<Vec<_>>();
         let mut output=Vec::new();
         loop {
@@ -552,7 +552,7 @@ mod tests {
     }
     fn inspect(state:&ConstraintState,context:&str) {
         // Cold queries must be evaluated BEFORE asking the full mask oracle.
-        let initial=state.state.clone();let accepting=state.is_accepting();
+        let initial=state.state.snapshot();let accepting=state.is_accepting();
         let limits=[0,1,2,3,8,usize::MAX];
         let cold=limits.map(|k|state.mask_if_at_most(k).unwrap_or_else(|e|panic!("{context}: K={k}: {e}")));
         let forced=forced_tokens(std::slice::from_ref(state))

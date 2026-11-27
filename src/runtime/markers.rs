@@ -425,10 +425,10 @@ impl CommitObserver for LiveMarkers<'_> {
 impl super::ConstraintState {
     pub(crate) fn initialize_markers(&mut self) {
         let Some(queries) = self.constraint.marker_queries.as_deref() else { return; };
-        let mut markers = Box::new(MarkerState::new(queries));
+        let mut markers = MarkerState::new(queries);
         LiveMarkers { queries, state: &mut markers, base: 0 }.frontier(&self.constraint, &self.state, 0);
         markers.finish(queries, 0, true);
-        self.markers = Some(markers);
+        self.markers = Some(Arc::new(markers));
     }
 
     /// The markers passed by the most recent commit, or by
@@ -476,7 +476,7 @@ mod tests {
             assert_eq!(state.mask(), reference.mask(), "initial mask {mode:?}");
             for (token, marker) in [(0, 7), (1, 42)] {
                 assert!(state.commit_token(token)); assert!(reference.commit_token(token));
-                let before = state.state.clone();
+                let before = state.state.snapshot();
                 assert_eq!(observations(&state), [marker], "{mode:?} token {token}");
                 assert_eq!(state.state, before, "marker query mutated the parser");
                 assert_eq!(state.mask(), reference.mask(), "mask {mode:?} token {token}");

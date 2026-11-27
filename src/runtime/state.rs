@@ -1,5 +1,11 @@
 use crate::automata::lexer::Lexer;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
+use std::thread::LocalKey;
+use super::ConstraintData;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
@@ -257,6 +263,139 @@ impl<'a> IntoIterator for &'a ParserStateMap {
 }
 
 
+/// Only live sequence frontiers use shared storage. Temporary algorithmic
+/// maps keep their inline representation and allocation-free fast paths.
+/// Cloning a sequence is constant-time; a write to a shared frontier detaches
+/// once, preserving the original parser paths and their immutable GSS nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedFrontier(Arc<ParserStateMap>);
+
+impl From<ParserStateMap> for SharedFrontier {
+    fn from(state: ParserStateMap) -> Self { Self(Arc::new(state)) }
+}
+
+impl SharedFrontier {
+    #[inline]
+    pub(crate) fn snapshot(&self) -> ParserStateMap { self.0.as_ref().clone() }
+
+    // Rejection need not duplicate a shared frontier merely to empty it.
+    pub(crate) fn clear(&mut self) {
+        if let Some(state) = Arc::get_mut(&mut self.0) {
+            state.clear();
+        } else {
+            self.0 = Arc::new(ParserStateMap::default());
+        }
+    }
+}
+
+impl Deref for SharedFrontier {
+    type Target = ParserStateMap;
+    #[inline]
+    fn deref(&self) -> &ParserStateMap { &self.0 }
+}
+
+impl DerefMut for SharedFrontier {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut ParserStateMap { Arc::make_mut(&mut self.0) }
+}
+
+impl PartialEq<ParserStateMap> for SharedFrontier {
+    fn eq(&self, other: &ParserStateMap) -> bool { self.0.as_ref() == other }
+}
+
+impl PartialEq<SharedFrontier> for ParserStateMap {
+    fn eq(&self, other: &SharedFrontier) -> bool { self == other.0.as_ref() }
+}
+
+impl<'a> IntoIterator for &'a SharedFrontier {
+    type Item = <&'a ParserStateMap as IntoIterator>::Item;
+    type IntoIter = <&'a ParserStateMap as IntoIterator>::IntoIter;
+    fn into_iter(self) -> Self::IntoIter { self.0.as_ref().into_iter() }
+}
+
+// A bounded, per-thread cache of idle scratch leases, scoped to the exact
+// immutable compiled constraint. Weak identity prevents pointer ABA without
+// retaining a compiled grammar. A checkout removes the slot before invoking
+// any parser or mask code, so nested/reentrant calls obtain independent
+// storage and no RefCell borrow or synchronization guard spans runtime work.
+// The lease is !Send; a public state contains no lease and can move freely
+// between threads. On unwind discard the affected scratch.
+type ScratchSlot<T> = (Weak<ConstraintData>, Box<T>);
+type ScratchPool<T> = RefCell<Vec<ScratchSlot<T>>>;
+const SCRATCH_POOL_LIMIT: usize = 8;
+
+thread_local! {
+    static COMMIT_SCRATCH: ScratchPool<CommitBuffers> = const { RefCell::new(Vec::new()) };
+    static MASK_SCRATCH: ScratchPool<MaskScratch> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct ScratchLease<T: 'static> {
+    slot: Option<ScratchSlot<T>>,
+    pool: &'static LocalKey<ScratchPool<T>>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl<T: 'static> Deref for ScratchLease<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T { &self.slot.as_ref().expect("live scratch lease").1 }
+}
+
+impl<T: 'static> DerefMut for ScratchLease<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T { &mut self.slot.as_mut().expect("live scratch lease").1 }
+}
+
+impl<T: 'static> Drop for ScratchLease<T> {
+    fn drop(&mut self) {
+        if std::thread::panicking() { return; }
+        let mut slot = self.slot.take();
+        // Drop any displaced value outside the TLS borrow. TLS destruction
+        // and reentrant acquisition must not panic in Drop.
+        let mut displaced = None;
+        let _ = self.pool.try_with(|cell| {
+            let Ok(mut slots) = cell.try_borrow_mut() else { return; };
+            // Retain nested leases too, so subsequent reentrant work does
+            // not have to rebuild scratch for the same constraint.
+            if slots.len() >= SCRATCH_POOL_LIMIT {
+                displaced = Some(slots.remove(0));
+            }
+            slots.push(slot.take().expect("live scratch lease"));
+        });
+        drop(displaced);
+    }
+}
+
+#[inline]
+fn checkout_scratch<T: 'static>(
+    pool: &'static LocalKey<ScratchPool<T>>,
+    constraint: &Constraint,
+    make: impl FnOnce(&Constraint) -> T,
+) -> ScratchLease<T> {
+    let ptr = Arc::as_ptr(&constraint.data);
+    let slot = pool.try_with(|cell| {
+        let mut slots = cell.try_borrow_mut().ok()?;
+        let index = slots.iter().rposition(|(key, _)| key.as_ptr() == ptr)?;
+        Some(slots.remove(index))
+    }).ok().flatten().unwrap_or_else(|| (Arc::downgrade(&constraint.data), Box::new(make(constraint))));
+    ScratchLease { slot: Some(slot), pool, _thread_bound: PhantomData }
+}
+
+#[inline]
+pub(crate) fn commit_scratch(constraint: &Constraint) -> ScratchLease<CommitBuffers> {
+    checkout_scratch(&COMMIT_SCRATCH, constraint, CommitBuffers::for_constraint)
+}
+
+#[inline]
+pub(crate) fn mask_scratch(constraint: &Constraint) -> ScratchLease<MaskScratch> {
+    checkout_scratch(&MASK_SCRATCH, constraint, MaskScratch::for_constraint)
+}
+
+pub(crate) fn warm_scratch(constraint: &Constraint) {
+    drop(commit_scratch(constraint));
+    drop(mask_scratch(constraint));
+}
+
 /// Cached fill_mask result, keyed on generation counter.
 pub(crate) struct MaskCacheData {
     pub generation: u64,
@@ -279,11 +418,6 @@ pub(crate) struct MaskScratch {
     /// Bounded live-state cache for indexed-DAG masking. Cached products are
     /// exact pure-function results keyed by retained immutable GSS nodes.
     pub indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime,
-    /// Reusable scratch for retained segmented component evaluators. These are
-    /// allocated when the outer state is created, not in the mask hot path.
-    /// `Arc<Mutex<_>>` lets a short-lived projected `ConstraintState` borrow the
-    /// component scratch without moving it out of the parent scratch object.
-    pub segmented_component_scratch: Vec<Arc<Mutex<MaskScratch>>>,
     /// Exact component initial states/masks, prepared outside mask timing. A
     /// composed projection frequently lands exactly at a component entry; in
     /// that case reuse the component's already-cached initial mask rather than
@@ -295,7 +429,6 @@ pub(crate) struct MaskScratch {
 impl MaskScratch {
     pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
         let dense_words = constraint.internal_token_dense_words;
-        let mut segmented_component_scratch = Vec::new();
         let mut segmented_component_initial_states = Vec::new();
         let mut segmented_component_initial_masks = Vec::new();
         if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
@@ -310,14 +443,10 @@ impl MaskScratch {
                     })
                 });
             if !authoritative_dynamic_direct {
-                segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
                 segmented_component_initial_states.reserve(overlay.segmented_parser_components.len());
                 segmented_component_initial_masks.reserve(overlay.segmented_parser_components.len());
                 for component in &overlay.segmented_parser_components {
                     let source = component.constraint.as_ref();
-                    segmented_component_scratch.push(Arc::new(Mutex::new(
-                        MaskScratch::for_constraint(source),
-                    )));
                     segmented_component_initial_states.push(source.initial_state_map());
                     segmented_component_initial_masks.push(source.start().mask());
                 }
@@ -332,7 +461,6 @@ impl MaskScratch {
             single_path_aux_dense: vec![0; dense_words],
             single_path_acc_dense: vec![0; dense_words],
             indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
-            segmented_component_scratch,
             segmented_component_initial_states,
             segmented_component_initial_masks,
         }
@@ -516,18 +644,15 @@ impl CommitBuffers {
 
 pub struct ConstraintState {
     pub(crate) terminated: bool,
-    pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
+    pub(crate) markers: Option<Arc<crate::runtime::markers::MarkerState>>,
     pub(crate) constraint: Constraint,
-    pub(crate) state: ParserStateMap,
-    pub(crate) buffers: CommitBuffers,
+    pub(crate) state: SharedFrontier,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
     pub(crate) generation: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
     /// Not cloned — clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
-    /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
-    pub(crate) mask_scratch: Arc<Mutex<MaskScratch>>,
 }
 
 impl Clone for ConstraintState {
@@ -538,10 +663,8 @@ impl Clone for ConstraintState {
             markers: self.markers.clone(),
             constraint: self.constraint.clone(),
             state: self.state.clone(),
-            buffers: CommitBuffers::for_constraint(&self.constraint),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Arc::new(Mutex::new(MaskScratch::for_constraint(&self.constraint))),
         }
     }
 }
@@ -562,10 +685,8 @@ impl ConstraintState {
         self.terminated = source.terminated;
         self.markers = source.markers.clone();
         self.state = source.state.clone();
-        self.buffers = CommitBuffers::for_constraint(&self.constraint);
         self.generation = source.generation;
         self.mask_cache = Mutex::new(None);
-        self.mask_scratch = Arc::new(Mutex::new(MaskScratch::for_constraint(&self.constraint)));
     }
 
     pub(crate) fn reserve_linear_stack_hot_path(&mut self) {
@@ -722,3 +843,74 @@ pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserState
                         })
             })
     }
+
+
+#[cfg(test)]
+mod clone_and_scratch_tests {
+    use super::*;
+    use crate::{Grammar, Vocab};
+
+    fn constraint(source: &str) -> Constraint {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())]).unwrap();
+        Constraint::compile(Grammar::glrm(source), &vocab).unwrap()
+    }
+
+    #[test]
+    fn scratch_checkout_is_reentrant_constraint_scoped_and_reusable() {
+        let c = constraint("start root; nt root = 'a'+;");
+        let other = constraint("start root; nt root = 'b'+;");
+        let mut outer = commit_scratch(&c);
+        outer.linear_stack_original.push(98765);
+        let outer_ptr = &*outer as *const CommitBuffers;
+        let inner = commit_scratch(&c);
+        assert_ne!(outer_ptr, &*inner as *const CommitBuffers);
+        assert!(inner.linear_stack_original.is_empty());
+        let different = commit_scratch(&other);
+        assert!(different.linear_stack_original.is_empty());
+        drop(different);
+        drop(inner);
+        drop(outer);
+        let mut reused = commit_scratch(&c);
+        assert_eq!(outer_ptr, &*reused as *const CommitBuffers);
+        assert_eq!(reused.linear_stack_original.pop(), Some(98765));
+        drop(reused);
+        let a = mask_scratch(&c);
+        let b = mask_scratch(&c);
+        assert!(!std::ptr::eq(&*a, &*b));
+    }
+
+    #[test]
+    fn scratch_is_not_reused_after_unwind() {
+        let c = constraint("start root; nt root = 'a'+;");
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut scratch = commit_scratch(&c);
+            scratch.linear_stack_original.push(98765);
+            panic!("simulated runtime unwind");
+        }));
+        assert!(failed.is_err());
+        assert!(!commit_scratch(&c).linear_stack_original.contains(&98765));
+    }
+
+    #[test]
+    fn sequence_clone_shares_frontier_but_detaches_on_mutation() {
+        let c = constraint("start root; nt root = 'a' ('b' | 'c');");
+        let mut original = c.start();
+        assert!(original.commit_token(0));
+        let expected = original.mask();
+        let mut accepted = original.clone();
+        let mut rejected = original.clone();
+        assert!(Arc::ptr_eq(&original.state.0, &accepted.state.0));
+        assert!(Arc::ptr_eq(&original.state.0, &rejected.state.0));
+        assert!(accepted.commit_token(1));
+        assert!(accepted.is_accepting());
+        assert!(!Arc::ptr_eq(&original.state.0, &accepted.state.0));
+        assert!(!rejected.commit_token(0));
+        assert!(!rejected.is_accepting());
+        assert!(rejected.is_terminated());
+        assert!(rejected.mask().iter().all(|&word| word == 0));
+        assert_eq!(original.mask(), expected);
+        assert!(!original.is_accepting());
+        assert!(original.commit_token(2));
+        assert!(original.is_accepting());
+    }
+}

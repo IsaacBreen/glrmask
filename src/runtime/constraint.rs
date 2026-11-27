@@ -12588,14 +12588,13 @@ impl Constraint {
             terminated: false,
             markers: None,
             constraint: self.clone(),
-            state,
-            buffers: Default::default(),
+            state: state.into(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
         state.initialize_markers();
+        super::state::warm_scratch(self);
         state
     }
 
@@ -12605,14 +12604,13 @@ impl Constraint {
             terminated: false,
             markers: None,
             constraint: self.clone(),
-            state: self.initial_state_map(),
-            buffers: crate::runtime::state::CommitBuffers::for_constraint(self),
+            state: self.initial_state_map().into(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
         state.initialize_markers();
+        super::state::warm_scratch(self);
         state
     }
 
