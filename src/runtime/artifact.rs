@@ -10178,20 +10178,8 @@ pub struct ConstraintData {
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    /// Precomputed combined buf output for each group of 64 internal tokens.
-    /// `word_group_buf_masks[w]` is the combined mask for internal tokens [w*64 .. (w+1)*64).
-    /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
-    pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
-    /// Precomputed dense output masks for groups of 128 internal tokens.
-    pub(crate) pair_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 256 internal tokens.
-    pub(crate) quad_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 512 internal tokens.
-    pub(crate) super_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 1024 internal tokens.
-    pub(crate) mega_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 2048 internal tokens.
-    pub(crate) giga_word_group_buf_masks: DenseBufMaskRows,
+    /// Dense sliding windows of 2, 4, 8, 16 and 32 consecutive 64-token groups.
+    pub(crate) sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
     /// Sparse OR-union for each 64-token internal word group.
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
     /// Dense prefix-unions of 64-token internal word groups.
@@ -10213,7 +10201,7 @@ pub struct ConstraintData {
     pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
     pub(crate) word_group_sparse_total_entries: usize,
     pub(crate) word_group_sparse_max_entries: usize,
-    /// Precomputed buf output for the full internal token universe (OR of all word_group_buf_masks).
+    /// Precomputed buf output for the full internal token universe (union of all sparse word groups).
     pub(crate) all_tokens_buf_mask: Box<[u32]>,
     pub(crate) internal_token_dense_words: usize,
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
@@ -10549,26 +10537,9 @@ pub(crate) struct ConstraintSerde {
     /// for all original tokens that map to internal token `i`.
     #[serde(skip)]
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    /// Precomputed combined buf output for each group of 64 internal tokens.
-    /// `word_group_buf_masks[w]` is the combined mask for internal tokens [w*64 .. (w+1)*64).
-    /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
+    /// Dense sliding windows of 2, 4, 8, 16 and 32 consecutive 64-token groups.
     #[serde(skip)]
-    pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
-    /// Precomputed dense output masks for groups of 128 internal tokens.
-    #[serde(skip)]
-    pub(crate) pair_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 256 internal tokens.
-    #[serde(skip)]
-    pub(crate) quad_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 512 internal tokens.
-    #[serde(skip)]
-    pub(crate) super_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 1024 internal tokens.
-    #[serde(skip)]
-    pub(crate) mega_word_group_buf_masks: DenseBufMaskRows,
-    /// Precomputed dense output masks for groups of 2048 internal tokens.
-    #[serde(skip)]
-    pub(crate) giga_word_group_buf_masks: DenseBufMaskRows,
+    pub(crate) sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
     /// Sparse OR-union for each 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -10598,7 +10569,7 @@ pub(crate) struct ConstraintSerde {
     pub(crate) word_group_sparse_total_entries: usize,
     #[serde(skip)]
     pub(crate) word_group_sparse_max_entries: usize,
-    /// Precomputed buf output for the full internal token universe (OR of all word_group_buf_masks).
+    /// Precomputed buf output for the full internal token universe (union of all sparse word groups).
     #[serde(skip)]
     pub(crate) all_tokens_buf_mask: Box<[u32]>,
     #[serde(skip)]

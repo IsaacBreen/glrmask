@@ -693,15 +693,12 @@ pub(crate) struct DeltaReplayProfileStats {
     pub removed_token_entries: u64,
 }
 
+const SLIDING_WORD_GROUP_LENGTHS: [usize; 5] = [2, 4, 8, 16, 32];
+
 pub(crate) struct TokenMaskCachePrebuild {
     mask_words: usize,
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    word_group_buf_masks: Vec<Box<[u32]>>,
-    pair_word_group_buf_masks: DenseBufMaskRows,
-    quad_word_group_buf_masks: DenseBufMaskRows,
-    super_word_group_buf_masks: DenseBufMaskRows,
-    mega_word_group_buf_masks: DenseBufMaskRows,
-    giga_word_group_buf_masks: DenseBufMaskRows,
+    sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
     word_group_sparse_masks: Vec<InternalTokenBufMasks>,
     word_group_prefix_buf_masks: DenseBufMaskRows,
     word_group_sparse_prefix_entries: Vec<usize>,
@@ -874,11 +871,7 @@ impl TokenMaskCachePrebuild {
             DenseBufMaskRows::from_flat(flat.into_boxed_slice(), n_windows, mask_words)
                 .expect("sliding dense-mask dimensions should match construction")
         };
-        let pair_word_group_buf_masks = build_sliding(2);
-        let quad_word_group_buf_masks = build_sliding(4);
-        let super_word_group_buf_masks = build_sliding(8);
-        let mega_word_group_buf_masks = build_sliding(16);
-        let giga_word_group_buf_masks = build_sliding(32);
+        let sliding_word_group_buf_masks = SLIDING_WORD_GROUP_LENGTHS.map(build_sliding);
 
         let mut all_tokens_buf_mask = vec![0u32; mask_words];
         for group in &word_group_sparse_masks {
@@ -930,12 +923,7 @@ impl TokenMaskCachePrebuild {
         Self {
             mask_words,
             internal_token_buf_masks,
-            word_group_buf_masks: Vec::new(),
-            pair_word_group_buf_masks,
-            quad_word_group_buf_masks,
-            super_word_group_buf_masks,
-            mega_word_group_buf_masks,
-            giga_word_group_buf_masks,
+            sliding_word_group_buf_masks,
             word_group_sparse_masks,
             word_group_prefix_buf_masks,
             word_group_sparse_prefix_entries,
@@ -965,12 +953,7 @@ impl TokenMaskCachePrebuild {
 
     pub(crate) fn install(self, constraint: &mut Constraint) {
         constraint.internal_token_buf_masks = self.internal_token_buf_masks;
-        constraint.word_group_buf_masks = self.word_group_buf_masks;
-        constraint.pair_word_group_buf_masks = self.pair_word_group_buf_masks;
-        constraint.quad_word_group_buf_masks = self.quad_word_group_buf_masks;
-        constraint.super_word_group_buf_masks = self.super_word_group_buf_masks;
-        constraint.mega_word_group_buf_masks = self.mega_word_group_buf_masks;
-        constraint.giga_word_group_buf_masks = self.giga_word_group_buf_masks;
+        constraint.sliding_word_group_buf_masks = self.sliding_word_group_buf_masks;
         constraint.word_group_sparse_masks = self.word_group_sparse_masks;
         constraint.word_group_prefix_buf_masks = self.word_group_prefix_buf_masks;
         constraint.word_group_sparse_prefix_entries = self.word_group_sparse_prefix_entries;
@@ -9418,7 +9401,6 @@ impl Constraint {
             && crate::env::var_os("GLRMASK_SKIP_LOAD_DENSE_GROUP_CACHES").is_some();
         let skip_load_sliding_dense_caches = self.packed_parser_dwa.is_some()
             && crate::env::var_os("GLRMASK_SKIP_LOAD_SLIDING_DENSE_CACHES").is_some();
-        self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
         let skip_small_group_caches = crate::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
             .map(|value| {
@@ -9538,13 +9520,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (result, ms)
         };
-        let (
-            ((pair_word_group_buf_masks, pair_ms), (quad_word_group_buf_masks, quad_ms)),
-            (
-                (super_word_group_buf_masks, super_ms),
-                ((mega_word_group_buf_masks, mega_ms), (giga_word_group_buf_masks, giga_ms)),
-            ),
-        ) = if rayon::current_num_threads() == 1 {
+        let ((pair, quad), (super_group, (mega, giga))) = if rayon::current_num_threads() == 1 {
             (
                 (build_sliding(2), build_sliding(4)),
                 (build_sliding(8), (build_sliding(16), build_sliding(32))),
@@ -9552,19 +9528,15 @@ impl Constraint {
         } else {
             rayon::join(
                 || rayon::join(|| build_sliding(2), || build_sliding(4)),
-                || {
-                    rayon::join(
-                        || build_sliding(8),
-                        || rayon::join(|| build_sliding(16), || build_sliding(32)),
-                    )
-                },
+                || rayon::join(
+                    || build_sliding(8),
+                    || rayon::join(|| build_sliding(16), || build_sliding(32)),
+                ),
             )
         };
-        self.pair_word_group_buf_masks = pair_word_group_buf_masks;
-        self.quad_word_group_buf_masks = quad_word_group_buf_masks;
-        self.super_word_group_buf_masks = super_word_group_buf_masks;
-        self.mega_word_group_buf_masks = mega_word_group_buf_masks;
-        self.giga_word_group_buf_masks = giga_word_group_buf_masks;
+        let [(pair, pair_ms), (quad, quad_ms), (super_group, super_ms), (mega, mega_ms), (giga, giga_ms)] =
+            [pair, quad, super_group, mega, giga];
+        self.sliding_word_group_buf_masks = [pair, quad, super_group, mega, giga];
         let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         let all_tokens_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -10073,9 +10045,6 @@ impl Constraint {
                 self.table.as_lr().map_or(0, |table| table.guarded_shift_index.iter().map(|row| row.len()).sum::<usize>()),
             );
         }
-        // This mapping is a derived cache. Reset it before scheduling the
-        // independent cache builders so the direct sparse weight-cache branch
-        // observes the same default mapping as the historical serial path.
         // Static cache finalization never constructs the direct-dynamic
         // vocabulary. Deferred possible-match fallback materializes it lazily
         // on the first state that actually requires a dynamic mask.
@@ -10788,21 +10757,13 @@ impl Constraint {
             .expect("sliding dense-mask dimensions should match construction")
     }
 
-    fn compute_all_sliding_word_group_dense_masks(
-        &self,
-    ) -> (
-        DenseBufMaskRows,
-        DenseBufMaskRows,
-        DenseBufMaskRows,
-        DenseBufMaskRows,
-        DenseBufMaskRows,
-    ) {
+    fn compute_all_sliding_word_group_dense_masks(&self) -> [DenseBufMaskRows; 5] {
         if self.word_group_prefix_buf_masks.is_empty() {
             return Default::default();
         }
         let n_word_groups = self.word_group_prefix_buf_masks.len() - 1;
         let row_len = self.word_group_prefix_buf_masks.row_len();
-        let lengths = [2usize, 4, 8, 16, 32];
+        let lengths = SLIDING_WORD_GROUP_LENGTHS;
         let windows = lengths.map(|len| {
             if n_word_groups >= len {
                 n_word_groups - len + 1
@@ -10815,13 +10776,7 @@ impl Constraint {
                 DenseBufMaskRows::from_flat(Vec::new().into_boxed_slice(), rows, 0)
                     .expect("zero-width sliding dense-mask dimensions should match")
             };
-            return (
-                empty(windows[0]),
-                empty(windows[1]),
-                empty(windows[2]),
-                empty(windows[3]),
-                empty(windows[4]),
-            );
+            return windows.map(empty);
         }
 
         let allocate = |rows: usize| {
@@ -10836,18 +10791,8 @@ impl Constraint {
             }
             values
         };
-        let mut pair = allocate(windows[0]);
-        let mut quad = allocate(windows[1]);
-        let mut super_group = allocate(windows[2]);
-        let mut mega = allocate(windows[3]);
-        let mut giga = allocate(windows[4]);
-        let ptrs = [
-            pair.as_mut_ptr() as usize,
-            quad.as_mut_ptr() as usize,
-            super_group.as_mut_ptr() as usize,
-            mega.as_mut_ptr() as usize,
-            giga.as_mut_ptr() as usize,
-        ];
+        let mut levels = windows.map(allocate);
+        let ptrs = std::array::from_fn::<_, 5, _>(|tier| levels[tier].as_mut_ptr() as usize);
         let build_start = |start: usize| {
             let before = &self.word_group_prefix_buf_masks[start];
             for word in 0..row_len {
@@ -10883,23 +10828,15 @@ impl Constraint {
             DenseBufMaskRows::from_flat(values, rows, row_len)
                 .expect("fused sliding dense-mask dimensions should match")
         };
-        (
-            finish(pair, windows[0]),
-            finish(quad, windows[1]),
-            finish(super_group, windows[2]),
-            finish(mega, windows[3]),
-            finish(giga, windows[4]),
-        )
+        let mut rows = levels.into_iter().zip(windows);
+        std::array::from_fn(|_| {
+            let (values, count) = rows.next().expect("one allocation per sliding level");
+            finish(values, count)
+        })
     }
 
     pub(crate) fn rebuild_sliding_word_group_dense_masks(&mut self) {
-        let (pair, quad, super_group, mega, giga) =
-            self.compute_all_sliding_word_group_dense_masks();
-        self.pair_word_group_buf_masks = pair;
-        self.quad_word_group_buf_masks = quad;
-        self.super_word_group_buf_masks = super_group;
-        self.mega_word_group_buf_masks = mega;
-        self.giga_word_group_buf_masks = giga;
+        self.sliding_word_group_buf_masks = self.compute_all_sliding_word_group_dense_masks();
     }
 
     pub(crate) fn rebuild_word_group_prefix_and_sliding_dense_masks(&mut self) {
@@ -11743,7 +11680,7 @@ impl Constraint {
     pub(crate) fn rebuild_heavy_and_sliding_token_mask_caches(&mut self) {
         let n_word_groups = self.word_group_prefix_buf_masks.len().saturating_sub(1);
         let buf_words = self.body_mask_len();
-        let sliding_useful = [2usize, 4, 8, 16, 32].into_iter().any(|len| {
+        let sliding_useful = SLIDING_WORD_GROUP_LENGTHS.into_iter().any(|len| {
             n_word_groups >= len
                 && (0..=n_word_groups - len).any(|start| {
                     Self::prefer_dense_buf_scan(
@@ -11757,26 +11694,16 @@ impl Constraint {
             if sliding_useful {
                 self.compute_all_sliding_word_group_dense_masks()
             } else {
-                (
-                    DenseBufMaskRows::default(),
-                    DenseBufMaskRows::default(),
-                    DenseBufMaskRows::default(),
-                    DenseBufMaskRows::default(),
-                    DenseBufMaskRows::default(),
-                )
+                Default::default()
             }
         };
-        let (heavy, (pair, quad, super_group, mega, giga)) = if rayon::current_num_threads() == 1 {
+        let (heavy, sliding) = if rayon::current_num_threads() == 1 {
             (build_heavy(), build_sliding())
         } else {
             rayon::join(build_heavy, build_sliding)
         };
         self.heavy_token_dense_masks = heavy;
-        self.pair_word_group_buf_masks = pair;
-        self.quad_word_group_buf_masks = quad;
-        self.super_word_group_buf_masks = super_group;
-        self.mega_word_group_buf_masks = mega;
-        self.giga_word_group_buf_masks = giga;
+        self.sliding_word_group_buf_masks = sliding;
     }
 
     pub(crate) fn rebuild_token_mask_cache_stats(&mut self) {
@@ -12305,7 +12232,6 @@ impl Constraint {
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
         self.internal_token_buf_masks = self.compute_buf_masks();
-        self.word_group_buf_masks = Vec::new();
         let (word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries) =
             self.compute_token_block_sparse_masks(64);
         let (quad_group_sparse_masks, _, _) = self.compute_token_block_sparse_masks(4);
@@ -12326,11 +12252,8 @@ impl Constraint {
         );
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
-        self.pair_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(2);
-        self.quad_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(4);
-        self.super_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(8);
-        self.mega_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(16);
-        self.giga_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(32);
+        self.sliding_word_group_buf_masks = SLIDING_WORD_GROUP_LENGTHS
+            .map(|len| self.compute_sliding_word_group_dense_masks(len));
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
         let flat_ready = self.internal_token_buf_offsets.len()
@@ -13412,12 +13335,7 @@ impl Constraint {
         self.internal_token_buf_flat = Box::new([]);
         self.backed_internal_token_buf_flat = None;
         self.internal_token_buf_offsets = Box::new([]);
-        self.word_group_buf_masks.clear();
-        self.pair_word_group_buf_masks = Default::default();
-        self.quad_word_group_buf_masks = Default::default();
-        self.super_word_group_buf_masks = Default::default();
-        self.mega_word_group_buf_masks = Default::default();
-        self.giga_word_group_buf_masks = Default::default();
+        self.sliding_word_group_buf_masks = Default::default();
         self.word_group_sparse_masks.clear();
         self.word_group_prefix_buf_masks = Default::default();
         self.word_group_sparse_prefix_entries.clear();
@@ -13565,100 +13483,46 @@ impl Constraint {
         }
     }
 
-    fn or_full_internal_word_run_to_buf<const PROFILE: bool>(
-        &self,
-        mut wi: usize,
-        end: usize,
-        buf: &mut [u32],
-        stats: &mut DenseToBufProfileStats,
-    ) {
-        let run_len = end.saturating_sub(wi);
-        if run_len > 0
-            && end < self.word_group_prefix_buf_masks.len()
-            && Self::prefer_dense_buf_scan(buf.len(), self.sparse_word_group_entries_in(wi, run_len))
+    /// Largest cached window that fits the run and beats sparse replay.
+    #[inline(always)]
+    fn sliding_word_group_for_run(&self, start: usize, end: usize) -> Option<(usize, &[u32])> {
+        let remaining = end - start;
+        for (len, rows) in SLIDING_WORD_GROUP_LENGTHS
+            .into_iter()
+            .zip(&self.sliding_word_group_buf_masks)
+            .rev()
         {
-            if PROFILE {
-                stats.normal_full_word_hits += run_len as u64;
-                stats.group_or_sparse_entries += buf.len() as u64;
+            if len <= remaining
+                && let Some(dense) = rows.get(start)
+                && Self::prefer_dense_buf_scan(
+                    dense.len(),
+                    self.sparse_word_group_entries_in(start, len),
+                )
+            {
+                return Some((len, dense));
             }
-            self.or_word_group_prefix_diff_to_buf(wi, end, buf);
-            return;
         }
+        None
+    }
 
-        while wi < end {
-            let remaining = end - wi;
-            let block = if remaining >= 32
-                && self
-                    .giga_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 32)))
-            {
-                Some((32, &self.giga_word_group_buf_masks[wi]))
-            } else if remaining >= 16
-                && self
-                    .mega_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 16)))
-            {
-                Some((16, &self.mega_word_group_buf_masks[wi]))
-            } else if remaining >= 8
-                && self
-                    .super_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 8)))
-            {
-                Some((8, &self.super_word_group_buf_masks[wi]))
-            } else if remaining >= 4
-                && self
-                    .quad_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 4)))
-            {
-                Some((4, &self.quad_word_group_buf_masks[wi]))
-            } else if remaining >= 2
-                && self
-                    .pair_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 2)))
-            {
-                Some((2, &self.pair_word_group_buf_masks[wi]))
+    #[inline(always)]
+    fn record_word_run<const PROFILE: bool, const REMOVE: bool>(
+        stats: &mut DenseToBufProfileStats,
+        hits: u64,
+        entries: u64,
+    ) {
+        if PROFILE {
+            if REMOVE {
+                stats.complement_full_word_hits += hits;
+                stats.group_andnot_sparse_entries += entries;
             } else {
-                None
-            };
-
-            if let Some((block_len, dense_mask)) = block {
-                if PROFILE {
-                    stats.normal_full_word_hits += block_len as u64;
-                    stats.group_or_sparse_entries += dense_mask.len() as u64;
-                }
-                or_dense_buf(buf, dense_mask);
-                wi += block_len;
-                continue;
+                stats.normal_full_word_hits += hits;
+                stats.group_or_sparse_entries += entries;
             }
-
-            if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
-                if PROFILE {
-                    stats.normal_full_word_hits += 1;
-                }
-                if Self::prefer_dense_buf_scan(buf.len(), group_mask.len())
-                    && wi + 1 < self.word_group_prefix_buf_masks.len()
-                {
-                    if PROFILE {
-                        stats.group_or_sparse_entries += buf.len() as u64;
-                    }
-                    self.or_word_group_prefix_diff_to_buf(wi, wi + 1, buf);
-                } else {
-                    if PROFILE {
-                        stats.group_or_sparse_entries += group_mask.len() as u64;
-                    }
-                    or_sparse_buf_entries(buf, group_mask);
-                }
-            }
-            wi += 1;
         }
     }
 
-    fn andnot_full_internal_word_run_from_buf<const PROFILE: bool>(
+    fn apply_full_internal_word_run<const PROFILE: bool, const REMOVE: bool>(
         &self,
         mut wi: usize,
         end: usize,
@@ -13668,83 +13532,51 @@ impl Constraint {
         let run_len = end.saturating_sub(wi);
         if run_len > 0
             && end < self.word_group_prefix_buf_masks.len()
-            && Self::prefer_dense_buf_scan(buf.len(), self.sparse_word_group_entries_in(wi, run_len))
+            && Self::prefer_dense_buf_scan(
+                buf.len(),
+                self.sparse_word_group_entries_in(wi, run_len),
+            )
         {
-            if PROFILE {
-                stats.complement_full_word_hits += run_len as u64;
-                stats.group_andnot_sparse_entries += buf.len() as u64;
+            Self::record_word_run::<PROFILE, REMOVE>(stats, run_len as u64, buf.len() as u64);
+            if REMOVE {
+                self.andnot_word_group_prefix_diff_from_buf(wi, end, buf);
+            } else {
+                self.or_word_group_prefix_diff_to_buf(wi, end, buf);
             }
-            self.andnot_word_group_prefix_diff_from_buf(wi, end, buf);
             return;
         }
 
         while wi < end {
-            let remaining = end - wi;
-            let block = if remaining >= 32
-                && self
-                    .giga_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 32)))
-            {
-                Some((32, &self.giga_word_group_buf_masks[wi]))
-            } else if remaining >= 16
-                && self
-                    .mega_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 16)))
-            {
-                Some((16, &self.mega_word_group_buf_masks[wi]))
-            } else if remaining >= 8
-                && self
-                    .super_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 8)))
-            {
-                Some((8, &self.super_word_group_buf_masks[wi]))
-            } else if remaining >= 4
-                && self
-                    .quad_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 4)))
-            {
-                Some((4, &self.quad_word_group_buf_masks[wi]))
-            } else if remaining >= 2
-                && self
-                    .pair_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| Self::prefer_dense_buf_scan(dense.len(), self.sparse_word_group_entries_in(wi, 2)))
-            {
-                Some((2, &self.pair_word_group_buf_masks[wi]))
-            } else {
-                None
-            };
+            let block = self.sliding_word_group_for_run(wi, end);
 
             if let Some((block_len, dense_mask)) = block {
-                if PROFILE {
-                    stats.complement_full_word_hits += block_len as u64;
-                    stats.group_andnot_sparse_entries += dense_mask.len() as u64;
+                Self::record_word_run::<PROFILE, REMOVE>(stats, block_len as u64, dense_mask.len() as u64);
+                if REMOVE {
+                    andnot_dense_buf(buf, dense_mask);
+                } else {
+                    or_dense_buf(buf, dense_mask);
                 }
-                andnot_dense_buf(buf, dense_mask);
                 wi += block_len;
                 continue;
             }
 
             if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
-                if PROFILE {
-                    stats.complement_full_word_hits += 1;
-                }
                 if Self::prefer_dense_buf_scan(buf.len(), group_mask.len())
                     && wi + 1 < self.word_group_prefix_buf_masks.len()
                 {
-                    if PROFILE {
-                        stats.group_andnot_sparse_entries += buf.len() as u64;
+                    Self::record_word_run::<PROFILE, REMOVE>(stats, 1, buf.len() as u64);
+                    if REMOVE {
+                        self.andnot_word_group_prefix_diff_from_buf(wi, wi + 1, buf);
+                    } else {
+                        self.or_word_group_prefix_diff_to_buf(wi, wi + 1, buf);
                     }
-                    self.andnot_word_group_prefix_diff_from_buf(wi, wi + 1, buf);
                 } else {
-                    if PROFILE {
-                        stats.group_andnot_sparse_entries += group_mask.len() as u64;
+                    Self::record_word_run::<PROFILE, REMOVE>(stats, 1, group_mask.len() as u64);
+                    if REMOVE {
+                        andnot_sparse_buf_entries(buf, group_mask);
+                    } else {
+                        or_sparse_buf_entries(buf, group_mask);
                     }
-                    andnot_sparse_buf_entries(buf, group_mask);
                 }
             }
             wi += 1;
@@ -13843,73 +13675,10 @@ impl Constraint {
 
         let mut cost = 0usize;
         while wi < end {
-            let remaining = end - wi;
-            let block = if remaining >= 32
-                && self
-                    .giga_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| {
-                        Self::prefer_dense_buf_scan(
-                            dense.len(),
-                            self.sparse_word_group_entries_in(wi, 32),
-                        )
-                    })
-            {
-                Some((32, self.giga_word_group_buf_masks[wi].len()))
-            } else if remaining >= 16
-                && self
-                    .mega_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| {
-                        Self::prefer_dense_buf_scan(
-                            dense.len(),
-                            self.sparse_word_group_entries_in(wi, 16),
-                        )
-                    })
-            {
-                Some((16, self.mega_word_group_buf_masks[wi].len()))
-            } else if remaining >= 8
-                && self
-                    .super_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| {
-                        Self::prefer_dense_buf_scan(
-                            dense.len(),
-                            self.sparse_word_group_entries_in(wi, 8),
-                        )
-                    })
-            {
-                Some((8, self.super_word_group_buf_masks[wi].len()))
-            } else if remaining >= 4
-                && self
-                    .quad_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| {
-                        Self::prefer_dense_buf_scan(
-                            dense.len(),
-                            self.sparse_word_group_entries_in(wi, 4),
-                        )
-                    })
-            {
-                Some((4, self.quad_word_group_buf_masks[wi].len()))
-            } else if remaining >= 2
-                && self
-                    .pair_word_group_buf_masks
-                    .get(wi)
-                    .is_some_and(|dense| {
-                        Self::prefer_dense_buf_scan(
-                            dense.len(),
-                            self.sparse_word_group_entries_in(wi, 2),
-                        )
-                    })
-            {
-                Some((2, self.pair_word_group_buf_masks[wi].len()))
-            } else {
-                None
-            };
+            let block = self.sliding_word_group_for_run(wi, end);
 
-            if let Some((block_len, dense_cost)) = block {
-                cost = cost.saturating_add(dense_cost);
+            if let Some((block_len, dense_mask)) = block {
+                cost = cost.saturating_add(dense_mask.len());
                 wi += block_len;
                 continue;
             }
@@ -14208,7 +13977,7 @@ impl Constraint {
                     }
                     wi += 1;
                 }
-                self.andnot_full_internal_word_run_from_buf::<PROFILE>(
+                self.apply_full_internal_word_run::<PROFILE, true>(
                     run_start,
                     wi,
                     buf,
@@ -14347,7 +14116,7 @@ impl Constraint {
                         }
                         wi += 1;
                     }
-                    self.or_full_internal_word_run_to_buf::<PROFILE>(
+                    self.apply_full_internal_word_run::<PROFILE, false>(
                         run_start,
                         wi,
                         buf,
