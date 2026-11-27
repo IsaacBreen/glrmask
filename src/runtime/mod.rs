@@ -14,7 +14,6 @@ mod finalize;
 mod mask;
 mod mask_cache_payload;
 mod mask_cache_values;
-pub(crate) mod mask_mapping;
 pub(crate) mod serde;
 pub(crate) use serde::compact_large_non_dwa_weight_runtime;
 mod state;

@@ -67,8 +67,6 @@ use super::artifact::{
     SparseWeightBufMaskCache,
 };
 pub(crate) use super::artifact::Constraint;
-pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
-use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
 
 struct RecursiveSegmentedParserTables<'a> {
@@ -656,6 +654,43 @@ fn build_internal_token_buf_masks_from_maps(
             .map(|originals| Constraint::build_internal_token_buf_mask(originals))
             .collect()
     }
+}
+
+#[derive(Default, Clone, Copy)]
+pub(crate) struct DenseToBufProfileStats {
+    pub dense_words_visited: u64,
+    pub normal_full_word_hits: u64,
+    pub normal_group_complement_hits: u64,
+    pub complement_full_word_hits: u64,
+    pub complement_full_byte_groups: u64,
+    pub complement_full_nibble_groups: u64,
+    pub complement_remaining_bits: u64,
+    pub normal_token_iterations: u64,
+    pub complement_token_iterations: u64,
+    pub normal_sparse_entries: u64,
+    pub normal_group_complement_sparse_entries: u64,
+    pub complement_sparse_entries: u64,
+    pub complement_heavy_dense_clears: u64,
+    pub complement_max_sparse_span: u64,
+    pub group_or_sparse_entries: u64,
+    pub group_andnot_sparse_entries: u64,
+    pub complement_path_used: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+pub(crate) struct DeltaReplayProfileStats {
+    pub added_word_group_hits: u64,
+    pub added_word_group_entries: u64,
+    pub removed_word_group_hits: u64,
+    pub removed_word_group_entries: u64,
+    pub added_byte_group_hits: u64,
+    pub added_byte_group_entries: u64,
+    pub removed_byte_group_hits: u64,
+    pub removed_byte_group_entries: u64,
+    pub added_token_iterations: u64,
+    pub added_token_entries: u64,
+    pub removed_token_iterations: u64,
+    pub removed_token_entries: u64,
 }
 
 pub(crate) struct TokenMaskCachePrebuild {
@@ -8378,10 +8413,6 @@ impl Constraint {
     }
 
     pub(crate) fn estimate_internal_dense_to_buf_cost(&self, dense: &[u64]) -> u64 {
-        if self.final_mask_mapping.internal_len() > 0 {
-            return self.final_mask_mapping.estimate_dense_to_buf_cost(dense);
-        }
-
         let all_mask = &self.all_tokens_buf_mask;
         let sparse_word_groups = &self.word_group_sparse_masks;
         let offsets = &self.internal_token_buf_offsets;
@@ -9835,7 +9866,6 @@ impl Constraint {
             self.token_mask_caches_ready(),
             "parser runtime cache prebuild requires internal-token output masks",
         );
-        self.final_mask_mapping = FinalMaskMapping::default();
         let (fast_transitions, (prebuilt_sparse, dense_words, dense_masks)) = rayon::join(
             || self.compute_fast_transitions(),
             || {
@@ -10046,7 +10076,6 @@ impl Constraint {
         // This mapping is a derived cache. Reset it before scheduling the
         // independent cache builders so the direct sparse weight-cache branch
         // observes the same default mapping as the historical serial path.
-        self.final_mask_mapping = FinalMaskMapping::default();
         // Static cache finalization never constructs the direct-dynamic
         // vocabulary. Deferred possible-match fallback materializes it lazily
         // on the first state that actually requires a dynamic mask.
@@ -11452,8 +11481,7 @@ impl Constraint {
         let buf_words = self.body_mask_len();
         let direct_sparse = buf_words != 0
             && buf_words <= u16::MAX as usize
-            && Self::direct_sparse_weight_buf_cache_enabled()
-            && self.final_mask_mapping.internal_len() == 0;
+            && Self::direct_sparse_weight_buf_cache_enabled();
         let direct_token_limit = ((buf_words / 2).min(2048)) as u64;
         let direct_work_limit = direct_token_limit;
         let prefix_started = profile.then(std::time::Instant::now);
@@ -14210,17 +14238,6 @@ impl Constraint {
         buf_zeroed: bool,
         dirty_complement_scratch: Option<&mut Vec<u32>>,
     ) -> DenseToBufProfileStats {
-        if self.final_mask_mapping.internal_len() > 0 {
-            if PROFILE {
-                return self
-                    .final_mask_mapping
-                    .or_dense_to_buf(dense, buf, buf_zeroed);
-            }
-            self.final_mask_mapping
-                .or_dense_to_buf_fast(dense, buf, buf_zeroed);
-            return DenseToBufProfileStats::default();
-        }
-
         let mut stats = DenseToBufProfileStats::default();
         let all_mask = &self.all_tokens_buf_mask;
         let sparse_word_groups = &self.word_group_sparse_masks;
@@ -14739,7 +14756,6 @@ mod dense_internal_token_mask_tests {
                 let rows = constraint.compute_buf_masks();
                 assert_eq!(rows.len(), constraint.internal_token_count());
                 assert!(!rows.is_empty());
-                assert_eq!(constraint.final_mask_mapping.internal_len(), 0);
                 let words = constraint.body_mask_len();
                 let limit = (words / 2).min(2048) as u64;
                 let prefix = Constraint::direct_sparse_work_prefix(&rows, words);
@@ -14963,7 +14979,6 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        constraint.final_mask_mapping = Default::default();
         let n_internal = constraint.internal_token_count();
         assert!(n_internal <= 16, "small exhaustive test requires a tiny internal vocab");
 
@@ -15051,7 +15066,6 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        constraint.final_mask_mapping = Default::default();
 
         let n_internal = constraint.internal_token_count();
         assert_eq!(n_internal, 64, "expected duplicate bytes to form 64 internal tokens");

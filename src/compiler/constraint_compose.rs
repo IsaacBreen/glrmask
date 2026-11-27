@@ -8812,7 +8812,6 @@ fn build_composed_constraint_unfinalized(
         light_avg_cost_x256: 0,
         internal_token_buf_op_costs: Vec::new(),
         word_group_buf_op_costs: Vec::new(),
-        final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
         parser_state_domain_labels,
         ignore_expr,
         serialized_artifact_cache: None,

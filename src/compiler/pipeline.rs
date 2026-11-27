@@ -5963,7 +5963,6 @@ fn compile_prepared_with_profile_and_table_construction(
             light_avg_cost_x256: 0,
             internal_token_buf_op_costs: Vec::new(),
             word_group_buf_op_costs: Vec::new(),
-            final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
             serialized_artifact_cache: None,

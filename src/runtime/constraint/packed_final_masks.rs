@@ -91,7 +91,6 @@ impl Constraint {
         let buf_words = self.body_mask_len();
         if self.internal_token_dense_words == 0
             || buf_words == 0
-            || self.final_mask_mapping.internal_len() != 0
             || buf_words > MAX_CACHE_BYTES / 4
             || self.internal_token_buf_mask_count() >= MAX_WORKSPACE_BYTES / 8
         {
@@ -264,9 +263,6 @@ impl Constraint {
         tokens: PackedRuntimePoolTokenSetRef<'_>,
         buf: &mut [u32],
     ) -> bool {
-        if self.final_mask_mapping.internal_len() != 0 {
-            return false;
-        }
         let Some(pool) = &self.packed_non_dwa_weights else {
             return false;
         };

@@ -33,7 +33,6 @@ use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
-use super::mask_mapping::FinalMaskMapping;
 use super::mask_cache_payload::DynamicMaskCachePayload;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
@@ -10287,8 +10286,6 @@ pub struct ConstraintData {
     pub(crate) internal_token_buf_op_costs: Vec<usize>,
     /// Exact materialization cost per 64-token internal word group.
     pub(crate) word_group_buf_op_costs: Vec<usize>,
-    /// Self-contained final internal-token -> original-token bitset materializer.
-    pub(crate) final_mask_mapping: FinalMaskMapping,
     /// Optional exact quotient of positive parser-state labels used by composed
     /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
     /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
@@ -10699,9 +10696,6 @@ pub(crate) struct ConstraintSerde {
     /// Exact materialization cost per 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_buf_op_costs: Vec<usize>,
-    /// Self-contained final internal-token -> original-token bitset materializer.
-    #[serde(skip)]
-    pub(crate) final_mask_mapping: FinalMaskMapping,
     /// Optional exact quotient of positive parser-state labels used by composed
     /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
     /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
