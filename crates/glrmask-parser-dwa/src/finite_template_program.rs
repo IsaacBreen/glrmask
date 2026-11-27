@@ -334,38 +334,34 @@ fn normalize_finite_template_program_impl(
         input_states: logical_states, input_edges: edges,
         assembly_ms, ..Default::default()
     };
-    if std::env::var_os("GLRMASK_BOUNDARY_EARLY_WEIGHTED_TOP").is_some() {
-        // Keep attribution and the old Boolean experiment separate. Failure
-        // discards this private graph; the outer caller runs the exact fallback.
-        if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_SUPPORT").is_some() { return None; }
-        let phase=Instant::now();
-        let result=finite_weighted_top::restrict(&mut states,program.starts,parser_states,&mut interner);
-        if result.is_none() && compile_profile_enabled() {
-            eprintln!("[glrmask/profile][boundary_weighted_top_declined] states={} alphabet={} native_failed={} native_weights={} native_work={} ms={:.3}",
-                states.len(),parser_states,interner.failed,interner.values.len(),interner.work,elapsed_ms(phase));
-        }
-        let statistics=result?;
-        profile.early_top_ms=elapsed_ms(phase);
-        if compile_profile_enabled() {eprintln!("[glrmask/profile][boundary_weighted_top_support] ms={:.3} stats={statistics:?}",profile.early_top_ms);}
-        if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_TRIM").is_some() {
-            let phase=Instant::now();
-            (states,active_starts)=trim(states,&active_starts)?;
-            profile.early_trim_ms=elapsed_ms(phase);
-            if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_weighted_top_trim] states={} ms={:.3}",states.len(),profile.early_trim_ms);}
-        }
+    let weighted_top = std::env::var_os("GLRMASK_BOUNDARY_EARLY_WEIGHTED_TOP").is_some();
+    let boolean_top = std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_SUPPORT").is_some();
+    if weighted_top && boolean_top {
+        return None;
     }
-    if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_SUPPORT").is_some(){
-        let phase=Instant::now();
-        let statistics=finite_top_support::restrict(&mut states,program.starts,parser_states)?;
-        profile.early_top_ms=elapsed_ms(phase);
-        if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_early_top_support] ms={:.3} stats={statistics:?}",profile.early_top_ms);}
-        if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_TRIM").is_some(){
-            let phase=Instant::now();
-            // The same injective compactor is label-agnostic; signed labels
-            // are retained unchanged. Every live target keeps a distinct ID.
-            (states,active_starts)=trim(states,&active_starts)?;
-            profile.early_trim_ms=elapsed_ms(phase);
-            if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_early_top_trim] states={} ms={:.3}",states.len(),profile.early_trim_ms);}
+    if weighted_top || boolean_top {
+        let phase = Instant::now();
+        let statistics = if weighted_top {
+            let result = finite_weighted_top::restrict(&mut states, &active_starts, parser_states, &mut interner);
+            if result.is_none() && compile_profile_enabled() {
+                eprintln!("[glrmask/profile][boundary_weighted_top_declined] states={} alphabet={} native_failed={} native_weights={} native_work={} ms={:.3}",
+                    states.len(), parser_states, interner.failed, interner.values.len(), interner.work, elapsed_ms(phase));
+            }
+            result?
+        } else {
+            finite_top_support::restrict(&mut states, &active_starts, parser_states)?
+        };
+        profile.early_top_ms = elapsed_ms(phase);
+        if compile_profile_enabled() {
+            eprintln!("[glrmask/profile][boundary_early_top_support] weighted={weighted_top} ms={:.3} stats={statistics:?}", profile.early_top_ms);
+        }
+        if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_TRIM").is_some() {
+            let phase = Instant::now();
+            (states, active_starts) = trim(states, &active_starts)?;
+            profile.early_trim_ms = elapsed_ms(phase);
+            if compile_profile_enabled() {
+                eprintln!("[glrmask/profile][boundary_early_top_trim] weighted={weighted_top} states={} ms={:.3}", states.len(), profile.early_trim_ms);
+            }
         }
     }
     if let Some(resolve_ms)=virtual_resolve_ms {

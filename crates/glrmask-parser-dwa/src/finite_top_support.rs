@@ -8,15 +8,7 @@
 //! This is an impossibility filter, not an admission oracle or a quotient.
 use super::*;
 
-#[derive(Debug,Default)]
-pub(super) struct TopSupportProfile {
-    pub states:usize,
-    pub live_states:usize,
-    pub edges_before:usize,
-    pub edges_after:usize,
-    pub blocked_labels:usize,
-    pub top_classes:usize,
-}
+use super::signed_top_support::{StackEffect, TopDomain, TopSupportProfile};
 
 struct Tops {
     words:usize,
@@ -64,45 +56,39 @@ impl Tops {
     }
 }
 
-pub(super) fn restrict(
-    states:&mut [FastBoundaryNwaState],starts:&[u32],alphabet:u32,
-) -> Option<TopSupportProfile> {
-    let n=states.len();if n==0||n>200_000||starts.iter().any(|&q|q as usize>=n){return None;}
-    let order=fast_boundary_topological_order(states)?;
-    let mut tops=Tops::new(alphabet as usize)?;
-    let mut inputs=vec![0u32;n];for &q in starts{inputs[q as usize]=1;}
-    let mut profile=TopSupportProfile{states:n,..Default::default()};
-    for q in order {
-        let row=&mut states[q as usize];let input=inputs[q as usize];
-        if input==0{row.final_weight=0;}
-        else{profile.live_states+=1;}
-        for (next,weight) in &mut row.epsilons{
-            if *weight==0{continue;}
-            profile.edges_before+=1;
-            if input==0{*weight=0;continue;}
-            if *next as usize>=n{return None;}
-            inputs[*next as usize]=tops.union(inputs[*next as usize],input)?;
-            profile.edges_after+=1;
-        }
-        for (label,branches) in &mut row.transitions{
-            let output=if input==0{0}
-                else if is_negative_label(*label){tops.singleton(negative_to_positive_label(*label) as u32)?}
-                else if *label==DEFAULT_LABEL{1}
-                else if *label<0||*label as u32>=alphabet{return None;}
-                else if tops.contains(input,*label as u32){1}else{0};
-            if output==0&&!branches.is_empty(){profile.blocked_labels+=1;}
-            for (next,weight) in branches.iter_mut(){
-                if *weight==0{continue;}
-                profile.edges_before+=1;
-                if output==0{*weight=0;continue;}
-                if *next as usize>=n{return None;}
-                inputs[*next as usize]=tops.union(inputs[*next as usize],output)?;
-                profile.edges_after+=1;
-            }
-        }
-        if profile.edges_before>4_000_000{return None;}
+impl TopDomain for Tops {
+    fn live(&self, input: u32) -> bool { input != 0 }
+    fn final_weight(&mut self, input: u32, weight: u32) -> u32 {
+        if input == 0 { 0 } else { weight }
     }
-    profile.top_classes=tops.rows.len();Some(profile)
+    fn epsilon(&mut self, input: u32, weight: u32) -> Option<(u32, u32)> {
+        Some((input, self.final_weight(input, weight)))
+    }
+    fn prepare(&mut self, input: u32, effect: StackEffect) -> Option<u32> {
+        if input == 0 {
+            return Some(0);
+        }
+        match effect {
+            StackEffect::Push(symbol) => self.singleton(symbol),
+            StackEffect::Read(symbol) => Some(u32::from(self.contains(input, symbol))),
+            StackEffect::Forget => Some(1),
+        }
+    }
+    fn branch(&mut self, prepared: u32, _: StackEffect, weight: u32) -> Option<(u32, u32)> {
+        self.epsilon(prepared, weight)
+    }
+    fn join(&mut self, old: u32, incoming: u32) -> Option<u32> {
+        self.union(old, incoming)
+    }
+    fn finish_profile(&self, profile: &mut TopSupportProfile) {
+        profile.top_classes = self.rows.len();
+    }
+}
+
+pub(super) fn restrict(
+    states: &mut [FastBoundaryNwaState], starts: &[u32], alphabet: u32,
+) -> Option<TopSupportProfile> {
+    super::signed_top_support::restrict(states, starts, alphabet, &mut Tops::new(alphabet as usize)?)
 }
 
 #[cfg(test)]

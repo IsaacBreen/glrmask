@@ -13,17 +13,7 @@ use super::*;
 type Domain = u32;
 type Mask = FastBoundaryWeightId;
 
-#[derive(Debug, Default)]
-pub(super) struct Profile {
-    pub states: usize,
-    pub live_states: usize,
-    pub edges_before: usize,
-    pub edges_after: usize,
-    pub changed_edges: usize,
-    pub domains: usize,
-    pub stored_pairs: usize,
-    pub work: usize,
-}
+use super::signed_top_support::{StackEffect, TopDomain, TopSupportProfile};
 
 #[derive(Clone)]
 struct Row { unknown: Mask, known: Vec<(u32, Mask)>, total: Mask }
@@ -131,48 +121,59 @@ impl Domains {
     }
 }
 
-/// Mutates only a freshly constructed private candidate. On `None` the caller
-/// discards it and rebuilds through the unchanged exact compiler; no partially
-/// analyzed graph may be published. All label keys and node identities remain.
-pub(super) fn restrict(states:&mut [FastBoundaryNwaState],starts:&[u32],alphabet:u32,
-    masks:&mut FastBoundaryWeightInterner)->Option<Profile> {
-    if states.is_empty() || states.len()>200_000 || alphabet==0 || alphabet>50_000
-        || starts.iter().any(|&q|q as usize>=states.len()) {return None;}
-    let order=fast_boundary_topological_order(states)?;
-    let mut domains=Domains::new();let mut inputs=vec![0;states.len()];
-    for &q in starts {inputs[q as usize]=1;}
-    let mut p=Profile{states:states.len(),..Default::default()};
-    for q in order {
-        let id=inputs[q as usize];let total=domains.rows[id as usize].total;
-        if total!=0 {p.live_states+=1;}
-        let row=&mut states[q as usize];
-        row.final_weight=masks.intersection(row.final_weight,total);
-        for (target,w) in &mut row.epsilons {
-            if *w==0 {continue;}
-            p.edges_before+=1;
-            let output=domains.meet(id,*w,masks)?;
-            let new=domains.rows[output as usize].total;
-            p.changed_edges+=usize::from(new!=*w);*w=new;
-            if new!=0 {p.edges_after+=1;inputs[*target as usize]=domains.union(inputs[*target as usize],output,masks)?;}
-        }
-        for (label,branches) in &mut row.transitions {
-            let push=is_negative_label(*label);
-            let symbol=if push {negative_to_positive_label(*label)} else {*label};
-            if symbol!=DEFAULT_LABEL && (symbol<0 || symbol as u32>=alphabet) {return None;}
-            let eligible=if push || *label==DEFAULT_LABEL {total} else {domains.read(id,*label as u32,masks)};
-            for (target,w) in branches {
-                if *w==0 {continue;}
-                p.edges_before+=1;let new=masks.intersection(*w,eligible);
-                p.changed_edges+=usize::from(new!=*w);*w=new;
-                if new==0 {continue;}
-                p.edges_after+=1;
-                let output=if push {domains.singleton(symbol as u32,new,masks)?} else {domains.unknown(new,masks)?};
-                inputs[*target as usize]=domains.union(inputs[*target as usize],output,masks)?;
-            }
-        }
-        if p.edges_before>4_000_000 || !masks.allow_work(row.epsilons.len()+row.transitions.len()+1,0,0) {return None;}
+struct WeightedTop<'a> {
+    domains: Domains,
+    masks: &'a mut FastBoundaryWeightInterner,
+}
+
+impl TopDomain for WeightedTop<'_> {
+    fn live(&self, input: u32) -> bool {
+        self.domains.rows[input as usize].total != 0
     }
-    p.domains=domains.rows.len();p.stored_pairs=domains.pairs;p.work=domains.work;Some(p)
+    fn final_weight(&mut self, input: u32, weight: u32) -> u32 {
+        self.masks.intersection(weight, self.domains.rows[input as usize].total)
+    }
+    fn epsilon(&mut self, input: u32, weight: u32) -> Option<(u32, u32)> {
+        let output = self.domains.meet(input, weight, self.masks)?;
+        Some((output, self.domains.rows[output as usize].total))
+    }
+    fn prepare(&mut self, input: u32, effect: StackEffect) -> Option<u32> {
+        Some(match effect {
+            StackEffect::Read(symbol) => self.domains.read(input, symbol, self.masks),
+            _ => self.domains.rows[input as usize].total,
+        })
+    }
+    fn branch(&mut self, eligible: u32, effect: StackEffect, weight: u32) -> Option<(u32, u32)> {
+        let weight = self.masks.intersection(weight, eligible);
+        if weight == 0 { return Some((0, 0)); }
+        let output = match effect {
+            StackEffect::Push(symbol) => self.domains.singleton(symbol, weight, self.masks)?,
+            _ => self.domains.unknown(weight, self.masks)?,
+        };
+        Some((output, weight))
+    }
+    fn join(&mut self, old: u32, incoming: u32) -> Option<u32> {
+        self.domains.union(old, incoming, self.masks)
+    }
+    fn finish_row(&mut self, work: usize) -> bool {
+        self.masks.allow_work(work, 0, 0)
+    }
+    fn finish_profile(&self, profile: &mut TopSupportProfile) {
+        profile.domains = self.domains.rows.len();
+        profile.stored_pairs = self.domains.pairs;
+        profile.work = self.domains.work;
+    }
+}
+
+/// Mutates only a private candidate; exhaustion never publishes a partial
+/// signed graph. The literal stack-effect oracle remains independent.
+pub(super) fn restrict(
+    states: &mut [FastBoundaryNwaState], starts: &[u32], alphabet: u32,
+    masks: &mut FastBoundaryWeightInterner,
+) -> Option<TopSupportProfile> {
+    super::signed_top_support::restrict(
+        states, starts, alphabet, &mut WeightedTop { domains: Domains::new(), masks },
+    )
 }
 
 #[cfg(test)]

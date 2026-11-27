@@ -3710,6 +3710,8 @@ struct FastBoundaryNwaState {
 
 #[path = "finite_template_program.rs"]
 mod finite_template_program;
+#[path = "signed_top_support.rs"]
+mod signed_top_support;
 #[path = "finite_top_support.rs"]
 mod finite_top_support;
 #[path = "finite_weighted_top.rs"]
