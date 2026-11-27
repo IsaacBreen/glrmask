@@ -2716,36 +2716,10 @@ fn compile_expr_to_dfa(expr: &Expr) -> DFA {
 }
 
 fn direct_expression_graph_byte_classes(local_dfas: &[DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let mut classes = vec![0u8; 256];
-    let mut num_classes = 1usize;
-    for dfa in local_dfas {
-        for state in 0..dfa.num_states() as u32 {
-            if num_classes == 256 {
-                break;
-            }
-            let mut keys = FxHashMap::<(u8, u32), u8>::default();
-            let mut refined = vec![0u8; 256];
-            let mut next_class = 0u16;
-            for byte in 0u8..=255 {
-                let key = (classes[byte as usize], dfa.step(state, byte).unwrap_or(u32::MAX));
-                let class = *keys.entry(key).or_insert_with(|| {
-                    let class = next_class as u8;
-                    next_class += 1;
-                    class
-                });
-                refined[byte as usize] = class;
-            }
-            if refined != classes {
-                classes = refined;
-                num_classes = next_class as usize;
-            }
-        }
-    }
-    let mut members = vec![Vec::<u8>::new(); num_classes];
-    for byte in 0u8..=255 {
-        members[classes[byte as usize] as usize].push(byte);
-    }
-    (classes, members)
+    let mut partitions = compute_dfa_byte_partitions(local_dfas);
+    // The direct graph historically numbers classes by their least byte.
+    partitions.sort_unstable_by_key(|set| set.iter().next().unwrap());
+    byte_classes_from_partitions(&partitions)
 }
 
 fn direct_expression_graph_class_transitions(
@@ -4248,29 +4222,42 @@ impl LazyZeroMinRepeatSuffixComponent {
     }
 }
 
-fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let mut partitions = vec![U8Set::all()];
-    let mut seen_sets = FxHashSet::default();
-
-    for dfa in dfas {
-        for state in dfa.states() {
-            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
-            for (byte, &target) in state.transitions.iter() {
-                bytes_by_target
-                    .entry(target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
-                    .or_insert_with(|| U8Set::single(byte));
-            }
-            for byte_set in bytes_by_target.into_values() {
-                if seen_sets.insert(byte_set) {
-                    partitions = refine_u8_partitions(partitions, byte_set);
-                }
+fn refine_dfa_byte_partitions(
+    partitions: &mut Vec<U8Set>,
+    seen_sets: &mut FxHashSet<U8Set>,
+    dfa: &DFA,
+) {
+    for state in dfa.states() {
+        if partitions.len() == 256 {
+            break;
+        }
+        let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+        for (byte, &target) in state.transitions.iter() {
+            bytes_by_target
+                .entry(target)
+                .and_modify(|set| {
+                    set.insert(byte);
+                })
+                .or_insert_with(|| U8Set::single(byte));
+        }
+        for byte_set in bytes_by_target.into_values() {
+            if seen_sets.insert(byte_set) {
+                *partitions = refine_u8_partitions(std::mem::take(partitions), byte_set);
             }
         }
     }
+}
 
+fn compute_dfa_byte_partitions<'a>(dfas: impl IntoIterator<Item = &'a DFA>) -> Vec<U8Set> {
+    let mut partitions = vec![U8Set::all()];
+    let mut seen_sets = FxHashSet::default();
+    for dfa in dfas {
+        refine_dfa_byte_partitions(&mut partitions, &mut seen_sets, dfa);
+    }
+    partitions
+}
+
+fn byte_classes_from_partitions(partitions: &[U8Set]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut class_map = vec![0u8; 256];
     let mut class_members = vec![Vec::new(); partitions.len()];
     for (class_id, partition) in partitions.iter().enumerate() {
@@ -4282,38 +4269,19 @@ fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>
     (class_map, class_members)
 }
 
+fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    byte_classes_from_partitions(&compute_dfa_byte_partitions(dfas.iter().copied()))
+}
+
 fn compute_lazy_zero_min_repeat_product_equivalence_classes(
     lazy: &LazyZeroMinRepeatSuffixComponent,
     other: &DFA,
 ) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let (_, class_members) = compute_dfa_byte_equivalence_classes(&[
-        &lazy.body_dfa,
-        &lazy.suffix_dfa,
-        other,
-    ]);
-    let mut partitions = class_members
-        .into_iter()
-        .map(|bytes| {
-            let mut set = U8Set::empty();
-            for byte in bytes {
-                set.insert(byte);
-            }
-            set
-        })
-        .collect::<Vec<_>>();
+    let mut partitions = compute_dfa_byte_partitions([&lazy.body_dfa, &lazy.suffix_dfa, other]);
     for &byte in &lazy.prefix {
         partitions = refine_u8_partitions(partitions, U8Set::single(byte));
     }
-
-    let mut class_map = vec![0u8; 256];
-    let mut class_members = vec![Vec::new(); partitions.len()];
-    for (class_id, partition) in partitions.iter().enumerate() {
-        for byte in partition.iter() {
-            class_map[byte as usize] = class_id as u8;
-            class_members[class_id].push(byte);
-        }
-    }
-    (class_map, class_members)
+    byte_classes_from_partitions(&partitions)
 }
 
 fn build_zero_min_repeat_suffix_dominance_dfa_internal(
@@ -12453,27 +12421,14 @@ fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<
     let mut seen_sets = FxHashSet::default();
 
     for component in components {
+        if partitions.len() == 256 {
+            break;
+        }
         match component {
             ProductComponent::Materialized(dfa)
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. }
             | ProductComponent::VirtualBoundedRepeat { base_dfa: dfa, .. } => {
-                for state in dfa.states() {
-                    let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
-                    for (byte, &target) in state.transitions.iter() {
-                        bytes_by_target
-                            .entry(target)
-                            .and_modify(|set| {
-                                set.insert(byte);
-                            })
-                            .or_insert_with(|| U8Set::single(byte));
-                    }
-
-                    for byte_set in bytes_by_target.into_values() {
-                        if seen_sets.insert(byte_set) {
-                            partitions = refine_u8_partitions(partitions, byte_set);
-                        }
-                    }
-                }
+                refine_dfa_byte_partitions(&mut partitions, &mut seen_sets, dfa);
             }
             ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
                 for &byte_set in byte_sets.iter() {
@@ -12484,17 +12439,7 @@ fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<
             }
         }
     }
-
-    let mut class_map = vec![0u8; 256];
-    let mut class_members = vec![Vec::new(); partitions.len()];
-    for (class_id, partition) in partitions.iter().enumerate() {
-        for byte in partition.iter() {
-            class_map[byte as usize] = class_id as u8;
-            class_members[class_id].push(byte);
-        }
-    }
-
-    (class_map, class_members)
+    byte_classes_from_partitions(&partitions)
 }
 
 fn build_product_class_transitions_for_dfa(dfa: &DFA, class_map: &[u8]) -> Vec<Vec<(u8, u32)>> {
