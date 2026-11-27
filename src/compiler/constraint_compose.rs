@@ -1904,7 +1904,7 @@ pub(crate) fn component_ignores_are_globally_erasable(
         .collect::<Vec<_>>();
     if components
         .iter()
-        .any(|component| !component.table.skip_terminals.is_empty())
+        .any(|component| !component.parser_skip_terminals().is_empty())
     {
         return false;
     }
@@ -1968,7 +1968,7 @@ pub(crate) fn merged_ignore_terminals(
         .enumerate()
     {
         let terminal_offset = terminal_offsets[component_index] as usize;
-        for &skip in &component.table.skip_terminals {
+        for &skip in component.parser_skip_terminals() {
             all.set(terminal_offset + skip as usize);
         }
     }
@@ -2003,20 +2003,18 @@ pub(crate) fn merged_ignore_terminals(
 /// A provider-native coordinator owns the shared vocabulary and the global
 /// terminal coordinate, but does not compile a second lexer/parser mask graph.
 fn build_recursive_coordinator(
-    mut table: crate::compiler::glr::table::GLRTable,
+    parser: crate::runtime::parser_backend::LinkedLrParser,
     tokenizer: Arc<Tokenizer>,
     tokenizer_state_offsets: Vec<u32>,
     terminal_offsets: Vec<u32>,
     special_token_terminals: Vec<SpecialTokenTerminal>,
-    embedded_end_token_ids: Vec<u32>,
     terminal_display_names: Vec<String>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
     vocab: &Vocab,
 ) -> ConstraintComposition {
     let parser_state_relations = vec![Vec::new(); terminal_offsets.len()];
     let tokenizer_has_epsilon_transitions = tokenizer.has_epsilon_transitions();
-    assert!(table.num_states == 0 && table.action.is_empty() && table.goto.is_empty());
-    table.set_embedded_end_token_ids(&embedded_end_token_ids);
+    debug_assert_eq!(parser.terminal_count as usize, terminal_display_names.len());
     let token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
     let constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
@@ -2035,7 +2033,7 @@ fn build_recursive_coordinator(
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
         direct_regular_automaton: None,
-        table: crate::runtime::parser_backend::ParserExecutable::explicit(table),
+        table: crate::runtime::parser_backend::ParserExecutable::LinkedLr(parser),
         terminal_display_names,
         tokenizer,
         boundary_completion_index: None,
@@ -2196,7 +2194,7 @@ fn compose_dynamic_recursive_shared_fast(
     let placeholder_started_at = Instant::now();
     let component_end_token_ids = components
         .iter()
-        .flat_map(|constraint| constraint.table.embedded_end_token_ids())
+        .flat_map(|constraint| constraint.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
     validate_compiled_subgrammar_placeholders(
         &parent,
@@ -2212,7 +2210,7 @@ fn compose_dynamic_recursive_shared_fast(
     for component in &components {
         terminal_offsets.push(next_terminal);
         next_terminal = next_terminal
-            .checked_add(component.table.num_terminals)
+            .checked_add(component.parser_terminal_count())
             .ok_or_else(|| "dynamic recursive terminal coordinate overflow".to_owned())?;
     }
     let global_ignores = component_ignores_are_globally_erasable(&parent, children);
@@ -2246,7 +2244,7 @@ fn compose_dynamic_recursive_shared_fast(
         } else { None }
     }).collect::<Vec<_>>();
     let no_ignores = components.iter().all(|component| component.ignore_terminal.is_none()
-        && component.table.skip_terminals.is_empty());
+        && component.parser_skip_terminals().is_empty());
     if (!global_ignores || no_ignores) && dynamic_candidate_ids[0].is_some() {
         let entered = children.iter().map(|child| child.constraint).collect::<Vec<_>>();
         let calls = children.iter().flat_map(|child| std::iter::once(child.placeholder_terminal)
@@ -2297,27 +2295,11 @@ fn compose_dynamic_recursive_shared_fast(
     let metadata_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let shell_started_at = Instant::now();
-    // The live recursive runtime never executes this outer table. Keep only
-    // enough root grammar metadata for nullable/end-token facts and the global
-    // terminal coordinate; exact LR behavior remains in the retained leaves.
-    let shell_rules = parent.table.rules.first().cloned().into_iter().collect::<Vec<_>>();
-    let shell_table = crate::compiler::glr::table::GLRTable {
-        action: Vec::new(),
-        goto: Vec::new(),
-        num_states: 0,
-        num_terminals: next_terminal,
-        num_rules: shell_rules.len() as u32,
-        rules: shell_rules,
-        nonterminal_display_names: parent.table.nonterminal_display_names.clone(),
-        construction: parent.table.construction,
-        admission_policy: parent.table.admission_policy,
-        advance: Vec::new(),
-        unconditional_advance: Vec::new(),
-        forwarded_shifts: FxHashSet::default(),
-        control_terminals: BTreeSet::new(),
-        skip_terminals: BTreeSet::new(),
-        guarded_shift_index: Vec::new(),
-        direct_regular_wide_frontiers: Vec::new(),
+    let parser = crate::runtime::parser_backend::LinkedLrParser {
+        terminal_count: next_terminal,
+        root_nullable: parent.composition_start_nullable()?,
+        admission_policy: parent.parser_admission_policy(),
+        embedded_end_token_ids,
     };
     let shell_ms = shell_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -2325,12 +2307,11 @@ fn compose_dynamic_recursive_shared_fast(
     let root_tokenizer = parent.tokenizer.clone();
     let root_fast_transitions = parent.tokenizer_fast_transitions.clone();
     let mut result = build_recursive_coordinator(
-        shell_table,
+        parser,
         root_tokenizer,
         tokenizer_state_offsets.clone(),
         terminal_offsets.clone(),
         special_token_terminals,
-        embedded_end_token_ids,
         terminal_display_names,
         root_fast_transitions,
         vocab,
@@ -2589,8 +2570,8 @@ fn compose_constraints_owned_parent_impl(
     // flattened source/compiler view. Its nullable/global-ignore boundary is
     // checked by that linker and returns a capability error.
     if boundary_backend != SegmentedBoundaryBackend::Dynamic
-        || !parent.table.is_present()
-        || children.iter().any(|input|input.constraint.has_template_parser() || !input.constraint.table.is_present()) {
+        || !parent.table.is_lr_backend()
+        || children.iter().any(|input|!input.constraint.table.is_lr_backend()) {
         return Err("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends".into());
     }
     let shared=shared_children.ok_or("retained-LR composition requires owned shared children")?;

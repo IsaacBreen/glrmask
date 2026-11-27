@@ -2257,8 +2257,8 @@ fn compose_named_children(
     }
     // This branch is only for ordinary retained-LR Dynamic components.
     // Native components were dispatched above and may never enter LR machinery.
-    if !parent.table.is_present() || present.iter().any(|&i|
-        children[i].1.has_template_parser() || !children[i].1.table.is_present()) {
+    if !parent.table.is_lr_backend() || present.iter().any(|&i|
+        !children[i].1.table.is_lr_backend()) {
         return Err(Error::Compilation("a composition can't mix parts precompiled with the LrTable and TemplateDfa parser backends".into()));
     }
 

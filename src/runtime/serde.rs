@@ -43,6 +43,7 @@ const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 52;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
 const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 53;
+const EXTERNAL_LINKED_LR_CONSTRAINT_VERSION: u16 = 54;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -3157,6 +3158,8 @@ impl Constraint {
             crate::dynamic_constraint::remainder_trace::Session::new("constraint.snapshot_body");
         let artifact_version = if self.has_template_parser() {
             EXTERNAL_TEMPLATE_CONSTRAINT_VERSION
+        } else if self.table.linked_lr().is_some() {
+            EXTERNAL_LINKED_LR_CONSTRAINT_VERSION
         } else {
             assert!(self.table.is_present(), "cannot save an uninstalled parser section");
             EXTERNAL_LR_CONSTRAINT_VERSION
@@ -3454,6 +3457,11 @@ impl Constraint {
                         let started = profile.then(std::time::Instant::now);
                         let bytes = if let Some(parser) = self.template_parser() {
                             crate::runtime::parser_backend::wire::encode_external(parser, self.artifact_vocab_digest())
+                        } else if let Some(linked) = self.table.linked_lr() {
+                            let mut framed = self.artifact_vocab_digest().to_vec();
+                            bincode::serialize_into(&mut framed, linked)
+                                .expect("linked LR metadata serialization");
+                            framed
                         } else {
                             let rules = self.retained_table_rules()
                                 .expect("validated retained grammar rules must remain readable");
@@ -4109,6 +4117,14 @@ impl Constraint {
                                     }
                                     table
                                 };
+                                if version == EXTERNAL_LINKED_LR_CONSTRAINT_VERSION {
+                                    let metadata: crate::runtime::parser_backend::LinkedLrParser =
+                                        bincode::deserialize(table_section).map_err(|err| err.to_string())?;
+                                    if metadata.embedded_end_token_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                                        return Err("noncanonical linked LR end-token IDs".into());
+                                    }
+                                    return Ok((crate::runtime::parser_backend::ParserExecutable::LinkedLr(metadata), None, None));
+                                }
                                 let result = {
                                     let backing = current_backing.as_ref().ok_or_else(|| {
                                         "current GLR table has no artifact backing".to_owned()
@@ -4501,6 +4517,7 @@ impl Constraint {
             version,
             EXTERNAL_TEMPLATE_CONSTRAINT_VERSION
                 | EXTERNAL_LR_CONSTRAINT_VERSION
+                | EXTERNAL_LINKED_LR_CONSTRAINT_VERSION
         ) {
             return Err(crate::Error::Serialization(
                 "they were saved by another GLRMask version".to_owned(),
@@ -4695,10 +4712,22 @@ impl Constraint {
         };
         let deserialize_ms = deserialize_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        if constraint.table.is_present() && !constraint.uses_dynamic_runtime() {
+        if constraint.table.is_lr_backend() && !constraint.uses_dynamic_runtime() {
             return Err(crate::Error::Serialization(
                 "retained LR artifacts are supported only for ordinary Dynamic runtimes".into(),
             ));
+        }
+        if let Some(linked) = constraint.table.linked_lr() {
+            if linked.terminal_count as usize != constraint.terminal_display_names.len()
+                || (!deferred && !constraint.uses_compact_segmented_parser_runtime())
+            {
+                return Err(crate::Error::Serialization("invalid linked LR provider layout".into()));
+            }
+            if !deferred && constraint.static_dynamic_overlay.as_ref().is_some_and(|overlay|
+                overlay.segmented_parser_components.iter().any(|part| !part.constraint.table.is_lr_backend()))
+            {
+                return Err(crate::Error::Serialization("linked LR provider contains a non-LR component".into()));
+            }
         }
         if constraint.has_template_parser() {
             constraint.validate_template_composition_layout().map_err(crate::Error::Serialization)?;

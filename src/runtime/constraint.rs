@@ -1506,6 +1506,9 @@ impl Constraint {
             return parser.link_grammar.as_ref().map(|grammar| grammar.rules())
                 .ok_or_else(|| "template parser has no source grammar metadata".to_owned());
         }
+        if self.table.linked_lr().is_some() {
+            return Err("linked LR provider has no flattened grammar rules".into());
+        }
         if self.deferred_table_rules_blob.is_none() {
             return Ok(&self.table.rules);
         }
@@ -1549,7 +1552,7 @@ impl Constraint {
             && let Some(summary) = self.composition_grammar_summary.as_ref() {
                 return Ok(summary.root_nullable);
             }
-        Ok(self.table.embedded_start_nullable())
+        Ok(self.table.linked_lr().map_or_else(|| self.table.embedded_start_nullable(), |metadata| metadata.root_nullable))
     }
 
     /// Exact zero-width pop depth for returning from this constraint when it is
@@ -1581,15 +1584,35 @@ impl Constraint {
     }
 
     pub(crate) fn embedded_end_token_ids(&self) -> Vec<u32> {
-        self.template_parser().and_then(|parser| parser.link_grammar.as_ref())
-            .map(|grammar| grammar.embedded_end_token_ids.clone())
-            .expect("native parser is missing composition grammar metadata")
+        match &self.table {
+            crate::runtime::parser_backend::ParserExecutable::Native(parser) =>
+                parser.link_grammar.as_ref().map(|grammar| grammar.embedded_end_token_ids.clone())
+                    .expect("native parser is missing composition grammar metadata"),
+            crate::runtime::parser_backend::ParserExecutable::LinkedLr(metadata) =>
+                metadata.embedded_end_token_ids.clone(),
+            crate::runtime::parser_backend::ParserExecutable::ExplicitLr(table) =>
+                table.embedded_end_token_ids(),
+            _ => panic!("parser section not installed"),
+        }
     }
 
     pub(crate) fn set_composition_end_token_ids(&mut self, ids: &[u32]) {
-        if let Some(parser) = self.template_parser_mut().and_then(Arc::get_mut)
-            && let Some(grammar) = parser.link_grammar.as_mut() {
-            Arc::make_mut(grammar).embedded_end_token_ids = ids.to_vec();
+        use crate::runtime::parser_backend::ParserExecutable;
+        match &mut self.table {
+            ParserExecutable::Native(parser) => {
+                if let Some(parser) = Arc::get_mut(parser)
+                    && let Some(grammar) = parser.link_grammar.as_mut()
+                {
+                    Arc::make_mut(grammar).embedded_end_token_ids = ids.to_vec();
+                }
+            }
+            ParserExecutable::ExplicitLr(table) => table.set_embedded_end_token_ids(ids),
+            ParserExecutable::LinkedLr(metadata) => {
+                metadata.embedded_end_token_ids = ids.to_vec();
+                metadata.embedded_end_token_ids.sort_unstable();
+                metadata.embedded_end_token_ids.dedup();
+            }
+            ParserExecutable::SectionPending => panic!("parser section not installed"),
         }
     }
 
@@ -1597,6 +1620,10 @@ impl Constraint {
     /// updates the executable EOF relation, interface metadata and the finite
     /// nullable return relation; it never reconstructs or materializes an LR table.
     pub(crate) fn set_composition_start_nullable(&mut self, nullable: bool) {
+        if let crate::runtime::parser_backend::ParserExecutable::LinkedLr(metadata) = &mut self.table {
+            metadata.root_nullable = nullable;
+            return;
+        }
         if self.template_parser().is_none() {
             // Explicit retained-LR parser. The historic LR pipeline recorded
             // source nullability directly on the table's embedded-start
@@ -3202,10 +3229,8 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn uses_sparse_direct_regular_runtime(&self) -> bool {
-        if self.has_template_parser() { return false; }
         self.direct_regular_automaton.is_some()
-            && self.table.num_rules == 0
-            && self.table.action.is_empty()
+            && self.table.as_lr().is_some_and(|table| table.num_rules == 0 && table.action.is_empty())
     }
 
     /// Attach the derived lexer artifacts used only by exact dynamic masking.
@@ -7192,7 +7217,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
-        if !self.has_template_parser() && (self.table.unconditional_advance.len() != self.parser_symbol_count() as usize
+        if self.table.is_present() && (self.table.unconditional_advance.len() != self.parser_symbol_count() as usize
             || self.table.unconditional_advance.iter()
                 .any(|row| row.len() != self.parser_terminal_count() as usize))
         {
@@ -7206,7 +7231,7 @@ impl Constraint {
         // dynamic compile/load latency and allocations.
         self.terminal_live_states.clear();
         let started_at = profile.then(std::time::Instant::now);
-        if !self.has_template_parser() && self.table.guarded_shift_index.len() != self.parser_symbol_count() as usize {
+        if self.table.is_present() && self.table.guarded_shift_index.len() != self.parser_symbol_count() as usize {
             if self.table.has_guarded_stack_shifts() {
                 self.table.rebuild_guarded_shift_index();
             } else {
@@ -8134,7 +8159,7 @@ impl Constraint {
     fn compute_direct_regular_wide_frontier_acceptance(
         &self,
     ) -> Vec<DirectRegularWideFrontierAcceptance> {
-        if self.has_template_parser() { return Vec::new(); }
+        if !self.table.is_present() { return Vec::new(); }
         // Loaded current-format constraints can execute exact acceptance
         // directly from packed Weight ids. These summaries are only an
         // optimization over materialized Weight objects; rebuilding them would
@@ -8265,7 +8290,7 @@ impl Constraint {
     fn compute_direct_regular_parser_state_acceptance(
         &self,
     ) -> Vec<DirectRegularParserStateAcceptance> {
-        if self.has_template_parser() { return Vec::new(); }
+        if !self.table.is_present() { return Vec::new(); }
         let Some(relations) = self.non_dwa_weights.materialized() else {
             return Vec::new();
         };
@@ -9044,7 +9069,7 @@ impl Constraint {
         // anywhere a dynamic full walk is explicitly requested. DynamicConstraint
         // prepares its own execution coordinate in rebuild_dynamic_runtime_caches().
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
-        if !self.has_template_parser() && self.table.guarded_shift_index.len() != self.parser_symbol_count() as usize {
+        if self.table.is_present() && self.table.guarded_shift_index.len() != self.parser_symbol_count() as usize {
             if self.table.num_rules == 0 {
                 self.table.guarded_shift_index =
                     vec![FxHashMap::default(); self.parser_symbol_count() as usize];

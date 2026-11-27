@@ -66,13 +66,35 @@ impl DynamicParserBackend {
 pub(crate) enum ParserExecutable {
     SectionPending,
     ExplicitLr(GLRTable),
+    LinkedLr(LinkedLrParser),
     Native(Arc<TemplateParser>),
+}
+
+/// The linked LR executor uses the scoped leaf action providers. The
+/// coordinator owns no local stack states or action/goto rows.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinkedLrParser {
+    pub(crate) terminal_count: u32,
+    pub(crate) root_nullable: bool,
+    pub(crate) embedded_end_token_ids: Vec<u32>,
+    pub(crate) admission_policy: AdmissionPolicy,
 }
 
 impl ParserExecutable {
     pub(crate) fn section_pending() -> Self { Self::SectionPending }
     pub(crate) fn explicit(table: GLRTable) -> Self { Self::ExplicitLr(table) }
     pub(crate) fn is_present(&self) -> bool { matches!(self, Self::ExplicitLr(_)) }
+
+    pub(crate) fn is_lr_backend(&self) -> bool {
+        matches!(self, Self::ExplicitLr(_) | Self::LinkedLr(_))
+    }
+
+    pub(crate) fn linked_lr(&self) -> Option<&LinkedLrParser> {
+        match self {
+            Self::LinkedLr(metadata) => Some(metadata),
+            _ => None,
+        }
+    }
     pub(crate) fn as_lr(&self) -> Option<&GLRTable> {
         match self { Self::ExplicitLr(table) => Some(table), _ => None }
     }
@@ -737,53 +759,72 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn parser_symbol_count(&self) -> u32 {
-        self.template_parser()
-            .map_or_else(|| self.table.num_states, |parser| parser.state_count)
+        match &self.table {
+            ParserExecutable::Native(parser) => parser.state_count,
+            ParserExecutable::ExplicitLr(table) => table.num_states,
+            // The scoped coordinate lives in the recursive layout, not here.
+            ParserExecutable::LinkedLr(_) => 0,
+            ParserExecutable::SectionPending => panic!("parser section not installed"),
+        }
     }
 
     #[inline]
     pub(crate) fn parser_terminal_count(&self) -> u32 {
-        self.template_parser()
-            .map_or_else(|| self.table.num_terminals, |parser| parser.terminal_count)
+        match &self.table {
+            ParserExecutable::Native(parser) => parser.terminal_count,
+            ParserExecutable::ExplicitLr(table) => table.num_terminals,
+            ParserExecutable::LinkedLr(metadata) => metadata.terminal_count,
+            ParserExecutable::SectionPending => panic!("parser section not installed"),
+        }
     }
 
     #[inline]
     pub(crate) fn parser_has_controls(&self) -> bool {
-        self.template_parser().map_or_else(
-            || !self.table.control_terminals.is_empty(),
-            |parser| parser.composition()
+        match &self.table {
+            ParserExecutable::Native(parser) => parser.composition()
                 .is_some_and(|composition| composition.has_controls()),
-        )
+            ParserExecutable::ExplicitLr(table) => !table.control_terminals.is_empty(),
+            // The scoped provider consumes its own controls; these are not
+            // ordinary terminals on a global LR table.
+            _ => false,
+        }
     }
 
     #[inline]
     pub(crate) fn parser_skip_terminals(&self) -> &BTreeSet<TerminalID> {
-        self.template_parser()
-            .map_or_else(|| &self.table.skip_terminals, |parser| &parser.skip_terminals)
+        static EMPTY: BTreeSet<TerminalID> = BTreeSet::new();
+        match &self.table {
+            ParserExecutable::Native(parser) => &parser.skip_terminals,
+            ParserExecutable::ExplicitLr(table) => &table.skip_terminals,
+            _ => &EMPTY,
+        }
     }
 
     pub(crate) fn parser_is_control_terminal(&self, terminal: TerminalID) -> bool {
-        self.template_parser().map_or_else(
-            || self.table.control_terminals.contains(&terminal),
-            |parser| parser.link_grammar.as_ref()
+        match &self.table {
+            ParserExecutable::Native(parser) => parser.link_grammar.as_ref()
                 .is_some_and(|grammar| grammar.control_terminals.contains(&terminal)),
-        )
+            ParserExecutable::ExplicitLr(table) => table.control_terminals.contains(&terminal),
+            _ => false,
+        }
     }
 
     pub(crate) fn parser_control_terminals(&self) -> BTreeSet<u32> {
-        self.template_parser().map_or_else(
-            || self.table.control_terminals.clone(),
-            |parser| parser.link_grammar.as_ref()
+        match &self.table {
+            ParserExecutable::Native(parser) => parser.link_grammar.as_ref()
                 .map_or_else(BTreeSet::new, |grammar| grammar.control_terminals.clone()),
-        )
+            ParserExecutable::ExplicitLr(table) => table.control_terminals.clone(),
+            _ => BTreeSet::new(),
+        }
     }
 
     #[inline]
     pub(crate) fn parser_admission_policy(&self) -> AdmissionPolicy {
-        if self.has_template_parser() {
-            AdmissionPolicy::ExactSimulation
-        } else {
-            self.table.admission_policy
+        match &self.table {
+            ParserExecutable::Native(_) => AdmissionPolicy::ExactSimulation,
+            ParserExecutable::ExplicitLr(table) => table.admission_policy,
+            ParserExecutable::LinkedLr(metadata) => metadata.admission_policy,
+            ParserExecutable::SectionPending => panic!("parser section not installed"),
         }
     }
 
@@ -791,7 +832,7 @@ impl Constraint {
     pub(crate) fn parser_advance_row(&self, top: u32) -> Option<&BitSet> {
         if self.template_composition_provider().is_some() { return None; }
         self.template_parser().map_or_else(
-            || self.table.advance_row(top),
+            || self.table.as_lr()?.advance_row(top),
             |parser| parser.possible_row(top),
         )
     }
@@ -809,7 +850,7 @@ impl Constraint {
             };
             parser.possible_row(top).is_some_and(|row| row.contains(bit))
         } else {
-            self.table.advance_row_allows(top, terminal)
+            self.table.as_lr().is_some_and(|table| table.advance_row_allows(top, terminal))
         }
     }
 
@@ -823,7 +864,7 @@ impl Constraint {
                 row.words().iter().zip(terminals.words()).any(|(a, b)| a & b != 0)
             })
         } else {
-            self.table.advance_row_intersects(top, terminals)
+            self.table.as_lr().is_some_and(|table| table.advance_row_intersects(top, terminals))
         }
     }
 
@@ -831,7 +872,7 @@ impl Constraint {
     pub(crate) fn parser_unconditional_row(&self, top: u32) -> Option<&BitSet> {
         if self.template_composition_provider().is_some() { return None; }
         self.template_parser().map_or_else(
-            || self.table.unconditional_advance_row(top),
+            || self.table.as_lr()?.unconditional_advance_row(top),
             |parser| parser.unconditional_row(top),
         )
     }
@@ -1085,6 +1126,7 @@ impl Constraint {
             None => serde_json::json!({
                 "backend": "lr-table",
                 "lr_table_present": self.table.is_present(),
+                "linked_lr_provider": self.table.linked_lr().is_some(),
                 "sparse_regular": self.uses_sparse_direct_regular_runtime()
             }),
         }

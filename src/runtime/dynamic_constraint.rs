@@ -790,10 +790,9 @@ impl DynamicConstraint {
             let body = rest.get(8..end)
                 .ok_or_else(|| error("truncated dynamic alternative"))?;
             let mut constraint = Constraint::load_external(body, vocab)?;
-            constraint.materialize_composition_link_metadata_for_compilation()
-                .map_err(crate::Error::Serialization)?;
-            if !constraint.uses_dynamic_runtime() {
-                return Err(error("dynamic alternative is not a dynamic constraint"));
+            if !constraint.has_template_parser() {
+                constraint.materialize_composition_link_metadata_for_compilation()
+                    .map_err(crate::Error::Serialization)?;
             }
             constraints.push(constraint);
             rest = &rest[end..];
