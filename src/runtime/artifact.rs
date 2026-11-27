@@ -9994,42 +9994,79 @@ impl std::ops::DerefMut for Constraint {
     }
 }
 
-/// Inner compiled data shared by handles. Hidden from the documented API;
-/// its visibility allows the public Deref target to be named by rustc.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub struct ConstraintData {
+// Declare the runtime layout and private remote Serde schema together.
+// Only the remote definition receives serialization attributes: Constraint
+// and its public Deref target retain their existing non-Serde API.
+macro_rules! constraint_data_schema {
+    ($(
+        $(#[$doc:meta])*
+        $(@serde($($wire:tt)*))?
+        $vis:vis $name:ident: $ty:ty,
+    )*) => {
+        /// Inner compiled data shared by handles. Hidden from the documented API;
+        /// its visibility allows the public Deref target to be named by rustc.
+        #[doc(hidden)]
+        #[derive(Debug, Clone)]
+        pub struct ConstraintData {
+            $(
+                $(#[$doc])*
+                $vis $name: $ty,
+            )*
+        }
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        #[serde(remote = "ConstraintData")]
+        pub(crate) struct ConstraintSerde {
+            $(
+                $(#[serde($($wire)*)])?
+                $vis $name: $ty,
+            )*
+        }
+    };
+}
+
+constraint_data_schema! {
     /// Final generation policy, not part of the embeddable compiled body.
     /// The outer root artifact stores these separately from compiler data.
+    @serde(skip, default)
     pub(crate) end_tokens: Arc<[u32]>,
+    @serde(skip, default)
     pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
+    @serde(default)
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
+    @serde(skip, default)
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Reusable component-local trigger metadata for dynamic composition.
     /// Ordinary static/dynamic compilation leaves this at `None` so there is
     /// no trigger construction cost unless explicitly requested in the future.
+    @serde(skip, default)
     pub(crate) boundary_trigger: BoundaryTrigger,
     /// Grammar-aware proper-prefix model-token summary used only by static
     /// composition boundary preparation.  It is intentionally independent of
     /// `boundary_trigger`: the latter is a dynamic-runtime accelerator with a
     /// different observation contract.  The lock permits lazy preparation by
     /// composition without mutating the immutable constraint API.
+    @serde(skip, default)
     pub(crate) boundary_candidate_summary: OnceLock<BoundaryCandidateSummary>,
     /// Named, compiler-generated linker terminals for unresolved
     /// `extern grammar` declarations. The token IDs backing these terminals
     /// are deliberately private and outside the model vocabulary; callers
     /// address slots only by `name` through the late-binding API.
+    @serde(skip, default)
     pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
     /// Runtime-only public vocabulary reconstructed from this immutable
     /// constraint for late subgrammar binding. Keeping it here lets repeated
     /// binds share `Vocab`'s pure derived-artifact cache (adjacent-byte index,
     /// tries, etc.) instead of rebuilding those structures for every child.
+    @serde(skip, default)
     pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
     /// Fingerprint recorded by a vocabulary-free artifact that has not yet
     /// been rehydrated with its vocabulary. Runtime-only.
+    @serde(skip, default)
     pub(crate) pending_vocab_fingerprint: Option<[u8; 32]>,
     /// Exact-only token IDs recorded by a pending artifact's root policy.
     /// Runtime-only.
+    @serde(skip, default)
     pub(crate) pending_special_token_ids: Option<Vec<u32>>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
@@ -10038,75 +10075,97 @@ pub struct ConstraintData {
     /// not serialized; it is cheap to rebuild from the retained terminal
     /// expression and vocabulary and therefore does not change artifact wire
     /// compatibility.
+    @serde(skip, default)
     pub(crate) scoped_ignore_only_tokens: Vec<(TerminalID, Box<[u32]>)>,
     /// Exact byte-token fusions `(fused, suffix)` grouped by scoped Skip. The
     /// fused token begins with one or more complete instances of the Skip
     /// language and the remaining bytes equal `suffix` exactly. If `suffix`
     /// is admitted by the ordinary static mask, `fused` is therefore admitted
     /// as well. Runtime-only for the same wire-compatibility reason as above.
+    @serde(skip, default)
     pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
     pub(crate) parser_dwa: DWA,
     /// Current-format loaded constraints retain the immutable parser DWA in
     /// its compact canonical pools instead of reconstructing RangeSet/Weight
     /// objects. Compiler-created and legacy-loaded constraints leave this
     /// empty and use `parser_dwa` directly.
+    @serde(skip, default)
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
     /// Runtime-only override for the parser-DWA start final. Composition uses
     /// this to suppress a component's standalone globally-erased ignore at the
     /// union root without materializing or mutating the full parser DWA.
+    @serde(skip, default)
     pub(crate) parser_start_final_override: Option<Weight>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
     /// stack symbol.
+    @serde(default)
     pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
     /// Uncombined exact depth-one acceptance parts. Direct-regular grammars
     /// retain terminal completion weights separately to avoid constructing one
     /// large union weight per parser state at compile time.
+    @serde(default)
     pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
     /// Immediate-completion L1 terminal weights for direct-regular parsers.
     /// Kept once per grammar terminal rather than duplicated across every
     /// epsilon-closed parser row.
+    @serde(default)
     pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    @serde(skip, default)
     pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
+    @serde(skip, default)
     pub(crate) direct_regular_wide_frontier_acceptance:
         Vec<DirectRegularWideFrontierAcceptance>,
     /// Runtime-only exact transition maps for the direct automaton's initial
     /// frontier and its single widest successor frontier. Dynamic masking
     /// repeatedly queries these two frontiers at token boundaries.
+    @serde(skip, default)
     pub(crate) direct_regular_dynamic_hot_frontiers:
         Vec<DirectRegularDynamicHotFrontier>,
     /// Runtime-derived exact dense acceptance for the broadest direct-regular
     /// parser row(s). This avoids replaying thousands of L1 terminal weights on
     /// every mask while keeping the cached result source-state exact.
+    @serde(skip, default)
     pub(crate) direct_regular_parser_state_acceptance:
         Vec<DirectRegularParserStateAcceptance>,
     /// Sparse terminal-level automaton retained for exact direct-regular
     /// runtime indexes. Static artifact format versioning covers this field.
+    @serde(default)
     pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
+    @serde(with = "crate::runtime::parser_backend::table_serde")
     pub(crate) table: crate::runtime::parser_backend::ParserTableStorage,
+    @serde(default)
     pub(crate) terminal_display_names: Vec<String>,
+    @serde(with = "crate::runtime::artifact::immutable_tokenizer_serde")
     pub(crate) tokenizer: Arc<Tokenizer>,
+    @serde(skip)
     pub(crate) boundary_completion_index: Option<Arc<crate::compiler::boundary_precomputed_completion::PreparedCompletion>>,
     /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
     /// scans every tokenizer state, so runtime dispatch must not recompute it.
+    @serde(skip, default)
     pub(crate) tokenizer_has_epsilon_transitions: bool,
+    @serde(default)
     pub(crate) ignore_terminal: Option<TerminalID>,
+    @serde(default)
     pub(crate) special_token_terminals: Vec<SpecialTokenTerminal>,
 
     /// Runtime-only vocabulary data for direct dynamic masking.
+    @serde(skip, default)
     pub(crate) dynamic_mask_vocab: DynamicMaskVocab,
     /// Lazily materialized static-mode fallback vocabulary. Ordinary static
     /// masking never touches this; it is initialized only if an empty
     /// possible-matches table encounters a token-start exclusion.
+    @serde(skip, default)
     pub(crate) lazy_dynamic_mask_vocab: OnceLock<DynamicMaskVocab>,
     /// Original IDs with an empty byte spelling. Derived at compile/load,
     /// never by constructing the full vocabulary trie on a mask call. Shared
     /// with clones; special-token admission is checked against the live state.
+    @serde(skip, default)
     pub(crate) empty_byte_token_ids: Arc<[u32]>,
 
     /// possible_matches keyed by grammar terminal id.
@@ -10129,19 +10188,23 @@ pub struct ConstraintData {
     /// must set this to true. False exists only for legacy dynamic/deferred
     /// construction and is not permitted as a fallback strategy for new
     /// compiler features.
+    @serde(default)
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
+    @serde(default, with = "internal_tsid_inverse_artifact_serde")
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     /// Ordinary tokenizers have one internal TSID per physical state, making
     /// `internal_tsid_to_states` the exact bucket inverse of
     /// `state_to_internal_tsid`. Current artifacts can omit that redundant
     /// allocation and reconstruct it only for composition/debug paths.
+    @serde(skip, default)
     pub(crate) deferred_internal_tsid_to_states: OnceLock<Vec<Vec<u32>>>,
     /// Composition-preparation cache: row `t` lists original model-token IDs
     /// which, from this component's lexer reset, complete terminal `t` exactly
     /// at the end of the model token.  This is not part of the historical inner
     /// `Constraint` bincode layout; artifact V13 stores it in the outer
     /// envelope so V12 constraints remain loadable unchanged.
+    @serde(skip, default)
     pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
     /// Composition-time parser stack-effect templates retained from the
     /// original compile. These are the unspecialized per-terminal DFAs used to
@@ -10149,49 +10212,66 @@ pub struct ConstraintData {
     /// behavior instead of re-characterizing the component LR table.
     /// Stored in the outer versioned artifact envelope for compatibility with
     /// older inner `Constraint` bincode layouts.
+    @serde(skip, default)
     pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     /// Composition-time symbolic parser characterizations retained from the
     /// original compile. A later linker can append only the boundary-induced
     /// reductions/rereductions and recompile affected terminal templates,
     /// rather than re-solving the component's reduction closure from scratch.
+    @serde(skip, default)
     pub(crate) composition_parser_characterizations_by_terminal:
         Vec<Option<TerminalCharacterization>>,
     /// Composition-time grammar adjacency summary. Stored in the outer
     /// versioned artifact envelope so older inner `Constraint` layouts remain
     /// loadable unchanged.
+    @serde(skip, default)
     pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
     /// Runtime-only inverse lexer-metadata index used by compiled-constraint
     /// composition. Row `t` lists exactly the raw tokenizer states whose
     /// epsilon closure has terminal `t` matched or still reachable.
+    @serde(skip, default)
     pub(crate) terminal_live_states: Vec<Vec<u32>>,
     /// Runtime-only CSR view of the exact state -> internal-TSID relation.
     /// A physical lexer state can have one or several internal TSIDs.
+    @serde(skip, default)
     pub(crate) state_internal_tsid_offsets: Vec<u32>,
+    @serde(skip, default)
     pub(crate) state_internal_tsids: Vec<u32>,
+    @serde(with = "crate::runtime::parser_backend::wire::core_programs")
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Runtime-only compact transition view for commit template products.
+    @serde(skip, default)
     pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
+    @serde(skip, default)
     pub(crate) template_parser: Option<Arc<crate::runtime::parser_backend::TemplateParser>>,
+    @serde(skip, default)
     pub(crate) token_classes: crate::runtime::TokenClasses,
+    @serde(with = "token_bytes_artifact_serde")
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     /// Indexed immutable vocabulary used directly by runtime token lookup and
     /// iteration. Loaded constraints can point into artifact backing; compiled
     /// constraints own the same indexed representation alongside the source
     /// map used by compiler/composition code.
+    @serde(skip, default)
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
     // Compiler-side scratch/result metadata only. No runtime or composition
     // path reads this field; composition rebuilds the map for its result when
     // needed. Persisting it duplicated token bytes inside every constraint.
+    @serde(skip, default)
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
+    @serde(skip)
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
 
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.
+    @serde(skip)
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
     /// Dense sliding windows of 2, 4, 8, 16 and 32 consecutive 64-token groups.
+    @serde(skip)
     pub(crate) sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
     /// Sparse OR-union for each 64-token internal word group.
+    @serde(skip)
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
     /// Dense prefix-unions of 64-token internal word groups.
     ///
@@ -10199,97 +10279,130 @@ pub struct ConstraintData {
     /// `[0, i)`. Internal-token groups are disjoint in original-token space,
     /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
     /// internal-word run `[start, end)`.
+    @serde(skip)
     pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
     /// Prefix sums of `word_group_sparse_masks[i].len()`.
+    @serde(skip)
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
+    @serde(skip)
     pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
     /// Dense output masks for quad groups whose sparse replay is more
     /// expensive than a sequential output-buffer scan.
+    @serde(skip)
     pub(crate) quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
+    @serde(skip)
     pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
     /// Dense output masks for byte groups whose sparse replay is more
     /// expensive than a sequential output-buffer scan.
+    @serde(skip)
     pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
     pub(crate) word_group_sparse_total_entries: usize,
+    @serde(skip)
     pub(crate) word_group_sparse_max_entries: usize,
     /// Precomputed buf output for the full internal token universe (union of all sparse word groups).
+    @serde(skip)
     pub(crate) all_tokens_buf_mask: Box<[u32]>,
+    @serde(skip)
     pub(crate) internal_token_dense_words: usize,
+    @serde(skip)
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
     /// Dense masks for wide token sets retained in a current-format packed
     /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
     /// packed token-set id and can therefore be rebuilt directly from the
     /// artifact without materializing RangeSet/Weight objects.
+    @serde(skip, default)
     pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
+    @serde(skip)
     pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
+    @serde(skip)
     pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
     /// Final-weight token sets eligible for the direct sparse-intersection
     /// path. Their full output masks are intentionally not materialized: the
     /// runtime intersects them with the current dense state on every use.
+    @serde(skip)
     pub(crate) direct_sparse_weight_token_sets: DirectSparseWeightTokenSetCache,
     /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
     /// the dense bitmap of internal tokens that terminal covers in that state.
+    @serde(skip)
     pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
     /// Exact masks lazily materialized for delayed-exclusion pairs that are not
     /// represented by `possible_matches`. Shared across sequence states cloned
     /// from this immutable constraint.
+    @serde(skip, default)
     pub(crate) seed_terminal_dense_fallback: Arc<Mutex<SeedTerminalDenseMasks>>,
     /// Dense bitmap of the full internal token universe.
+    @serde(skip, default = "empty_dense_words")
     pub(crate) seed_universe_dense: DenseWords,
     /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
     /// Built from parser_dwa.states at load/build time.
+    @serde(skip)
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
     /// Runtime-only readiness marker for caches derived from the final parser
     /// DWA and final internal-token coordinate. Composition may build these at
     /// the final parser-union boundary so generic post-link finalization does
     /// not rescan the same parser artifact.
+    @serde(skip, default)
     pub(crate) parser_runtime_caches_prebuilt: bool,
     /// Runtime-only parser-DWA transitions with exact dense masks materialized
     /// for the final internal tokenizer states present in each transition
     /// weight; absent states are implicitly empty. Indexed-DAG masking uses
     /// this table directly instead of hashing a transition tuple and lazily
     /// rebuilding the same dense transition record at runtime.
+    @serde(skip, default)
     pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
     /// Runtime-only exact dense final weights, indexed by parser-DWA state.
     /// This is the final-weight analogue of `indexed_dag_dense_transitions`:
     /// absent tokenizer states are empty, and full final weights stay implicit.
+    @serde(skip, default)
     pub(crate) indexed_dag_dense_finals: Vec<IndexedDagDenseTransitionMasks>,
     /// Dense tokenizer transition lookup for commit-time byte scans.
+    @serde(skip)
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
     /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
     /// Indexed by internal token ID; None for light tokens.
+    @serde(skip)
     pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
     /// Flattened contiguous array of all internal token buf mask entries.
     /// All tokens' (word_index, or_mask) pairs concatenated in token order.
     /// Improves cache locality vs separate Vec allocations per token.
+    @serde(skip)
     pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
     /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
     /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
+    @serde(skip, default)
     pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
     /// Offsets into `internal_token_buf_flat` for each internal token.
     /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
     /// Length = n_internal + 1 (sentinel at end).
+    @serde(skip)
     pub(crate) internal_token_buf_offsets: Box<[u32]>,
     /// Pre-computed total cost (sum of entry counts) for all internal tokens.
     /// Used to avoid O(n_internal) cost analysis in the convert phase.
+    @serde(skip)
     pub(crate) total_internal_buf_cost: usize,
     /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
+    @serde(skip)
     pub(crate) heavy_token_indices: Vec<usize>,
     /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
+    @serde(skip)
     pub(crate) heavy_total_cost: usize,
     /// Average cost per light token: (total_cost - heavy_total) / n_light.
     /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
+    @serde(skip)
     pub(crate) light_avg_cost_x256: usize,
     /// Exact materialization cost per internal token, after heavy-token dense masks
     /// have been chosen.
+    @serde(skip)
     pub(crate) internal_token_buf_op_costs: Vec<usize>,
     /// Exact materialization cost per 64-token internal word group.
+    @serde(skip)
     pub(crate) word_group_buf_op_costs: Vec<usize>,
     /// Optional exact quotient of positive parser-state labels used by composed
     /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
     /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
     /// transitions always take precedence, followed by this label, then the
     /// ordinary global DEFAULT. Empty for ordinary non-composed constraints.
+    @serde(skip, default)
     pub(crate) parser_state_domain_labels: Vec<i32>,
     /// Exact source expression for the globally erasable ignore terminal.
     ///
@@ -10297,433 +10410,42 @@ pub struct ConstraintData {
     /// omitted from artifacts. Retaining this one expression lets a loaded
     /// compiled constraint participate in later subgrammar composition without
     /// conservatively degrading an identical global ignore into scoped skips.
+    @serde(skip, default)
     pub(crate) ignore_expr: Option<Expr>,
     /// Exact current-format artifact backing for an unchanged loaded
     /// constraint. Runtime cache rebuilds do not alter serialized semantics,
     /// so resave can return a single bulk copy instead of rediscovering and
     /// re-encoding the same canonical pools.
+    @serde(skip, default)
     pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
     /// Current-format terminal source expressions can be retained as their
     /// canonical bincode payload instead of recursively rebuilding every Expr
     /// node during an ordinary static load. Composition materializes the list
     /// lazily through `retained_terminal_exprs` when it actually needs source
     /// language proofs.
+    @serde(skip, default)
     pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
+    @serde(skip, default)
     pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
     /// Serialized composition-only metadata (reset-token rows, parser template
     /// cache, symbolic characterizations, and grammar summary). Current-format
     /// loads keep this cold section backed by the artifact and materialize it
     /// only if the constraint is later used as a composition component.
+    @serde(skip, default)
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
     /// Runtime-only marker distinguishing "the lightweight linking metadata
     /// has already been decoded" from "the heavy static compiler-cache blob is
     /// still deferred". Dynamic A+B intentionally keeps the latter deferred.
+    @serde(skip, default)
     pub(crate) composition_link_metadata_materialized: bool,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through
     /// `retained_table_rules`.
+    @serde(skip, default)
     pub(crate) deferred_table_rules_blob:
         Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
-    pub(crate) deferred_table_rules: OnceLock<Arc<[crate::grammar::flat::Rule]>>,
-}
-
-// Private Serde definition used only by the versioned artifact encoder/decoder.
-// Keeping this remote definition separate prevents `Constraint` itself from
-// implementing Serde, so `Constraint::save`/`Constraint::load` remain the only
-// public persistence contract.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(remote = "ConstraintData")]
-pub(crate) struct ConstraintSerde {
-    #[serde(skip, default)]
-    pub(crate) end_tokens: Arc<[u32]>,
-    #[serde(skip, default)]
-    pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
-    #[serde(default)]
-    pub(crate) runtime_backend: ConstraintRuntimeBackend,
-    #[serde(skip, default)]
-    pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
-    #[serde(skip, default)]
-    pub(crate) boundary_trigger: BoundaryTrigger,
-    #[serde(skip, default)]
-    pub(crate) boundary_candidate_summary: OnceLock<BoundaryCandidateSummary>,
-    #[serde(skip, default)]
-    pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
-    #[serde(skip, default)]
-    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
-    #[serde(skip, default)]
-    pub(crate) pending_vocab_fingerprint: Option<[u8; 32]>,
-    #[serde(skip, default)]
-    pub(crate) pending_special_token_ids: Option<Vec<u32>>,
-    /// Runtime-derived exact original-token sets for `Skip` terminals in a
-    /// composed grammar. Each token is wholly in `L(skip)+`: it can be
-    /// consumed as one or more complete instances of that scoped-ignore
-    /// terminal with a lexer reset between instances. This is deliberately
-    /// not serialized; it is cheap to rebuild from the retained terminal
-    /// expression and vocabulary and therefore does not change artifact wire
-    /// compatibility.
-    #[serde(skip, default)]
-    pub(crate) scoped_ignore_only_tokens: Vec<(TerminalID, Box<[u32]>)>,
-    /// Exact byte-token fusions `(fused, suffix)` grouped by scoped Skip. The
-    /// fused token begins with one or more complete instances of the Skip
-    /// language and the remaining bytes equal `suffix` exactly. If `suffix`
-    /// is admitted by the ordinary static mask, `fused` is therefore admitted
-    /// as well. Runtime-only for the same wire-compatibility reason as above.
-    #[serde(skip, default)]
-    pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
-    pub(crate) parser_dwa: DWA,
-    /// Current-format loaded constraints retain the immutable parser DWA in
-    /// its compact canonical pools instead of reconstructing RangeSet/Weight
-    /// objects. Compiler-created and legacy-loaded constraints leave this
-    /// empty and use `parser_dwa` directly.
-    #[serde(skip, default)]
-    pub(crate) packed_parser_dwa:
-        Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
-    #[serde(skip, default)]
-    pub(crate) parser_start_final_override: Option<Weight>,
-    /// Exact depth-one parser acceptance kept separate from the deeper parser
-    /// DWA. Keys are encoded parser-state labels; values are already the
-    /// transition/final-weight intersection for accepting after that one
-    /// stack symbol.
-    #[serde(default)]
-    pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
-    /// Uncombined exact depth-one acceptance parts. Direct-regular grammars
-    /// retain terminal completion weights separately to avoid constructing one
-    /// large union weight per parser state at compile time.
-    #[serde(default)]
-    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
-    /// Immediate-completion L1 terminal weights for direct-regular parsers.
-    /// Kept once per grammar terminal rather than duplicated across every
-    /// epsilon-closed parser row.
-    #[serde(default)]
-    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
-    #[serde(skip, default)]
-    pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
-    /// Runtime-derived exact acceptance summaries for wide direct-regular
-    /// replace-top frontiers. Rebuilt after compile/load from the table and
-    /// parser-top acceptance artifacts.
-    #[serde(skip, default)]
-    pub(crate) direct_regular_wide_frontier_acceptance:
-        Vec<DirectRegularWideFrontierAcceptance>,
-    /// Runtime-only exact transition maps for the direct automaton's initial
-    /// frontier and its single widest successor frontier. Dynamic masking
-    /// repeatedly queries these two frontiers at token boundaries.
-    #[serde(skip, default)]
-    pub(crate) direct_regular_dynamic_hot_frontiers:
-        Vec<DirectRegularDynamicHotFrontier>,
-    /// Runtime-derived exact dense acceptance for the broadest direct-regular
-    /// parser row(s). This avoids replaying thousands of L1 terminal weights on
-    /// every mask while keeping the cached result source-state exact.
-    #[serde(skip, default)]
-    pub(crate) direct_regular_parser_state_acceptance:
-        Vec<DirectRegularParserStateAcceptance>,
-    /// Sparse terminal-level automaton retained for exact direct-regular
-    /// runtime indexes. Static artifact format versioning covers this field.
-    #[serde(default)]
-    pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
-    #[serde(with = "crate::runtime::parser_backend::table_serde")]
-    pub(crate) table: crate::runtime::parser_backend::ParserTableStorage,
-    #[serde(default)]
-    pub(crate) terminal_display_names: Vec<String>,
-    #[serde(with = "crate::runtime::artifact::immutable_tokenizer_serde")]
-    pub(crate) tokenizer: Arc<Tokenizer>,
-    #[serde(skip)]
-    pub(crate) boundary_completion_index: Option<Arc<crate::compiler::boundary_precomputed_completion::PreparedCompletion>>,
-    /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
-    /// scans every tokenizer state, so runtime dispatch must not recompute it.
-    #[serde(skip, default)]
-    pub(crate) tokenizer_has_epsilon_transitions: bool,
-    #[serde(default)]
-    pub(crate) ignore_terminal: Option<TerminalID>,
-    #[serde(default)]
-    pub(crate) special_token_terminals: Vec<SpecialTokenTerminal>,
-
-    /// Runtime-only vocabulary data for direct dynamic masking.
-    #[serde(skip, default)]
-    pub(crate) dynamic_mask_vocab: DynamicMaskVocab,
-    /// Lazily materialized static-mode fallback vocabulary. Ordinary static
-    /// masking never touches this; it is initialized only if an empty
-    /// possible-matches table encounters a token-start exclusion.
-    #[serde(skip, default)]
-    pub(crate) lazy_dynamic_mask_vocab: OnceLock<DynamicMaskVocab>,
-    #[serde(skip, default)]
-    pub(crate) empty_byte_token_ids: Arc<[u32]>,
-
-    /// possible_matches keyed by grammar terminal id.
-    ///
-    /// An empty table may represent deferred possible-match construction in
-    /// legacy code only.
-    ///
-    /// IMPORTANT: the dynamic possible-matches fallback is intentionally
-    /// terrible and is planned for removal. New compiler paths MUST construct
-    /// complete exact possible matches and MUST NOT set
-    /// `possible_matches_complete` to false as an implementation shortcut.
-    /// DO NOT REMOVE OR WEAKEN THIS COMMENT.
-    ///
-    /// Each Weight maps final shared internal tokenizer-state ids to token sets
-    /// in the final shared constraint-internal vocab space. Parser-DWA weights
-    /// and possible_matches weights are reconciled into this same space during
-    /// compilation.
-    pub(crate) possible_matches: PossibleMatchesByTerminal,
-    /// Whether `possible_matches` is a complete table. New static constraints
-    /// must set this to true. False exists only for legacy dynamic/deferred
-    /// construction and is not permitted as a fallback strategy for new
-    /// compiler features.
-    #[serde(default)]
-    pub(crate) possible_matches_complete: bool,
-    pub(crate) state_to_internal_tsid: Vec<u32>,
-    #[serde(default, with = "internal_tsid_inverse_artifact_serde")]
-    pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
-    /// Ordinary tokenizers have one internal TSID per physical state, making
-    /// `internal_tsid_to_states` the exact bucket inverse of
-    /// `state_to_internal_tsid`. Current artifacts can omit that redundant
-    /// allocation and reconstruct it only for composition/debug paths.
-    #[serde(skip, default)]
-    pub(crate) deferred_internal_tsid_to_states: OnceLock<Vec<Vec<u32>>>,
-    /// Composition-preparation cache: row `t` lists original model-token IDs
-    /// which, from this component's lexer reset, complete terminal `t` exactly
-    /// at the end of the model token.  This is not part of the historical inner
-    /// `Constraint` bincode layout; artifact V13 stores it in the outer
-    /// envelope so V12 constraints remain loadable unchanged.
-    #[serde(skip, default)]
-    pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    /// Composition-time parser stack-effect templates retained from the
-    /// original compile. These are the unspecialized per-terminal DFAs used to
-    /// build parser DWAs, so a later linker can transport unchanged component
-    /// behavior instead of re-characterizing the component LR table.
-    /// Stored in the outer versioned artifact envelope for compatibility with
-    /// older inner `Constraint` bincode layouts.
-    #[serde(skip, default)]
-    pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
-    /// Composition-time symbolic parser characterizations retained from the
-    /// original compile. A later linker can append only the boundary-induced
-    /// reductions/rereductions and recompile affected terminal templates,
-    /// rather than re-solving the component's reduction closure from scratch.
-    #[serde(skip, default)]
-    pub(crate) composition_parser_characterizations_by_terminal:
-        Vec<Option<TerminalCharacterization>>,
-    /// Composition-time grammar adjacency summary. Stored in the outer
-    /// versioned artifact envelope so older inner `Constraint` layouts remain
-    /// loadable unchanged.
-    #[serde(skip, default)]
-    pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
-    /// Runtime-only inverse lexer-metadata index used by compiled-constraint
-    /// composition. Row `t` lists exactly the raw tokenizer states whose
-    /// epsilon closure has terminal `t` matched or still reachable.
-    #[serde(skip, default)]
-    pub(crate) terminal_live_states: Vec<Vec<u32>>,
-    /// Runtime-only CSR view of the exact state -> internal-TSID relation.
-    /// A physical lexer state can have one or several internal TSIDs.
-    #[serde(skip, default)]
-    pub(crate) state_internal_tsid_offsets: Vec<u32>,
-    #[serde(skip, default)]
-    pub(crate) state_internal_tsids: Vec<u32>,
-    #[serde(with = "crate::runtime::parser_backend::wire::core_programs")]
-    pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
-    /// Runtime-only compact transition view for commit template products.
-    #[serde(skip, default)]
-    pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
-    #[serde(skip, default)]
-    pub(crate) template_parser: Option<Arc<crate::runtime::parser_backend::TemplateParser>>,
-    #[serde(skip, default)]
-    pub(crate) token_classes: crate::runtime::TokenClasses,
-    #[serde(with = "token_bytes_artifact_serde")]
-    pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
-    /// Indexed immutable vocabulary used directly by runtime token lookup and
-    /// iteration. Loaded constraints can point into artifact backing; compiled
-    /// constraints own the same indexed representation alongside the source
-    /// map used by compiler/composition code.
-    #[serde(skip, default)]
-    pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
-    // Compiler-side scratch/result metadata only. No runtime or composition
-    // path reads this field; composition rebuilds the map for its result when
-    // needed. Persisting it duplicated token bytes inside every constraint.
-    #[serde(skip, default)]
-    pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
-    #[serde(skip)]
-    pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
-
-    /// Precomputed bitmask fragments for each internal token.
-    /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
-    /// for all original tokens that map to internal token `i`.
-    #[serde(skip)]
-    pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    /// Dense sliding windows of 2, 4, 8, 16 and 32 consecutive 64-token groups.
-    #[serde(skip)]
-    pub(crate) sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
-    /// Sparse OR-union for each 64-token internal word group.
-    #[serde(skip)]
-    pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense prefix-unions of 64-token internal word groups.
-    ///
-    /// `word_group_prefix_buf_masks[i]` is the OR-union of word groups
-    /// `[0, i)`. Internal-token groups are disjoint in original-token space,
-    /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
-    /// internal-word run `[start, end)`.
-    #[serde(skip)]
-    pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
-    /// Prefix sums of `word_group_sparse_masks[i].len()`.
-    #[serde(skip)]
-    pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
-    #[serde(skip)]
-    pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense output masks for quad groups whose sparse replay is more
-    /// expensive than a sequential output-buffer scan.
-    #[serde(skip)]
-    pub(crate) quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    #[serde(skip)]
-    pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense output masks for byte groups whose sparse replay is more
-    /// expensive than a sequential output-buffer scan.
-    #[serde(skip)]
-    pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    pub(crate) word_group_sparse_total_entries: usize,
-    #[serde(skip)]
-    pub(crate) word_group_sparse_max_entries: usize,
-    /// Precomputed buf output for the full internal token universe (union of all sparse word groups).
-    #[serde(skip)]
-    pub(crate) all_tokens_buf_mask: Box<[u32]>,
-    #[serde(skip)]
-    pub(crate) internal_token_dense_words: usize,
-    #[serde(skip)]
-    pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
-    /// Dense masks for wide token sets retained in a current-format packed
-    /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
-    /// packed token-set id and can therefore be rebuilt directly from the
-    /// artifact without materializing RangeSet/Weight objects.
-    #[serde(skip, default)]
-    pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
-    #[serde(skip)]
-    pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
-    #[serde(skip)]
-    pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
-    /// Final-weight token sets eligible for the direct sparse-intersection
-    /// path. Their full output masks are intentionally not materialized: the
-    /// runtime intersects them with the current dense state on every use.
-    #[serde(skip)]
-    pub(crate) direct_sparse_weight_token_sets: DirectSparseWeightTokenSetCache,
-    /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
-    /// the dense bitmap of internal tokens that terminal covers in that state.
-    #[serde(skip)]
-    pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
-    /// Exact masks lazily materialized for delayed-exclusion pairs that are not
-    /// represented by `possible_matches`. Shared across sequence states cloned
-    /// from this immutable constraint.
-    #[serde(skip, default)]
-    pub(crate) seed_terminal_dense_fallback: Arc<Mutex<SeedTerminalDenseMasks>>,
-    /// Dense bitmap of the full internal token universe.
-    #[serde(skip, default = "empty_dense_words")]
-    pub(crate) seed_universe_dense: DenseWords,
-    /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
-    /// Built from parser_dwa.states at load/build time.
-    #[serde(skip)]
-    pub(crate) dwa_fast_transitions: FastDwaTransitions,
-    /// Runtime-only readiness marker for caches derived from the final parser
-    /// DWA and final internal-token coordinate. Composition may build these at
-    /// the final parser-union boundary so generic post-link finalization does
-    /// not rescan the same parser artifact.
-    #[serde(skip, default)]
-    pub(crate) parser_runtime_caches_prebuilt: bool,
-    /// Runtime-only parser-DWA transitions with exact dense masks materialized
-    /// for the final internal tokenizer states present in each transition
-    /// weight; absent states are implicitly empty. Indexed-DAG masking uses
-    /// this table directly instead of hashing a transition tuple and lazily
-    /// rebuilding the same dense transition record at runtime.
-    #[serde(skip, default)]
-    pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
-    /// Runtime-only exact dense final weights, indexed by parser-DWA state.
-    /// This is the final-weight analogue of `indexed_dag_dense_transitions`:
-    /// absent tokenizer states are empty, and full final weights stay implicit.
-    #[serde(skip, default)]
-    pub(crate) indexed_dag_dense_finals: Vec<IndexedDagDenseTransitionMasks>,
-    /// Dense tokenizer transition lookup for commit-time byte scans.
-    #[serde(skip)]
-    pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
-    /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
-    /// Indexed by internal token ID; None for light tokens.
-    #[serde(skip)]
-    pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
-    /// Flattened contiguous array of all internal token buf mask entries.
-    /// All tokens' (word_index, or_mask) pairs concatenated in token order.
-    /// Improves cache locality vs separate Vec allocations per token.
-    #[serde(skip)]
-    pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
-    /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
-    /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
-    #[serde(skip, default)]
-    pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
-    /// Offsets into `internal_token_buf_flat` for each internal token.
-    /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
-    /// Length = n_internal + 1 (sentinel at end).
-    #[serde(skip)]
-    pub(crate) internal_token_buf_offsets: Box<[u32]>,
-    /// Pre-computed total cost (sum of entry counts) for all internal tokens.
-    /// Used to avoid O(n_internal) cost analysis in the convert phase.
-    #[serde(skip)]
-    pub(crate) total_internal_buf_cost: usize,
-    /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
-    #[serde(skip)]
-    pub(crate) heavy_token_indices: Vec<usize>,
-    /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
-    #[serde(skip)]
-    pub(crate) heavy_total_cost: usize,
-    /// Average cost per light token: (total_cost - heavy_total) / n_light.
-    /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
-    #[serde(skip)]
-    pub(crate) light_avg_cost_x256: usize,
-    /// Exact materialization cost per internal token, after heavy-token dense masks
-    /// have been chosen.
-    #[serde(skip)]
-    pub(crate) internal_token_buf_op_costs: Vec<usize>,
-    /// Exact materialization cost per 64-token internal word group.
-    #[serde(skip)]
-    pub(crate) word_group_buf_op_costs: Vec<usize>,
-    /// Optional exact quotient of positive parser-state labels used by composed
-    /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
-    /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
-    /// transitions always take precedence, followed by this label, then the
-    /// ordinary global DEFAULT. Empty for ordinary non-composed constraints.
-    #[serde(skip, default)]
-    pub(crate) parser_state_domain_labels: Vec<i32>,
-    /// Exact source expression for the globally erasable ignore terminal.
-    ///
-    /// Tokenizer source expressions are compile-time data and are normally
-    /// omitted from artifacts. Retaining this one expression lets a loaded
-    /// compiled constraint participate in later subgrammar composition without
-    /// conservatively degrading an identical global ignore into scoped skips.
-    #[serde(skip, default)]
-    pub(crate) ignore_expr: Option<Expr>,
-    /// Exact current-format artifact backing for an unchanged loaded
-    /// constraint. Runtime cache rebuilds do not alter serialized semantics,
-    /// so resave can return a single bulk copy instead of rediscovering and
-    /// re-encoding the same canonical pools.
-    #[serde(skip, default)]
-    pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
-    /// Current-format terminal source expressions can be retained as their
-    /// canonical bincode payload instead of recursively rebuilding every Expr
-    /// node during an ordinary static load. Composition materializes the list
-    /// lazily through `retained_terminal_exprs` when it actually needs source
-    /// language proofs.
-    #[serde(skip, default)]
-    pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
-    #[serde(skip, default)]
-    pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
-    /// Serialized composition-only metadata (reset-token rows, parser template
-    /// cache, symbolic characterizations, and grammar summary). Current-format
-    /// loads keep this cold section backed by the artifact and materialize it
-    /// only if the constraint is later used as a composition component.
-    #[serde(skip, default)]
-    pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
-    #[serde(skip, default)]
-    pub(crate) composition_link_metadata_materialized: bool,
-    /// Large current-format GLR rule vectors are composition metadata rather
-    /// than runtime parser data. Keep their canonical payload undecoded during
-    /// ordinary load; composition materializes it lazily through
-    /// `retained_table_rules`.
-    #[serde(skip, default)]
-    pub(crate) deferred_table_rules_blob:
-        Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
-    #[serde(skip, default)]
+    @serde(skip, default)
     pub(crate) deferred_table_rules: OnceLock<Arc<[crate::grammar::flat::Rule]>>,
 }
 
