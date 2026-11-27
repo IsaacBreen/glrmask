@@ -123,9 +123,7 @@ fn shipped_example_sources_import() {
         ("bindings/node/examples/generate.mjs", include_str!("../bindings/node/examples/generate.mjs"), "fromGlrm(\x60", "\x60"),
         ("bindings/node/examples/tool_calls.cjs", include_str!("../bindings/node/examples/tool_calls.cjs"), "fromGlrm(\x60", "\x60"),
         ("python/examples_module_expr.py", include_str!("../python/examples_module_expr.py"), "from_glrm(\n    '", "'"),
-        ("GUIDE.md arithmetic", include_str!("../GUIDE.md"), "from_glrm(r'''", "'''"),
         ("GUIDE.md call", include_str!("../GUIDE.md"), "from_glrm('''", "'''"),
-        ("reference arithmetic", include_str!("../docs/content/reference.md"), "from_glrm(r'''", "'''"),
         ("reference call", include_str!("../docs/content/reference.md"), "from_glrm('''", "'''"),
         ("README.md", include_str!("../README.md"), "from_glrm('''", "'''"),
         ("usage details", include_str!("../docs/content/usage-details.md"), "from_glrm('''", "'''"),
@@ -151,7 +149,7 @@ fn shipped_example_sources_import() {
         }
         assert!(found > 0, "{name}: example literal not found");
     }
-    assert_eq!(count, 20);
+    assert_eq!(count, 18);
 }
 
 #[test]

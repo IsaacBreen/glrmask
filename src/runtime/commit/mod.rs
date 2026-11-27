@@ -11079,13 +11079,13 @@ nt start = item item? item?;
             constraint,
             &mut fast.state,
             bytes,
-            &mut CommitBuffers::for_constraint(&constraint),
+            &mut CommitBuffers::for_constraint(constraint),
         );
         let profiled_result = commit_bytes_impl_profiled(
             constraint,
             &mut profiled.state,
             bytes,
-            &mut CommitBuffers::for_constraint(&constraint),
+            &mut CommitBuffers::for_constraint(constraint),
             None,
             true,
         );
@@ -11093,7 +11093,7 @@ nt start = item item? item?;
             constraint,
             &mut general.state,
             bytes,
-            &mut CommitBuffers::for_constraint(&constraint),
+            &mut CommitBuffers::for_constraint(constraint),
             None,
             false,
         );
