@@ -3958,53 +3958,77 @@ fn step_fixed_bytes(dfa: &DFA, mut state: u32, bytes: &[u8]) -> Option<u32> {
     Some(state)
 }
 
-/// A single identity for each runtime state. Restored projections retain the
-/// derivative cross-check: their oracle was decoded rather than constructed
-/// from the expression in this process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum RuntimeStateKey {
-    Residual(ResidualId),
-    Coordinate(BoundedCodeOracleCoordinate),
-    Checked(ResidualId, BoundedCodeOracleCoordinate),
+/// State identity and observations depend on the recognition authority, not
+/// on a per-state mode tag. The reverse entry retains only that mode's key
+/// and observation payload.
+#[derive(Debug)]
+struct StateEntry<K, V> {
+    key: K,
+    observation: V,
 }
 
-impl RuntimeStateKey {
-    fn residual(self) -> Option<ResidualId> {
-        match self {
-            Self::Residual(id) | Self::Checked(id, _) => Some(id),
-            Self::Coordinate(_) => None,
-        }
+#[derive(Debug)]
+struct StateRegistry<K, V> {
+    ids: FxHashMap<K, u32>,
+    entries: FxHashMap<u32, StateEntry<K, V>>,
+}
+
+impl<K: Copy + Eq + std::hash::Hash, V> StateRegistry<K, V> {
+    fn new(root: u32, key: K, observation: V) -> Self {
+        let mut ids = FxHashMap::default();
+        ids.insert(key, root);
+        let mut entries = FxHashMap::default();
+        entries.insert(root, StateEntry { key, observation });
+        Self { ids, entries }
+    }
+
+    fn intern(&mut self, key: K, observation: V, allocate: impl FnOnce() -> u32) -> u32 {
+        *self.ids.entry(key).or_insert_with(|| {
+            let state = allocate();
+            self.entries.insert(state, StateEntry { key, observation });
+            state
+        })
+    }
+
+    fn get(&self, state: u32) -> Option<&StateEntry<K, V>> {
+        self.entries.get(&state)
+    }
+
+    fn observation_mut(&mut self, state: u32) -> Option<&mut V> {
+        Some(&mut self.entries.get_mut(&state)?.observation)
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RuntimeStateRecord {
-    key: RuntimeStateKey,
+#[derive(Debug)]
+struct HintObservation {
     hint: BoundedCodeOracleSlot,
     future: Option<bool>,
 }
 
-impl RuntimeStateRecord {
-    fn coordinate(self) -> Option<BoundedCodeOracleCoordinate> {
-        match self.key {
-            RuntimeStateKey::Coordinate(c) | RuntimeStateKey::Checked(_, c) => Some(c),
-            RuntimeStateKey::Residual(_) => match self.hint {
-                BoundedCodeOracleSlot::Exact(c) => Some(c),
-                _ => None,
-            },
-        }
-    }
-}
-
-/// Authority is represented by the actual owned language data. A certified
-/// coordinate needs no derivative; a decoded static projection still needs
-/// the original expression as a check. Projection is a capability of a
-/// certified coordinate, not a distinct recognition semantics.
+/// The derivative is authoritative for ordinary and hinted recognition.
+/// Certified coordinates need no derivative. Restored coordinates retain
+/// the derivative check because their oracle was decoded, not constructed.
 #[derive(Debug)]
 enum RuntimeLanguage {
-    Derivative { arena: ResidualArena, hint: Option<BoundedCodeIntersectionOracle> },
-    Certified { oracle: BoundedCodeIntersectionOracle, finite_projection: bool },
-    Restored { arena: ResidualArena, oracle: BoundedCodeIntersectionOracle },
+    Derivative {
+        arena: ResidualArena,
+        states: StateRegistry<ResidualId, ()>,
+    },
+    HintedDerivative {
+        arena: ResidualArena,
+        oracle: BoundedCodeIntersectionOracle,
+        states: StateRegistry<ResidualId, HintObservation>,
+    },
+    Certified {
+        oracle: BoundedCodeIntersectionOracle,
+        finite_projection: bool,
+        states: StateRegistry<BoundedCodeOracleCoordinate, Option<bool>>,
+    },
+    Restored {
+        arena: ResidualArena,
+        oracle: BoundedCodeIntersectionOracle,
+        states: StateRegistry<(ResidualId, BoundedCodeOracleCoordinate), Option<bool>>,
+    },
 }
 
 impl RuntimeLanguage {
@@ -4022,29 +4046,82 @@ impl RuntimeLanguage {
 
     fn arena(&self) -> Option<&ResidualArena> {
         match self {
-            Self::Derivative { arena, .. } | Self::Restored { arena, .. } => Some(arena),
+            Self::Derivative { arena, .. } | Self::HintedDerivative { arena, .. }
+                | Self::Restored { arena, .. } => Some(arena),
             Self::Certified { .. } => None,
         }
     }
 
     fn arena_mut(&mut self) -> Option<&mut ResidualArena> {
         match self {
-            Self::Derivative { arena, .. } | Self::Restored { arena, .. } => Some(arena),
+            Self::Derivative { arena, .. } | Self::HintedDerivative { arena, .. }
+                | Self::Restored { arena, .. } => Some(arena),
             Self::Certified { .. } => None,
         }
     }
 
     fn oracle(&self) -> Option<&BoundedCodeIntersectionOracle> {
         match self {
-            Self::Derivative { hint, .. } => hint.as_ref(),
-            Self::Certified { oracle, .. } | Self::Restored { oracle, .. } => Some(oracle),
+            Self::Derivative { .. } => None,
+            Self::HintedDerivative { oracle, .. } | Self::Certified { oracle, .. }
+                | Self::Restored { oracle, .. } => Some(oracle),
         }
     }
 
     fn oracle_mut(&mut self) -> Option<&mut BoundedCodeIntersectionOracle> {
         match self {
-            Self::Derivative { hint, .. } => hint.as_mut(),
-            Self::Certified { oracle, .. } | Self::Restored { oracle, .. } => Some(oracle),
+            Self::Derivative { .. } => None,
+            Self::HintedDerivative { oracle, .. } | Self::Certified { oracle, .. }
+                | Self::Restored { oracle, .. } => Some(oracle),
+        }
+    }
+
+    fn residual(&self, state: u32) -> Option<ResidualId> {
+        match self {
+            Self::Derivative { states, .. } => Some(states.get(state)?.key),
+            Self::HintedDerivative { states, .. } => Some(states.get(state)?.key),
+            Self::Restored { states, .. } => Some(states.get(state)?.key.0),
+            Self::Certified { .. } => None,
+        }
+    }
+
+    fn coordinate(&self, state: u32) -> Option<BoundedCodeOracleCoordinate> {
+        match self {
+            Self::Derivative { .. } => None,
+            Self::HintedDerivative { states, .. } => match states.get(state)?.observation.hint {
+                BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
+                _ => None,
+            },
+            Self::Certified { states, .. } => Some(states.get(state)?.key),
+            Self::Restored { states, .. } => Some(states.get(state)?.key.1),
+        }
+    }
+
+    fn cached_future(&self, state: u32) -> Option<bool> {
+        match self {
+            Self::Derivative { .. } => None,
+            Self::HintedDerivative { states, .. } => states.get(state)?.observation.future,
+            Self::Certified { states, .. } => states.get(state)?.observation,
+            Self::Restored { states, .. } => states.get(state)?.observation,
+        }
+    }
+
+    fn set_future(&mut self, state: u32, future: bool) -> Option<()> {
+        match self {
+            Self::Derivative { .. } => return None,
+            Self::HintedDerivative { states, .. } => states.observation_mut(state)?.future = Some(future),
+            Self::Certified { states, .. } => *states.observation_mut(state)? = Some(future),
+            Self::Restored { states, .. } => *states.observation_mut(state)? = Some(future),
+        }
+        Some(())
+    }
+
+    fn state_count(&self) -> usize {
+        match self {
+            Self::Derivative { states, .. } => states.entries.len(),
+            Self::HintedDerivative { states, .. } => states.entries.len(),
+            Self::Certified { states, .. } => states.entries.len(),
+            Self::Restored { states, .. } => states.entries.len(),
         }
     }
 }
@@ -4052,8 +4129,6 @@ impl RuntimeLanguage {
 #[derive(Debug)]
 struct ResidualRuntimeStore {
     language: RuntimeLanguage,
-    state_ids: FxHashMap<RuntimeStateKey, u32>,
-    states: FxHashMap<u32, RuntimeStateRecord>,
     oracle_byte_to_class: Option<Arc<[u8; 256]>>,
     oracle_language_finite: Option<bool>,
     parser_transparent_byte_family_cache: FxHashSet<(u32, U8Set, u32)>,
@@ -4149,24 +4224,13 @@ pub(super) struct VirtualResidualRuntime {
 pub(super) struct FiniteMaskProjectionLanguageKey(Arc<BoundedCodeLanguage>);
 
 impl VirtualResidualRuntime {
-    fn intern_state_locked(
-        &self,
-        store: &mut ResidualRuntimeStore,
-        key: RuntimeStateKey,
-    ) -> u32 {
-        if let Some(&state) = store.state_ids.get(&key) {
-            return state;
-        }
+    fn allocate_virtual_state(&self) -> u32 {
         let state = self.state_allocator.allocate().expect(
             "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
         );
         self.state_owners
             .register_virtual(state, self.runtime_index)
             .expect("residual virtual state owner index must follow shared allocator");
-        store.state_ids.insert(key, state);
-        store.states.insert(state, RuntimeStateRecord {
-            key, hint: BoundedCodeOracleSlot::Unknown, future: None,
-        });
         state
     }
 
@@ -4175,7 +4239,10 @@ impl VirtualResidualRuntime {
         store: &mut ResidualRuntimeStore,
         coordinate: BoundedCodeOracleCoordinate,
     ) -> Option<u32> {
-        Some(self.intern_state_locked(store, RuntimeStateKey::Coordinate(coordinate)))
+        let RuntimeLanguage::Certified { states, .. } = &mut store.language else {
+            return None;
+        };
+        Some(states.intern(coordinate, None, || self.allocate_virtual_state()))
     }
 
     fn coordinate_future_locked(
@@ -4183,7 +4250,7 @@ impl VirtualResidualRuntime {
         state: u32,
         coordinate: BoundedCodeOracleCoordinate,
     ) -> Option<bool> {
-        if let Some(future) = store.states.get(&state)?.future {
+        if let Some(future) = store.language.cached_future(state) {
             return Some(future);
         }
         let boundary_future = store
@@ -4195,7 +4262,7 @@ impl VirtualResidualRuntime {
             .as_deref()
             .and_then(|rows| oracle.has_future_with_boundary_table(coordinate, rows))
             .unwrap_or_else(|| oracle.has_future(coordinate));
-        store.states.get_mut(&state)?.future = Some(future);
+        store.language.set_future(state, future)?;
         Some(future)
     }
 
@@ -4631,28 +4698,32 @@ impl VirtualResidualRuntime {
         // populate serialized proxy metadata.
         let root_live = arena.conservative_has_future(root);
         let language = match (preserve_oracle_coordinate, restored, coordinate_runtime, liveness_oracle) {
-            (true, true, _, Some(oracle)) => RuntimeLanguage::Restored { arena, oracle },
-            (true, false, _, Some(oracle)) => RuntimeLanguage::Certified { oracle, finite_projection: true },
+            (true, true, _, Some(oracle)) => RuntimeLanguage::Restored {
+                arena, oracle,
+                states: StateRegistry::new(root_state, (root, root_oracle_coordinate?), None),
+            },
+            (true, false, _, Some(oracle)) => RuntimeLanguage::Certified {
+                oracle, finite_projection: true,
+                states: StateRegistry::new(root_state, root_oracle_coordinate?, None),
+            },
             (true, _, _, None) => return None,
-            (false, _, true, Some(oracle)) => RuntimeLanguage::Certified { oracle, finite_projection: false },
-            (_, _, _, hint) => RuntimeLanguage::Derivative { arena, hint },
+            (false, _, true, Some(oracle)) => RuntimeLanguage::Certified {
+                oracle, finite_projection: false,
+                states: StateRegistry::new(root_state, root_oracle_coordinate?, None),
+            },
+            (_, _, _, Some(oracle)) => RuntimeLanguage::HintedDerivative {
+                arena, oracle,
+                states: StateRegistry::new(root_state, root, HintObservation {
+                    hint: root_oracle_coordinate.map_or(BoundedCodeOracleSlot::Unknown, BoundedCodeOracleSlot::Exact),
+                    future: None,
+                }),
+            },
+            (_, _, _, None) => RuntimeLanguage::Derivative {
+                arena, states: StateRegistry::new(root_state, root, ()),
+            },
         };
         let direct_coordinate_stepper = language.direct_dynamic()
             .then(|| language.oracle().and_then(DirectCoordinateStepper::new)).flatten();
-        let key = match &language {
-            RuntimeLanguage::Derivative { .. } => RuntimeStateKey::Residual(root),
-            RuntimeLanguage::Restored { .. } => RuntimeStateKey::Checked(root, root_oracle_coordinate?),
-            RuntimeLanguage::Certified { .. } => RuntimeStateKey::Coordinate(root_oracle_coordinate?),
-        };
-        let record = RuntimeStateRecord {
-            key,
-            hint: root_oracle_coordinate.map_or(BoundedCodeOracleSlot::Unknown, BoundedCodeOracleSlot::Exact),
-            future: None,
-        };
-        let mut state_ids = FxHashMap::default();
-        state_ids.insert(key, root_state);
-        let mut states = FxHashMap::default();
-        states.insert(root_state, record);
         let mut accepting = BitSet::new(num_terminals as usize);
         accepting.set(terminal as usize);
         let live = accepting.clone();
@@ -4676,8 +4747,6 @@ impl VirtualResidualRuntime {
             accepting_list: vec![terminal].into_boxed_slice(),
             store: Mutex::new(ResidualRuntimeStore {
                 language,
-                state_ids,
-                states,
                 oracle_byte_to_class,
                 oracle_language_finite,
                 parser_transparent_byte_family_cache: FxHashSet::default(),
@@ -4701,7 +4770,7 @@ impl VirtualResidualRuntime {
     }
 
     fn residual_for_state(store: &ResidualRuntimeStore, state: u32) -> Option<ResidualId> {
-        store.states.get(&state)?.key.residual()
+        store.language.residual(state)
     }
 
     #[inline]
@@ -4710,7 +4779,7 @@ impl VirtualResidualRuntime {
         store: &ResidualRuntimeStore,
         state: u32,
     ) -> Option<BoundedCodeOracleCoordinate> {
-        store.states.get(&state)?.coordinate()
+        store.language.coordinate(state)
     }
 
     pub(super) fn handles_state(&self, state: u32) -> bool {
@@ -4728,7 +4797,7 @@ impl VirtualResidualRuntime {
         residual: ResidualId,
         byte: u8,
     ) -> Option<u32> {
-        let source_coordinate = store.states.get(&state)?.coordinate();
+        let source_coordinate = store.language.coordinate(state);
         let arena = store.language.arena_mut()?;
         let target = arena.step(residual, byte)?;
         if arena.is_empty(target) {
@@ -4737,35 +4806,42 @@ impl VirtualResidualRuntime {
         let target_coordinate = source_coordinate.and_then(|source| {
             store.language.oracle()?.step_coordinate(source, byte)
         });
-        if matches!(store.language, RuntimeLanguage::Restored { .. }) {
-            let coordinate = target_coordinate.expect(
-                "restored coordinate-preserving runtime lost its exact coordinate",
-            );
-            return Some(self.intern_state_locked(store, RuntimeStateKey::Checked(target, coordinate)));
-        }
-
-        let state = self.intern_state_locked(store, RuntimeStateKey::Residual(target));
-        if store.language.oracle().is_some() {
-            let next = target_coordinate.map_or(
-                BoundedCodeOracleSlot::Ambiguous, BoundedCodeOracleSlot::Exact,
-            );
-            let record = store.states.get_mut(&state)?;
-            let previous = record.hint;
-            record.hint = match (previous, next) {
-                (BoundedCodeOracleSlot::Unknown, next) => next,
-                (BoundedCodeOracleSlot::Exact(a), BoundedCodeOracleSlot::Exact(b)) if a == b => previous,
-                _ => BoundedCodeOracleSlot::Ambiguous,
-            };
-            if record.hint != previous {
-                record.future = None;
+        match &mut store.language {
+            RuntimeLanguage::Restored { states, .. } => {
+                let coordinate = target_coordinate.expect(
+                    "restored coordinate-preserving runtime lost its exact coordinate",
+                );
+                Some(states.intern((target, coordinate), None, || self.allocate_virtual_state()))
             }
+            RuntimeLanguage::Derivative { states, .. } => {
+                Some(states.intern(target, (), || self.allocate_virtual_state()))
+            }
+            RuntimeLanguage::HintedDerivative { states, .. } => {
+                let state = states.intern(target, HintObservation {
+                    hint: BoundedCodeOracleSlot::Unknown, future: None,
+                }, || self.allocate_virtual_state());
+                let next = target_coordinate.map_or(
+                    BoundedCodeOracleSlot::Ambiguous, BoundedCodeOracleSlot::Exact,
+                );
+                let record = states.observation_mut(state)?;
+                let previous = record.hint;
+                record.hint = match (previous, next) {
+                    (BoundedCodeOracleSlot::Unknown, next) => next,
+                    (BoundedCodeOracleSlot::Exact(a), BoundedCodeOracleSlot::Exact(b)) if a == b => previous,
+                    _ => BoundedCodeOracleSlot::Ambiguous,
+                };
+                if record.hint != previous {
+                    record.future = None;
+                }
+                Some(state)
+            }
+            RuntimeLanguage::Certified { .. } => None,
         }
-        Some(state)
     }
 
     fn step_locked(&self, store: &mut ResidualRuntimeStore, state: u32, byte: u8) -> Option<u32> {
         if store.language.coordinate_only() {
-            let source = store.states.get(&state)?.coordinate()?;
+            let source = store.language.coordinate(state)?;
             let target = store.language.oracle()?.step_coordinate(source, byte)?;
             return self.intern_oracle_coordinate_locked(store, target);
         }
@@ -4788,7 +4864,7 @@ impl VirtualResidualRuntime {
             return None;
         }
         let store = self.store.lock().ok()?;
-        let coordinate = store.states.get(&state)?.coordinate()?;
+        let coordinate = store.language.coordinate(state)?;
         Some(VirtualResidualDirectCoordinate {
             runtime_index: self.runtime_index,
             coordinate,
@@ -5013,14 +5089,14 @@ impl VirtualResidualRuntime {
         store: &mut ResidualRuntimeStore,
         state: u32,
     ) -> Option<bool> {
-        let coordinate = store.states.get(&state)?.coordinate()?;
+        let coordinate = store.language.coordinate(state)?;
         Self::coordinate_future_locked(store, state, coordinate)
     }
 
     fn observation(&self, state: u32) -> Option<(bool, bool)> {
         let mut store = self.store.lock().unwrap();
         if store.language.coordinate_only() {
-            let coordinate = store.states.get(&state)?.coordinate()?;
+            let coordinate = store.language.coordinate(state)?;
             let accepting = state != self.root_state
                 && store
                     .language.oracle()?
@@ -5065,7 +5141,7 @@ impl VirtualResidualRuntime {
     fn accepting_now(&self, state: u32) -> Option<bool> {
         let store = self.store.lock().unwrap();
         if store.language.coordinate_only() {
-            let coordinate = store.states.get(&state)?.coordinate()?;
+            let coordinate = store.language.coordinate(state)?;
             return Some(
                 state != self.root_state
                     && store
@@ -5186,7 +5262,7 @@ impl VirtualResidualRuntime {
     pub(super) fn exact_has_future(&self, state: u32) -> Result<Option<bool>, String> {
         let mut store = self.store.lock().unwrap();
         if store.language.coordinate_only() {
-            let Some(coordinate) = store.states.get(&state).and_then(|record| record.coordinate()) else {
+            let Some(coordinate) = store.language.coordinate(state) else {
                 return Ok(None);
             };
             return Ok(Self::coordinate_future_locked(&mut store, state, coordinate));
@@ -6015,7 +6091,7 @@ impl VirtualResidualRuntime {
         }
         let mut store = self.store.lock().unwrap();
         if store.language.coordinate_only() {
-            let coordinate = store.states.get(&state)?.coordinate()?;
+            let coordinate = store.language.coordinate(state)?;
             let mut out = Vec::new();
             for byte in 0u16..=255 {
                 let Some(target_coordinate) = store
@@ -6284,7 +6360,7 @@ impl VirtualResidualRuntime {
     }
 
     pub(super) fn interned_state_count(&self) -> usize {
-        self.store.lock().unwrap().states.len().saturating_sub(1)
+        self.store.lock().unwrap().language.state_count().saturating_sub(1)
     }
 }
 
@@ -8174,17 +8250,19 @@ mod tests {
 
         {
             let mut store = runtime.store.lock().unwrap();
+            let RuntimeLanguage::HintedDerivative { states, .. } = &mut store.language else { panic!("expected hinted derivative") };
             assert!(matches!(
-                store.states[&after_one].hint,
+                states.entries[&after_one].observation.hint,
                 BoundedCodeOracleSlot::Exact(_)
             ));
-            assert_eq!(store.states[&after_one].future, Some(true));
-            store.states.get_mut(&body_boundary).unwrap().hint = BoundedCodeOracleSlot::Ambiguous;
+            assert_eq!(states.entries[&after_one].observation.future, Some(true));
+            states.observation_mut(body_boundary).unwrap().hint = BoundedCodeOracleSlot::Ambiguous;
         }
         assert_eq!(runtime.step(body_boundary, b'a'), Some(after_one));
         let store = runtime.store.lock().unwrap();
-        assert_eq!(store.states[&after_one].hint, BoundedCodeOracleSlot::Ambiguous);
-        assert_eq!(store.states[&after_one].future, None);
+        let RuntimeLanguage::HintedDerivative { states, .. } = &store.language else { panic!("expected hinted derivative") };
+        assert_eq!(states.entries[&after_one].observation.hint, BoundedCodeOracleSlot::Ambiguous);
+        assert_eq!(states.entries[&after_one].observation.future, None);
     }
 
     #[test]
