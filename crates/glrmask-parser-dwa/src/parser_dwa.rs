@@ -3852,144 +3852,75 @@ impl CheckedNativeTopology {
     }
 }
 
+struct FiniteCancellationGraph<'a>(&'a [FastBoundaryNwaState]);
+
+impl crate::cancellation::CancellationGraph<FastBoundaryWeightId> for FiniteCancellationGraph<'_> {
+    fn len(&self) -> usize { self.0.len() }
+
+    fn pushes(&self, source: u32, mut visit: impl FnMut(u32, i32, &FastBoundaryWeightId)) {
+        for (label, branches) in &self.0[source as usize].transitions {
+            if is_negative_label(*label) {
+                let positive = negative_to_positive_label(*label);
+                for (target, weight) in branches {
+                    visit(*target, positive, weight);
+                }
+            }
+        }
+    }
+
+    fn epsilons(&self, source: u32, mut visit: impl FnMut(u32, &FastBoundaryWeightId)) {
+        for (target, weight) in &self.0[source as usize].epsilons {
+            visit(*target, weight);
+        }
+    }
+
+    fn reads(&self, source: u32, label: i32, mut visit: impl FnMut(u32, &FastBoundaryWeightId)) {
+        for (candidate, branches) in &self.0[source as usize].transitions {
+            if *candidate == label || *candidate == DEFAULT_LABEL {
+                for (target, weight) in branches {
+                    visit(*target, weight);
+                }
+            }
+        }
+    }
+}
+
+impl crate::cancellation::CancellationWeights for FastBoundaryWeightInterner {
+    type Value = FastBoundaryWeightId;
+
+    fn is_empty(value: &FastBoundaryWeightId) -> bool { *value == 0 }
+    fn identity(value: &FastBoundaryWeightId) -> usize { *value as usize }
+    fn intersection(&mut self, left: &FastBoundaryWeightId, right: &FastBoundaryWeightId) -> FastBoundaryWeightId {
+        FastBoundaryWeightInterner::intersection(self, *left, *right)
+    }
+    fn union(&mut self, left: &FastBoundaryWeightId, right: &FastBoundaryWeightId) -> FastBoundaryWeightId {
+        FastBoundaryWeightInterner::union(self, *left, *right)
+    }
+    fn begin_batch(&mut self, pops: usize, states: usize) -> bool {
+        pops & 255 != 0 || self.allow_work(256, states, 0)
+    }
+    fn complete(&mut self) -> bool { !self.failed }
+}
+
 fn fast_boundary_cancellations_worklist(
     states: &[FastBoundaryNwaState],
     interner: &mut FastBoundaryWeightInterner,
 ) -> Option<NativeCancellationResult> {
-    let n = states.len();
-    let mut query_weights = vec![FastBoundaryQueryRow::default(); n];
-    let mut derived = vec![FastBoundaryDerivedRow::default(); n];
-    let mut worklist = VecDeque::<(u32, u32, i32)>::new();
-    let cancellation_started = Instant::now();
-    let mut worklist_pops = 0usize;
-
-    let queue_query = |query_weights: &mut [FastBoundaryQueryRow],
-                       worklist: &mut VecDeque<(u32, u32, i32)>,
-                       current: u32,
-                       source: u32,
-                       label: i32,
-                       add: FastBoundaryWeightId,
-                       interner: &mut FastBoundaryWeightInterner| {
-        if (current as usize) < query_weights.len()
-            && query_weights[current as usize].merge((source, label), add, interner)
-        {
-            worklist.push_back((current, source, label));
-        }
-    };
-
-    for source in 0..n as u32 {
-        for (label, branches) in &states[source as usize].transitions {
-            if !is_negative_label(*label) {
-                continue;
-            }
-            let positive = negative_to_positive_label(*label);
-            for (target, weight) in branches {
-                if *weight != 0 {
-                    queue_query(
-                        &mut query_weights,
-                        &mut worklist,
-                        *target,
-                        source,
-                        positive,
-                        *weight,
-                        interner,
-                    );
-                }
-            }
-        }
-    }
-
-    while let Some((current, source, positive_label)) = worklist.pop_front() {
-        // The existing pop counter gives a bounded cancellation-work budget
-        // without a full policy check on every inner query. At most 255 query
-        // pops can occur after a limit is crossed; nothing is published until
-        // the final exhaustion check. Mask-word caps still apply per insertion.
-        if worklist_pops & 255 == 0 && !interner.allow_work(256, states.len(), 0) { return None; }
-        worklist_pops += 1;
-        if current as usize >= n || source as usize >= n {
-            continue;
-        }
-        let query = query_weights[current as usize].get(&(source, positive_label));
-        if query == 0 {
-            continue;
-        }
-
-        let mut local_updates = Vec::with_capacity(derived[current as usize].len());
-        derived[current as usize].for_each(|target, edge_weight| {
-            local_updates.push((target, interner.intersection(query, edge_weight)));
-        });
-        for (target, propagated) in local_updates {
-            queue_query(
-                &mut query_weights,
-                &mut worklist,
-                target,
-                source,
-                positive_label,
-                propagated,
-                interner,
-            );
-        }
-
-        for (label, branches) in &states[current as usize].transitions {
-            if *label != positive_label && *label != DEFAULT_LABEL {
-                continue;
-            }
-            for (target, edge_weight) in branches {
-                if *target as usize >= n {
-                    continue;
-                }
-                let add = interner.intersection(query, *edge_weight);
-                if add == 0
-                    || !derived[source as usize].merge(*target, add, interner)
-                {
-                    continue;
-                }
-                let derived_weight = derived[source as usize].get(*target);
-                let mut upstream_updates = Vec::with_capacity(query_weights[source as usize].len());
-                query_weights[source as usize].for_each(|(upstream_source, upstream_label), upstream_weight| {
-                    let propagated = interner.intersection(upstream_weight, derived_weight);
-                    if propagated != 0 {
-                        upstream_updates.push((upstream_source, upstream_label, propagated));
-                    }
-                });
-                for (upstream_source, upstream_label, propagated) in upstream_updates {
-                    queue_query(
-                        &mut query_weights,
-                        &mut worklist,
-                        *target,
-                        upstream_source,
-                        upstream_label,
-                        propagated,
-                        interner,
-                    );
-                }
-            }
-        }
-
-        for (target, edge_weight) in &states[current as usize].epsilons {
-            if *target as usize >= n {
-                continue;
-            }
-            let propagated = interner.intersection(query, *edge_weight);
-            queue_query(
-                &mut query_weights,
-                &mut worklist,
-                *target,
-                source,
-                positive_label,
-                propagated,
-                interner,
-            );
-        }
-    }
-
-    let cancellation_ms = elapsed_ms(cancellation_started);
-    let query_entries = query_weights.iter().map(FastBoundaryQueryRow::len).sum::<usize>();
-    let max_query_entries = query_weights.iter().map(FastBoundaryQueryRow::len).max().unwrap_or(0);
-    let derived_entries = derived.iter().map(FastBoundaryDerivedRow::len).sum::<usize>();
+    let started = Instant::now();
+    let (derived, stats) = crate::cancellation::solve(
+        &FiniteCancellationGraph(states), 0..states.len() as u32, None, interner, false,
+    )?;
+    let derived_entries = derived.iter().map(FastBoundaryDerivedRow::len).sum();
     let max_derived_entries = derived.iter().map(FastBoundaryDerivedRow::len).max().unwrap_or(0);
-    Some(NativeCancellationResult { derived, worklist_pops, query_entries, max_query_entries,
-        derived_entries, max_derived_entries, cancellation_ms })
+    Some(NativeCancellationResult {
+        derived,
+        worklist_pops: stats.pops,
+        query_entries: stats.query_entries,
+        max_query_entries: stats.max_query_entries,
+        derived_entries,
+        max_derived_entries,
+        cancellation_ms: elapsed_ms(started),
+    })
 }
 
 #[path = "finite_cancellation.rs"]

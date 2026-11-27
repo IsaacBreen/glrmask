@@ -208,236 +208,57 @@ fn union_guarded_pending(
     }
 }
 
-fn record_query_weight(
-    query_weights: &mut QueryWeights,
-    state: u32,
-    query_key: QueryKey,
-    add: Weight,
-) -> bool {
-    query_weights[state as usize].merge(query_key, add)
-}
-
-fn queue_query_weight(
-    query_weights: &mut QueryWeights,
-    worklist: &mut VecDeque<CancellationTask>,
-    state: u32,
-    source_state: u32,
-    positive_label: i32,
-    add: Weight,
-) {
-    if record_query_weight(query_weights, state, (source_state, positive_label), add) {
-        worklist.push_back((state, source_state, positive_label));
-    }
-}
-
-#[derive(Debug)]
-struct CancellationQueryGroup {
-    current_state: u32,
-    positive_label: i32,
-    weight: Weight,
-    sources: SmallVec<[u32; 8]>,
-}
-
-fn build_cancellation_query_groups(
-    worklist: &mut VecDeque<CancellationTask>,
-    query_weights: &QueryWeights,
-) -> Vec<CancellationQueryGroup> {
-    let mut group_index = FxHashMap::<(u32, i32, usize), usize>::default();
-    let mut groups = Vec::<CancellationQueryGroup>::new();
-
-    while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
-        let Some(weight) = query_weights[current_state as usize]
-            .get(&(source_state, positive_label))
-            .cloned()
-        else {
-            continue;
-        };
-        let key = (current_state, positive_label, weight.ptr_key());
-        if let Some(&index) = group_index.get(&key) {
-            groups[index].sources.push(source_state);
-        } else {
-            let index = groups.len();
-            group_index.insert(key, index);
-            groups.push(CancellationQueryGroup {
-                current_state,
-                positive_label,
-                weight,
-                sources: smallvec::smallvec![source_state],
-            });
-        }
-    }
-    for group in &mut groups {
-        group.sources.sort_unstable();
-        group.sources.dedup();
-    }
-    groups
-}
-
-fn queue_group_propagation(
-    query_weights: &mut QueryWeights,
-    worklist: &mut VecDeque<CancellationTask>,
-    sources: &[u32],
-    target_state: u32,
-    positive_label: i32,
-    propagated: &Weight,
-) {
-    if propagated.is_empty() {
-        return;
-    }
-    for &source_state in sources {
-        queue_query_weight(
-            query_weights,
-            worklist,
-            target_state,
-            source_state,
-            positive_label,
-            propagated.clone(),
-        );
-    }
-}
-
-/// Q(current, source, read) describes an unmatched push at source, followed
-/// by epsilon and already-balanced excursions to current. Closing Q with a
-/// matching read grows the balanced relation D(source, target). Whenever D
-/// grows, every query waiting at its source must also traverse that edge.
-/// These are the same monotone equations for grouped and singleton work.
-struct CancellationSolver<'a> {
+struct GeneralCancellationGraph<'a> {
     nwa: &'a NWA,
-    foreign: Option<&'a DerivedEpsilons>,
     classes: Option<&'a crate::pop_classes::PopLabelClasses>,
-    queries: QueryWeights,
-    queue: VecDeque<CancellationTask>,
-    derived: DerivedEpsilons,
-    products: ScopedWeightOpCache,
 }
 
-impl<'a> CancellationSolver<'a> {
-    fn new(
-        nwa: &'a NWA,
-        foreign: Option<&'a DerivedEpsilons>,
-        classes: Option<&'a crate::pop_classes::PopLabelClasses>,
-    ) -> Self {
-        let n = nwa.states().len();
-        Self {
-            nwa, foreign, classes, queries: vec![SmallQueryWeights::Empty; n],
-            queue: VecDeque::new(), derived: vec![SmallTargetWeights::Empty; n],
-            products: ScopedWeightOpCache::default(),
-        }
+impl crate::cancellation::CancellationGraph<Weight> for GeneralCancellationGraph<'_> {
+    fn len(&self) -> usize {
+        self.nwa.states().len()
     }
 
-    fn seed(&mut self, sources: impl IntoIterator<Item = u32>) {
-        let nwa = self.nwa;
-        for source in sources {
-            let Some(state) = nwa.states().get(source as usize) else { continue; };
-            for (&label, branches) in state.transitions.range(..0) {
-                let positive = negative_to_positive_label(label);
-                for (target, weight) in branches {
-                    if (*target as usize) < nwa.states().len() {
-                        queue_query_weight(&mut self.queries, &mut self.queue,
-                            *target, source, positive, weight.clone());
-                    }
-                }
+    fn pushes(&self, source: u32, mut visit: impl FnMut(u32, i32, &Weight)) {
+        for (&label, branches) in self.nwa.states()[source as usize].transitions.range(..0) {
+            let positive = negative_to_positive_label(label);
+            for (target, weight) in branches {
+                visit(*target, positive, weight);
             }
         }
     }
 
-    fn extend_balanced(&mut self, source: u32, target: u32, weight: &Weight) {
-        if weight.is_empty() || !self.derived[source as usize].merge(target, weight.clone()) {
-            return;
-        }
-        let balanced = self.derived[source as usize].get(target).unwrap();
-        let queries = &mut self.queries;
-        let queue = &mut self.queue;
-        let products = &mut self.products;
-        // Query storage can alias its update destination on cyclic graphs.
-        // Collect the upstream products before mutating any query row.
-        let mut updates = SmallVec::<[(u32, i32, Weight); 4]>::new();
-        queries[source as usize].for_each(|(upstream, read), query| {
-            let propagated = products.intersection(query, balanced);
-            if !propagated.is_empty() {
-                updates.push((upstream, read, propagated));
-            }
-        });
-        for (upstream, read, propagated) in updates {
-            queue_query_weight(queries, queue, target, upstream, read, propagated);
+    fn epsilons(&self, source: u32, mut visit: impl FnMut(u32, &Weight)) {
+        for (target, weight) in &self.nwa.states()[source as usize].epsilons {
+            visit(*target, weight);
         }
     }
 
-    fn process(&mut self, group: CancellationQueryGroup) {
-        let current = group.current_state as usize;
-        let nwa = self.nwa;
-        let classes = self.classes;
-        let state = &nwa.states()[current];
-        let label = group.positive_label;
-        let n = nwa.states().len();
-        let local = &self.derived[current];
-        let foreign = self.foreign.map(|rows| &rows[current]);
-        let products = &mut self.products;
-        let queries = &mut self.queries;
-        let queue = &mut self.queue;
-        let mut propagate = |target: u32, weight: &Weight| {
-            if target as usize >= n { return; }
-            let value = products.intersection(&group.weight, weight);
-            queue_group_propagation(queries, queue, &group.sources, target, label, &value);
-        };
-        local.for_each(&mut propagate);
-        if let Some(foreign) = foreign {
-            foreign.for_each(&mut propagate);
-        }
-        for (target, weight) in &state.epsilons {
-            propagate(*target, weight);
-        }
-
-        // Concrete reads, row-local complement classes and ordinary
-        // DEFAULT reads are additive witnesses to the same cancellation.
-        let reads = [state.transitions.get(&label), state.transitions.get(&DEFAULT_LABEL)]
+    fn reads(&self, source: u32, label: i32, mut visit: impl FnMut(u32, &Weight)) {
+        let state = &self.nwa.states()[source as usize];
+        for (target, weight) in [state.transitions.get(&label), state.transitions.get(&DEFAULT_LABEL)]
             .into_iter().flatten().flatten()
-            .chain(classes.into_iter().flat_map(|classes| classes.matching_targets(state, label as u32)));
-        for (target, weight) in reads {
-            if *target as usize >= n { continue; }
-            let value = self.products.intersection(&group.weight, weight);
-            if !value.is_empty() {
-                for &source in &group.sources {
-                    self.extend_balanced(source, *target, &value);
-                }
-            }
+            .chain(self.classes.into_iter().flat_map(|classes| classes.matching_targets(state, label as u32)))
+        {
+            visit(*target, weight);
         }
     }
+}
 
-    fn run(mut self, grouped: bool) -> Vec<(u32, u32, Weight)> {
-        let started = std::time::Instant::now();
-        let mut groups = 0usize;
-        let mut queries = 0usize;
-        while !self.queue.is_empty() {
-            let batch = if grouped {
-                SmallVec::<[CancellationQueryGroup; 1]>::from_vec(
-                    build_cancellation_query_groups(&mut self.queue, &self.queries))
-            } else {
-                let (current_state, source, positive_label) = self.queue.pop_front().unwrap();
-                let Some(weight) = self.queries[current_state as usize]
-                    .get(&(source, positive_label)).cloned() else { continue; };
-                smallvec::smallvec![CancellationQueryGroup {
-                    current_state, positive_label, weight, sources: smallvec::smallvec![source],
-                }]
-            };
-            for group in batch {
-                groups += 1;
-                queries += group.sources.len();
-                self.process(group);
-            }
-            // Weak operand identities in ScopedWeightOpCache also prevent
-            // stale pointer-key hits when a growing query replaces a weight.
-            // Bound retained cache entries on very large cyclic worklists.
-            if self.products.intersection_entry_count() > 262_144 {
-                self.products = ScopedWeightOpCache::default();
-            }
+impl crate::cancellation::CancellationWeights for ScopedWeightOpCache {
+    type Value = Weight;
+
+    fn is_empty(value: &Weight) -> bool { value.is_empty() }
+    fn identity(value: &Weight) -> usize { value.ptr_key() }
+    fn intersection(&mut self, left: &Weight, right: &Weight) -> Weight {
+        ScopedWeightOpCache::intersection(self, left, right)
+    }
+    fn union(&mut self, left: &Weight, right: &Weight) -> Weight {
+        ScopedWeightOpCache::union(self, left, right)
+    }
+    fn finish_batch(&mut self) {
+        if self.intersection_entry_count() > 262_144 {
+            *self = Self::default();
         }
-        let result = collect_non_empty_derived_epsilons(self.derived);
-        if std::env::var_os("GLRMASK_PROFILE_CANCELLATION_DETAIL").is_some() {
-            eprintln!("[glrmask/profile][cancellation] groups={} source_queries={} derived_edges={} grouped={} total_ms={:.3}",
-                groups, queries, result.len(), grouped, started.elapsed().as_secs_f64() * 1000.0);
-        }
-        result
     }
 }
 
@@ -448,9 +269,18 @@ fn compute_cancellations_sources(
     classes: Option<&crate::pop_classes::PopLabelClasses>,
     grouped: bool,
 ) -> Vec<(u32, u32, Weight)> {
-    let mut solver = CancellationSolver::new(nwa, foreign, classes);
-    solver.seed(sources);
-    solver.run(grouped)
+    let started = std::time::Instant::now();
+    let graph = GeneralCancellationGraph { nwa, classes };
+    let (derived, stats) = crate::cancellation::solve(
+        &graph, sources, foreign.map(Vec::as_slice),
+        &mut ScopedWeightOpCache::default(), grouped,
+    ).expect("unbounded weight algebra cannot decline");
+    let result = collect_non_empty_derived_epsilons(derived);
+    if std::env::var_os("GLRMASK_PROFILE_CANCELLATION_DETAIL").is_some() {
+        eprintln!("[glrmask/profile][cancellation] groups={} source_queries={} derived_edges={} grouped={} total_ms={:.3}",
+            stats.groups, stats.source_queries, result.len(), grouped, started.elapsed().as_secs_f64() * 1000.0);
+    }
+    result
 }
 
 fn compute_cancellations_range_grouped_inner(
