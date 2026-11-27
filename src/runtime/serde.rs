@@ -39,13 +39,13 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 42;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 45;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 43;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 46;
 /// External-vocabulary envelope for a table-free constraint that is not a
 /// template parser: the parser DWA is serialized as its own section.
-const EXTERNAL_DWA_CONSTRAINT_VERSION: u16 = 44;
+const EXTERNAL_DWA_CONSTRAINT_VERSION: u16 = 47;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;

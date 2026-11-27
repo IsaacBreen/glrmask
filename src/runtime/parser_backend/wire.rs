@@ -126,8 +126,8 @@ fn validate_alphabet(template: &CommitTemplateDfas, state_count: u32) -> Result<
 
 impl ParserSeed {
     pub(crate) fn install(self, constraint: &mut Constraint) -> Result<(), String> {
-        if !constraint.lr_terminal_templates.is_empty() {
-            return Err("compact template artifact has duplicate core parser programs".into());
+        if !matches!(&constraint.table, ParserExecutable::SectionPending) {
+            return Err("parser section would replace an already installed executable".into());
         }
         let programs = self.programs;
         if !constraint.terminal_display_names.is_empty()
@@ -170,7 +170,6 @@ impl ParserSeed {
         constraint.table = ParserExecutable::Native(Arc::new(parser));
         constraint.deferred_table_rules_blob = None;
         constraint.deferred_table_rules = Default::default();
-        constraint.lr_fast_terminal_templates.clear();
         Ok(())
     }
 }
@@ -180,14 +179,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_parser_section_rejects_duplicate_core_program_inventory() {
+    fn current_parser_section_cannot_replace_an_installed_executable() {
         let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let original = Constraint::from_glrm_grammar("start root; nt root = \"a\";", &vocab).unwrap();
         let wire = encode(original.template_parser().unwrap());
         let mut duplicate = original.clone();
-        duplicate.lr_terminal_templates = original.template_parser().unwrap().terminal_sources();
         let error = decode(&wire).unwrap().install(&mut duplicate).unwrap_err();
-        assert!(error.contains("duplicate core parser programs"), "{error}");
+        assert!(error.contains("already installed executable"), "{error}");
         assert!(!duplicate.table.is_present());
 
         let mut section_owned = original.clone();

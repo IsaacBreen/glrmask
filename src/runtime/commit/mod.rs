@@ -590,24 +590,6 @@ struct NormalizedMatch {
 }
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
-static TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
-static VALIDATE_TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
-
-fn template_advance_enabled() -> bool {
-    *TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| crate::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some())
-}
-
-#[inline]
-fn template_advance_selected(constraint: &Constraint) -> bool {
-    constraint.has_template_parser()
-}
-
-fn validate_template_advance_enabled() -> bool {
-    *VALIDATE_TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| crate::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())
-}
-
 fn advance_parser_stacks(
     constraint: &Constraint,
     stack: &ParserGSS,
@@ -625,21 +607,6 @@ fn advance_parser_stacks(
     if let Some(cached) = constraint.direct_regular_cached_advance(stack, terminal) {
         return cached;
     }
-    if template_advance_selected(constraint)
-        && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
-    {
-        if validate_template_advance_enabled() {
-            let table_advanced = advance_stacks(&constraint.table, stack, terminal);
-            assert!(
-                template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
-                "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
-                template_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
-                table_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
-            );
-        }
-        return template_advanced;
-    }
-
     if !constraint.parser_has_controls() {
         advance_stacks(&constraint.table, stack, terminal)
     } else {
@@ -664,22 +631,6 @@ fn advance_parser_stacks_owned(
     if let Some(cached) = constraint.direct_regular_cached_advance(&stack, terminal) {
         return cached;
     }
-    if template_advance_selected(constraint)
-        && let Some(template_advanced) =
-            advance_stacks_template_dfa_owned(constraint, stack.clone(), terminal)
-    {
-        if validate_template_advance_enabled() {
-            let table_advanced = advance_stacks_owned(&constraint.table, stack, terminal);
-            assert!(
-                template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
-                "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
-                template_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
-                table_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
-            );
-        }
-        return template_advanced;
-    }
-
     if !constraint.parser_has_controls() {
         advance_stacks_owned(&constraint.table, stack, terminal)
     } else {
@@ -726,13 +677,7 @@ fn advance_parser_stacks_profiled(
             },
         );
     }
-    if template_advance_selected(constraint)
-        && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
-    {
-        let template_elapsed = template_start.elapsed().as_nanos() as u64;
-        if validate_template_advance_enabled() {
-            let (table_advanced, table_profile) =
-                advance_stacks_profiled(&constraint.table, stack, terminal);
+    advance_stacks_profiled(&constraint.table, stack, terminal);
             assert!(
                 template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
                 "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
@@ -1105,8 +1050,6 @@ fn profile_allow_fast_paths() -> bool {
 }
 
 pub(crate) fn initialize_runtime_config() {
-    let _ = template_advance_enabled();
-    let _ = validate_template_advance_enabled();
     let _ = commit_assertion_flags();
 }
 
@@ -3190,7 +3133,7 @@ fn commit_bytes_fast_path_observed<O: CommitObserver>(
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
-    if !has_linker_controls && all_accs_empty && !template_advance_selected(constraint) {
+    if !has_linker_controls && all_accs_empty && !constraint.has_template_parser() {
         let top_state = gss.single_exclusive_top_value();
         if let Some(top_state) = top_state
             && let Some(action) = constraint.table.action(top_state, terminal) {
@@ -3244,7 +3187,7 @@ fn commit_bytes_fast_path_observed<O: CommitObserver>(
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
     let advanced = if !has_linker_controls
-        && !template_advance_selected(constraint)
+        && !constraint.has_template_parser()
         && let Some(top_state) = pruned_gss.single_exclusive_top_value()
         && let Some(action) = constraint.table.action(top_state, terminal)
         && let Some(advanced) = apply_single_top_action_fast(
@@ -3366,7 +3309,7 @@ fn commit_bytes_full_width_fast_path_observed<O: CommitObserver>(
 
         if let Some(terminal) = terminal {
             let advanced = if !has_linker_controls
-                && !template_advance_selected(constraint)
+                && !constraint.has_template_parser()
                 && let Some(top_state) = pruned_gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
@@ -4126,7 +4069,7 @@ fn try_advance_unique_actionable_top_fast(
     gss: &ParserGSS,
     terminal: u32,
 ) -> Option<ParserGSS> {
-    if constraint.parser_has_controls() || template_advance_selected(constraint) {
+    if constraint.parser_has_controls() || constraint.has_template_parser() {
         return None;
     }
     // If every nonempty path has this top, isolate(Some(top)) is precisely
@@ -4161,7 +4104,7 @@ fn try_batch_same_width_disjoint_alias_actions(
     width: usize,
     continuation_states: &[u32],
 ) -> Option<ParserGSS> {
-    if constraint.parser_has_controls() || template_advance_selected(constraint) {
+    if constraint.parser_has_controls() || constraint.has_template_parser() {
         return None;
     }
     let group = matches
@@ -4529,7 +4472,7 @@ fn commit_bytes_small_queue_fast_path_observed<O: CommitObserver>(
                 }
 
                 let advanced = if !has_linker_controls
-                    && !template_advance_selected(constraint)
+                    && !constraint.has_template_parser()
                     && let Some(advanced) = try_advance_unique_actionable_top_fast(
                         constraint,
                         &gss_at_offset,
@@ -4941,7 +4884,7 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
             }
             if let Some(action) = carried_action {
                 let apply_action_start = profile.as_ref().map(|_| std::time::Instant::now());
-                if !template_advance_selected(constraint)
+                if !constraint.has_template_parser()
                     && let Some(stack) = carried_stack.as_mut()
                 {
                     shifted_carried_stack =
@@ -4984,7 +4927,7 @@ fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
                 }
             }
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
-            let advanced = if !template_advance_selected(constraint)
+            let advanced = if !constraint.has_template_parser()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) =
@@ -5179,7 +5122,7 @@ fn commit_bytes_fast_path_profiled(
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
 
-    if all_accs_empty && !template_advance_selected(constraint)
+    if all_accs_empty && !constraint.has_template_parser()
         && let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
                 let advance_start = Instant::now();
@@ -5226,7 +5169,7 @@ fn commit_bytes_fast_path_profiled(
                 profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
                 return Some(Ok(()));
             }
-            if !template_advance_selected(constraint)
+            if !constraint.has_template_parser()
                 && let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal)
             {
                 let advance_start = Instant::now();
@@ -6088,7 +6031,7 @@ fn commit_bytes_linear_fast_path_observed<O: CommitObserver>(
 
         if !ignored {
             let mut shifted_carried_stack = false;
-            if !template_advance_selected(constraint)
+            if !constraint.has_template_parser()
                 && let Some(stack) = carried_stack.as_mut()
                 && let Some(top_state) = stack.top().copied()
                 && let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal)
@@ -6145,7 +6088,7 @@ fn commit_bytes_linear_fast_path_observed<O: CommitObserver>(
                 gss = stack.into_gss();
             }
 
-            let fast_advanced = if !template_advance_selected(constraint)
+            let fast_advanced = if !constraint.has_template_parser()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
@@ -6308,7 +6251,7 @@ fn commit_bytes_linear_fast_path_profiled(
 
         if !ignored {
             let fast_start = Instant::now();
-            let fast_advanced = if !template_advance_selected(constraint)
+            let fast_advanced = if !constraint.has_template_parser()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
@@ -9274,7 +9217,7 @@ mod tests {
     #[test]
     fn unique_actionable_top_matches_isolation_reference_including_empty_paths() {
         fn reference(constraint: &Constraint, gss: &ParserGSS, terminal: u32) -> Option<ParserGSS> {
-            if constraint.parser_has_controls() || template_advance_selected(constraint) {
+            if constraint.parser_has_controls() || constraint.has_template_parser() {
                 return None;
             }
             let mut selected = None;

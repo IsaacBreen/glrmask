@@ -5898,8 +5898,6 @@ fn compile_prepared_with_profile_and_table_construction(
             composition_grammar_summary,
             terminal_live_states: Vec::new(),
             token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
-            lr_terminal_templates: Vec::new(),
-            lr_fast_terminal_templates: Vec::new(),
             token_bytes,
             internal_token_buf_masks: Vec::new(),
             sliding_word_group_buf_masks: Default::default(),

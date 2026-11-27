@@ -918,8 +918,6 @@ impl Constraint {
                 "prepared template parser no longer matches its source constraint".into()
             ));
         }
-        self.lr_terminal_templates.clear();
-        self.lr_fast_terminal_templates.clear();
         self.serialized_artifact_cache = None;
         self.deferred_table_rules_blob = None;
         self.deferred_table_rules = Default::default();

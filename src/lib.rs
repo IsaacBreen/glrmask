@@ -491,7 +491,7 @@ pub mod __private {
                     "reference_stack_vectors":a.to_stacks(4096).map(|stacks|stacks.into_iter().map(|(stack,_)|stack).collect::<Vec<_>>()),
                     "candidate_stack_vectors":b.to_stacks(4096).map(|stacks|stacks.into_iter().map(|(stack,_)|stack).collect::<Vec<_>>()),
                     "reference_table":serde_json::to_value(&*reference.constraint.table).ok(),
-                    "candidate_templates":serde_json::to_value(candidate.constraint.template_parser().as_ref().map(|parser| parser.terminal_sources()).unwrap_or_else(|| candidate.constraint.lr_terminal_templates.clone())).ok(),
+                    "candidate_templates":serde_json::to_value(candidate.constraint.template_parser().map(|parser| parser.terminal_sources()).unwrap_or_default()).ok(),
                     "ignore_terminal":reference.constraint.ignore_terminal,
                 }));
             }

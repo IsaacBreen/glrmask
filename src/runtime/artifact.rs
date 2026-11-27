@@ -9811,11 +9811,6 @@ constraint_data_schema! {
     /// epsilon closure has terminal `t` matched or still reachable.
     @serde(skip, default)
     pub(crate) terminal_live_states: Vec<Vec<u32>>,
-    /// Optional precompiled terminal accelerators for the explicit LR backend only.
-    pub(crate) lr_terminal_templates: TemplateDfasByTerminal,
-    /// Runtime-only compact transition view for commit template products.
-    @serde(skip, default)
-    pub(crate) lr_fast_terminal_templates: FastTemplateDfasByTerminal,
     @serde(skip, default)
     pub(crate) token_classes: crate::runtime::TokenClasses,
     @serde(skip, default)

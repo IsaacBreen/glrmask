@@ -1022,8 +1022,6 @@ impl DynamicConstraint {
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
             terminal_live_states: Vec::new(),
-            lr_terminal_templates: Vec::new(),
-            lr_fast_terminal_templates: Vec::new(),
             token_classes: Default::default(),
             token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),
             internal_token_buf_masks: Vec::new(),

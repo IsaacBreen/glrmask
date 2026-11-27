@@ -58,7 +58,7 @@ use super::artifact::{
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
     FastCommitTemplateDfas, FastDwaTransitionRow, FastDwaTransitions,
-    FastTemplateDfasByTerminal, FastTokenizerTransitions,
+    FastTokenizerTransitions,
     IndexedDagDenseMask, IndexedDagDenseTransition, IndexedDagDenseTransitionMasks,
     IndexedDagDenseTransitionRow, IndexedDagDenseTransitions,
     InternalTokenBufMasks, PackedDwaDenseWeightMaskCache, PackedInternalTokenBufMask,
@@ -9554,17 +9554,11 @@ impl Constraint {
         self.tokenizer_tsids.prepare_rows(state_count, raw_count);
         let state_relation_ms = state_relation_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let fast_template_started_at = profile.then(std::time::Instant::now);
-        // Native relations own their immutable prepared views. Only LR acceleration
-        // needs to be rebuilt from the core inventory.
-        let lr_fast_terminal_templates = self.compute_lr_fast_terminal_templates();
-        let fast_template_ms = fast_template_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let guarded_shift_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if profile {
             eprintln!(
-                "[glrmask/profile][runtime_finalize_guarded_split] guarded_index_ms={guarded_index_ms:.3} state_relation_ms={state_relation_ms:.3} fast_template_ms={fast_template_ms:.3} guarded_cells={}",
+                "[glrmask/profile][runtime_finalize_guarded_split] guarded_index_ms={guarded_index_ms:.3} state_relation_ms={state_relation_ms:.3} guarded_cells={}",
                 self.table.as_lr().map_or(0, |table| table.guarded_shift_index.iter().map(|row| row.len()).sum::<usize>()),
             );
         }
@@ -9904,7 +9898,6 @@ impl Constraint {
                 self.internal_tsid_count(),
             );
         }
-        self.lr_fast_terminal_templates = lr_fast_terminal_templates;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let seed_started_at = profile.then(std::time::Instant::now);
         let seed_dense_prebuilt = self.seed_universe_dense.len() == self.internal_token_dense_words
@@ -11165,50 +11158,11 @@ impl Constraint {
     }
 
     pub(crate) fn terminal_template(&self, terminal: usize) -> Option<&Arc<crate::runtime::CommitTemplateDfas>> {
-        match self.template_parser() {
-            Some(parser) => parser.terminal_source(terminal),
-            None => self.lr_terminal_templates.get(terminal)?.as_ref(),
-        }
+        self.template_parser()?.terminal_source(terminal)
     }
 
     pub(crate) fn fast_terminal_template(&self, terminal: usize) -> Option<&Arc<FastCommitTemplateDfas>> {
-        match self.template_parser() {
-            Some(parser) => parser.local_fast(terminal),
-            None => self.lr_fast_terminal_templates.get(terminal)?.as_ref(),
-        }
-    }
-
-
-    fn compute_lr_fast_terminal_templates(&self) -> FastTemplateDfasByTerminal {
-        let mut shared = rustc_hash::FxHashMap::<
-            usize, Arc<FastCommitTemplateDfas>,
-        >::default();
-        for (source, view) in self.lr_terminal_templates.iter()
-            .zip(&self.lr_fast_terminal_templates)
-        {
-            if let (Some(source), Some(view)) = (source, view)
-                && view.is_for_source(source)
-            {
-                shared.entry(Arc::as_ptr(source) as usize)
-                    .or_insert_with(|| Arc::clone(view));
-            }
-        }
-        self.lr_terminal_templates
-            .iter()
-            .map(|template| {
-                template.as_ref().map(|source| {
-                    let identity = Arc::as_ptr(source) as usize;
-                    if let Some(view) = shared.get(&identity) {
-                        return Arc::clone(view);
-                    }
-                    let view = Arc::new(
-                        FastCommitTemplateDfas::from_shared_source(Arc::clone(source))
-                    );
-                    shared.insert(identity, Arc::clone(&view));
-                    view
-                })
-            })
-            .collect()
+        self.template_parser()?.local_fast(terminal)
     }
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
