@@ -3424,66 +3424,234 @@ fn interned_terminal_row<'a>(
     &entries[offsets[row_id] as usize..offsets[row_id + 1] as usize]
 }
 
-fn intern_terminal_rows(
-    mut rows: Vec<SmallVec<[TerminalID; 4]>>,
-) -> (Vec<u32>, Vec<u32>, Vec<TerminalID>) {
-    let mut intern = FxHashMap::<Vec<TerminalID>, u32>::default();
-    let mut unique_rows = Vec::<Vec<TerminalID>>::new();
-    let mut row_ids = Vec::<u32>::with_capacity(rows.len());
-    for row in &mut rows {
-        row.sort_unstable();
-        row.dedup();
-        let slice = row.as_slice();
-        let id = if let Some(&id) = intern.get(slice) {
-            id
-        } else {
-            let owned = slice.to_vec();
-            let id = unique_rows.len() as u32;
-            intern.insert(owned.clone(), id);
-            unique_rows.push(owned);
-            id
-        };
-        row_ids.push(id);
-    }
-    let mut offsets = Vec::<u32>::with_capacity(unique_rows.len() + 1);
-    let mut entries = Vec::<TerminalID>::new();
-    offsets.push(0);
-    for row in unique_rows {
-        entries.extend(row);
-        offsets.push(entries.len() as u32);
-    }
-    (row_ids, offsets, entries)
+#[derive(Debug, Default)]
+struct InternedRows<T> {
+    row_ids: Vec<u32>,
+    offsets: Vec<u32>,
+    entries: Vec<T>,
 }
 
-fn intern_radius_rows(
-    mut rows: Vec<SmallVec<[(TerminalID, u16); 4]>>,
-) -> (Vec<u32>, Vec<u32>, Vec<(TerminalID, u16)>) {
-    let mut intern = FxHashMap::<Vec<(TerminalID, u16)>, u32>::default();
-    let mut unique_rows = Vec::<Vec<(TerminalID, u16)>>::new();
-    let mut row_ids = Vec::<u32>::with_capacity(rows.len());
+impl<T> InternedRows<T> {
+    fn row(&self, source: usize) -> Option<&[T]> {
+        let id = *self.row_ids.get(source)? as usize;
+        Some(&self.entries[self.offsets[id] as usize..self.offsets[id + 1] as usize])
+    }
+}
+
+fn intern_sorted_rows<T, R>(rows: impl IntoIterator<Item = R>) -> InternedRows<T>
+where
+    T: Copy + Eq + std::hash::Hash + Default,
+    R: AsRef<[T]>,
+{
+    let mut result = InternedRows::default();
+    let mut intern = FxHashMap::<Vec<T>, u32>::default();
+    for row in rows {
+        let row = row.as_ref();
+        let id = if let Some(&id) = intern.get(row) {
+            id
+        } else {
+            if result.offsets.is_empty() {
+                result.offsets.push(0);
+            }
+            let id = intern.len() as u32;
+            intern.insert(row.to_vec(), id);
+            result.entries.extend_from_slice(row);
+            result.offsets.push(result.entries.len() as u32);
+            id
+        };
+        result.row_ids.push(id);
+    }
+    result
+}
+
+fn intern_radius_rows(mut rows: Vec<SmallVec<[(TerminalID, u16); 4]>>) -> InternedRows<(TerminalID, u16)> {
     for row in &mut rows {
         row.sort_unstable_by_key(|&(terminal, _)| terminal);
         row.dedup_by_key(|entry| entry.0);
-        let slice = row.as_slice();
-        let id = if let Some(&id) = intern.get(slice) {
-            id
+    }
+    intern_sorted_rows(rows)
+}
+
+/// One observed terminal belongs to the positive prefix or negative suffix
+/// of a canonical proof row. Unlisted terminals are unknown, except for
+/// globally complete direct residual solvers.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+struct MasterProofRow {
+    positive: SmallVec<[TerminalID; 4]>,
+    negative: SmallVec<[TerminalID; 4]>,
+}
+
+impl MasterProofRow {
+    fn push(&mut self, terminal: TerminalID, proved: bool) {
+        if proved {
+            self.positive.push(terminal);
         } else {
-            let owned = slice.to_vec();
-            let id = unique_rows.len() as u32;
-            intern.insert(owned.clone(), id);
-            unique_rows.push(owned);
-            id
+            self.negative.push(terminal);
+        }
+    }
+
+    fn canonicalize(&mut self) {
+        self.positive.sort_unstable();
+        self.positive.dedup();
+        self.negative.sort_unstable();
+        self.negative.dedup();
+        let positive = &self.positive;
+        self.negative.retain(|terminal| positive.binary_search(terminal).is_err());
+    }
+}
+
+#[derive(Debug)]
+enum MasterProofCoverage {
+    /// Legacy positive-only artifacts need the associated exact quotient.
+    Projected,
+    Explicit(Box<[TerminalID]>),
+}
+
+#[derive(Debug)]
+struct MasterProofRows {
+    row_ids: Vec<u32>,
+    /// Positive-end and row-end offsets in a single terminal arena.
+    ends: Vec<(u32, u32)>,
+    entries: Vec<TerminalID>,
+    coverage: MasterProofCoverage,
+}
+
+impl MasterProofRows {
+    fn empty(coverage: MasterProofCoverage) -> Self {
+        Self { row_ids: Vec::new(), ends: Vec::new(), entries: Vec::new(), coverage }
+    }
+
+    fn append_unique(&mut self, row: &MasterProofRow) -> u32 {
+        let id = self.ends.len() as u32;
+        self.entries.extend_from_slice(&row.positive);
+        let positive_end = self.entries.len() as u32;
+        self.entries.extend_from_slice(&row.negative);
+        self.ends.push((positive_end, self.entries.len() as u32));
+        id
+    }
+
+    fn intern(rows: Vec<MasterProofRow>, coverage: MasterProofCoverage) -> Self {
+        let mut result = Self::empty(coverage);
+        result.row_ids.reserve(rows.len());
+        let mut ids = FxHashMap::<MasterProofRow, u32>::default();
+        for mut row in rows {
+            row.canonicalize();
+            let id = if let Some(&id) = ids.get(&row) {
+                id
+            } else {
+                let id = result.append_unique(&row);
+                ids.insert(row, id);
+                id
+            };
+            result.row_ids.push(id);
+        }
+        result
+    }
+
+    fn unique_row(&self, id: usize) -> (&[TerminalID], &[TerminalID]) {
+        let start = (if id == 0 { 0 } else { self.ends[id - 1].1 }) as usize;
+        let (positive_end, end) = self.ends[id];
+        (&self.entries[start..positive_end as usize],
+         &self.entries[positive_end as usize..end as usize])
+    }
+
+    #[inline]
+    fn row(&self, source_slot: usize) -> Option<(&[TerminalID], &[TerminalID])> {
+        Some(self.unique_row(*self.row_ids.get(source_slot)? as usize))
+    }
+
+    fn from_wire(artifact: &PreparedMasterProofArtifact) -> Self {
+        let explicit = !artifact.coverage_row_ids.is_empty();
+        let mut result = Self::empty(if explicit {
+            MasterProofCoverage::Explicit(artifact.safe_plus_complete_terminals.clone().into_boxed_slice())
+        } else {
+            MasterProofCoverage::Projected
+        });
+        result.row_ids.reserve(artifact.positive_row_ids.len());
+        // The validated wire already interns both tables. Join each pair of
+        // row IDs once, rather than expanding every source row.
+        let mut joined = FxHashMap::<(u32, u32), u32>::default();
+        for (source_slot, &positive_id) in artifact.positive_row_ids.iter().enumerate() {
+            let coverage_id = artifact.coverage_row_ids.get(source_slot).copied().unwrap_or(u32::MAX);
+            let id = *joined.entry((positive_id, coverage_id)).or_insert_with(|| {
+                let positive = interned_terminal_row(
+                    &artifact.positive_row_ids, &artifact.positive_offsets,
+                    &artifact.positive_terminals, source_slot);
+                let mut row = MasterProofRow {
+                    positive: SmallVec::from_slice(positive),
+                    negative: SmallVec::new(),
+                };
+                if explicit {
+                    let coverage = interned_terminal_row(
+                        &artifact.coverage_row_ids, &artifact.coverage_offsets,
+                        &artifact.coverage_terminals, source_slot);
+                    row.negative.extend(coverage.iter().copied()
+                        .filter(|terminal| positive.binary_search(terminal).is_err()));
+                }
+                result.append_unique(&row)
+            });
+            result.row_ids.push(id);
+        }
+        result
+    }
+
+    /// Project the combined dictionary into the legacy wire format only
+    /// when saving. Re-intern unique rows, not every source-state row.
+    fn wire_rows(&self, include_negative: bool) -> InternedRows<TerminalID> {
+        let mut result = if include_negative {
+            intern_sorted_rows((0..self.ends.len()).map(|id| {
+                let (positive, negative) = self.unique_row(id);
+                let mut terminals = positive.iter().chain(negative).copied()
+                    .collect::<SmallVec<[TerminalID; 8]>>();
+                terminals.sort_unstable();
+                terminals
+            }))
+        } else {
+            intern_sorted_rows((0..self.ends.len()).map(|id| self.unique_row(id).0))
         };
-        row_ids.push(id);
+        result.row_ids = self.row_ids.iter().map(|&id| result.row_ids[id as usize]).collect();
+        result
     }
-    let mut offsets = Vec::<u32>::with_capacity(unique_rows.len() + 1);
-    let mut entries = Vec::<(TerminalID, u16)>::new();
-    offsets.push(0);
-    for row in unique_rows {
-        entries.extend(row);
-        offsets.push(entries.len() as u32);
+}
+
+#[derive(Debug)]
+struct PreparedMasterProofs {
+    proofs: MasterProofRows,
+    radii: InternedRows<(TerminalID, u16)>,
+}
+
+impl PreparedMasterProofs {
+    fn from_wire(artifact: PreparedMasterProofArtifact) -> Self {
+        let proofs = MasterProofRows::from_wire(&artifact);
+        Self {
+            proofs,
+            radii: InternedRows {
+                row_ids: artifact.safe_radius_row_ids,
+                offsets: artifact.safe_radius_offsets,
+                entries: artifact.safe_radius_entries,
+            },
+        }
     }
-    (row_ids, offsets, entries)
+
+    fn to_wire(&self) -> PreparedMasterProofArtifact {
+        let positive = self.proofs.wire_rows(false);
+        let (coverage, complete) = match &self.proofs.coverage {
+            MasterProofCoverage::Projected => (InternedRows::default(), Vec::new()),
+            MasterProofCoverage::Explicit(complete) => (self.proofs.wire_rows(true), complete.to_vec()),
+        };
+        PreparedMasterProofArtifact {
+            positive_row_ids: positive.row_ids,
+            positive_offsets: positive.offsets,
+            positive_terminals: positive.entries,
+            coverage_row_ids: coverage.row_ids,
+            coverage_offsets: coverage.offsets,
+            coverage_terminals: coverage.entries,
+            safe_plus_complete_terminals: complete,
+            safe_radius_row_ids: self.radii.row_ids.clone(),
+            safe_radius_offsets: self.radii.offsets.clone(),
+            safe_radius_entries: self.radii.entries.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3812,36 +3980,9 @@ pub(crate) struct DynamicMaskVocab {
     /// is rebuilt from the master trie after construction/load.
     llg_master_residual_ops: Arc<Vec<u32>>,
     llg_master_max_safe_chars: u16,
-    /// Positive-only parser-independent proof rows for the two overlapping
-    /// master slice languages. Row = `source_tsid * 2 + slice_slot`, where
-    /// slot 0 is safe+ and slot 1 is whitespace. Offsets index the flattened
-    /// terminal list. A terminal in a row certifies that the entire slice
-    /// language remains inside that terminal's exact projected residual from
-    /// the source TSID. Missing rows/terminals simply fall back to runtime
-    /// proof; they never imply rejection or admission.
-    prepared_master_prover_row_ids: Arc<[u32]>,
-    prepared_master_prover_offsets: Arc<[u32]>,
-    prepared_master_prover_terminals: Arc<[TerminalID]>,
-    /// Exact coverage rows corresponding to `prepared_master_prover_*`.
-    /// A terminal present here means the build-time proof solved this
-    /// `(source, slice, terminal)` residual completely. Membership in the
-    /// positive row is therefore `true`; coverage without positive membership
-    /// is an exact `false`. This lets compact direct-residual proofs retain
-    /// exact negative answers without carrying a projected-terminal quotient.
-    prepared_master_coverage_row_ids: Arc<[u32]>,
-    prepared_master_coverage_offsets: Arc<[u32]>,
-    prepared_master_coverage_terminals: Arc<[TerminalID]>,
-    /// Global safe+ terminal completeness marker for direct residual proofs.
-    /// Sorted and unique. See `PreparedMasterProofArtifact`.
-    prepared_safe_plus_complete_terminals: Arc<[TerminalID]>,
-    /// Exact positive bounded safe-slice rows. Row = exact source TSID; entries
-    /// are `(terminal, max safe Unicode-scalar radius)` for every prepared
-    /// projected terminal residual. Radius is capped at the largest safe-token
-    /// scalar count in this model vocabulary, because larger values are
-    /// observationally identical for one-token masking.
-    prepared_safe_radius_row_ids: Arc<[u32]>,
-    prepared_safe_radius_offsets: Arc<[u32]>,
-    prepared_safe_radius_entries: Arc<[(TerminalID, u16)]>,
+    /// One immutable inventory of exact parser-independent master proofs.
+    /// Slot = exact source TSID * 2 + slice (safe+ or whitespace).
+    prepared_master_proofs: Option<Arc<PreparedMasterProofs>>,
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
     /// True only when trie endpoints represent grammar-proven vocabulary
@@ -4157,16 +4298,7 @@ impl DynamicMaskVocab {
             llg_master_admitted_words: Arc::new(Vec::new()),
             llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: 0,
-            prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_master_coverage_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_plus_complete_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_radius_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_entries: Arc::from(Vec::<(TerminalID, u16)>::new()),
+            prepared_master_proofs: None,
             pending_source: None,
             initialized: true,
             grammar_quotiented: false,
@@ -4240,16 +4372,7 @@ impl DynamicMaskVocab {
             llg_master_admitted_words: Arc::clone(&self.llg_master_admitted_words),
             llg_master_residual_ops: Arc::clone(&self.llg_master_residual_ops),
             llg_master_max_safe_chars: self.llg_master_max_safe_chars,
-            prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_master_coverage_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_plus_complete_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_radius_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_entries: Arc::from(Vec::<(TerminalID, u16)>::new()),
+            prepared_master_proofs: None,
             pending_source: None,
             initialized: true,
             grammar_quotiented: self.grammar_quotiented,
@@ -4368,16 +4491,7 @@ impl DynamicMaskVocab {
                 .map_or_else(|| Arc::new(Vec::new()), |(_, words)| Arc::clone(words)),
             llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: fused_master_admission.map_or(0, |(max_safe_chars, _)| max_safe_chars),
-            prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_master_coverage_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_plus_complete_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_radius_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_entries: Arc::from(Vec::<(TerminalID, u16)>::new()),
+            prepared_master_proofs: None,
             pending_source: None,
             initialized: true,
             grammar_quotiented: false,
@@ -4923,38 +5037,14 @@ impl DynamicMaskVocab {
             return &[];
         }
         let row = source as usize * Self::PREPARED_PROOF_SLOT_COUNT + slice_slot;
-        let Some(&row_id) = self.prepared_master_prover_row_ids.get(row) else {
-            return &[];
-        };
-        let row_id = row_id as usize;
-        let Some((&start, &end)) = self
-            .prepared_master_prover_offsets
-            .get(row_id)
-            .zip(self.prepared_master_prover_offsets.get(row_id + 1))
-        else {
-            return &[];
-        };
-        self.prepared_master_prover_terminals
-            .get(start as usize..end as usize)
-            .unwrap_or(&[])
+        self.prepared_master_proofs.as_ref()
+            .and_then(|prepared| prepared.proofs.row(row))
+            .map_or(&[], |(positive, _)| positive)
     }
 
     pub(crate) fn prepared_master_proof_artifact(&self) -> PreparedMasterProofArtifact {
-        PreparedMasterProofArtifact {
-            positive_row_ids: self.prepared_master_prover_row_ids.as_ref().to_vec(),
-            positive_offsets: self.prepared_master_prover_offsets.as_ref().to_vec(),
-            positive_terminals: self.prepared_master_prover_terminals.as_ref().to_vec(),
-            coverage_row_ids: self.prepared_master_coverage_row_ids.as_ref().to_vec(),
-            coverage_offsets: self.prepared_master_coverage_offsets.as_ref().to_vec(),
-            coverage_terminals: self.prepared_master_coverage_terminals.as_ref().to_vec(),
-            safe_plus_complete_terminals: self
-                .prepared_safe_plus_complete_terminals
-                .as_ref()
-                .to_vec(),
-            safe_radius_row_ids: self.prepared_safe_radius_row_ids.as_ref().to_vec(),
-            safe_radius_offsets: self.prepared_safe_radius_offsets.as_ref().to_vec(),
-            safe_radius_entries: self.prepared_safe_radius_entries.as_ref().to_vec(),
-        }
+        self.prepared_master_proofs.as_ref().map_or_else(
+            PreparedMasterProofArtifact::default, |prepared| prepared.to_wire())
     }
 
     pub(crate) fn restore_prepared_master_proof_artifact(
@@ -5078,17 +5168,11 @@ impl DynamicMaskVocab {
         {
             return Err("prepared safe-radius table exists without row ids".to_owned());
         }
-        self.prepared_master_prover_row_ids = Arc::from(artifact.positive_row_ids);
-        self.prepared_master_prover_offsets = Arc::from(artifact.positive_offsets);
-        self.prepared_master_prover_terminals = Arc::from(artifact.positive_terminals);
-        self.prepared_master_coverage_row_ids = Arc::from(artifact.coverage_row_ids);
-        self.prepared_master_coverage_offsets = Arc::from(artifact.coverage_offsets);
-        self.prepared_master_coverage_terminals = Arc::from(artifact.coverage_terminals);
-        self.prepared_safe_plus_complete_terminals =
-            Arc::from(artifact.safe_plus_complete_terminals);
-        self.prepared_safe_radius_row_ids = Arc::from(artifact.safe_radius_row_ids);
-        self.prepared_safe_radius_offsets = Arc::from(artifact.safe_radius_offsets);
-        self.prepared_safe_radius_entries = Arc::from(artifact.safe_radius_entries);
+        self.prepared_master_proofs = if artifact.is_empty() {
+            None
+        } else {
+            Some(Arc::new(PreparedMasterProofs::from_wire(artifact)))
+        };
         Ok(())
     }
 
@@ -5099,38 +5183,25 @@ impl DynamicMaskVocab {
     #[inline(always)]
     pub(crate) fn has_prepared_master_prover_row(&self, source: u32) -> bool {
         let row = source as usize * Self::PREPARED_PROOF_SLOT_COUNT;
-        self.prepared_master_prover_row_ids
-            .get(row + Self::PREPARED_PROOF_SLOT_COUNT - 1)
-            .is_some()
+        self.prepared_master_proofs.as_ref().is_some_and(|prepared|
+            prepared.proofs.row_ids.get(row + Self::PREPARED_PROOF_SLOT_COUNT - 1).is_some())
     }
 
-    /// Whether the compact prepared-master artifact contains row framing for
-    /// every exact tokenizer source.  Transfer artifacts restore these rows
-    /// verbatim; when they are complete, rebuilding the terminal projection
-    /// quotients and solving the same source×slice products again on load is
-    /// redundant.
+    /// Only explicit coverage is self-contained after transfer. A legacy
+    /// projected table still needs its associated exact quotient inventory.
     #[inline]
     pub(crate) fn has_complete_prepared_master_prover_rows(
         &self,
         source_state_count: usize,
     ) -> bool {
-        source_state_count
-            .checked_mul(Self::PREPARED_PROOF_SLOT_COUNT)
-            .and_then(|rows| rows.checked_add(1))
-            .is_some_and(|expected_offsets| {
-                self.prepared_master_prover_offsets.len() == expected_offsets
-            })
+        source_state_count.checked_mul(Self::PREPARED_PROOF_SLOT_COUNT)
+            .is_some_and(|rows| rows != 0 && self.prepared_master_proofs.as_ref().is_some_and(|prepared|
+                matches!(&prepared.proofs.coverage, MasterProofCoverage::Explicit(_))
+                    && prepared.proofs.row_ids.len() == rows))
     }
 
-    /// Exact build-time master-slice answer when this `(terminal, source)` is
-    /// represented by an exact projected terminal quotient.
-    ///
-    /// `prepare_master_provers_all_sources` solves the complete
-    /// quotientA-slice product for every retained quotient residual. Therefore
-    /// once the compact row table is present, absence from a row is an exact
-    /// negative result for a terminal whose quotient contains `source`.
-    /// Missing rows or missing quotients remain `None` and must use the normal
-    /// runtime proof path.
+    /// A completed proof is positive or negative; missing coverage remains
+    /// unknown and must fall back to exact runtime proof.
     #[inline]
     pub(crate) fn prepared_master_proof_result(
         &self,
@@ -5138,63 +5209,29 @@ impl DynamicMaskVocab {
         slice_slot: usize,
         terminal: TerminalID,
     ) -> Option<bool> {
-        if slice_slot >= Self::PREPARED_PROOF_SLOT_COUNT
-            || self.prepared_master_prover_row_ids.is_empty()
-        {
+        if slice_slot >= Self::PREPARED_PROOF_SLOT_COUNT {
             return None;
         }
+        let prepared = self.prepared_master_proofs.as_ref()?;
         let row = source as usize * Self::PREPARED_PROOF_SLOT_COUNT + slice_slot;
-        self.prepared_master_prover_row_ids.get(row)?;
-        if !self.prepared_master_coverage_row_ids.is_empty() {
-            let coverage_id = *self.prepared_master_coverage_row_ids.get(row)? as usize;
-            let (&start, &end) = self
-                .prepared_master_coverage_offsets
-                .get(coverage_id)
-                .zip(self.prepared_master_coverage_offsets.get(coverage_id + 1))?;
-            if self.prepared_master_coverage_terminals[start as usize..end as usize]
-                .binary_search(&terminal)
-                .is_err()
-            {
-                if slice_slot == Self::PREPARED_SAFE_PLUS_SLOT
-                    && self
-                        .prepared_safe_plus_complete_terminals
-                        .binary_search(&terminal)
-                        .is_ok()
-                {
-                    return Some(false);
+        let (positive, negative) = prepared.proofs.row(row)?;
+        let proved = positive.binary_search(&terminal).is_ok();
+        match &prepared.proofs.coverage {
+            MasterProofCoverage::Explicit(complete) => {
+                if proved {
+                    Some(true)
+                } else if negative.binary_search(&terminal).is_ok()
+                    || (slice_slot == Self::PREPARED_SAFE_PLUS_SLOT
+                        && complete.binary_search(&terminal).is_ok()) {
+                    Some(false)
+                } else {
+                    None
                 }
-                return None;
             }
-        } else if self.projected_terminal_quotient(terminal, source).is_none() {
-            return None;
+            MasterProofCoverage::Projected => self.projected_terminal_quotient(terminal, source)
+                .map(|_| proved),
         }
-        Some(
-            self.prepared_master_provers(source, slice_slot)
-                .binary_search(&terminal)
-                .is_ok(),
-        )
     }
-
-    #[inline(always)]
-    pub(crate) fn prepared_safe_radii(&self, source: u32) -> &[(TerminalID, u16)] {
-        let Some(&row_id) = self.prepared_safe_radius_row_ids.get(source as usize) else {
-            return &[];
-        };
-        let row_id = row_id as usize;
-        let Some((&start, &end)) = self
-            .prepared_safe_radius_offsets
-            .get(row_id)
-            .zip(self.prepared_safe_radius_offsets.get(row_id + 1))
-        else {
-            return &[];
-        };
-        self.prepared_safe_radius_entries
-            .get(start as usize..end as usize)
-            .unwrap_or(&[])
-    }
-
-
-
 
     #[inline]
     pub(crate) fn prepared_safe_radius(
@@ -5202,24 +5239,14 @@ impl DynamicMaskVocab {
         source: u32,
         terminal: TerminalID,
     ) -> Option<u16> {
-        let row = self.prepared_safe_radii(source);
+        // An empty row can be a solved zero; a missing row cannot.
+        let prepared = self.prepared_master_proofs.as_ref()?;
+        let row = prepared.radii.row(source as usize)?;
         if let Ok(index) = row.binary_search_by_key(&terminal, |&(candidate, _)| candidate) {
             return Some(row[index].1);
         }
-
-        // Prepared radius rows intentionally omit zero radii to keep the
-        // transfer compact. When the safe+ master-proof coverage row contains
-        // this exact `(source, terminal)`, the radius solver was also run for
-        // the same residual and an absent radius entry therefore means the
-        // exact answer is zero, not "unprepared". Returning None here would
-        // incorrectly launch the lazy projected-terminal quotient builder
-        // during masking.
-        self.prepared_master_proof_result(
-            source,
-            Self::PREPARED_SAFE_PLUS_SLOT,
-            terminal,
-        )
-        .map(|_| 0)
+        self.prepared_master_proof_result(source, Self::PREPARED_SAFE_PLUS_SLOT, terminal)
+            .map(|_| 0)
     }
 
     /// Exact all-start-state master-slice proof directly over an independently
@@ -5768,19 +5795,14 @@ impl DynamicMaskVocab {
         safe_plus_complete_terminals.dedup();
 
         let row_count = source_state_count * Self::PREPARED_PROOF_SLOT_COUNT;
-        let mut positive_rows = vec![SmallVec::<[TerminalID; 4]>::new(); row_count];
-        let mut coverage_rows = vec![SmallVec::<[TerminalID; 4]>::new(); row_count];
+        let mut proof_rows = vec![MasterProofRow::default(); row_count];
         let mut radius_rows = vec![SmallVec::<[(TerminalID, u16); 4]>::new(); source_state_count];
         let source_limit = source_state_count.min(coordinates.len());
-        positive_rows[..source_limit * Self::PREPARED_PROOF_SLOT_COUNT]
+        proof_rows[..source_limit * Self::PREPARED_PROOF_SLOT_COUNT]
             .par_chunks_mut(Self::PREPARED_PROOF_SLOT_COUNT)
-            .zip(
-                coverage_rows[..source_limit * Self::PREPARED_PROOF_SLOT_COUNT]
-                    .par_chunks_mut(Self::PREPARED_PROOF_SLOT_COUNT),
-            )
             .zip(radius_rows[..source_limit].par_iter_mut())
             .enumerate()
-            .for_each(|(source, ((positive_rows, coverage_rows), radius_row))| {
+            .for_each(|(source, (proof_rows, radius_row))| {
                 let Some(entries) = coordinates.row(source as u32) else {
                     return;
                 };
@@ -5790,10 +5812,8 @@ impl DynamicMaskVocab {
                         let Some(transparent) = proof_slots[slice_slot].as_ref() else {
                             continue;
                         };
-                        coverage_rows[slice_slot].push(terminal);
-                        if transparent.get(residual as usize).copied().unwrap_or(false) {
-                            positive_rows[slice_slot].push(terminal);
-                        }
+                        proof_rows[slice_slot].push(terminal,
+                            transparent.get(residual as usize).copied().unwrap_or(false));
                     }
                     if let Some(radii) = radius_by_terminal[terminal as usize].as_ref() {
                         let radius = radii
@@ -5808,49 +5828,24 @@ impl DynamicMaskVocab {
                 }
             });
 
-        let positive_entry_count = positive_rows.iter().map(SmallVec::len).sum::<usize>();
-        let parallel_intern = candidates.len() >= 64 && rayon::current_num_threads() > 1;
-        let ((positive, coverage), radius) = if parallel_intern {
+        let positive_entry_count = proof_rows.iter().map(|row| row.positive.len()).sum::<usize>();
+        let coverage = MasterProofCoverage::Explicit(safe_plus_complete_terminals.into_boxed_slice());
+        let (proofs, radii) = if candidates.len() >= 64 && rayon::current_num_threads() > 1 {
             rayon::join(
-                || {
-                    rayon::join(
-                        || intern_terminal_rows(positive_rows),
-                        || intern_terminal_rows(coverage_rows),
-                    )
-                },
+                || MasterProofRows::intern(proof_rows, coverage),
                 || intern_radius_rows(radius_rows),
             )
         } else {
-            (
-                (
-                    intern_terminal_rows(positive_rows),
-                    intern_terminal_rows(coverage_rows),
-                ),
-                intern_radius_rows(radius_rows),
-            )
+            (MasterProofRows::intern(proof_rows, coverage), intern_radius_rows(radius_rows))
         };
-        let (positive_row_ids, positive_offsets, positive_terminals) = positive;
-        let (coverage_row_ids, coverage_offsets, coverage_terminals) = coverage;
-        let (radius_row_ids, radius_offsets, radius_entries) = radius;
-
-        self.prepared_master_prover_row_ids = Arc::from(positive_row_ids);
-        self.prepared_master_prover_offsets = Arc::from(positive_offsets);
-        self.prepared_master_prover_terminals = Arc::from(positive_terminals);
-        self.prepared_master_coverage_row_ids = Arc::from(coverage_row_ids);
-        self.prepared_master_coverage_offsets = Arc::from(coverage_offsets);
-        self.prepared_master_coverage_terminals = Arc::from(coverage_terminals);
-        self.prepared_safe_plus_complete_terminals = Arc::from(safe_plus_complete_terminals);
-        self.prepared_safe_radius_row_ids = Arc::from(radius_row_ids);
-        self.prepared_safe_radius_offsets = Arc::from(radius_offsets);
-        self.prepared_safe_radius_entries = Arc::from(radius_entries);
+        self.prepared_master_proofs = Some(Arc::new(PreparedMasterProofs { proofs, radii }));
         Some((positive_entry_count, product_pairs, edges))
     }
 
-    /// Build positive-only parser-independent master-slice certificates for
-    /// every exact source TSID represented by the currently prepared terminal
-    /// quotients. One `(terminal quotient, slice)` product graph is solved once
-    /// for all quotient residual states; source TSIDs are then fanned out
-    /// through the quotient's exact source->residual mapping.
+    /// Build explicit exact parser-independent master-slice certificates for
+    /// all represented sources. One product is solved per terminal/slice,
+    /// then fanned out through the quotient's source-to-residual mapping.
+    /// A skipped candidate remains unknown rather than implicitly negative.
     pub(crate) fn prepare_master_provers_all_sources(
         &mut self,
         tokenizer: &Tokenizer,
@@ -5900,23 +5895,15 @@ impl DynamicMaskVocab {
         ));
         let quotients = self.active_projected_terminal_quotients();
         if quotients.is_empty() || source_state_count == 0 {
-            self.prepared_master_prover_row_ids = Arc::from(Vec::<u32>::new());
-            self.prepared_master_prover_offsets = Arc::from(Vec::<u32>::new());
-            self.prepared_master_prover_terminals = Arc::from(Vec::<TerminalID>::new());
-            self.prepared_master_coverage_row_ids = Arc::from(Vec::<u32>::new());
-            self.prepared_master_coverage_offsets = Arc::from(Vec::<u32>::new());
-            self.prepared_master_coverage_terminals = Arc::from(Vec::<TerminalID>::new());
-            self.prepared_safe_plus_complete_terminals = Arc::from(Vec::<TerminalID>::new());
-            self.prepared_safe_radius_row_ids = Arc::from(Vec::<u32>::new());
-            self.prepared_safe_radius_offsets = Arc::from(Vec::<u32>::new());
-            self.prepared_safe_radius_entries = Arc::from(Vec::<(TerminalID, u16)>::new());
+            self.prepared_master_proofs = None;
             return (0, 0);
         }
 
         struct PreparedPair {
             terminal: TerminalID,
             slice_slot: usize,
-            certified_sources: Vec<u32>,
+            quotient: Arc<TerminalProjectedQuotient>,
+            transparent: Vec<bool>,
             product_pairs: usize,
             elapsed_ns: u64,
             verified: usize,
@@ -5964,21 +5951,11 @@ impl DynamicMaskVocab {
                         }
                     }
                 }
-                let certified_sources = quotient
-                    .projected_source_states()
-                    .iter()
-                    .copied()
-                    .zip(quotient.projected_states_for_sources().iter().copied())
-                    .filter_map(|(source, projected)| {
-                        ((source as usize) < source_state_count
-                            && transparent.get(projected as usize).copied().unwrap_or(false))
-                        .then_some(source)
-                    })
-                    .collect::<Vec<_>>();
                 PreparedPair {
                     terminal,
                     slice_slot,
-                    certified_sources,
+                    quotient,
+                    transparent,
                     product_pairs,
                     elapsed_ns: started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
                     verified,
@@ -5988,10 +5965,8 @@ impl DynamicMaskVocab {
             })
             .collect::<Vec<_>>();
 
-        let mut rows = vec![
-            SmallVec::<[TerminalID; 4]>::new();
-            source_state_count * Self::PREPARED_PROOF_SLOT_COUNT
-        ];
+        let mut rows = vec![MasterProofRow::default();
+            source_state_count * Self::PREPARED_PROOF_SLOT_COUNT];
         let mut product_pairs = 0usize;
         let mut pair_work_ns = 0u64;
         let mut max_pair_ns = 0u64;
@@ -6005,9 +5980,15 @@ impl DynamicMaskVocab {
             verified += job.verified;
             mismatches += job.mismatches;
             unknown += job.unknown;
-            for source in job.certified_sources {
-                rows[source as usize * Self::PREPARED_PROOF_SLOT_COUNT + job.slice_slot]
-                    .push(job.terminal);
+            for (&source, &projected) in job.quotient.projected_source_states().iter()
+                .zip(job.quotient.projected_states_for_sources()) {
+                if source as usize >= source_state_count {
+                    continue;
+                }
+                if let Some(&proved) = job.transparent.get(projected as usize) {
+                    rows[source as usize * Self::PREPARED_PROOF_SLOT_COUNT + job.slice_slot]
+                        .push(job.terminal, proved);
+                }
             }
         }
         if crate::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {
@@ -6026,9 +6007,9 @@ impl DynamicMaskVocab {
             assert_eq!(mismatches, 0, "batched master proof disagrees with per-source exact proof");
         }
 
-        let entry_count = rows.iter().map(SmallVec::len).sum::<usize>();
-        let (row_ids, offsets, terminals) = intern_terminal_rows(rows);
-        if include_safe_radii {
+        let entry_count = rows.iter().map(|row| row.positive.len()).sum::<usize>();
+        let proofs = MasterProofRows::intern(rows, MasterProofCoverage::Explicit(Box::new([])));
+        let radii = if include_safe_radii {
             let max_radius = self.llg_master_max_safe_chars;
             let radius_jobs = quotients
                 .par_iter()
@@ -6062,25 +6043,11 @@ impl DynamicMaskVocab {
                     }
                 }
             }
-            let (radius_row_ids, radius_offsets, radius_entries) = intern_radius_rows(radius_rows);
-            self.prepared_safe_radius_row_ids = Arc::from(radius_row_ids);
-            self.prepared_safe_radius_offsets = Arc::from(radius_offsets);
-            self.prepared_safe_radius_entries = Arc::from(radius_entries);
+            intern_radius_rows(radius_rows)
         } else {
-            self.prepared_safe_radius_row_ids = Arc::from(Vec::<u32>::new());
-            self.prepared_safe_radius_offsets = Arc::from(Vec::<u32>::new());
-            self.prepared_safe_radius_entries = Arc::from(Vec::<(TerminalID, u16)>::new());
-        }
-        // Keep the borrow of the active quotient sidecar alive through the
-        // optional radius analysis above, then publish the compact prepared
-        // rows only after all quotient reads are complete.
-        self.prepared_master_prover_row_ids = Arc::from(row_ids);
-        self.prepared_master_prover_offsets = Arc::from(offsets);
-        self.prepared_master_prover_terminals = Arc::from(terminals);
-        self.prepared_master_coverage_row_ids = Arc::from(Vec::<u32>::new());
-        self.prepared_master_coverage_offsets = Arc::from(Vec::<u32>::new());
-        self.prepared_master_coverage_terminals = Arc::from(Vec::<TerminalID>::new());
-        self.prepared_safe_plus_complete_terminals = Arc::from(Vec::<TerminalID>::new());
+            InternedRows::default()
+        };
+        self.prepared_master_proofs = Some(Arc::new(PreparedMasterProofs { proofs, radii }));
         (entry_count, product_pairs)
     }
 
@@ -6727,26 +6694,7 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions = source.mask_tokenizer_fast_transitions.clone();
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
         self.terminal_quotients = source.terminal_quotients.clone();
-        self.prepared_master_prover_row_ids =
-            Arc::clone(&source.prepared_master_prover_row_ids);
-        self.prepared_master_prover_offsets =
-            Arc::clone(&source.prepared_master_prover_offsets);
-        self.prepared_master_prover_terminals =
-            Arc::clone(&source.prepared_master_prover_terminals);
-        self.prepared_master_coverage_row_ids =
-            Arc::clone(&source.prepared_master_coverage_row_ids);
-        self.prepared_master_coverage_offsets =
-            Arc::clone(&source.prepared_master_coverage_offsets);
-        self.prepared_master_coverage_terminals =
-            Arc::clone(&source.prepared_master_coverage_terminals);
-        self.prepared_safe_plus_complete_terminals =
-            Arc::clone(&source.prepared_safe_plus_complete_terminals);
-        self.prepared_safe_radius_row_ids =
-            Arc::clone(&source.prepared_safe_radius_row_ids);
-        self.prepared_safe_radius_offsets =
-            Arc::clone(&source.prepared_safe_radius_offsets);
-        self.prepared_safe_radius_entries =
-            Arc::clone(&source.prepared_safe_radius_entries);
+        self.prepared_master_proofs = source.prepared_master_proofs.clone();
     }
 
     pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
@@ -8413,16 +8361,7 @@ impl Default for DynamicMaskVocab {
             llg_master_admitted_words: Arc::new(Vec::new()),
             llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: 0,
-            prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_master_coverage_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_plus_complete_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_radius_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_entries: Arc::from(Vec::<(TerminalID, u16)>::new()),
+            prepared_master_proofs: None,
             pending_source: None,
             initialized: false,
             grammar_quotiented: false,
