@@ -3983,17 +3983,20 @@ impl DynamicMaskVocab {
         let Some(fast) = Self::build_full_walk_fast_transitions(&deterministic) else {
             return false;
         };
-+
-+        true        self.set_mask_tokenizer_source_subsets(source_subsets);
-            return true;
+        if let Some(projection) = self.mask_projection.as_mut() {
+            projection.derivative = Some(MaskExecutionDerivative {
+                tokenizer: Arc::new(deterministic),
+                from_projection: Arc::from(source_to_determinized),
+            });
+            projection.provenance = None;
+            self.mask_tokenizer_fast_transitions = Some(fast);
+        } else {
+            self.publish_mask_projection(
+                deterministic,
+                MaskCoordinateMap::Dense(Arc::from(source_to_determinized)),
+                Some(fast),
+            );
         }
-        self.mask_determinized_tokenizer = Some(Arc::new(deterministic));
-        self.mask_projection_to_determinized = Arc::from(source_to_determinized);
-        self.mask_tokenizer_fast_transitions = Some(fast);
-        // The derivative determinizer subsets are expressed in the finite
-        // projection coordinate. Retain them so multiple exact lexer states
-        // carrying one parser object can be coalesced into an already-built
-        // execution subset at the beginning of a mask walk.
         self.set_mask_tokenizer_source_subsets(source_subsets);
         true
     }
@@ -6746,16 +6749,19 @@ impl DynamicMaskVocab {
             Arc::clone(&source.prepared_safe_radius_entries);
     }
 
-+
-+    pub(crate) fn mask_projection_fast_transitions(    #[inline]
-    pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
-        self.mask_tokenizer.as_deref()
+    pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
+        let projection = self.mask_projection.as_ref()?;
+        let MaskCoordinateMap::Dense(states) = &projection.map else {
+            return None;
+        };
+        Some((projection.tokenizer.as_ref().clone(), states.to_vec()))
     }
 
-    /// Exact tokenizer coordinate used by dynamic mask generation. A finite
-    /// serialized projection may have a second-stage deterministic derivative
-    /// for the hot walk while static artifact tables remain keyed by the base
-    /// projection above.
+    #[inline]
+    pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
+        self.mask_projection.as_ref().map(|projection| projection.tokenizer.as_ref())
+    }
+
     #[inline]
     pub(crate) fn mask_runtime_tokenizer(&self) -> Option<&Tokenizer> {
         self.mask_runtime_tokenizer_owner().map(Arc::as_ref)
@@ -6763,12 +6769,12 @@ impl DynamicMaskVocab {
 
     #[inline]
     pub(crate) fn mask_runtime_tokenizer_owner(&self) -> Option<&Arc<Tokenizer>> {
-        self.mask_determinized_tokenizer.as_ref().or(self.mask_tokenizer.as_ref())
+        self.mask_projection.as_ref().map(MaskProjection::runtime_owner)
     }
 
     #[inline]
     pub(crate) fn has_dense_mask_tokenizer_projection(&self) -> bool {
-        self.mask_tokenizer.is_some() && !self.full_to_mask_state.is_empty()
+        self.mask_projection.as_ref().is_some_and(|projection| matches!(&projection.map, MaskCoordinateMap::Dense(_)))
     }
 
     #[inline]
