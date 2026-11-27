@@ -3415,6 +3415,71 @@ impl Default for FiniteCompileLimits {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FiniteWeightOp {
+    Intersection,
+    Union,
+    Difference,
+}
+
+impl FiniteWeightOp {
+    #[inline]
+    fn shortcut(self, left: u32, right: u32) -> Option<u32> {
+        match self {
+            Self::Intersection => {
+                if left == 0 || right == 0 { Some(0) }
+                else if left == 1 { Some(right) }
+                else if right == 1 || left == right { Some(left) }
+                else { None }
+            }
+            Self::Union => {
+                if left == 0 { Some(right) }
+                else if right == 0 || left == right { Some(left) }
+                else if left == 1 || right == 1 { Some(1) }
+                else { None }
+            }
+            Self::Difference => {
+                if left == 0 || right == 1 || left == right { Some(0) }
+                else if right == 0 { Some(left) }
+                else { None }
+            }
+        }
+    }
+
+    #[inline]
+    fn key(self, left: u32, right: u32) -> (u32, u32) {
+        if matches!(self, Self::Difference) || left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        }
+    }
+
+    #[inline]
+    fn fill(self, out: &mut [u64], left: &[u64], right: &[u64]) {
+        debug_assert_eq!(out.len(), left.len());
+        debug_assert_eq!(out.len(), right.len());
+        // Dispatch once per row, rather than once per bit word.
+        match self {
+            Self::Intersection => {
+                for (slot, (&a, &b)) in out.iter_mut().zip(left.iter().zip(right)) {
+                    *slot = a & b;
+                }
+            }
+            Self::Union => {
+                for (slot, (&a, &b)) in out.iter_mut().zip(left.iter().zip(right)) {
+                    *slot = a | b;
+                }
+            }
+            Self::Difference => {
+                for (slot, (&a, &b)) in out.iter_mut().zip(left.iter().zip(right)) {
+                    *slot = a & !b;
+                }
+            }
+        }
+    }
+}
+
 struct FastBoundaryWeightInterner {
     // Only the new finite-output route enables this policy. A failed private
     // computation is discarded before any graph is published. Returning the
@@ -3494,31 +3559,32 @@ impl FastBoundaryWeightInterner {
         if let Some(&id) = self.ids.get(&value) {
             return id;
         }
+        self.insert_new(|| value)
+    }
+
+    fn intern_slice(&mut self, value: &[u64]) -> FastBoundaryWeightId {
+        if let Some(&id) = self.ids.get(value) {
+            return id;
+        }
+        self.insert_new(|| FastBoundaryWeightValue::from_slice(value))
+    }
+
+    fn insert_new(
+        &mut self,
+        value: impl FnOnce() -> FastBoundaryWeightValue,
+    ) -> FastBoundaryWeightId {
         if let Some(limits) = self.limits
             && (self.failed || self.values.len() >= limits.weights
-                || (self.values.len() + 1).saturating_mul(self.tsid_count) > limits.words) {
-                self.failed = true;
-                return 0;
-            }
+                || (self.values.len() + 1).saturating_mul(self.tsid_count) > limits.words)
+        {
+            self.failed = true;
+            return 0;
+        }
+        let value = value();
         let id = self.values.len() as u32;
         self.values.push(value.clone());
         self.ids.insert(value, id);
         id
-    }
-
-    // Look up a borrowed stack buffer before allocating an owned vector. Exact
-    // values, insertion order, weight IDs and resource-decline semantics match
-    // the original intern() path.
-    fn intern_slice(&mut self, value:&[u64])->FastBoundaryWeightId {
-        if let Some(&id)=self.ids.get(value){return id;}
-        if let Some(limits)=self.limits
-            && (self.failed || self.values.len()>=limits.weights
-                ||(self.values.len()+1).saturating_mul(self.tsid_count)>limits.words){
-                self.failed=true;return 0;
-            }
-        let id=self.values.len()as u32;
-        let owned=FastBoundaryWeightValue::from_slice(value);
-        self.values.push(owned.clone());self.ids.insert(owned,id);id
     }
 
     #[inline]
@@ -3601,130 +3667,62 @@ impl FastBoundaryWeightInterner {
         Some(id)
     }
 
+    fn operation_cache(
+        &self, op: FiniteWeightOp,
+    ) -> &FxHashMap<(FastBoundaryWeightId, FastBoundaryWeightId), FastBoundaryWeightId> {
+        match op {
+            FiniteWeightOp::Intersection => &self.intersections,
+            FiniteWeightOp::Union => &self.unions,
+            FiniteWeightOp::Difference => &self.differences,
+        }
+    }
+
     #[inline]
-    fn intersection(
-        &mut self,
-        left: FastBoundaryWeightId,
-        right: FastBoundaryWeightId,
-    ) -> FastBoundaryWeightId {
-        if left == 0 || right == 0 {
-            return 0;
-        }
-        if left == 1 {
-            return right;
-        }
-        if right == 1 || left == right {
-            return left;
-        }
-        let key = if left <= right { (left, right) } else { (right, left) };
-        if let Some(&id) = self.intersections.get(&key) {
+    fn binary(&mut self, op: FiniteWeightOp, left: u32, right: u32) -> u32 {
+        if let Some(id) = op.shortcut(left, right) {
             return id;
         }
-        let id=if self.borrowed_intern{
-            let mut buffer=[0u64;FAST_BOUNDARY_TSID_LIMIT];
-            for (slot,(&a,&b)) in buffer[..self.tsid_count].iter_mut()
-                .zip(self.values[left as usize].iter().zip(&self.values[right as usize])){
-                *slot=a & b;
-            }
-            self.intern_slice(&buffer[..self.tsid_count])
-        }else{
-        let mut value: FastBoundaryWeightValue = smallvec::smallvec![0u64; self.tsid_count];
-        for (slot, (&a, &b)) in value
-            .iter_mut()
-            .zip(self.values[left as usize].iter().zip(&self.values[right as usize]))
-            .take(self.tsid_count)
-        {
-            *slot = a & b;
+        let key = op.key(left, right);
+        if let Some(&id) = self.operation_cache(op).get(&key) {
+            return id;
         }
-        self.intern(value)
+        let a = &self.values[left as usize];
+        let b = &self.values[right as usize];
+        let id = if self.borrowed_intern {
+            let mut buffer = [0u64; FAST_BOUNDARY_TSID_LIMIT];
+            let bits = &mut buffer[..self.tsid_count];
+            op.fill(bits, a, b);
+            self.intern_slice(bits)
+        } else {
+            let mut bits: FastBoundaryWeightValue = smallvec::smallvec![0; self.tsid_count];
+            op.fill(&mut bits, a, b);
+            self.intern(bits)
         };
-        if self.limits.is_none() || self.intersections.len() < 262_144 {
-            self.intersections.insert(key, id);
+        let unbounded = self.limits.is_none();
+        let cache = match op {
+            FiniteWeightOp::Intersection => &mut self.intersections,
+            FiniteWeightOp::Union => &mut self.unions,
+            FiniteWeightOp::Difference => &mut self.differences,
+        };
+        if unbounded || cache.len() < 262_144 {
+            cache.insert(key, id);
         }
         id
     }
 
     #[inline]
-    fn union(
-        &mut self,
-        left: FastBoundaryWeightId,
-        right: FastBoundaryWeightId,
-    ) -> FastBoundaryWeightId {
-        if left == 0 {
-            return right;
-        }
-        if right == 0 || left == right {
-            return left;
-        }
-        if left == 1 || right == 1 {
-            return 1;
-        }
-        let key = if left <= right { (left, right) } else { (right, left) };
-        if let Some(&id) = self.unions.get(&key) {
-            return id;
-        }
-        let id=if self.borrowed_intern{
-            let mut buffer=[0u64;FAST_BOUNDARY_TSID_LIMIT];
-            for (slot,(&a,&b)) in buffer[..self.tsid_count].iter_mut()
-                .zip(self.values[left as usize].iter().zip(&self.values[right as usize])){
-                *slot=a | b;
-            }
-            self.intern_slice(&buffer[..self.tsid_count])
-        }else{
-        let mut value: FastBoundaryWeightValue = smallvec::smallvec![0u64; self.tsid_count];
-        for (slot, (&a, &b)) in value
-            .iter_mut()
-            .zip(self.values[left as usize].iter().zip(&self.values[right as usize]))
-            .take(self.tsid_count)
-        {
-            *slot = a | b;
-        }
-        self.intern(value)
-        };
-        if self.limits.is_none() || self.unions.len() < 262_144 {
-            self.unions.insert(key, id);
-        }
-        id
+    fn intersection(&mut self, left: u32, right: u32) -> u32 {
+        self.binary(FiniteWeightOp::Intersection, left, right)
     }
 
     #[inline]
-    fn difference(
-        &mut self,
-        left: FastBoundaryWeightId,
-        right: FastBoundaryWeightId,
-    ) -> FastBoundaryWeightId {
-        if left == 0 || right == 1 || left == right {
-            return 0;
-        }
-        if right == 0 {
-            return left;
-        }
-        let key = (left, right);
-        if let Some(&id) = self.differences.get(&key) {
-            return id;
-        }
-        let id=if self.borrowed_intern{
-            let mut buffer=[0u64;FAST_BOUNDARY_TSID_LIMIT];
-            for (slot,(&a,&b)) in buffer[..self.tsid_count].iter_mut()
-                .zip(self.values[left as usize].iter().zip(&self.values[right as usize])){
-                *slot=a & !b;
-            }
-            self.intern_slice(&buffer[..self.tsid_count])
-        }else{
-        let mut value: FastBoundaryWeightValue = smallvec::smallvec![0u64; self.tsid_count];
-        for (slot, (&a, &b)) in value
-            .iter_mut()
-            .zip(self.values[left as usize].iter().zip(&self.values[right as usize]))
-            .take(self.tsid_count)
-        {
-            *slot = a & !b;
-        }
-        self.intern(value)
-        };
-        if self.limits.is_none() || self.differences.len() < 262_144 {
-            self.differences.insert(key, id);
-        }
-        id
+    fn union(&mut self, left: u32, right: u32) -> u32 {
+        self.binary(FiniteWeightOp::Union, left, right)
+    }
+
+    #[inline]
+    fn difference(&mut self, left: u32, right: u32) -> u32 {
+        self.binary(FiniteWeightOp::Difference, left, right)
     }
 
     fn is_subset(

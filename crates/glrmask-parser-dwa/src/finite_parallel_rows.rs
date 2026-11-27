@@ -97,39 +97,41 @@ impl<'a> Overlay<'a> {
     }
 
     #[inline]
-    fn intersection(&mut self, a: u32, b: u32) -> u32 {
-        if a == 0 || b == 0 { return 0; }
-        if a == 1 { return b; }
-        if b == 1 || a == b { return a; }
-        let key = if a <= b { (a, b) } else { (b, a) };
-        if b & LOCAL == 0 && a & LOCAL == 0
-            && let Some(&id) = self.base.intersections.get(&key) { return id; }
-        if let Some(&id) = self.intersections.get(&key) { return id; }
-        let mut bits = [0u64; 64];
-        for (slot, (&x, &y)) in bits.iter_mut().zip(self.value(a).iter().zip(self.value(b))) {
-            *slot = x & y;
+    fn binary(&mut self, op: FiniteWeightOp, a: u32, b: u32) -> u32 {
+        if let Some(id) = op.shortcut(a, b) { return id; }
+        let key = op.key(a, b);
+        if a & LOCAL == 0 && b & LOCAL == 0
+            && let Some(&id) = self.base.operation_cache(op).get(&key)
+        {
+            return id;
         }
-        let id = self.intern(&bits[..self.base.tsid_count]);
-        if self.intersections.len() < 262_144 { self.intersections.insert(key, id); }
+        let cache = match op {
+            FiniteWeightOp::Intersection => &self.intersections,
+            FiniteWeightOp::Union => &self.unions,
+            FiniteWeightOp::Difference => unreachable!("overlay only needs meet and join"),
+        };
+        if let Some(&id) = cache.get(&key) { return id; }
+        let mut bits = [0u64; FAST_BOUNDARY_TSID_LIMIT];
+        let bits = &mut bits[..self.base.tsid_count];
+        op.fill(bits, self.value(a), self.value(b));
+        let id = self.intern(bits);
+        let cache = match op {
+            FiniteWeightOp::Intersection => &mut self.intersections,
+            FiniteWeightOp::Union => &mut self.unions,
+            FiniteWeightOp::Difference => unreachable!("overlay only needs meet and join"),
+        };
+        if cache.len() < 262_144 { cache.insert(key, id); }
         id
     }
 
     #[inline]
+    fn intersection(&mut self, a: u32, b: u32) -> u32 {
+        self.binary(FiniteWeightOp::Intersection, a, b)
+    }
+
+    #[inline]
     fn union(&mut self, a: u32, b: u32) -> u32 {
-        if a == 0 { return b; }
-        if b == 0 || a == b { return a; }
-        if a == 1 || b == 1 { return 1; }
-        let key = if a <= b { (a, b) } else { (b, a) };
-        if b & LOCAL == 0 && a & LOCAL == 0
-            && let Some(&id) = self.base.unions.get(&key) { return id; }
-        if let Some(&id) = self.unions.get(&key) { return id; }
-        let mut bits = [0u64; 64];
-        for (slot, (&x, &y)) in bits.iter_mut().zip(self.value(a).iter().zip(self.value(b))) {
-            *slot = x | y;
-        }
-        let id = self.intern(&bits[..self.base.tsid_count]);
-        if self.unions.len() < 262_144 { self.unions.insert(key, id); }
-        id
+        self.binary(FiniteWeightOp::Union, a, b)
     }
 
     #[inline]
