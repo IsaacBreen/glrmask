@@ -29,6 +29,7 @@ use crate::compiler::stages::resolve_negatives::{
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
+use crate::weight_row::SparseWeightRow;
 
 fn compile_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -3794,191 +3795,47 @@ pub use finite_template_program::{FiniteTemplateInstance, FiniteTemplateProgram,
 
 
 
-#[derive(Clone, Default)]
-enum FastBoundaryQueryRow {
-    #[default]
-    Empty,
-    One((u32, i32), FastBoundaryWeightId),
-    Many(FxHashMap<(u32, i32), FastBoundaryWeightId>),
+type FastBoundaryQueryRow = SparseWeightRow<(u32, i32), FastBoundaryWeightId>;
+type FastBoundaryDerivedRow = SparseWeightRow<u32, FastBoundaryWeightId>;
+
+impl<K: Copy + Eq + Hash> SparseWeightRow<K, FastBoundaryWeightId> {
+    fn merge(
+        &mut self,
+        key: K,
+        add: FastBoundaryWeightId,
+        interner: &mut FastBoundaryWeightInterner,
+    ) -> bool {
+        self.merge_with(key, add, |weight| *weight == 0, |existing, add| {
+            let merged = interner.union(*existing, add);
+            if merged == *existing {
+                false
+            } else {
+                *existing = merged;
+                true
+            }
+        })
+    }
+
+    fn for_each(&self, mut f: impl FnMut(K, FastBoundaryWeightId)) {
+        self.visit(|key, weight| f(key, *weight));
+    }
+
+    fn into_entries(self) -> Vec<(K, FastBoundaryWeightId)> {
+        self.into_entries_iter().collect()
+    }
 }
 
 impl FastBoundaryQueryRow {
-    fn merge(
-        &mut self,
-        key: (u32, i32),
-        add: FastBoundaryWeightId,
-        interner: &mut FastBoundaryWeightInterner,
-    ) -> bool {
-        if add == 0 {
-            return false;
-        }
-        match self {
-            Self::Empty => {
-                *self = Self::One(key, add);
-                true
-            }
-            Self::One(existing_key, existing) if *existing_key == key => {
-                let merged = interner.union(*existing, add);
-                if merged == *existing {
-                    false
-                } else {
-                    *existing = merged;
-                    true
-                }
-            }
-            Self::One(existing_key, existing) => {
-                let previous_key = *existing_key;
-                let previous_weight = *existing;
-                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
-                entries.insert(previous_key, previous_weight);
-                entries.insert(key, add);
-                *self = Self::Many(entries);
-                true
-            }
-            Self::Many(entries) => {
-                match entries.entry(key) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(add);
-                        true
-                    }
-                    Entry::Occupied(mut entry) => {
-                        let merged = interner.union(*entry.get(), add);
-                        if merged == *entry.get() {
-                            false
-                        } else {
-                            entry.insert(merged);
-                            true
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     #[inline]
     fn get(&self, key: &(u32, i32)) -> FastBoundaryWeightId {
-        match self {
-            Self::Empty => 0,
-            Self::One(existing_key, weight) => if *existing_key == *key { *weight } else { 0 },
-            Self::Many(entries) => entries.get(key).copied().unwrap_or(0),
-        }
+        self.get_ref(key).copied().unwrap_or(0)
     }
-
-    fn for_each(&self, mut f: impl FnMut((u32, i32), FastBoundaryWeightId)) {
-        match self {
-            Self::Empty => {}
-            Self::One(key, weight) => f(*key, *weight),
-            Self::Many(entries) => {
-                for (&key, &weight) in entries {
-                    f(key, weight);
-                }
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::One(_, _) => 1,
-            Self::Many(entries) => entries.len(),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-enum FastBoundaryDerivedRow {
-    #[default]
-    Empty,
-    One(u32, FastBoundaryWeightId),
-    Many(FxHashMap<u32, FastBoundaryWeightId>),
 }
 
 impl FastBoundaryDerivedRow {
-    fn merge(
-        &mut self,
-        target: u32,
-        add: FastBoundaryWeightId,
-        interner: &mut FastBoundaryWeightInterner,
-    ) -> bool {
-        if add == 0 {
-            return false;
-        }
-        match self {
-            Self::Empty => {
-                *self = Self::One(target, add);
-                true
-            }
-            Self::One(existing_target, existing) if *existing_target == target => {
-                let merged = interner.union(*existing, add);
-                if merged == *existing {
-                    false
-                } else {
-                    *existing = merged;
-                    true
-                }
-            }
-            Self::One(existing_target, existing) => {
-                let previous_target = *existing_target;
-                let previous_weight = *existing;
-                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
-                entries.insert(previous_target, previous_weight);
-                entries.insert(target, add);
-                *self = Self::Many(entries);
-                true
-            }
-            Self::Many(entries) => match entries.entry(target) {
-                Entry::Vacant(entry) => {
-                    entry.insert(add);
-                    true
-                }
-                Entry::Occupied(mut entry) => {
-                    let merged = interner.union(*entry.get(), add);
-                    if merged == *entry.get() {
-                        false
-                    } else {
-                        entry.insert(merged);
-                        true
-                    }
-                }
-            },
-        }
-    }
-
     #[inline]
     fn get(&self, target: u32) -> FastBoundaryWeightId {
-        match self {
-            Self::Empty => 0,
-            Self::One(existing_target, weight) => if *existing_target == target { *weight } else { 0 },
-            Self::Many(entries) => entries.get(&target).copied().unwrap_or(0),
-        }
-    }
-
-    fn for_each(&self, mut f: impl FnMut(u32, FastBoundaryWeightId)) {
-        match self {
-            Self::Empty => {}
-            Self::One(target, weight) => f(*target, *weight),
-            Self::Many(entries) => {
-                for (&target, &weight) in entries {
-                    f(target, weight);
-                }
-            }
-        }
-    }
-
-    fn into_entries(self) -> Vec<(u32, FastBoundaryWeightId)> {
-        match self {
-            Self::Empty => Vec::new(),
-            Self::One(target, weight) => vec![(target, weight)],
-            Self::Many(entries) => entries.into_iter().collect(),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::One(_, _) => 1,
-            Self::Many(entries) => entries.len(),
-        }
+        self.get_ref(&target).copied().unwrap_or(0)
     }
 }
 

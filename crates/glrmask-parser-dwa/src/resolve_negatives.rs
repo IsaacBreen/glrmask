@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
+use crate::weight_row::{SparseWeightRow, SparseWeightRowIter};
 
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
@@ -32,171 +33,32 @@ const DIRECT_ACYCLIC_FINALITY_MIN_STATES: usize = 65_536;
 /// finality solvers remain preferable until they can consume the same plan.
 const PRECOMPUTED_FINALITY_MIN_STATES: usize = 8_192;
 
-#[derive(Clone, Default)]
-enum SmallQueryWeights {
-    #[default]
-    Empty,
-    One(QueryKey, Weight),
-    Many(FxHashMap<QueryKey, Weight>),
-}
+type SmallQueryWeights = SparseWeightRow<QueryKey, Weight>;
+type SmallTargetWeights = SparseWeightRow<u32, Weight>;
 
-#[derive(Clone, Default)]
-enum SmallTargetWeights {
-    #[default]
-    Empty,
-    One(u32, Weight),
-    Many(FxHashMap<u32, Weight>),
-}
+impl<K: Copy + Eq + std::hash::Hash> SparseWeightRow<K, Weight> {
+    fn merge(&mut self, key: K, add: Weight) -> bool {
+        self.merge_with(key, add, Weight::is_empty, merge_weight)
+    }
 
-enum SmallTargetWeightsIntoIter {
-    Empty,
-    One(Option<(u32, Weight)>),
-    Many(std::collections::hash_map::IntoIter<u32, Weight>),
-}
+    fn for_each(&self, f: impl FnMut(K, &Weight)) {
+        self.visit(f);
+    }
 
-impl Iterator for SmallTargetWeightsIntoIter {
-    type Item = (u32, Weight);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Empty => None,
-            Self::One(entry) => entry.take(),
-            Self::Many(entries) => entries.next(),
-        }
+    fn into_entries(self) -> SparseWeightRowIter<K, Weight> {
+        self.into_entries_iter()
     }
 }
 
 impl SmallTargetWeights {
-    fn merge(&mut self, target: u32, add: Weight) -> bool {
-        match self {
-            Self::Empty => {
-                if add.is_empty() {
-                    return false;
-                }
-                *self = Self::One(target, add);
-                true
-            }
-            Self::One(existing_target, existing_weight) if *existing_target == target => {
-                merge_weight(existing_weight, add)
-            }
-            Self::One(existing_target, existing_weight) => {
-                if add.is_empty() {
-                    return false;
-                }
-                let previous_target = *existing_target;
-                let previous_weight = existing_weight.clone();
-                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
-                entries.insert(previous_target, previous_weight);
-                entries.insert(target, add);
-                *self = Self::Many(entries);
-                true
-            }
-            Self::Many(entries) => {
-                let entry = entries.entry(target).or_insert_with(Weight::empty);
-                merge_weight(entry, add)
-            }
-        }
-    }
-
     fn get(&self, target: u32) -> Option<&Weight> {
-        match self {
-            Self::Empty => None,
-            Self::One(existing_target, weight) => {
-                (*existing_target == target).then_some(weight)
-            }
-            Self::Many(entries) => entries.get(&target),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    fn for_each(&self, mut f: impl FnMut(u32, &Weight)) {
-        match self {
-            Self::Empty => {}
-            Self::One(target, weight) => f(*target, weight),
-            Self::Many(entries) => {
-                for (&target, weight) in entries {
-                    f(target, weight);
-                }
-            }
-        }
-    }
-
-    fn into_entries(self) -> SmallTargetWeightsIntoIter {
-        match self {
-            Self::Empty => SmallTargetWeightsIntoIter::Empty,
-            Self::One(target, weight) => {
-                SmallTargetWeightsIntoIter::One(Some((target, weight)))
-            }
-            Self::Many(entries) => SmallTargetWeightsIntoIter::Many(entries.into_iter()),
-        }
+        self.get_ref(&target)
     }
 }
 
 impl SmallQueryWeights {
-    fn merge(&mut self, query_key: QueryKey, add: Weight) -> bool {
-        match self {
-            Self::Empty => {
-                if add.is_empty() {
-                    return false;
-                }
-                *self = Self::One(query_key, add);
-                true
-            }
-            Self::One(existing_key, existing_weight) if *existing_key == query_key => {
-                merge_weight(existing_weight, add)
-            }
-            Self::One(existing_key, existing_weight) => {
-                if add.is_empty() {
-                    return false;
-                }
-                let previous_key = *existing_key;
-                let previous_weight = existing_weight.clone();
-                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
-                entries.insert(previous_key, previous_weight);
-                entries.insert(query_key, add);
-                *self = Self::Many(entries);
-                true
-            }
-            Self::Many(entries) => {
-                let entry = entries.entry(query_key).or_insert_with(Weight::empty);
-                merge_weight(entry, add)
-            }
-        }
-    }
-
-    fn get(&self, query_key: &QueryKey) -> Option<&Weight> {
-        match self {
-            Self::Empty => None,
-            Self::One(existing_key, weight) => (existing_key == query_key).then_some(weight),
-            Self::Many(entries) => entries.get(query_key),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::One(_, _) => 1,
-            Self::Many(entries) => entries.len(),
-        }
-    }
-
-    fn for_each(&self, mut f: impl FnMut(QueryKey, &Weight)) {
-        match self {
-            Self::Empty => {}
-            Self::One(query_key, weight) => f(*query_key, weight),
-            Self::Many(entries) => {
-                for (&query_key, weight) in entries {
-                    f(query_key, weight);
-                }
-            }
-        }
+    fn get(&self, key: &QueryKey) -> Option<&Weight> {
+        self.get_ref(key)
     }
 }
 
