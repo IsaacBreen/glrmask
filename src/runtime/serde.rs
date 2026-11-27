@@ -4387,47 +4387,44 @@ impl Constraint {
                             },
                             || -> Result<Option<DecodedConstraintRuntime>, String> {
                                 let started = profile.then(std::time::Instant::now);
-                                let result = if matches!(version, EXTERNAL_TEMPLATE_CONSTRAINT_VERSION | EXTERNAL_LR_CONSTRAINT_VERSION) {
+                                let result =
                                     current_backing
-                                        .as_ref()
-                                        .ok_or_else(|| bincode::Error::new(bincode::ErrorKind::Custom("current runtime has no artifact backing".to_owned())))
-                                        .and_then(|backing| {
-                                            decode_current_runtime_wire(runtime_section, std::sync::Arc::clone(backing))
-                                                .map_err(|err| bincode::Error::new(bincode::ErrorKind::Custom(err)))
-                                        })
-                                    .and_then(|(runtime, static_virtual_residual_mask)| {
-                                        let packed_dwa_dense_masks = if runtime
-                                            .packed_dwa_dense_mask_ids
-                                            .is_empty()
-                                        {
-                                            if !runtime.packed_dwa_dense_mask_rows.is_empty() {
-                                                return Err(bincode::Error::new(
-                                                    bincode::ErrorKind::Custom(
-                                                        "packed DWA dense-mask slab has rows but no ids"
-                                                            .to_owned(),
-                                                    ),
-                                                ));
-                                            }
-                                            None
-                                        } else {
-                                            Some((
-                                                runtime.packed_dwa_dense_mask_ids,
-                                                runtime.packed_dwa_dense_mask_rows,
-                                            ))
-                                        };
-                                        Ok(DecodedConstraintRuntime {
-                                            template_dynamic_proofs: runtime.template_dynamic_proofs,
-                                            terminal_live_states: runtime.terminal_live_states,
-                                            segmented_runtime_v27: runtime.segmented_runtime,
-                                            dynamic_mask_vocab: runtime.dynamic_mask_vocab,
-                                            virtual_runtimes: runtime.virtual_runtimes,
-                                            static_virtual_residual_mask,
-                                            packed_dwa_dense_masks,
-                                        })
+                                    .as_ref()
+                                    .ok_or_else(|| bincode::Error::new(bincode::ErrorKind::Custom("current runtime has no artifact backing".to_owned())))
+                                    .and_then(|backing| {
+                                        decode_current_runtime_wire(runtime_section, std::sync::Arc::clone(backing))
+                                            .map_err(|err| bincode::Error::new(bincode::ErrorKind::Custom(err)))
                                     })
-                                } else {
-                                    return Err("unsupported constraint runtime version".to_owned());
-                                }
+                                    .and_then(|(runtime, static_virtual_residual_mask)| {
+                                    let packed_dwa_dense_masks = if runtime
+                                        .packed_dwa_dense_mask_ids
+                                        .is_empty()
+                                    {
+                                        if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                            return Err(bincode::Error::new(
+                                                bincode::ErrorKind::Custom(
+                                                    "packed DWA dense-mask slab has rows but no ids"
+                                                        .to_owned(),
+                                                ),
+                                            ));
+                                        }
+                                        None
+                                    } else {
+                                        Some((
+                                            runtime.packed_dwa_dense_mask_ids,
+                                            runtime.packed_dwa_dense_mask_rows,
+                                        ))
+                                    };
+                                    Ok(DecodedConstraintRuntime {
+                                        template_dynamic_proofs: runtime.template_dynamic_proofs,
+                                        terminal_live_states: runtime.terminal_live_states,
+                                        segmented_runtime_v27: runtime.segmented_runtime,
+                                        dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                        virtual_runtimes: runtime.virtual_runtimes,
+                                        static_virtual_residual_mask,
+                                        packed_dwa_dense_masks,
+                                    })
+                                    })
                                 .map(Some)
                                 .map_err(|err| err.to_string());
                                 if let Some(started) = started {
