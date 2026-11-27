@@ -3874,13 +3874,15 @@ impl RepeatSuffixLanguage<'_> {
             }
         }
         frontier.body.extend(boundary.into_iter().map(|count| (0, count)));
-        frontier.body.retain(|&(state, count)| {
+        frontier.body.retain(|entry| {
+            let (state, count) = *entry;
             count < self.max && self.body.possible_future_group_ids(state).contains(0)
         });
         frontier.body.sort_unstable();
         frontier.body.dedup();
         let mut dominated = None;
-        frontier.body.retain(|&(state, count)| {
+        frontier.body.retain(|entry| {
+            let (state, count) = *entry;
             if count < self.min {
                 return true;
             }
@@ -3891,7 +3893,8 @@ impl RepeatSuffixLanguage<'_> {
                 true
             }
         });
-        frontier.suffix.retain(|&state| {
+        frontier.suffix.retain(|entry| {
+            let state = *entry;
             self.suffix.finalizers(state).contains(0)
                 || self.suffix.possible_future_group_ids(state).contains(0)
         });
