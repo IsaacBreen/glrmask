@@ -7899,7 +7899,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                         support_transposition_checks += class.members.len();
                         accepted_representative_members += class.members.len();
                         for (terminal, map) in class.members {
-                            record_certified_member(                                 &mut result,                                 &mut accepted_maps,                                 representative,                                 terminal,                                 map,                             );
+                            record_certified_member(
+                                &mut result,
+                                &mut accepted_maps,
+                                representative,
+                                terminal,
+                                map,
+                            );
                         }
                     }
                 }
@@ -7989,7 +7995,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                 support_transposition_checks += group.len() - 1;
                 accepted_representative_members += group.len() - 1;
                 for (&terminal, map) in group[1..].iter().zip(maps) {
-                    record_certified_member(                         &mut result,                         &mut accepted_maps,                         representative,                         terminal,                         map,                     );
+                    record_certified_member(
+                        &mut result,
+                        &mut accepted_maps,
+                        representative,
+                        terminal,
+                        map,
+                    );
                 }
             }
             residual_groups
@@ -8119,7 +8131,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                     support_transposition_checks += group.len() - 1;
                     accepted_representative_members += group.len() - 1;
                     for (&terminal, map) in group[1..].iter().zip(maps) {
-                        record_certified_member(                             &mut result,                             &mut accepted_maps,                             representative,                             terminal,                             map,                         );
+                        record_certified_member(
+                            &mut result,
+                            &mut accepted_maps,
+                            representative,
+                            terminal,
+                            map,
+                        );
                     }
                 }
             }
@@ -8269,7 +8287,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                         if let Some(map) = map {
                             accepted_this_pivot += 1;
                             accepted_representative_members += 1;
-                            record_certified_member(                                 &mut result,                                 &mut accepted_maps,                                 representative,                                 terminal,                                 map,                             );
+                            record_certified_member(
+                                &mut result,
+                                &mut accepted_maps,
+                                representative,
+                                terminal,
+                                map,
+                            );
                         } else {
                             next_unresolved.push(terminal);
                         }
@@ -8391,7 +8415,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                                 if let Some(map) = map {
                                     let terminal = batch_members[member_index];
                                     accepted_representative_members += 1;
-                                    record_certified_member(                                         &mut result,                                         &mut accepted_maps,                                         representative,                                         terminal,                                         map,                                     );
+                                    record_certified_member(
+                                        &mut result,
+                                        &mut accepted_maps,
+                                        representative,
+                                        terminal,
+                                        map,
+                                    );
                                 } else {
                                     next_remaining.push(member_index);
                                 }
@@ -8529,7 +8559,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                     if let Some(map) = map {
                         let storage_started_at = profile_timing.then(Instant::now);
                         accepted_representative_members += 1;
-                        record_certified_member(                             &mut result,                             &mut accepted_maps,                             representative,                             terminal,                             map,                         );
+                        record_certified_member(
+                            &mut result,
+                            &mut accepted_maps,
+                            representative,
+                            terminal,
+                            map,
+                        );
                         if let Some(started_at) = storage_started_at {
                             accepted_map_storage_ns += started_at.elapsed().as_nanos() as u64;
                         }
