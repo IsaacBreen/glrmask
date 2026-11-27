@@ -59,6 +59,7 @@ use crate::Vocab;
 pub(crate) fn compose_profile_enabled() -> bool {
     crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
         || crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+}
 
 pub(crate) fn eliminate_composed_runtime_controls(
     composed: &mut ComposedTable,
@@ -1865,72 +1866,6 @@ pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint
     }
 }
 
-
-fn merged_original_token_ids(
-    vocab: &Vocab,
-    special_token_terminals: &[SpecialTokenTerminal],
-) -> Vec<u32> {
-    // The output is the existing dense original-token coordinate. Normalize
-    // interval inputs first, rather than inserting their IDs into a tree.
-    let ordinary = RangeSetBlaze::from_iter(vocab.entries_map().keys().copied());
-    let exact = RangeSetBlaze::from_iter(special_token_terminals.iter().map(|special| special.token_ids()));
-    (ordinary | exact).into_iter().collect()
-}
-
-fn merged_special_token_terminals(
-    parent: &Constraint,
-    children: &[CompiledSubgrammarInput<'_>],
-    terminal_offsets: &[u32],
-    table: &crate::compiler::glr::table::GLRTable,
-    control_terminals: &BTreeSet<u32>,
-) -> Vec<SpecialTokenTerminal> {
-    fn consumes_terminal(action: &Action) -> bool {
-        match action {
-            Action::Reduce(_, _) => false,
-            Action::Split { shift, accept, .. } => shift.is_some() || *accept,
-            Action::Shift(_, _)
-            | Action::StackShifts(_)
-            | Action::GuardedStackShifts(_)
-            | Action::Accept
-            | Action::ReplaceShifts(_)
-            | Action::Skip => true,
-        }
-    }
-
-    let mut merged = Vec::new();
-    for (component_index, constraint) in std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
-        .enumerate()
-    {
-        let terminal_offset = terminal_offsets[component_index];
-        merged.extend(
-            constraint
-                .special_token_terminals
-                .iter()
-                .filter_map(|special| {
-                    let terminal_id = terminal_offset + special.terminal_id;
-                    if control_terminals.contains(&terminal_id) {
-                        return None;
-                    }
-                    // Placeholder terminals and placeholders retained inside an
-                    // already-composed child are dead after table splicing. Do
-                    // not keep their exact-token metadata: runtime special-token
-                    // masking is driven by this list rather than the byte lexer.
-                    table
-                        .action
-                        .iter()
-                        .any(|row| row.get(&terminal_id).is_some_and(consumes_terminal))
-                        .then_some(SpecialTokenTerminal {
-                            terminal_id,
-                            token_id: special.token_id, token_id_end: special.token_id_end,
-                        })
-                }),
-        );
-    }
-    merged.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
-    merged.dedup_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
-    merged
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct MergedIgnoreTerminals {
