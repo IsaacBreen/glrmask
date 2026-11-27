@@ -1545,317 +1545,239 @@ fn step_epsilon_closed_config_cached(
     targets
 }
 
-fn expand_trie_from_config(
-    tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
-    start_state: u32,
-    trie: &[ByteTrieNode],
-    configs: &mut Vec<Box<[u32]>>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    transitions: &mut Vec<u32>,
-    known_transitions: &mut Vec<u8>,
-    visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
-    preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &SingletonEpsilonClosures,
-    active_language: Option<&[bool]>,
-    target_marks: &mut [u32],
-    target_generation: &mut u32,
-) {
-    let mut stack = vec![(start_state, 0usize)];
-    while let Some((state, node)) = stack.pop() {
-        if !visited.insert((state, node)) {
-            continue;
-        }
-        for &(byte, child) in &trie[node].children {
-            let target = ensure_config_transition(
-                tokenizer,
-                raw_transitions,
-                state,
-                byte,
-                configs,
-                config_ids,
-                transitions,
-                known_transitions,
-                preseeded_raw_closures,
-                singleton_closures,
-                active_language,
-                target_marks,
-                target_generation,
-            );
-            if target != u32::MAX {
-                stack.push((target, child));
-            }
-        }
-    }
+/// Mutable transition interning state shared by prefix and reset-suffix walks.
+/// A cached transition describes an exact epsilon-closed configuration step,
+/// independently of the trie position that first requested it.
+struct BoundedExpansion<'a> {
+    tokenizer: &'a Tokenizer,
+    raw_transitions: Option<&'a [u32]>,
+    configs: &'a mut Vec<Box<[u32]>>,
+    config_ids: &'a mut FxHashMap<Vec<u32>, u32>,
+    transitions: &'a mut Vec<u32>,
+    known_transitions: &'a mut Vec<u8>,
+    singleton_closures: &'a SingletonEpsilonClosures,
+    active_language: Option<&'a [bool]>,
+    target_marks: &'a mut [u32],
+    target_generation: &'a mut u32,
 }
 
-fn expand_trie_from_config_budgeted(
-    tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
-    start_state: u32,
-    trie: &[ByteTrieNode],
-    configs: &mut Vec<Box<[u32]>>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    transitions: &mut Vec<u32>,
-    known_transitions: &mut Vec<u8>,
-    visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
-    preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &SingletonEpsilonClosures,
-    active_language: Option<&[bool]>,
-    target_marks: &mut [u32],
-    target_generation: &mut u32,
-    budget: TokenBoundedAnalysisWorkBudget,
-    prior_trie_visits: usize,
-) -> Result<(), TokenBoundedAnalysisWork> {
-    const CONFIG_CHECK_INTERVAL: usize = 4096;
-    debug_assert!(CONFIG_CHECK_INTERVAL.is_power_of_two());
-    let first_disallowed_trie_visit = budget.max_trie_visits.saturating_add(1);
-    let mut stack = vec![(start_state, 0usize)];
-    while let Some((state, node)) = stack.pop() {
-        if !visited.insert((state, node)) {
-            continue;
-        }
-        let trie_visits = prior_trie_visits + visited.len();
-        if trie_visits == first_disallowed_trie_visit
-            || (trie_visits & (CONFIG_CHECK_INTERVAL - 1) == 0
-                && configs.len() > budget.max_configurations)
-        {
-            return Err(TokenBoundedAnalysisWork {
-                configurations: configs.len(),
-                trie_visits,
-            });
-        }
-        for &(byte, child) in &trie[node].children {
-            let target = ensure_config_transition(
-                tokenizer,
-                raw_transitions,
-                state,
-                byte,
-                configs,
-                config_ids,
-                transitions,
-                known_transitions,
-                preseeded_raw_closures,
-                singleton_closures,
-                active_language,
-                target_marks,
-                target_generation,
-            );
-            if target != u32::MAX {
-                stack.push((target, child));
-            }
-        }
-    }
-    if configs.len() > budget.max_configurations {
-        return Err(TokenBoundedAnalysisWork {
-            configurations: configs.len(),
-            trie_visits: prior_trie_visits + visited.len(),
-        });
-    }
-    Ok(())
+struct FrontierFrame {
+    node: usize,
+    next_child: usize,
+    states: Vec<u32>,
 }
 
-/// Expand all reachable configuration × trie-node pairs by propagating a
-/// unique configuration frontier from each trie node into each child. A trie
-/// node has exactly one parent, so the child frontier can be deduplicated with
-/// a reusable generation-mark table instead of a global hash set of
-/// `(configuration, trie_node)` pairs.
-fn expand_trie_frontiers(
-    tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
-    start_states: &[u32],
-    trie: &[ByteTrieNode],
-    configs: &mut Vec<Box<[u32]>>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    transitions: &mut Vec<u32>,
-    known_transitions: &mut Vec<u8>,
-    preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &SingletonEpsilonClosures,
-    active_language: Option<&[bool]>,
-    target_marks: &mut [u32],
-    target_generation: &mut u32,
-    budget: Option<TokenBoundedAnalysisWorkBudget>,
-    prior_trie_visits: usize,
-) -> Result<usize, TokenBoundedAnalysisWork> {
-    if trie.is_empty() || start_states.is_empty() {
-        return Ok(0);
+impl BoundedExpansion<'_> {
+    #[inline]
+    fn step(&mut self, state: u32, byte: u8, preseeded: Option<&[u32]>) -> u32 {
+        ensure_config_transition(
+            self.tokenizer, self.raw_transitions, state, byte,
+            self.configs, self.config_ids, self.transitions, self.known_transitions,
+            preseeded, self.singleton_closures, self.active_language,
+            self.target_marks, self.target_generation,
+        )
     }
 
-    let mut node_state_start = vec![0u32; trie.len()];
-    let mut node_state_len = vec![0u32; trie.len()];
-    let mut product_states = Vec::<u32>::with_capacity(start_states.len());
-    product_states.extend_from_slice(start_states);
-    node_state_len[0] = start_states.len() as u32;
-
-    let mut config_marks = vec![0u32; configs.len().max(1)];
-    let mut config_generation = 0u32;
-    let mut trie_visits = 0usize;
-    for node_index in 0..trie.len() {
-        let state_start = node_state_start[node_index] as usize;
-        let state_len = node_state_len[node_index] as usize;
-        if state_len == 0 {
-            continue;
-        }
+    fn charge(
+        &self,
+        visits: &mut usize,
+        count: usize,
+        budget: Option<TokenBoundedAnalysisWorkBudget>,
+    ) -> Result<(), TokenBoundedAnalysisWork> {
         if let Some(budget) = budget {
-            let next_total_visits = prior_trie_visits + trie_visits + state_len;
-            if next_total_visits > budget.max_trie_visits {
+            if visits.saturating_add(count) > budget.max_trie_visits {
                 return Err(TokenBoundedAnalysisWork {
-                    configurations: configs.len(),
+                    configurations: self.configs.len(),
                     trie_visits: budget.max_trie_visits.saturating_add(1),
                 });
             }
-            if configs.len() > budget.max_configurations {
+            if self.configs.len() > budget.max_configurations {
                 return Err(TokenBoundedAnalysisWork {
-                    configurations: configs.len(),
-                    trie_visits: prior_trie_visits + trie_visits,
+                    configurations: self.configs.len(),
+                    trie_visits: *visits,
                 });
             }
         }
-        trie_visits += state_len;
+        *visits = visits.saturating_add(count);
+        Ok(())
+    }
 
-        // The root frontier is typically every raw tokenizer closure and may
-        // have dozens or hundreds of first-byte children.  Scanning
-        // `root_children × configurations` performs millions of absent-byte
-        // lookups for L1 workloads.  When a configuration is a singleton
-        // epsilon-closed physical state, iterate its actual sparse byte edges
-        // once and route only edges represented at the trie root.  Non-singleton
-        // configurations retain the generic exact path below.
-        if node_index == 0
-            && preseeded_raw_closures.is_some()
-            && trie[node_index].children.len() > 1
-        {
-            let raw_start_to_view = match preseeded_raw_closures {
-                Some(closures) => closures,
-                None => unreachable!("preseeded raw closures checked above"),
-            };
-            let root_children = &trie[node_index].children;
-            let mut child_slot_by_byte = [u16::MAX; 256];
-            for (slot, &(byte, _)) in root_children.iter().enumerate() {
-                child_slot_by_byte[byte as usize] = slot as u16;
-            }
-            let mut child_frontiers = vec![Vec::<u32>::new(); root_children.len()];
-
-            for state_offset in 0..state_len {
-                let state = product_states[state_start + state_offset];
-                if let [source] = configs[state as usize].as_ref() {
-                    for (byte, _) in tokenizer.transitions_from(*source) {
-                        let child_slot = child_slot_by_byte[byte as usize];
-                        if child_slot == u16::MAX {
-                            continue;
-                        }
-                        // Preserve the sparse root scan, but use the exact
-                        // configuration transition. A physical raw target may
-                        // not have been preseeded as a raw start, so directly
-                        // indexing `raw_start_to_view` can incorrectly turn a
-                        // live transition into DEAD.
-                        let target = ensure_config_transition(
-                            tokenizer,
-                            raw_transitions,
-                            state,
-                            byte,
-                            configs,
-                            config_ids,
-                            transitions,
-                            known_transitions,
-                            None,
-                            singleton_closures,
-                            active_language,
-                            target_marks,
-                            target_generation,
-                        );
-                        if target == u32::MAX {
-                            continue;
-                        }
-                        child_frontiers[child_slot as usize].push(target);
-                    }
-                    continue;
-                }
-
-                for (child_slot, &(byte, _)) in root_children.iter().enumerate() {
-                    let target = ensure_config_transition(
-                        tokenizer,
-                        raw_transitions,
-                        state,
-                        byte,
-                        configs,
-                        config_ids,
-                        transitions,
-                        known_transitions,
-                        preseeded_raw_closures,
-                        singleton_closures,
-                        active_language,
-                        target_marks,
-                        target_generation,
-                    );
-                    if target != u32::MAX {
-                        child_frontiers[child_slot].push(target);
-                    }
-                }
-            }
-
-            for ((_, child), frontier) in root_children.iter().zip(child_frontiers.iter_mut()) {
-                frontier.sort_unstable();
-                frontier.dedup();
-                let child_start = product_states.len();
-                product_states.extend_from_slice(frontier);
-                debug_assert_eq!(node_state_len[*child], 0, "trie child has multiple parents");
-                node_state_start[*child] = child_start as u32;
-                node_state_len[*child] = frontier.len() as u32;
-            }
-            continue;
+    /// Each trie node has one parent. Its reachable configuration set is
+    /// therefore exactly the image of that parent's frontier under one byte.
+    /// Keep only the current root-to-leaf path, recycling child buffers when
+    /// a branch finishes. No global product-state list or visited-pair table.
+    fn walk_frontier(
+        &mut self,
+        node: usize,
+        states: Vec<u32>,
+        trie: &[ByteTrieNode],
+        preseeded: Option<&[u32]>,
+        budget: Option<TokenBoundedAnalysisWorkBudget>,
+        visits: &mut usize,
+        marks: &mut Vec<u32>,
+        generation: &mut u32,
+        spare: &mut Vec<Vec<u32>>,
+    ) -> Result<(), TokenBoundedAnalysisWork> {
+        if states.is_empty() {
+            spare.push(states);
+            return Ok(());
         }
-
-        for &(byte, child) in &trie[node_index].children {
-            config_generation = config_generation.wrapping_add(1);
-            if config_generation == 0 {
-                config_marks.fill(0);
-                config_generation = 1;
+        self.charge(visits, states.len(), budget)?;
+        let mut stack = vec![FrontierFrame { node, next_child: 0, states }];
+        while let Some(frame) = stack.last_mut() {
+            let Some(&(byte, child)) = trie[frame.node].children.get(frame.next_child) else {
+                let mut finished = stack.pop().expect("current frontier frame").states;
+                finished.clear();
+                spare.push(finished);
+                continue;
+            };
+            frame.next_child += 1;
+            *generation = generation.wrapping_add(1);
+            if *generation == 0 {
+                marks.fill(0);
+                *generation = 1;
             }
-            let child_start = product_states.len();
-            for state_offset in 0..state_len {
-                let state = product_states[state_start + state_offset];
-                let target = ensure_config_transition(
-                    tokenizer,
-                    raw_transitions,
-                    state,
-                    byte,
-                    configs,
-                    config_ids,
-                    transitions,
-                    known_transitions,
-                    preseeded_raw_closures,
-                    singleton_closures,
-                    active_language,
-                    target_marks,
-                    target_generation,
-                );
+            let mut targets = spare.pop().unwrap_or_default();
+            targets.clear();
+            for &state in &frame.states {
+                let target = self.step(state, byte, preseeded);
                 if target == u32::MAX {
                     continue;
                 }
-                if config_marks.len() < configs.len() {
-                    config_marks.resize(configs.len(), 0);
+                if marks.len() < self.configs.len() {
+                    marks.resize(self.configs.len(), 0);
                 }
-                let mark = &mut config_marks[target as usize];
-                if *mark != config_generation {
-                    *mark = config_generation;
-                    product_states.push(target);
+                if marks[target as usize] != *generation {
+                    marks[target as usize] = *generation;
+                    targets.push(target);
                 }
             }
-            debug_assert_eq!(node_state_len[child], 0, "trie child has multiple parents");
-            node_state_start[child] = child_start as u32;
-            node_state_len[child] = (product_states.len() - child_start) as u32;
+            self.charge(visits, targets.len(), budget)?;
+            if targets.is_empty() {
+                spare.push(targets);
+            } else {
+                stack.push(FrontierFrame { node: child, next_child: 0, states: targets });
+            }
         }
+        Ok(())
     }
 
-    if let Some(budget) = budget
-        && configs.len() > budget.max_configurations
-    {
-        return Err(TokenBoundedAnalysisWork {
-            configurations: configs.len(),
-            trie_visits: prior_trie_visits + trie_visits,
-        });
+    fn expand(
+        &mut self,
+        start_states: &[u32],
+        trie: &[ByteTrieNode],
+        preseeded: Option<&[u32]>,
+        budget: Option<TokenBoundedAnalysisWorkBudget>,
+        prior_visits: usize,
+    ) -> Result<usize, TokenBoundedAnalysisWork> {
+        if trie.is_empty() || start_states.is_empty() {
+            return Ok(0);
+        }
+        let mut visits = prior_visits;
+        let mut marks = vec![0u32; self.configs.len()];
+        let mut generation = 0u32;
+        let mut spare = Vec::new();
+        if preseeded.is_some() && trie[0].children.len() > 1 {
+            // A broad root usually contains physical singleton closures.
+            // Route their actual sparse edges to the relevant first bytes
+            // rather than scanning the entire alphabet for every seed.
+            self.charge(&mut visits, start_states.len(), budget)?;
+            let children = &trie[0].children;
+            let mut slot_by_byte = [usize::MAX; 256];
+            for (slot, &(byte, _)) in children.iter().enumerate() {
+                slot_by_byte[byte as usize] = slot;
+            }
+            let mut frontiers = vec![Vec::new(); children.len()];
+            let tokenizer = self.tokenizer;
+            for &state in start_states {
+                if let [source] = self.configs[state as usize].as_ref() {
+                    let source = *source;
+                    for (byte, _) in tokenizer.transitions_from(source) {
+                        let slot = slot_by_byte[byte as usize];
+                        if slot == usize::MAX {
+                            continue;
+                        }
+                        let target = self.step(state, byte, preseeded);
+                        if target != u32::MAX {
+                            frontiers[slot].push(target);
+                        }
+                    }
+                } else {
+                    for (slot, &(byte, _)) in children.iter().enumerate() {
+                        let target = self.step(state, byte, preseeded);
+                        if target != u32::MAX {
+                            frontiers[slot].push(target);
+                        }
+                    }
+                }
+            }
+            for ((_, child), mut frontier) in children.iter().zip(frontiers) {
+                frontier.sort_unstable();
+                frontier.dedup();
+                self.walk_frontier(
+                    *child, frontier, trie, preseeded, budget, &mut visits,
+                    &mut marks, &mut generation, &mut spare,
+                )?;
+            }
+        } else {
+            self.walk_frontier(
+                0, start_states.to_vec(), trie, preseeded, budget, &mut visits,
+                &mut marks, &mut generation, &mut spare,
+            )?;
+        }
+        self.charge(&mut visits, 0, budget)?;
+        Ok(visits - prior_visits)
     }
-    Ok(trie_visits)
+
+    /// Independent literal product traversal, deliberately not implemented
+    /// through the frontier recurrence. Used only for semantic comparisons.
+    #[cfg(test)]
+    fn expand_reference(
+        &mut self,
+        start_states: &[u32],
+        trie: &[ByteTrieNode],
+        preseeded: Option<&[u32]>,
+        budget: Option<TokenBoundedAnalysisWorkBudget>,
+        prior_visits: usize,
+    ) -> Result<usize, TokenBoundedAnalysisWork> {
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visits = prior_visits;
+        let mut stack = Vec::new();
+        for &start in start_states {
+            stack.push((start, 0usize));
+            while let Some((state, node)) = stack.pop() {
+                if !visited.insert((state, node)) {
+                    continue;
+                }
+                self.charge(&mut visits, 1, budget)?;
+                for &(byte, child) in &trie[node].children {
+                    let target = self.step(state, byte, preseeded);
+                    if target != u32::MAX {
+                        stack.push((target, child));
+                    }
+                }
+            }
+        }
+        self.charge(&mut visits, 0, budget)?;
+        Ok(visits - prior_visits)
+    }
+
+    fn expand_selected(
+        &mut self,
+        start_states: &[u32],
+        trie: &[ByteTrieNode],
+        preseeded: Option<&[u32]>,
+        budget: Option<TokenBoundedAnalysisWorkBudget>,
+        prior_visits: usize,
+        use_frontier: bool,
+    ) -> Result<usize, TokenBoundedAnalysisWork> {
+        #[cfg(test)]
+        if !use_frontier {
+            return self.expand_reference(start_states, trie, preseeded, budget, prior_visits);
+        }
+        let _ = use_frontier;
+        self.expand(start_states, trie, preseeded, budget, prior_visits)
+    }
 }
 
 #[derive(Clone)]
@@ -2045,8 +1967,7 @@ fn build_bounded_analysis_topology_impl(
     budget: Option<TokenBoundedAnalysisWorkBudget>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
-    let use_frontier_expansion =
-        std::env::var_os("GLRMASK_DISABLE_TRIE_FRONTIER_EXPANSION").is_none();
+    let use_frontier_expansion = true;
     build_bounded_analysis_topology_impl_with_expansion(
         tokenizer,
         raw_transitions,
@@ -2185,161 +2106,40 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         .collect::<Vec<_>>();
     seeded_configs.sort_unstable();
     seeded_configs.dedup();
-    if let Some(first_byte) = common_first_byte {
-        let mut advanced_seeded_configs = Vec::with_capacity(seeded_configs.len());
-        for state in seeded_configs {
-            let target = ensure_config_transition(
-                tokenizer,
-                raw_transitions,
-                state,
-                first_byte,
-                &mut configs,
-                &mut config_ids,
-                &mut transitions,
-                &mut known_transitions,
-                (!combine_start_states).then_some(raw_start_to_view.as_slice()),
-                singleton_closures.as_ref(),
-                active_language.as_deref(),
-                &mut target_marks,
-                &mut target_generation,
-            );
-            if target != u32::MAX {
-                advanced_seeded_configs.push(target);
-            }
-        }
-        advanced_seeded_configs.sort_unstable();
-        advanced_seeded_configs.dedup();
-        seeded_configs = advanced_seeded_configs;
-        if budget.is_some_and(|budget| configs.len() > budget.max_configurations) {
-            return Err(TokenBoundedAnalysisWork {
-                configurations: configs.len(),
-                trie_visits: 0,
-            });
-        }
-    }
     let preseeded_raw_closures = (!combine_start_states).then_some(raw_start_to_view.as_slice());
-    let (token_trie_visits, suffix_trie_visits) = if use_frontier_expansion {
-        let token_trie_visits = expand_trie_frontiers(
-            tokenizer,
-            raw_transitions,
-            &seeded_configs,
-            token_trie,
-            &mut configs,
-            &mut config_ids,
-            &mut transitions,
-            &mut known_transitions,
-            preseeded_raw_closures,
-            singleton_closures.as_ref(),
-            active_language.as_deref(),
-            &mut target_marks,
-            &mut target_generation,
-            budget,
-            0,
-        )?;
-        let suffix_trie_visits = if let Some(suffix_trie) = suffix_trie.as_ref() {
-            expand_trie_frontiers(
-                tokenizer,
-                raw_transitions,
-                std::slice::from_ref(&start_state),
-                suffix_trie,
-                &mut configs,
-                &mut config_ids,
-                &mut transitions,
-                &mut known_transitions,
-                None,
-                singleton_closures.as_ref(),
-                active_language.as_deref(),
-                &mut target_marks,
-                &mut target_generation,
-                budget,
-                token_trie_visits,
-            )?
-        } else {
-            0
-        };
-        (token_trie_visits, suffix_trie_visits)
+    let mut expansion = BoundedExpansion {
+        tokenizer,
+        raw_transitions,
+        configs: &mut configs,
+        config_ids: &mut config_ids,
+        transitions: &mut transitions,
+        known_transitions: &mut known_transitions,
+        singleton_closures: singleton_closures.as_ref(),
+        active_language: active_language.as_deref(),
+        target_marks: &mut target_marks,
+        target_generation: &mut target_generation,
+    };
+    if let Some(first_byte) = common_first_byte {
+        seeded_configs = seeded_configs.into_iter()
+            .map(|state| expansion.step(state, first_byte, preseeded_raw_closures))
+            .filter(|&state| state != u32::MAX)
+            .collect();
+        seeded_configs.sort_unstable();
+        seeded_configs.dedup();
+        let mut visits = 0;
+        expansion.charge(&mut visits, 0, budget)?;
+    }
+    let token_trie_visits = expansion.expand_selected(
+        &seeded_configs, token_trie, preseeded_raw_closures,
+        budget, 0, use_frontier_expansion,
+    )?;
+    let suffix_trie_visits = if let Some(suffix_trie) = suffix_trie.as_ref() {
+        expansion.expand_selected(
+            std::slice::from_ref(&start_state), suffix_trie, None,
+            budget, token_trie_visits, use_frontier_expansion,
+        )?
     } else {
-        let mut token_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
-        for state in seeded_configs.iter().copied() {
-            if let Some(budget) = budget {
-                expand_trie_from_config_budgeted(
-                    tokenizer,
-                    raw_transitions,
-                    state,
-                    token_trie,
-                    &mut configs,
-                    &mut config_ids,
-                    &mut transitions,
-                    &mut known_transitions,
-                    &mut token_visited,
-                    preseeded_raw_closures,
-                    singleton_closures.as_ref(),
-                    active_language.as_deref(),
-                    &mut target_marks,
-                    &mut target_generation,
-                    budget,
-                    0,
-                )?;
-            } else {
-                expand_trie_from_config(
-                    tokenizer,
-                    raw_transitions,
-                    state,
-                    token_trie,
-                    &mut configs,
-                    &mut config_ids,
-                    &mut transitions,
-                    &mut known_transitions,
-                    &mut token_visited,
-                    preseeded_raw_closures,
-                    singleton_closures.as_ref(),
-                    active_language.as_deref(),
-                    &mut target_marks,
-                    &mut target_generation,
-                );
-            }
-        }
-        let mut suffix_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
-        if let Some(suffix_trie) = suffix_trie.as_ref() {
-            if let Some(budget) = budget {
-                expand_trie_from_config_budgeted(
-                    tokenizer,
-                    raw_transitions,
-                    start_state,
-                    suffix_trie,
-                    &mut configs,
-                    &mut config_ids,
-                    &mut transitions,
-                    &mut known_transitions,
-                    &mut suffix_visited,
-                    None,
-                    singleton_closures.as_ref(),
-                    active_language.as_deref(),
-                    &mut target_marks,
-                    &mut target_generation,
-                    budget,
-                    token_visited.len(),
-                )?;
-            } else {
-                expand_trie_from_config(
-                    tokenizer,
-                    raw_transitions,
-                    start_state,
-                    suffix_trie,
-                    &mut configs,
-                    &mut config_ids,
-                    &mut transitions,
-                    &mut known_transitions,
-                    &mut suffix_visited,
-                    None,
-                    singleton_closures.as_ref(),
-                    active_language.as_deref(),
-                    &mut target_marks,
-                    &mut target_generation,
-                );
-            }
-        }
-        (token_visited.len(), suffix_visited.len())
+        0
     };
 
     let expansion_ms = expansion_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
