@@ -22,10 +22,7 @@ fn identity() -> CommitTemplateDfas {
         pop_to_read: vec![], pop_to_push: vec![], read_to_push: vec![] }
 }
 
-fn with_nullable_return(program: &CommitTemplateDfas) -> Result<CommitTemplateDfas> {
-    let nfa = link_program::action_nfa(program).map_err(fail)?;
-    link_program::compile(&[nfa, link_program::nullable_return(0)]).map_err(fail)
-}
+
 
 /// Caller has chosen a dynamic boundary explicitly, or Auto. All supplied
 /// components are already compiled; this function never calls a grammar/LR
@@ -172,7 +169,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     if nullable && !parent_embedding.nullable {
         embedding = TemplateEmbedding::new(nullable, parent_embedding.return_pop,
             remaining_entries,
-            Arc::new(with_nullable_return(&parent_embedding.finish_view.source)?), parent_embedding.finish_view.symbols)
+            link_program::with_nullable_return(&parent_embedding.finish_view.source, 0).map_err(fail)?, parent_embedding.finish_view.symbols)
             .map_err(fail)?;
     }
     parser.embedding = Some(Arc::new(embedding));

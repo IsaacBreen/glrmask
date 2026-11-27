@@ -48,10 +48,7 @@ impl TemplateEmbedding {
         let nullable = source_nullable || super::compile_domain(completion)
             .map_err(|error| error.to_string())?.matches_top_first([0]);
         let finish = if nullable {
-            Arc::new(super::link_program::compile(&[
-                super::link_program::action_nfa(completion)?,
-                super::link_program::nullable_return(0),
-            ])?)
+            super::link_program::with_nullable_return(completion, 0)?
         } else {
             Arc::clone(completion)
         };

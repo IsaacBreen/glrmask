@@ -1,25 +1,84 @@
 //! Compile-time operations on the same finite stack programs used at runtime.
 //! DEFAULT is a per-source-state fallback, not an ordinary union alphabet
 //! symbol: explicit dead edges continue to shadow it during determinization.
+use std::sync::Arc;
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::automata::unweighted_u32::{dfa::DFA, nfa::NFA};
-use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label};
+use crate::automata::unweighted_u32::dfa::DFA;
+#[cfg(test)]
+use crate::automata::unweighted_u32::nfa::NFA;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
+#[cfg(test)]
+use crate::compiler::glr::labels::encode_negative_label;
 #[cfg(test)]
 use crate::compiler::glr::labels::negative_to_positive_label;
 use super::CommitTemplateDfas;
+#[cfg(test)]
 use glrmask_parser_dwa::__private::templates::compile_dfa::{
     recombine_split_commit_template_language, try_split_commit_template_dfas,
 };
 
+#[cfg(test)]
 const MAX_WORK: usize = 32_000_000;
 const MAX_STATES: usize = 131_072;
 const MAX_EDGES: usize = 1_048_576;
 
+/// Union a validated stack relation with the single action POP(symbol).
+/// Only the initial dispatch for this symbol changes. Clone its successor
+/// rather than accepting a shared state: other labels (including DEFAULT)
+/// must not acquire the new empty continuation.
+pub(crate) fn with_nullable_return(
+    source: &Arc<CommitTemplateDfas>, symbol: u32,
+) -> Result<Arc<CommitTemplateDfas>, String> {
+    if symbol >= DEFAULT_LABEL as u32 {
+        return Err("nullable return symbol outside stack alphabet".into());
+    }
+    let root = source.pop.start_state;
+    let label = symbol as i32;
+    let target = source.pop.states.get(root as usize).and_then(|row|
+        row.transitions.get(&label).or_else(|| row.transitions.get(&DEFAULT_LABEL)).copied());
+    if target.is_some_and(|id| source.pop.states[id as usize].is_accepting) {
+        return Ok(Arc::clone(source));
+    }
+    let states = source.pop.states.len().saturating_add(source.read.states.len())
+        .saturating_add(source.push.states.len())
+        .saturating_add(1 + usize::from(source.pop.states.is_empty()));
+    if states > MAX_STATES { return Err("nullable return exceeds state budget".into()); }
+    let edges = [&source.pop, &source.read, &source.push].into_iter()
+        .flat_map(|graph| &graph.states)
+        .fold(0usize, |count, row| count.saturating_add(row.transitions.len()));
+    let edges = [&source.pop_to_read, &source.pop_to_push, &source.read_to_push]
+        .into_iter().fold(edges, |count, links| count.saturating_add(links.iter().flatten().count()));
+    let added = target.map_or(0, |id| source.pop.states[id as usize].transitions.len()
+        + usize::from(source.pop_to_read.get(id as usize).is_some_and(Option::is_some))
+        + usize::from(source.pop_to_push.get(id as usize).is_some_and(Option::is_some)));
+    if edges.saturating_add(added).saturating_add(1) > MAX_EDGES {
+        return Err("nullable return exceeds edge budget".into());
+    }
+    let mut result = source.as_ref().clone();
+    if result.pop.states.is_empty() { result.pop = DFA::new(); }
+    let next = result.pop.add_state();
+    if let Some(id) = target {
+        result.pop.states[next as usize] = result.pop.states[id as usize].clone();
+        for links in [&mut result.pop_to_read, &mut result.pop_to_push] {
+            if let Some(Some(link)) = links.get(id as usize).copied() {
+                links.resize(next as usize + 1, None);
+                links[next as usize] = Some(link);
+            }
+        }
+    }
+    result.pop.set_accepting(next, true);
+    result.pop.add_transition(root, label, next);
+    Ok(Arc::new(result))
+}
+
+#[cfg(test)]
 fn spend(work: &mut usize, amount: usize) -> Result<(), String> {
     *work = work.checked_sub(amount).ok_or("template link program exceeds its work budget")?;
     Ok(())
 }
 
+#[cfg(test)]
 fn closure(nfa: &NFA, seeds: impl IntoIterator<Item = u32>, work: &mut usize) -> Result<Vec<u32>, String> {
     let mut seen = BTreeSet::new(); let mut todo = seeds.into_iter().collect::<Vec<_>>();
     while let Some(id) = todo.pop() {
@@ -37,6 +96,7 @@ fn closure(nfa: &NFA, seeds: impl IntoIterator<Item = u32>, work: &mut usize) ->
 /// their tests to one pop-and-restore before entering the output language;
 /// otherwise the one-READ compiler normal form would reject valid providers.
 /// Zero-READ acceptance and links remain separate, including on empty stacks.
+#[cfg(test)]
 pub(crate) fn action_nfa(template: &CommitTemplateDfas) -> Result<NFA, String> {
     let mut nfa = recombine_split_commit_template_language(template);
     if template.read.states.iter().all(|row| row.transitions.values().all(|&target|
@@ -170,6 +230,7 @@ pub(crate) fn scoped_template(program: &CommitTemplateDfas, offset: u32, count: 
     compile(&[scoped(program, offset, count)?])
 }
 
+#[cfg(test)]
 pub(crate) fn append_push(nfa: &mut NFA, symbol: u32) {
     let end = nfa.add_state(); nfa.set_accepting(end);
     for id in 0..end {
@@ -180,11 +241,13 @@ pub(crate) fn append_push(nfa: &mut NFA, symbol: u32) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn nullable_return(symbol: u32) -> NFA {
     let mut nfa = NFA::new(); let end = nfa.add_state(); nfa.set_accepting(end);
     nfa.add_transition(0, symbol as i32, end); nfa
 }
 
+#[cfg(test)]
 fn union(programs: &[NFA]) -> Result<NFA, String> {
     let mut result = NFA::new_empty(); let mut edges = 0usize;
     for program in programs {
@@ -274,6 +337,27 @@ mod oracle_tests {
     }
 
     #[test]
+    fn direct_nullable_return_preserves_other_paths_and_is_idempotent() {
+        let mut programs = cases();
+        let mut shared = program(&[DEFAULT_LABEL], &[1, 1], &[2]);
+        let target = shared.pop.states[0].transitions[&DEFAULT_LABEL];
+        shared.pop.add_transition(0, 1, target);
+        programs.push(shared);
+        for original in programs {
+            let source = Arc::new(original);
+            let result = with_nullable_return(&source, 0).unwrap();
+            assert!(Arc::ptr_eq(&result, &with_nullable_return(&result, 0).unwrap()));
+            for stack in stacks() {
+                let mut expected = evaluate(&source, &stack);
+                if stack.last() == Some(&0) {
+                    expected.insert(stack[..stack.len() - 1].to_vec());
+                }
+                assert_eq!(evaluate(&result, &stack), expected, "stack={stack:?}");
+            }
+        }
+    }
+
+    #[test]
     fn scoped_programs_match_phase_executor_over_all_small_stacks() {
         for (case, original) in cases().into_iter().enumerate() {
             let reference = rename(&original, 2);
@@ -324,6 +408,7 @@ mod oracle_tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compile(programs: &[NFA]) -> Result<CommitTemplateDfas, String> {
     let nfa = union(programs)?;
     let mut work = MAX_WORK;

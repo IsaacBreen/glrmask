@@ -588,14 +588,11 @@ impl TemplateParser {
 
     pub(crate) fn preserve_start_nullable(&mut self) {
         if self.completion_domain().matches_top_first([0]) { return; }
-        let completion = link_program::compile(&[
-            link_program::action_nfa(self.completion_template())
-                .expect("validated finite completion relation"),
-            link_program::nullable_return(0),
-        ]).expect("nullable completion must remain finite");
+        let completion = link_program::with_nullable_return(self.completion_template(), 0)
+            .expect("nullable completion must remain finite");
         let symbols = self.composition().map_or(self.state_count, |linked| linked.completion_view.symbols);
         let relation = Arc::new(PreparedRelation::prepare(
-            Arc::new(completion), symbols, false,
+            completion, symbols, false,
         ).expect("validated nullable completion relation"));
         match &mut self.admission {
             TemplateAdmission::Local(local) => {
