@@ -4236,6 +4236,69 @@ fn fast_boundary_resolve_negative_codes_with_topology(
     Some(())
 }
 
+/// Structural label presence matters to DEFAULT fallback even when every
+/// coefficient is zero. Preserve it in native normalization; older paths
+/// intentionally remove empty edges before resolving/determinizing.
+#[derive(Clone, Copy)]
+enum FastBoundaryInputPolicy {
+    DropEmpty,
+    PreserveLabelPresence { signed: bool },
+}
+
+fn convert_fast_boundary_nwa(
+    nwa: &NWA,
+    interner: &mut FastBoundaryWeightInterner,
+    source_tsid_map: Option<&[u32]>,
+    policy: FastBoundaryInputPolicy,
+) -> Option<(Vec<FastBoundaryNwaState>, usize)> {
+    let projection = match source_tsid_map {
+        Some(map) => Some(SourceTsidProjection::new(map, interner.tsid_count)?),
+        None => None,
+    };
+    let mut source_ids = FxHashMap::default();
+    let mut convert = |weight: &Weight| {
+        interner.source_weight_id(weight, &mut source_ids, projection.as_ref())
+    };
+    let mut states = Vec::with_capacity(nwa.states().len());
+    for state in nwa.states() {
+        let final_weight = match &state.final_weight {
+            Some(weight) => convert(weight)?,
+            None => 0,
+        };
+        let mut epsilons = Vec::with_capacity(state.epsilons.len());
+        for (target, weight) in &state.epsilons {
+            let id = convert(weight)?;
+            if id != 0 || matches!(policy, FastBoundaryInputPolicy::PreserveLabelPresence { .. }) {
+                epsilons.push((*target, id));
+            }
+        }
+        let mut transitions = Vec::with_capacity(state.transitions.len());
+        for (&label, branches) in &state.transitions {
+            let mut row = SmallVec::with_capacity(branches.len());
+            for (target, weight) in branches {
+                let id = convert(weight)?;
+                if id != 0 {
+                    row.push((*target, id));
+                }
+            }
+            match policy {
+                FastBoundaryInputPolicy::DropEmpty if row.is_empty() => continue,
+                FastBoundaryInputPolicy::PreserveLabelPresence { signed }
+                    if row.is_empty() && (!signed || !branches.is_empty()) =>
+                {
+                    // Native row storage distinguishes absent labels from
+                    // present labels whose effective coefficient is empty.
+                    row.push((0, 0));
+                }
+                _ => {}
+            }
+            transitions.push((label, row));
+        }
+        states.push(FastBoundaryNwaState { epsilons, transitions, final_weight });
+    }
+    Some((states, source_ids.len()))
+}
+
 fn resolve_negative_codes_small_boundary_impl(
     nwa: &NWA,
     tsid_count: usize,
@@ -4243,40 +4306,10 @@ fn resolve_negative_codes_small_boundary_impl(
 ) -> Option<NWA> {
     let total_started = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
     let convert_started = Instant::now();
-    let mut states = Vec::with_capacity(nwa.states().len());
-    for state in nwa.states() {
-        let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, None)?,
-            None => 0,
-        };
-        let mut epsilons = Vec::with_capacity(state.epsilons.len());
-        for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
-            if weight != 0 {
-                epsilons.push((*target, weight));
-            }
-        }
-        let mut transitions = Vec::with_capacity(state.transitions.len());
-        for (&label, branches) in &state.transitions {
-            let mut out = SmallVec::with_capacity(branches.len());
-            for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
-                if weight != 0 {
-                    out.push((*target, weight));
-                }
-            }
-            if !out.is_empty() {
-                transitions.push((label, out));
-            }
-        }
-        states.push(FastBoundaryNwaState {
-            epsilons,
-            transitions,
-            final_weight,
-        });
-    }
+    let (mut states, source_weight_count) = convert_fast_boundary_nwa(
+        nwa, &mut interner, None, FastBoundaryInputPolicy::DropEmpty,
+    )?;
     let convert_ms = elapsed_ms(convert_started);
     let resolve_started = Instant::now();
     fast_boundary_resolve_negative_codes(&mut states, &mut interner)?;
@@ -4325,7 +4358,7 @@ fn resolve_negative_codes_small_boundary_impl(
         eprintln!(
             "[glrmask/profile][small_boundary_signed_resolution] states={} source_weights={} fast_weights={} convert_ms={convert_ms:.3} resolve_ms={resolve_ms:.3} materialize_ms={materialize_ms:.3} total_ms={:.3}",
             nwa.states().len(),
-            source_weight_ids.len(),
+            source_weight_count,
             interner.values.len(),
             elapsed_ms(total_started),
         );
@@ -6052,39 +6085,9 @@ pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_stat
     let total_started = Instant::now();
     let convert_started = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
-    let mut fast_nwa = Vec::with_capacity(signed_nwa.states().len());
-    for state in signed_nwa.states() {
-        let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, None)?,
-            None => 0,
-        };
-        let mut epsilons = Vec::with_capacity(state.epsilons.len());
-        for (target, weight) in &state.epsilons {
-            let id = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
-            if id != 0 {
-                epsilons.push((*target, id));
-            }
-        }
-        let mut transitions = Vec::with_capacity(state.transitions.len());
-        for (&label, branches) in &state.transitions {
-            let mut row = SmallVec::with_capacity(branches.len());
-            for (target, weight) in branches {
-                let id = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
-                if id != 0 {
-                    row.push((*target, id));
-                }
-            }
-            if !row.is_empty() {
-                transitions.push((label, row));
-            }
-        }
-        fast_nwa.push(FastBoundaryNwaState {
-            epsilons,
-            transitions,
-            final_weight,
-        });
-    }
+    let (mut fast_nwa, source_weight_count) = convert_fast_boundary_nwa(
+        signed_nwa, &mut interner, None, FastBoundaryInputPolicy::DropEmpty,
+    )?;
     let convert_ms = elapsed_ms(convert_started);
     let resolve_started = Instant::now();
     fast_boundary_resolve_negative_codes(&mut fast_nwa, &mut interner)?;
@@ -6100,7 +6103,7 @@ pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_stat
         &fast_start_states,
         num_parser_states,
         &mut interner,
-        source_weight_ids.len(),
+        source_weight_count,
         convert_ms,
         total_started,
     )?;
@@ -6132,7 +6135,7 @@ pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_stat
             "[glrmask/profile][small_boundary_signed_fused] signed_states={} positive_states={} source_weights={} fast_weights={} convert_ms={convert_ms:.3} resolve_ms={resolve_ms:.3} hashcons_ms={hashcons_ms:.3} determinize_ms={determinize_ms:.3} possible_ms={possible_ms:.3} default_ms={default_ms:.3} subtract_ms={subtract_ms:.3} fallback_ms={fallback_ms:.3} output_states={} output_transitions={} total_ms={:.3}",
             signed_nwa.states().len(),
             fast_nwa.len(),
-            source_weight_ids.len(),
+            source_weight_count,
             interner.values.len(),
             parser_dwa.num_states(),
             parser_dwa.num_transitions(),
@@ -6163,50 +6166,16 @@ fn determinize_with_supports_small_boundary(
     }
     let total_started_at = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let source_projection = match source_tsid_map {
-        Some(map) => Some(SourceTsidProjection::new(map, tsid_count)?),
-        None => None,
-    };
-    let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
-    let mut fast_nwa = Vec::with_capacity(nwa.states().len());
-    for state in nwa.states() {
-        let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?,
-            None => interner.empty_id(),
-        };
-        let mut epsilons = Vec::with_capacity(state.epsilons.len());
-        for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
-            if weight != 0 {
-                epsilons.push((*target, weight));
-            }
-        }
-        let mut transitions = Vec::with_capacity(state.transitions.len());
-        for (&label, branches) in &state.transitions {
-            let mut fast_branches = SmallVec::with_capacity(branches.len());
-            for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
-                if weight != 0 {
-                    fast_branches.push((*target, weight));
-                }
-            }
-            if !fast_branches.is_empty() {
-                transitions.push((label, fast_branches));
-            }
-        }
-        fast_nwa.push(FastBoundaryNwaState {
-            epsilons,
-            transitions,
-            final_weight,
-        });
-    }
+    let (fast_nwa, source_weight_count) = convert_fast_boundary_nwa(
+        nwa, &mut interner, source_tsid_map, FastBoundaryInputPolicy::DropEmpty,
+    )?;
     let conversion_ms = elapsed_ms(total_started_at);
     determinize_preconverted_small_boundary(
         &fast_nwa,
         nwa.start_states(),
         dense_positive_label_limit,
         &mut interner,
-        source_weight_ids.len(),
+        source_weight_count,
         conversion_ms,
         total_started_at,
     )
@@ -6285,43 +6254,10 @@ fn normalize_finite_with_read_context_impl(
     }
     let total_started_at = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let source_projection = match source_tsid_map {
-        Some(map) => Some(SourceTsidProjection::new(map, tsid_count)?),
-        None => None,
-    };
     interner.limits = Some(limits);
-    let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
-    let mut fast_nwa = Vec::with_capacity(nwa.states().len());
-    for state in nwa.states() {
-        let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?,
-            None => interner.empty_id(),
-        };
-        let mut epsilons = Vec::with_capacity(state.epsilons.len());
-        for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
-            epsilons.push((*target, weight));
-        }
-        let mut transitions = Vec::with_capacity(state.transitions.len());
-        for (&label, branches) in &state.transitions {
-            let mut fast_branches = SmallVec::with_capacity(branches.len());
-            for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
-                if weight != 0 {
-                    fast_branches.push((*target, weight));
-                }
-            }
-            if fast_branches.is_empty() && (!signed || !branches.is_empty()) {
-                fast_branches.push((0, 0));
-            }
-            transitions.push((label, fast_branches));
-        }
-        fast_nwa.push(FastBoundaryNwaState {
-            epsilons,
-            transitions,
-            final_weight,
-        });
-    }
+    let (mut fast_nwa, source_weight_count) = convert_fast_boundary_nwa(
+        nwa, &mut interner, source_tsid_map, FastBoundaryInputPolicy::PreserveLabelPresence { signed },
+    )?;
     if !interner.allow_work(0, n, nwa.num_transitions()) { return None; }
     if signed {
         // Keep logical state identities intact: no early hash-consing.
@@ -6355,7 +6291,7 @@ fn normalize_finite_with_read_context_impl(
     let conversion_ms = elapsed_ms(total_started_at);
     match determinize_preconverted_small_boundary_output(
         &fast_nwa, start_states, dense_positive_label_limit,
-        &mut interner, source_weight_ids.len(), conversion_ms, total_started_at,
+        &mut interner, source_weight_count, conversion_ms, total_started_at,
         true,
     )? {
         SmallBoundaryDeterminizeOutput::Finite(result) => Some(result),
