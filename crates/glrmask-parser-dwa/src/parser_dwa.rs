@@ -5756,86 +5756,39 @@ fn fast_boundary_reverse_hashcons_positive(
     states: Vec<FastBoundaryNwaState>,
     start_states: &[u32],
 ) -> Option<(Vec<FastBoundaryNwaState>, Vec<u32>)> {
-    fn fingerprint(state: &FastBoundaryNwaState, old_to_new: &[u32]) -> u64 {
-        let mut hasher = FxHasher::default();
-        state.final_weight.hash(&mut hasher);
-        state.transitions.len().hash(&mut hasher);
-        for (label, branches) in &state.transitions {
-            label.hash(&mut hasher);
-            branches.len().hash(&mut hasher);
-            for (target, weight) in branches {
-                old_to_new[*target as usize].hash(&mut hasher);
-                weight.hash(&mut hasher);
-            }
-        }
-        state.epsilons.len().hash(&mut hasher);
-        for (target, weight) in &state.epsilons {
-            old_to_new[*target as usize].hash(&mut hasher);
-            weight.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-    fn equivalent(
-        left: &FastBoundaryNwaState,
-        right: &FastBoundaryNwaState,
-        old_to_new: &[u32],
-    ) -> bool {
-        left.final_weight == right.final_weight
-            && left.transitions.len() == right.transitions.len()
-            && left.epsilons.len() == right.epsilons.len()
-            && left.transitions.iter().zip(&right.transitions).all(
-                |((left_label, left_branches), (right_label, right_branches))| {
-                    left_label == right_label
-                        && left_branches.len() == right_branches.len()
-                        && left_branches.iter().zip(right_branches).all(
-                            |((left_target, left_weight), (right_target, right_weight))| {
-                                old_to_new[*left_target as usize]
-                                    == old_to_new[*right_target as usize]
-                                    && left_weight == right_weight
-                            },
-                        )
-                },
-            )
-            && left.epsilons.iter().zip(&right.epsilons).all(
-                |((left_target, left_weight), (right_target, right_weight))| {
-                    old_to_new[*left_target as usize] == old_to_new[*right_target as usize]
-                        && left_weight == right_weight
-                },
-            )
-    }
+    use glrmask_weighted_automata::weighted_u32::structural_quotient::{classify_reverse, checked_successor};
 
     let started = Instant::now();
     let order = fast_boundary_topological_order(&states)?;
     let n = states.len();
-    let mut old_to_new = vec![u32::MAX; n];
-    let mut representatives = Vec::<u32>::new();
-    let mut buckets = FxHashMap::<u64, SmallVec<[u32; 2]>>::default();
-    for old_id in order.into_iter().rev() {
-        let state = &states[old_id as usize];
-        debug_assert!(state
-            .transitions
-            .iter()
-            .all(|(label, _)| !is_negative_label(*label)));
-        let fp = fingerprint(state, &old_to_new);
-        let existing = buckets.get(&fp).and_then(|candidates| {
-            candidates.iter().copied().find(|&candidate| {
-                equivalent(
-                    state,
-                    &states[representatives[candidate as usize] as usize],
-                    &old_to_new,
-                )
-            })
-        });
-        let id = if let Some(existing) = existing {
-            existing
-        } else {
-            let id = representatives.len() as u32;
-            representatives.push(old_id);
-            buckets.entry(fp).or_default().push(id);
-            id
+    let quotient = classify_reverse(n, order.into_iter().rev(), |old, classes, signature| {
+        let state = &states[old as usize];
+        signature.final_weight(Some(state.final_weight as usize));
+        let successor = |target, weight| {
+            if weight == 0 {
+                // A zero guard contributes no path even when its target is
+                // not yet classified by the live-edge topological order.
+                classes.get(target as usize).map(|_| u32::MAX)
+            } else {
+                checked_successor(classes, target)
+            }
         };
-        old_to_new[old_id as usize] = id;
-    }
+        for (label, branches) in &state.transitions {
+            if is_negative_label(*label) {
+                return None;
+            }
+            signature.label(*label);
+            for &(target, weight) in branches {
+                signature.branch(*label, successor(target, weight)?, weight as usize);
+            }
+        }
+        for &(target, weight) in &state.epsilons {
+            signature.epsilon(successor(target, weight)?, weight as usize);
+        }
+        Some(())
+    })?;
+    let old_to_new = quotient.old_to_new;
+    let representatives = quotient.representatives;
 
     let mut source = states.into_iter().map(Some).collect::<Vec<_>>();
     let mut output = Vec::with_capacity(representatives.len());

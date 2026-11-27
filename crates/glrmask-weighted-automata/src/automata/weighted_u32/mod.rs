@@ -8,3 +8,6 @@ pub mod nwa;
 pub mod nwa_support;
 pub mod terminal_automaton;
 pub mod source_nwa;
+
+#[doc(hidden)]
+pub mod structural_quotient;

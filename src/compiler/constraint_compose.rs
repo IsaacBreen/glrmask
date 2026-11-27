@@ -1040,75 +1040,7 @@ fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
     allow_signed_labels: bool,
 ) -> NWA {
     use rayon::prelude::*;
-    use rustc_hash::FxHasher;
-    use smallvec::SmallVec;
-    use std::hash::{Hash, Hasher};
-
-    fn fingerprint_state(source: &NWAState, old_to_new: &[u32]) -> u64 {
-        let mut hasher = FxHasher::default();
-        source
-            .final_weight
-            .as_ref()
-            .map(Weight::ptr_key)
-            .hash(&mut hasher);
-        source.transitions.len().hash(&mut hasher);
-        for (&label, targets) in &source.transitions {
-            label.hash(&mut hasher);
-            targets.len().hash(&mut hasher);
-            for (target, weight) in targets {
-                old_to_new[*target as usize].hash(&mut hasher);
-                weight.ptr_key().hash(&mut hasher);
-            }
-        }
-        source.epsilons.len().hash(&mut hasher);
-        for (target, weight) in &source.epsilons {
-            old_to_new[*target as usize].hash(&mut hasher);
-            weight.ptr_key().hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    // Fingerprints are only a candidate index. Exact structural comparison is
-    // the equivalence proof, so hash collisions cannot merge distinct states.
-    fn equivalent_old_states(
-        source: &NWAState,
-        representative: &NWAState,
-        old_to_new: &[u32],
-    ) -> bool {
-        if source.final_weight.as_ref().map(Weight::ptr_key)
-            != representative.final_weight.as_ref().map(Weight::ptr_key)
-            || source.transitions.len() != representative.transitions.len()
-            || source.epsilons.len() != representative.epsilons.len()
-        {
-            return false;
-        }
-        for ((&source_label, source_targets), (&rep_label, rep_targets)) in
-            source.transitions.iter().zip(representative.transitions.iter())
-        {
-            if source_label != rep_label || source_targets.len() != rep_targets.len() {
-                return false;
-            }
-            for ((source_target, source_weight), (rep_target, rep_weight)) in
-                source_targets.iter().zip(rep_targets.iter())
-            {
-                if old_to_new[*source_target as usize] != old_to_new[*rep_target as usize]
-                    || source_weight.ptr_key() != rep_weight.ptr_key()
-                {
-                    return false;
-                }
-            }
-        }
-        source
-            .epsilons
-            .iter()
-            .zip(representative.epsilons.iter())
-            .all(
-                |((source_target, source_weight), (rep_target, rep_weight))| {
-                    old_to_new[*source_target as usize] == old_to_new[*rep_target as usize]
-                        && source_weight.ptr_key() == rep_weight.ptr_key()
-                },
-            )
-    }
+    use glrmask_weighted_automata::weighted_u32::structural_quotient::{classify_reverse, checked_successor};
 
     let profile = compose_profile_enabled();
     let total_started = profile.then(Instant::now);
@@ -1126,39 +1058,29 @@ fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
         order.into_iter().rev().collect()
     };
     let topo_ms = topo_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-    let (old_states, old_starts) = nwa.into_parts();
-    let mut old_to_new = vec![u32::MAX; old_state_count];
-    let mut representatives = Vec::<u32>::new();
-    let mut buckets = FxHashMap::<u64, SmallVec<[u32; 2]>>::default();
     let classify_started = profile.then(Instant::now);
-
-    for old_id in reverse_order {
-        let source = &old_states[old_id as usize];
-        debug_assert!(allow_signed_labels
-            || source
-                .transitions
-                .keys()
-                .all(|&label| !is_negative_label(label)));
-        let fingerprint = fingerprint_state(source, &old_to_new);
-        let existing = buckets.get(&fingerprint).and_then(|candidates| {
-            candidates.iter().copied().find(|&candidate| {
-                equivalent_old_states(
-                    source,
-                    &old_states[representatives[candidate as usize] as usize],
-                    &old_to_new,
-                )
-            })
-        });
-        let new_id = if let Some(existing) = existing {
-            existing
-        } else {
-            let created = representatives.len() as u32;
-            representatives.push(old_id);
-            buckets.entry(fingerprint).or_default().push(created);
-            created
-        };
-        old_to_new[old_id as usize] = new_id;
-    }
+    let Some(quotient) = classify_reverse(old_state_count, reverse_order, |old, classes, signature| {
+        let source = &nwa.states()[old as usize];
+        if !allow_signed_labels && source.transitions.keys().any(|&label| is_negative_label(label)) {
+            return None;
+        }
+        signature.final_weight(source.final_weight.as_ref().map(Weight::ptr_key));
+        for (&label, branches) in &source.transitions {
+            signature.label(label);
+            for (target, weight) in branches {
+                signature.branch(label, checked_successor(classes, *target)?, weight.ptr_key());
+            }
+        }
+        for (target, weight) in &source.epsilons {
+            signature.epsilon(checked_successor(classes, *target)?, weight.ptr_key());
+        }
+        Some(())
+    }) else {
+        return nwa;
+    };
+    let (old_states, old_starts) = nwa.into_parts();
+    let mut old_to_new = quotient.old_to_new;
+    let mut representatives = quotient.representatives;
     let classify_ms = classify_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
 
     let renumber_by_old_id = crate::env::var_os(
