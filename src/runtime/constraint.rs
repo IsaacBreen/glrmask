@@ -1473,80 +1473,12 @@ impl Constraint {
         Ok(())
     }
 
-    /// Whether the stored internal-TSID inverse is redundant with the scalar
-    /// state -> TSID map. A many-valued relation must retain its explicit inverse.
-    pub(crate) fn can_defer_internal_tsid_inverse(&self) -> bool {
-        if self.state_to_internal_tsid.len() != self.tokenizer.num_states() as usize
-            || self.state_to_internal_tsid.contains(&u32::MAX)
-        {
-            return false;
-        }
-        let Some(count) = self
-            .state_to_internal_tsid
-            .iter()
-            .copied()
-            .max()
-            .map(|max| max as usize + 1)
-        else {
-            return self.internal_tsid_to_states.is_empty();
-        };
-        // A previously loaded omitted inverse is already certified by the
-        // current-format writer. The complete scalar map is sufficient to
-        // reconstruct it exactly.
-        if self.internal_tsid_to_states.is_empty() {
-            return true;
-        }
-        if self.internal_tsid_to_states.len() != count {
-            return false;
-        }
-        let mut entries = 0usize;
-        for (tsid, states) in self.internal_tsid_to_states.iter().enumerate() {
-            entries = entries.saturating_add(states.len());
-            for &state in states {
-                if self
-                    .state_to_internal_tsid
-                    .get(state as usize)
-                    .copied()
-                    != Some(tsid as u32)
-                {
-                    return false;
-                }
-            }
-        }
-        entries == self.state_to_internal_tsid.len()
-    }
-
     pub(crate) fn internal_tsid_count(&self) -> usize {
-        if !self.internal_tsid_to_states.is_empty() {
-            return self.internal_tsid_to_states.len();
-        }
-        if let Some(groups) = self.deferred_internal_tsid_to_states.get() {
-            return groups.len();
-        }
-        self.state_to_internal_tsid
-            .iter()
-            .copied()
-            .filter(|&tsid| tsid != u32::MAX)
-            .max()
-            .map_or(0, |max| max as usize + 1)
+        self.tokenizer_tsids.count()
     }
 
     pub(crate) fn internal_tsid_groups(&self) -> &[Vec<u32>] {
-        if !self.internal_tsid_to_states.is_empty() {
-            return &self.internal_tsid_to_states;
-        }
-        let groups = self.deferred_internal_tsid_to_states.get_or_init(|| {
-            let mut groups = vec![Vec::new(); self.internal_tsid_count()];
-            for (state, &tsid) in self.state_to_internal_tsid.iter().enumerate() {
-                if tsid != u32::MAX
-                    && let Some(states) = groups.get_mut(tsid as usize)
-                {
-                    states.push(state as u32);
-                }
-            }
-            groups
-        });
-        groups.as_slice()
+        self.tokenizer_tsids.groups()
     }
 
     /// Terminal source expressions retained for later compiled-constraint
@@ -1807,7 +1739,7 @@ impl Constraint {
             .ok_or_else(|| "recursive composition layout is unavailable".to_owned())?;
         let expected_states = layout.total_tokenizer_states as usize;
         if self.tokenizer.num_states() as usize == expected_states
-            && self.state_to_internal_tsid.len() == expected_states
+            && self.tokenizer_tsids.primary().len() == expected_states
         {
             return Ok(false);
         }
@@ -1840,18 +1772,13 @@ impl Constraint {
             ));
         }
 
-        let (state_to_internal_tsid, internal_tsid_to_states, state_internal_tsid_offsets, state_internal_tsids) =
+        let tokenizer_tsids =
             if provider_native {
                 // The fast DynamicDirect coordinator intentionally stores no
                 // outer quotient because live recursive execution never uses
                 // it. A later static/compiler analysis can safely over-refine
                 // to the exact raw-state identity coordinate on demand.
-                (
-                    (0..expected_states as u32).collect::<Vec<_>>(),
-                    Vec::new(),
-                    vec![u32::MAX],
-                    Vec::new(),
-                )
+                crate::runtime::TokenizerTsidMap::identity(expected_states)
             } else {
                 let relation = relation
                     .as_ref()
@@ -1880,7 +1807,7 @@ impl Constraint {
                     }
                     state_internal_tsid_offsets.push(state_internal_tsids.len() as u32);
                 }
-                (
+                crate::runtime::TokenizerTsidMap::with_relation(
                     state_to_internal_tsid,
                     internal_tsid_to_states,
                     state_internal_tsid_offsets,
@@ -1889,11 +1816,7 @@ impl Constraint {
             };
 
         self.tokenizer = tokenizer.into();
-        self.state_to_internal_tsid = state_to_internal_tsid;
-        self.internal_tsid_to_states = internal_tsid_to_states;
-        self.deferred_internal_tsid_to_states = OnceLock::new();
-        self.state_internal_tsid_offsets = state_internal_tsid_offsets;
-        self.state_internal_tsids = state_internal_tsids;
+        self.tokenizer_tsids = tokenizer_tsids;
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.terminal_live_states = self.compute_terminal_live_states();
         self.tokenizer_fast_transitions = Self::compute_tokenizer_fast_transitions_for(&self.tokenizer);
@@ -3007,7 +2930,7 @@ impl Constraint {
                     .recursive_compiler_table
                     .get()
                     .is_some_and(|blob| blob.is_empty())
-                    && self.state_to_internal_tsid.len() == layout.total_tokenizer_states as usize;
+                    && self.tokenizer_tsids.primary().len() == layout.total_tokenizer_states as usize;
                 if provider_native_compiler_view {
                     return Some(
                         self.internal_tsids_for_state(tokenizer_state)
@@ -3046,7 +2969,7 @@ impl Constraint {
             global.dedup();
             return (!global.is_empty()).then_some(global);
         }
-        if self.state_to_internal_tsid.is_empty() && self.internal_tsid_to_states.is_empty() {
+        if self.tokenizer_tsids.is_unmapped() {
             return (tokenizer_state < self.tokenizer.num_states())
                 .then(|| smallvec::smallvec![tokenizer_state]);
         }
@@ -10008,24 +9931,8 @@ impl Constraint {
         } else {
             self.tokenizer.num_states()
         } as usize;
-        let singleton_state_relation_ready = self.state_internal_tsid_offsets.as_slice()
-            == [u32::MAX]
-            && self.state_internal_tsids.is_empty()
-            && self.state_to_internal_tsid.len() == state_count;
-        let deferred_singleton_state_relation_ready = self.state_internal_tsid_offsets.is_empty()
-            && self.state_internal_tsids.is_empty()
-            && self.state_to_internal_tsid.len() == state_count
-            && self.state_to_internal_tsid.iter().all(|&tsid| tsid != u32::MAX);
-        let state_relation_ready = singleton_state_relation_ready
-            || deferred_singleton_state_relation_ready
-            || (self.state_internal_tsid_offsets.len() == state_count + 1
-                && self
-                    .state_internal_tsid_offsets
-                    .last()
-                    .is_some_and(|&end| end as usize == self.state_internal_tsids.len()));
-        if !state_relation_ready {
-            self.rebuild_state_internal_tsid_relation();
-        }
+        let raw_count = self.tokenizer.num_states() as usize;
+        self.tokenizer_tsids.prepare_rows(state_count, raw_count);
         let state_relation_ms = state_relation_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let fast_template_started_at = profile.then(std::time::Instant::now);
@@ -12279,39 +12186,6 @@ impl Constraint {
 
     pub(crate) fn build_dense_token_bytes(&mut self) {
         self.token_bytes_dense = self.compute_dense_token_bytes();
-    }
-
-    fn rebuild_state_internal_tsid_relation(&mut self) {
-        let state_count = self.tokenizer.num_states() as usize;
-        let mut relation = (0..state_count)
-            .map(|_| SmallVec::<[u32; 2]>::new())
-            .collect::<Vec<_>>();
-        for (internal_tsid, states) in self.internal_tsid_groups().iter().enumerate() {
-            for &state in states {
-                if let Some(tsids) = relation.get_mut(state as usize) {
-                    tsids.push(internal_tsid as u32);
-                }
-            }
-        }
-        for (state, tsids) in relation.iter_mut().enumerate() {
-            if let Some(&primary) = self.state_to_internal_tsid.get(state)
-                && !tsids.contains(&primary)
-            {
-                tsids.push(primary);
-            }
-            tsids.sort_unstable();
-            tsids.dedup();
-        }
-
-        self.state_internal_tsid_offsets.clear();
-        self.state_internal_tsid_offsets.reserve(state_count + 1);
-        self.state_internal_tsids.clear();
-        self.state_internal_tsid_offsets.push(0);
-        for tsids in relation {
-            self.state_internal_tsids.extend_from_slice(&tsids);
-            let offset = self.state_internal_tsids.len() as u32;
-            self.state_internal_tsid_offsets.push(offset);
-        }
     }
 
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.

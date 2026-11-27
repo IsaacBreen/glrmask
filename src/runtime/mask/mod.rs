@@ -5649,7 +5649,7 @@ impl ConstraintState {
                     .runtime_internal_tsids_for_tokenizer_state(global_tokenizer_state)
                     .unwrap_or_default(),
                 crate::runtime::BoundaryTsidCoordinate::Composed => self.constraint
-                    .state_to_internal_tsid
+                    .tokenizer_tsids.primary()
                     .get(global_tokenizer_state as usize)
                     .copied()
                     .filter(|&tsid| tsid != u32::MAX)

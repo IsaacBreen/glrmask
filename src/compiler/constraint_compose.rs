@@ -925,7 +925,7 @@ fn deterministic_component_union_root_dispatch(
 
 #[inline]
 fn tokenizer_tsid_relation_is_singleton(constraint: &Constraint) -> bool {
-    constraint.state_internal_tsid_offsets.as_slice() == [u32::MAX]
+    constraint.tokenizer_tsids.is_singleton()
 }
 
 fn build_direct_component_state_coordinates_from_constraints(
@@ -946,8 +946,7 @@ fn build_direct_component_state_coordinates_from_constraints(
         // quotient. Preserve that backend and use the exact raw tokenizer
         // coordinate as this component's private TSID coordinate instead of
         // compiling/materializing a quotient solely for linking.
-        if constraint.state_to_internal_tsid.is_empty()
-            && constraint.internal_tsid_to_states.is_empty()
+        if constraint.tokenizer_tsids.is_unmapped()
         {
             let local_tsid_count = component_tokenizer.num_states() as usize;
             if local_tsid_count == 0 {
@@ -988,10 +987,10 @@ fn build_direct_component_state_coordinates_from_constraints(
             local_to_global_tsids.push(local_map);
             continue;
         }
-        if constraint.state_to_internal_tsid.len() != component_tokenizer.num_states() as usize {
+        if constraint.tokenizer_tsids.primary().len() != component_tokenizer.num_states() as usize {
             return Err(format!(
                 "component {component_index} tokenizer-state map does not cover its runtime tokenizer: mapped_states={} tokenizer_states={} dynamic={}",
-                constraint.state_to_internal_tsid.len(),
+                constraint.tokenizer_tsids.primary().len(),
                 component_tokenizer.num_states(),
                 constraint.uses_dynamic_runtime(),
             ));
@@ -1040,7 +1039,7 @@ fn build_direct_component_state_coordinates_from_constraints(
             }
             let local_start = constraint.tokenizer.initial_state() as usize;
             let start_tsid = constraint
-                .state_to_internal_tsid
+                .tokenizer_tsids.primary()
                 .get(local_start)
                 .copied()
                 .ok_or_else(|| "component start tokenizer state has no internal TSID".to_string())?;
@@ -6296,8 +6295,8 @@ pub(super) fn prepared_leaf_possible_matches(
     }
     if leaves.iter().any(|leaf| !leaf.possible_matches_complete
         || leaf.tokenizer.has_any_virtual_runtime()
-        || !(leaf.state_internal_tsid_offsets.is_empty() || tokenizer_tsid_relation_is_singleton(leaf))
-        || leaf.state_to_internal_tsid.len()!=leaf.tokenizer.num_states() as usize) {
+        || leaf.tokenizer_tsids.has_csr()
+        || leaf.tokenizer_tsids.primary().len()!=leaf.tokenizer.num_states() as usize) {
         return Ok(None);
     }
     let started=Instant::now();
@@ -6333,7 +6332,7 @@ pub(super) fn prepared_leaf_possible_matches(
             }
             local[tsid].push(global);state_groups.push(translated);
         }
-        let start=leaf.state_to_internal_tsid[leaf.tokenizer.initial_state() as usize];
+        let start=leaf.tokenizer_tsids.primary()[leaf.tokenizer.initial_state() as usize];
         if start!=u32::MAX {
             local.get_mut(start as usize).ok_or_else(||"prepared PM initial class is invalid".to_string())?.push(0);
         }
@@ -8657,16 +8656,6 @@ fn build_composed_constraint_unfinalized(
         representative_original_ids: _,
     } = tokenizer_states;
     debug_assert!(state_to_internal_tsid.iter().all(|&tsid| tsid != u32::MAX));
-    // Direct component coordinates partition the composed raw tokenizer states:
-    // each state has exactly one runtime TSID. Materialize the flat relation
-    // directly instead of letting generic finalization allocate 1.4 million
-    // temporary SmallVec rows and rediscover the same partition.
-    // Sentinel `[u32::MAX]` means the relation is exactly the singleton
-    // `state_to_internal_tsid` map. Runtime lookup already falls back to that
-    // map; the sentinel prevents generic cache finalization from rebuilding two
-    // redundant million-entry CSR vectors.
-    let state_internal_tsid_offsets = vec![u32::MAX];
-    let state_internal_tsids = Vec::new();
     let ManyToOneIdMap {
         original_to_internal: original_token_to_internal,
         internal_to_originals: internal_token_to_tokens,
@@ -8738,16 +8727,14 @@ fn build_composed_constraint_unfinalized(
         // DO NOT REMOVE OR WEAKEN THIS COMMENT.
         possible_matches,
         possible_matches_complete: true,
-        state_to_internal_tsid,
-        internal_tsid_to_states,
-        deferred_internal_tsid_to_states: Default::default(),
+        tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
+            state_to_internal_tsid, internal_tsid_to_states,
+        ),
         composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,
         terminal_live_states,
-        state_internal_tsid_offsets,
-        state_internal_tsids,
         template_dfas_by_terminal,
         fast_template_dfas_by_terminal: Vec::new(),
             template_parser: None,

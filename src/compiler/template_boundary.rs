@@ -457,11 +457,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     overlay.recursive_tokenizer_internal_tsids.set(Arc::new(physical_tsids))
         .map_err(|_| fail("static template TSID coordinate initialized twice"))?;
     overlay.recursive_static_observation = observation.map(Arc::new);
-    constraint.state_to_internal_tsid = root_tsids;
-    constraint.internal_tsid_to_states = inverse_tsids;
-    constraint.deferred_internal_tsid_to_states = Default::default();
-    constraint.state_internal_tsid_offsets = vec![u32::MAX];
-    constraint.state_internal_tsids.clear();
+    constraint.tokenizer_tsids = crate::runtime::TokenizerTsidMap::scoped(root_tsids, inverse_tsids);
     constraint.internal_token_bytes = pm::build_internal_token_bytes_from_groups(vocab,
         &common.vocab_tokens.internal_to_originals);
     constraint.token_classes = crate::runtime::TokenClasses::mapped(common.vocab_tokens.original_to_internal, common.vocab_tokens.internal_to_originals);
@@ -555,9 +551,9 @@ mod tests {
             for (index,leaf) in leaves.iter().enumerate() {
                 assert!(leaf.possible_matches_complete,"leaf={index} incomplete PM");
                 assert!(!leaf.tokenizer.has_any_virtual_runtime(),"leaf={index} projected tokenizer");
-                assert!(leaf.state_internal_tsid_offsets.is_empty() || leaf.state_internal_tsid_offsets.as_slice()==[u32::MAX],
+                assert!(!leaf.tokenizer_tsids.has_csr(),
                     "leaf={index} multivalued TSID");
-                assert_eq!(leaf.state_to_internal_tsid.len(),leaf.tokenizer.num_states() as usize,"leaf={index} state coordinate");
+                assert_eq!(leaf.tokenizer_tsids.primary().len(),leaf.tokenizer.num_states() as usize,"leaf={index} state coordinate");
             }
             let prepared=super::super::constraint_compose::prepared_leaf_possible_matches(&leaves,&offsets,
                 &terminals,merged.num_states(),&vocab).unwrap().expect("complete intact leaf PM must be reusable");

@@ -55,9 +55,8 @@ const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R35\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C24\0";
-const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
-const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C25\0";
+const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 /// Clone a large already-serialized artifact without forcing one core to move
 /// the entire byte slab.  Current JS artifacts are ~20 MiB, so a serial
@@ -175,12 +174,8 @@ fn decode_current_core(
     if input.len() < header_len {
         return Err("truncated current constraint core header".to_owned());
     }
-    let flags = u32::from_le_bytes(input[4..8].try_into().unwrap());
-    if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
-        return Err("unsupported current constraint core flags".to_owned());
-    }
-    let base_len = u64::from_le_bytes(input[8..16].try_into().unwrap());
-    let expr_len = u64::from_le_bytes(input[16..24].try_into().unwrap());
+    let base_len = u64::from_le_bytes(input[4..12].try_into().unwrap());
+    let expr_len = u64::from_le_bytes(input[12..20].try_into().unwrap());
     let base_len = usize::try_from(base_len)
         .map_err(|_| "current core base length does not fit platform".to_owned())?;
     let expr_len = usize::try_from(expr_len)
@@ -194,18 +189,11 @@ fn decode_current_core(
     if expr_end != input.len() {
         return Err("invalid current constraint core section lengths".to_owned());
     }
-    let previous_omit_tsid_inverse =
-        crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
-            flags & CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0,
-        );
-    let decoded = bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(
+    let base = bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(
         &input[header_len..base_end],
     )
-    .map_err(|err| err.to_string());
-    crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
-        previous_omit_tsid_inverse,
-    );
-    let base = decoded?;
+    .map_err(|err| err.to_string())?;
+    base.constraint.tokenizer_tsids.validate()?;
     let exprs = if expr_len == 0 {
         None
     } else if let Some((backing, section_start)) = backing {
@@ -4768,22 +4756,11 @@ impl Constraint {
                         // rebuilding every packed field twice.
                         let mut encoded = Vec::with_capacity(3 * 1024 * 1024);
                         encoded.extend_from_slice(&CURRENT_CORE_MAGIC);
-                        let omit_tsid_inverse = self.can_defer_internal_tsid_inverse();
-                        let core_flags = if omit_tsid_inverse {
-                            CURRENT_CORE_FLAG_OMIT_TSID_INVERSE
-                        } else {
-                            0
-                        };
-                        encoded.extend_from_slice(&core_flags.to_le_bytes());
                         let base_len_offset = encoded.len();
                         encoded.extend_from_slice(&0u64.to_le_bytes());
                         let expr_len_offset = encoded.len();
                         encoded.extend_from_slice(&0u64.to_le_bytes());
                         let base_start = encoded.len();
-                        let previous_omit_tsid_inverse =
-                            crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
-                                omit_tsid_inverse,
-                            );
                         let encode_result = bincode::serialize_into(
                             &mut encoded,
                             &ConstraintArtifactCurrentCoreBaseRef {
@@ -4793,9 +4770,6 @@ impl Constraint {
                                 static_dynamic_overlay: &self.static_dynamic_overlay,
                                 late_grammar_slots: &self.late_grammar_slots,
                             },
-                        );
-                        crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
-                            previous_omit_tsid_inverse,
                         );
                         let base_len = encoded.len() - base_start;
                         encoded[base_len_offset..base_len_offset + 8]
@@ -7587,14 +7561,14 @@ mod tests {
             constraint.tokenizer.terminal_exprs(),
             "current artifacts should lazily retain terminal proof expressions",
         );
-        if constraint.can_defer_internal_tsid_inverse() {
+        if constraint.tokenizer_tsids.is_partition() {
             assert!(
-                loaded.internal_tsid_to_states.is_empty(),
-                "current scalar-state artifacts should defer the redundant TSID inverse",
+                loaded.tokenizer_tsids.is_partition(),
+                "current scalar-state artifacts should encode only the partition, not an explicit inverse",
             );
             assert_eq!(
                 loaded.internal_tsid_groups(),
-                constraint.internal_tsid_to_states.as_slice(),
+                constraint.internal_tsid_groups(),
                 "deferred TSID inverse must reconstruct exactly",
             );
         }

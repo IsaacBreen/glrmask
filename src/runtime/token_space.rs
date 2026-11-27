@@ -11,6 +11,223 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::Constraint;
 
 
+/// Scanner-state coordinate used by parser weights and possible matches.
+/// A compiler partition can derive its inverse exactly; composed observations
+/// may instead use an inverse over a different scope, which must be retained.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TokenizerTsidMap {
+    primary: Vec<u32>,
+    groups: TsidGroups,
+    #[serde(skip)]
+    rows: TsidRows,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum TsidGroups {
+    Partition {
+        count: usize,
+        #[serde(skip)]
+        inverse: std::sync::OnceLock<Vec<Vec<u32>>>,
+    },
+    Explicit(Vec<Vec<u32>>),
+}
+
+#[derive(Debug, Clone, Default)]
+enum TsidRows {
+    #[default]
+    Unbuilt,
+    Primary,
+    Csr {
+        offsets: Vec<u32>,
+        values: Vec<u32>,
+    },
+}
+
+impl Default for TokenizerTsidMap {
+    fn default() -> Self {
+        Self::partition(Vec::new(), Vec::new())
+    }
+}
+
+impl TokenizerTsidMap {
+    /// A ManyToOneIdMap already contains the exact partition. Move its inverse
+    /// into the cache rather than reconstructing it during compiler linking.
+    pub(crate) fn partition(primary: Vec<u32>, inverse: Vec<Vec<u32>>) -> Self {
+        let count = inverse.len();
+        let groups = if count <= primary.len() {
+            debug_assert!(
+                primary
+                    .iter()
+                    .all(|&id| id == u32::MAX || (id as usize) < count)
+            );
+            TsidGroups::Partition {
+                count,
+                inverse: std::sync::OnceLock::from(inverse),
+            }
+        } else {
+            // Preserve even unused class IDs in an explicitly supplied domain.
+            TsidGroups::Explicit(inverse)
+        };
+        Self {
+            primary,
+            groups,
+            rows: TsidRows::Primary,
+        }
+    }
+
+    pub(crate) fn identity(count: usize) -> Self {
+        Self {
+            primary: (0..count as u32).collect(),
+            groups: TsidGroups::Partition {
+                count,
+                inverse: Default::default(),
+            },
+            rows: TsidRows::Primary,
+        }
+    }
+
+    pub(crate) fn scoped(primary: Vec<u32>, inverse: Vec<Vec<u32>>) -> Self {
+        Self {
+            primary,
+            groups: TsidGroups::Explicit(inverse),
+            rows: TsidRows::Primary,
+        }
+    }
+
+    pub(crate) fn with_relation(
+        primary: Vec<u32>,
+        inverse: Vec<Vec<u32>>,
+        offsets: Vec<u32>,
+        values: Vec<u32>,
+    ) -> Self {
+        Self {
+            primary,
+            groups: TsidGroups::Explicit(inverse),
+            rows: TsidRows::Csr { offsets, values },
+        }
+    }
+
+    pub(crate) fn primary(&self) -> &[u32] {
+        &self.primary
+    }
+
+    pub(crate) fn is_unmapped(&self) -> bool {
+        self.primary.is_empty() && self.count() == 0
+    }
+
+    pub(crate) fn is_singleton(&self) -> bool {
+        matches!(self.rows, TsidRows::Primary)
+            || matches!(self.groups, TsidGroups::Partition { .. })
+    }
+
+    pub(crate) fn has_csr(&self) -> bool {
+        matches!(self.rows, TsidRows::Csr { .. })
+    }
+
+    pub(crate) fn is_partition(&self) -> bool {
+        matches!(self.groups, TsidGroups::Partition { .. })
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        match &self.groups {
+            TsidGroups::Partition { count, .. } => *count,
+            TsidGroups::Explicit(inverse) => inverse.len(),
+        }
+    }
+
+    pub(crate) fn groups(&self) -> &[Vec<u32>] {
+        match &self.groups {
+            TsidGroups::Explicit(inverse) => inverse,
+            TsidGroups::Partition { count, inverse } => inverse.get_or_init(|| {
+                let mut groups = vec![Vec::new(); *count];
+                for (state, &id) in self.primary.iter().enumerate() {
+                    if let Some(group) = groups.get_mut(id as usize) {
+                        group.push(state as u32);
+                    }
+                }
+                groups
+            }),
+        }
+    }
+
+    /// Validate the compact inverse domain before any lazy allocation on load.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if let TsidGroups::Partition { count, .. } = &self.groups {
+            if *count > self.primary.len()
+                || self
+                    .primary
+                    .iter()
+                    .any(|&id| id != u32::MAX && id as usize >= *count)
+            {
+                return Err("invalid tokenizer TSID partition".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn row(&self, state: usize) -> &[u32] {
+        if let TsidRows::Csr { offsets, values } = &self.rows
+            && let (Some(&start), Some(&end)) = (offsets.get(state), offsets.get(state + 1))
+            && let Some(row) = values.get(start as usize..end as usize)
+        {
+            return row;
+        }
+        self.primary
+            .get(state)
+            .map(std::slice::from_ref)
+            .unwrap_or(&[])
+    }
+
+    /// Only scoped/non-functional maps need to reconstruct a CSR. A partition
+    /// always has precisely its primary row, including unmapped sentinels.
+    pub(crate) fn prepare_rows(&mut self, expected_count: usize, raw_count: usize) {
+        if self.is_partition() {
+            self.rows = TsidRows::Primary;
+            return;
+        }
+        let ready = match &self.rows {
+            TsidRows::Primary => self.primary.len() == expected_count,
+            TsidRows::Unbuilt => {
+                self.primary.len() == expected_count
+                    && self.primary.iter().all(|&id| id != u32::MAX)
+            }
+            TsidRows::Csr { offsets, values } => {
+                offsets.len() == expected_count + 1
+                    && offsets
+                        .last()
+                        .is_some_and(|&end| end as usize == values.len())
+            }
+        };
+        if ready {
+            // A loaded scoped inverse is not certified as a local partition
+            // merely because its primary row covers the current tokenizer.
+            return;
+        }
+        let mut relation = vec![smallvec::SmallVec::<[u32; 2]>::new(); raw_count];
+        for (id, states) in self.groups().iter().enumerate() {
+            for &state in states {
+                if let Some(row) = relation.get_mut(state as usize) {
+                    row.push(id as u32);
+                }
+            }
+        }
+        let mut offsets = Vec::with_capacity(raw_count + 1);
+        let mut values = Vec::new();
+        offsets.push(0);
+        for (state, mut row) in relation.into_iter().enumerate() {
+            if let Some(&id) = self.primary.get(state) {
+                row.push(id);
+            }
+            row.sort_unstable();
+            row.dedup();
+            values.extend_from_slice(&row);
+            offsets.push(values.len() as u32);
+        }
+        self.rows = TsidRows::Csr { offsets, values };
+    }
+}
+
 /// The final token coordinate shared by parser weights and mask fragments.
 /// Identity has no quotient; empty explicit quotients remain distinct from it.
 #[derive(Debug, Clone, Default)]
@@ -409,28 +626,14 @@ impl Constraint {
 
 	pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
 		let tokenizer_state = self.static_observation_state(tokenizer_state);
-		self.state_to_internal_tsid
+		self.tokenizer_tsids.primary()
 			.get(tokenizer_state as usize)
 			.copied()
 			.unwrap_or(tokenizer_state)
 	}
 
 	pub(crate) fn internal_tsids_for_state(&self, tokenizer_state: u32) -> &[u32] {
-		let state = self.static_observation_state(tokenizer_state) as usize;
-		if let (Some(&start), Some(&end)) = (
-			self.state_internal_tsid_offsets.get(state),
-			self.state_internal_tsid_offsets.get(state + 1),
-		)
-			&& let Some(tsids) = self
-				.state_internal_tsids
-				.get(start as usize..end as usize)
-			{
-				return tsids;
-			}
-		self.state_to_internal_tsid
-			.get(state)
-			.map(std::slice::from_ref)
-			.unwrap_or(&[])
+		self.tokenizer_tsids.row(self.static_observation_state(tokenizer_state) as usize)
 	}
 
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {

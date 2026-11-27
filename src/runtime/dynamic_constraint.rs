@@ -869,8 +869,9 @@ impl DynamicConstraint {
         )?;
         result.inner.possible_matches = possible_matches;
         result.inner.possible_matches_complete = complete;
-        result.inner.state_to_internal_tsid = id_map.tokenizer_states.original_to_internal;
-        result.inner.internal_tsid_to_states = id_map.tokenizer_states.internal_to_originals;
+        result.inner.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(
+            id_map.tokenizer_states.original_to_internal, id_map.tokenizer_states.internal_to_originals,
+        );
         result.inner.token_classes = crate::runtime::TokenClasses::mapped(id_map.vocab_tokens.original_to_internal, id_map.vocab_tokens.internal_to_originals);
         Ok(result)
     }
@@ -1025,16 +1026,12 @@ impl DynamicConstraint {
             empty_byte_token_ids,
             possible_matches: BTreeMap::new(),
             possible_matches_complete: false,
-            state_to_internal_tsid: Vec::new(),
-            internal_tsid_to_states: Vec::new(),
-            deferred_internal_tsid_to_states: Default::default(),
+            tokenizer_tsids: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
             terminal_live_states: Vec::new(),
-            state_internal_tsid_offsets: Vec::new(),
-            state_internal_tsids: Vec::new(),
             template_dfas_by_terminal: Vec::new(),
             fast_template_dfas_by_terminal: Vec::new(),
             template_parser: None,

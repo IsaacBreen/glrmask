@@ -5720,8 +5720,6 @@ fn compile_prepared_with_profile_and_table_construction(
                 .expect("certified full lexer state map must lift the final synthesized TSID map"),
             None => internal_ids.tokenizer_states.clone(),
         };
-        let runtime_internal_tsid_to_states =
-            runtime_tokenizer_state_map.internal_to_originals_vecs();
         let runtime_state_map_lift_ms = elapsed_ms(runtime_state_map_lift_started_at);
         if compile_profile_enabled() {
             eprintln!(
@@ -5902,18 +5900,15 @@ fn compile_prepared_with_profile_and_table_construction(
             empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
             possible_matches: possible_matches.into_artifact(),
             possible_matches_complete,
-            state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
-            internal_tsid_to_states: runtime_internal_tsid_to_states,
-            deferred_internal_tsid_to_states: Default::default(),
+            tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
+                runtime_tokenizer_state_map.original_to_internal,
+                runtime_tokenizer_state_map.internal_to_originals,
+            ),
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal,
             composition_parser_characterizations_by_terminal,
             composition_grammar_summary,
             terminal_live_states: Vec::new(),
-            // The exact runtime state map is a ManyToOne partition.
-            // The sentinel avoids constructing a redundant singleton CSR.
-            state_internal_tsid_offsets: vec![u32::MAX],
-            state_internal_tsids: Vec::new(),
             token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
             template_dfas_by_terminal: prepared_parser.templates,
             fast_template_dfas_by_terminal: prepared_parser.runtime,

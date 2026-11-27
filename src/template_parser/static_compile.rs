@@ -622,9 +622,9 @@ pub(super) fn compile(
     inner.parser_dwa = parser_dwa.share_exact_transition_rows_owned();
     inner.possible_matches = possible_matches;
     inner.possible_matches_complete = possible.complete;
-    inner.state_to_internal_tsid = ids.tokenizer_states.original_to_internal.clone();
-    inner.internal_tsid_to_states = ids.tokenizer_states.internal_to_originals_vecs();
-    inner.state_internal_tsid_offsets = vec![u32::MAX];
+    inner.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(
+        ids.tokenizer_states.original_to_internal, ids.tokenizer_states.internal_to_originals,
+    );
     inner.token_classes = crate::runtime::TokenClasses::mapped(ids.vocab_tokens.original_to_internal.clone(), ids.vocab_tokens.internal_to_originals_vecs());
     inner.internal_token_bytes =
         pm::build_internal_token_bytes_from_groups(vocab, &ids.vocab_tokens.internal_to_originals);
