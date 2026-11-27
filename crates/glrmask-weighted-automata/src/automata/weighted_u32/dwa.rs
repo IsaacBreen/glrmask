@@ -2618,12 +2618,6 @@ impl PackedRuntimeDwa {
     /// into one u32. DWF6 keeps the same compact pools/state records but stores
     /// each transition as u24 target + u16 weight, covering larger parser DWAs
     /// without falling all the way back to DWF3.
-    fn try_narrow_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        self.try_append_narrow_backed_fast_wire_bytes(&mut out)?;
-        Some(out)
-    }
-
     fn try_append_narrow_backed_fast_wire_bytes(&self, out: &mut Vec<u8>) -> Option<usize> {
         let split_target_weight = self.states.len() > (1usize << 17)
             || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
@@ -2649,8 +2643,6 @@ impl PackedRuntimeDwa {
         let owned_chunks;
         let chunks: &[Box<[u8]>] = if raw_u16_ranges.is_some() {
             &[]
-        } else if let Some(chunks) = self.fast_wire_token_chunks.as_deref() {
-            chunks
         } else {
             let token_set_count = self.token_set_count();
             let chunk_ranges = (0..token_set_count)
@@ -4663,7 +4655,8 @@ impl PackedRuntimeDwa {
             None
         };
 
-        let owned_narrow = if requires_dwf6
+        let owned_narrow = if cfg!(target_endian = "little")
+            && requires_dwf6
             && compact_tokens.is_some()
             && flat_token_spans.len() <= u16::MAX as usize + 1
             && flat_token_spans
