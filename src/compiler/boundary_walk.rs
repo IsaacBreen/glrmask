@@ -25,8 +25,8 @@ use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, BoundaryShardMetadata,
     accepted_original_tokens, build_segmented_parser_links, compose_profile_enabled,
-    component_ignores_are_globally_erasable, eliminate_composed_runtime_controls,
-    leaf_ignores_are_globally_erasable, merged_ignore_terminals,
+    eliminate_composed_runtime_controls,
+    leaf_ignores_are_globally_erasable,
     merged_leaf_ignore_terminals, merged_leaf_terminal_display_names,
     merged_retained_terminal_exprs, merged_terminal_display_names,
 };
@@ -2097,28 +2097,6 @@ pub(crate) fn dynamic_fallback_walk_link_output(num_components: usize) -> WalkSt
     }
 }
 
-/// Effective static selection: the hybrid request minus components whose
-/// tokenizer has a virtual residual runtime. Those can query lazily-allocated
-/// tokenizer states at runtime that the link-time private TSID map cannot
-/// cover, so their shards stay on the exact dynamic walker.
-fn effective_static_selection(
-    parent: &Constraint,
-    children: &[CompiledSubgrammarInput<'_>],
-    static_components: Option<&BitSet>,
-) -> BitSet {
-    let num_components = children.len() + 1;
-    let mut effective = BitSet::new(num_components);
-    for index in 0..num_components {
-        let component =
-            if index == 0 { parent } else { children[index - 1].constraint };
-        let selected = static_components.is_none_or(|bits| bits.contains(index));
-        if selected && !component.tokenizer.has_virtual_residual_runtime() {
-            effective.set(index);
-        }
-    }
-    effective
-}
-
 /// Unbound subgrammar slots of a link as composed-terminal IDs: special-token
 /// terminals that are recorded late-grammar slots or whose backing token has
 /// no bytes (out-of-vocab linker sentinels), minus the placeholders bound by
@@ -2284,112 +2262,119 @@ fn link_provider_boundary_table(
 /// negative resolution, table-free normalization) and publication. This
 /// mirrors the gate's `link_and_time` walks; no provider-materialized table
 /// and no exact_control_elimination exists on this route.
+/// Compile all boundary links in one leaf coordinate. Direct and expanded
+/// links differ only in their proof policy and grammar-analysis splice.
 pub(crate) fn build_walk_static_boundary_link(
     inputs: &WalkStaticLinkInputs,
 ) -> Result<WalkStaticLinkOutput, String> {
-    let parent = inputs.parent;
-    let children = inputs.children;
     let link_total_started = Instant::now();
-    // Expand a composed parent block and nested children to intact leaves
-    // (flat links: leaves are exactly the direct components, so the flat path
-    // below is unchanged).
-    let expansion = expand_nested_link_leaves(parent, children)?;
-    if expansion.nested {
-        return build_walk_static_boundary_link_nested(inputs, &expansion);
-    }
+    let expansion = expand_nested_link_leaves(inputs.parent, inputs.children)?;
+    compile_leaf_boundary_link(inputs, &expansion, link_total_started)
+}
+
+fn compile_leaf_boundary_link(
+    inputs: &WalkStaticLinkInputs,
+    expansion: &NestedLinkExpansion<'_>,
+    link_total_started: Instant,
+) -> Result<WalkStaticLinkOutput, String> {
     let vocab = inputs.vocab;
-    let num_components = children.len() + 1;
-    let effective =
-        effective_static_selection(parent, children, inputs.static_components);
+    let num_components = inputs.children.len() + 1;
+    let leaves = &expansion.leaves;
 
     // The signed-transfer route links intact local tables and never invokes
-    // control elimination. Reject control-bearing components first, before any
-    // elimination-adjacent call, so even declined inputs cannot trigger it.
-    for component in std::iter::once(parent).chain(children.iter().map(|child| child.constraint)) {
-        if !component.table.control_terminals.is_empty() {
+    // control elimination. Reject control-bearing leaves first.
+    for leaf in leaves.iter() {
+        if !leaf.table.control_terminals.is_empty() {
             return Err(
                 "walk static link requires control-free component tables".to_string(),
             );
         }
     }
 
-    // Packed splice: rules + terminal layout only. The packed shape is the
-    // exact production construction (per-caller overlays); it feeds the
-    // grammar/follows analysis and the coordinator-layout pin, never the
-    // boundary parser. The boundary parser is compiled by the signed-transfer
-    // compiler below from intact local tables; no provider-materialized table
-    // and no exact_control_elimination exists on this route.
-    let global_ignores = component_ignores_are_globally_erasable(parent, children);
-    let parent_rules = parent.retained_table_rules()?;
-    let child_rules = children
-        .iter()
-        .map(|child| child.constraint.retained_table_rules())
-        .collect::<Result<Vec<_>, String>>()?;
-    let table_inputs: Vec<SubgrammarTableInput> = children
-        .iter()
-        .map(|child| SubgrammarTableInput {
-            placeholder_terminal: child.placeholder_terminal,
-            additional_placeholder_terminals: child.additional_placeholder_terminals,
-            table: &child.constraint.table,
-            ignore_terminal: (!global_ignores)
-                .then_some(child.constraint.ignore_terminal)
-                .flatten(),
-            start_nullable: child.constraint.table.embedded_start_nullable(),
-        })
-        .collect();
-    let mut composed = compose_subgrammar_tables_with_rules(
-        &parent.table,
-        parent_rules,
-        (!global_ignores).then_some(parent.ignore_terminal).flatten(),
-        &table_inputs,
-        child_rules.as_slice(),
-    )?;
-    eliminate_composed_runtime_controls(&mut composed)?;
-    if !composed.table.control_terminals.is_empty() || !composed.control_terminals.is_empty()
-    {
-        return Err(
-            "walk static link requires a control-free spliced table".to_string(),
-        );
+    // Effective static selection over top-level components: a requested block
+    // needs every leaf in its subtree free of virtual residual runtimes, whose
+    // lazily-allocated tokenizer states the link-time coordinate cannot cover.
+    // A requested-but-blocked block is a loud error, never a silent dynamic
+    // swap; unrequested blocks stay on the exact dynamic walker (hybrid).
+    let mut effective = BitSet::new(num_components);
+    for top in 0..num_components {
+        let requested = inputs
+            .static_components
+            .is_none_or(|bits| bits.contains(top));
+        if !requested {
+            continue;
+        }
+        let mut blocked = None;
+        for &leaf_index in &expansion.top_leaf_ranges[top] {
+            if leaves[leaf_index].tokenizer.has_virtual_residual_runtime() {
+                blocked = Some(leaf_index);
+                break;
+            }
+        }
+        if let Some(leaf_index) = blocked {
+            if !expansion.nested { continue; }
+            return Err(format!(
+                "walk static link component {top} requested a static shard but leaf {leaf_index} has a virtual residual runtime; leave it unselected (hybrid) or use the Dynamic boundary backend",
+            ));
+        }
+        effective.set(top);
     }
-    if composed.terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
-        return Err(format!(
-            "walk static link terminal layout differs from coordinator table: walk {:?} vs coordinator {:?} (leaf_terms {:?}, top_sizes {:?})",
-            composed.terminal_offsets,
-            inputs.expected_terminal_offsets,
-            expansion.leaves.iter().map(|leaf| leaf.table.num_terminals).collect::<Vec<_>>(),
-            expansion.top_terminal_sizes,
-        ));
-    }
-    // Signed-transfer link context: intact local tables, provider-layout
-    // injections, validated Entry/Finish contracts.
-    let link_context_started = Instant::now();
-    let unbound = unbound_link_slot_terminals(parent, children, &composed.terminal_offsets)?;
+
+    let global_ignores = leaf_ignores_are_globally_erasable(leaves);
+
+    // Signed-transfer context over leaves first: the bounded-closure
+    // certificate declines nullable bound children and link-level cycles
+    // loudly here, before any walks run.
+    let unbound = nested_unbound_slot_terminals(expansion)?;
     for &terminal in &unbound {
-        if terminal as usize >= composed.table.num_terminals as usize {
+        if terminal >= expansion.num_terminals {
             return Err(format!(
                 "unbound slot terminal {terminal} lies outside the composed terminal domain",
             ));
         }
     }
-    let signed_context = crate::compiler::boundary_transfer::build_signed_link_context(
-        parent,
-        children,
-        &composed.terminal_offsets,
-        composed.table.num_terminals,
+    let pre_context_setup_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
+    let link_context_started = Instant::now();
+    let signed_context = crate::compiler::boundary_transfer::build_signed_link_context_from_parts(
+        leaves.iter().map(|leaf| &*leaf.table).collect(),
+        leaves.iter().map(|leaf| leaf.ignore_terminal).collect(),
+        expansion.links.clone(),
+        &expansion.leaf_terminal_offsets,
+        expansion.num_terminals,
         global_ignores,
         unbound.into_iter().collect(),
-    )?;
+    )?.with_component_template_sources(leaves)?;
     let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
+    let post_context_setup_started = Instant::now();
 
-    // Merged tokenizer + ignores (mirror the gate's low_level_compose).
-    let link_setup_started = Instant::now();
+    let composed = link_analysis_splice(inputs, expansion, global_ignores)?;
+    if expansion.top_terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
+        return Err(format!(
+            "walk link top-level layout differs from coordinator table: walk {:?} vs coordinator {:?} (leaf_terms {:?}, top_sizes {:?})",
+            expansion.top_terminal_offsets, inputs.expected_terminal_offsets,
+            leaves.iter().map(|leaf| leaf.table.num_terminals).collect::<Vec<_>>(),
+            expansion.top_terminal_sizes,
+        ));
+    }
+    if composed.table.num_terminals != expansion.num_terminals {
+        return Err("walk link analysis terminal domain differs from leaf domain".into());
+    }
+
+    // Merged tokenizer + names + ignores over leaves.
     let tokenizer_merge_started = Instant::now();
-    let terminal_names = merged_terminal_display_names(parent, children);
-    let tokenizer_inputs: Vec<(&Tokenizer, u32)> = std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
+    let terminal_names = if expansion.nested {
+        merged_leaf_terminal_display_names(leaves)
+    } else {
+        merged_terminal_display_names(inputs.parent, inputs.children)
+    };
+    let tokenizer_inputs: Vec<(&Tokenizer, u32)> = leaves
+        .iter()
         .enumerate()
-        .map(|(index, constraint)| {
-            (constraint.composition_tokenizer(), composed.terminal_offsets[index])
+        .map(|(index, leaf)| {
+            (
+                leaf.composition_tokenizer(),
+                expansion.leaf_terminal_offsets[index],
+            )
         })
         .collect();
     let (mut merged, tokenizer_offsets) =
@@ -2399,33 +2384,30 @@ pub(crate) fn build_walk_static_boundary_link(
             "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
         );
     }
-    // These spans are established at the actual disjoint-union boundary, from
-    // the same immutable component allocations and its returned raw offsets.
-    // The following Expr-sidecar restoration changes no byte/label topology.
-    let prepared_first = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION")
-        .then(|| std::iter::once(parent)
-            .chain(children.iter().map(|child| child.constraint))
-            .zip(tokenizer_offsets.iter().copied())
-            .zip(composed.terminal_offsets.iter().copied())
-            .map(|((component, offset), terminal_offset)| super::boundary_precomputed_completion::PreparedSourceSpan::for_component(component, offset, terminal_offset))
-            .collect::<Vec<_>>());
-    if merged.terminal_exprs().is_none() {
-        let all: Vec<&Constraint> = std::iter::once(parent)
-            .chain(children.iter().map(|child| child.constraint))
-            .collect();
-        if let Some(exprs) = merged_retained_terminal_exprs(
-            &all,
-            &composed.terminal_offsets,
-            composed.table.num_terminals,
+    // Prepared source spans describe one intact component. Nested block
+    // queries still use exact on-the-fly transport.
+    let prepared_first = (!expansion.nested
+        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION"))
+        .then(|| leaves.iter().zip(tokenizer_offsets.iter().copied())
+            .zip(expansion.leaf_terminal_offsets.iter().copied())
+            .map(|((leaf, offset), terminal_offset)| {
+                super::boundary_precomputed_completion::PreparedSourceSpan::for_component(
+                    leaf, offset, terminal_offset,
+                )
+            }).collect::<Vec<_>>());
+    if merged.terminal_exprs().is_none()
+        && let Some(exprs) = merged_retained_terminal_exprs(
+            leaves,
+            &expansion.leaf_terminal_offsets,
+            expansion.num_terminals,
         ) {
             merged.restore_terminal_exprs(Some(exprs))?;
         }
-    }
     let ignores =
-        merged_ignore_terminals(parent, children, &composed.terminal_offsets, global_ignores);
+        merged_leaf_ignore_terminals(leaves, &expansion.leaf_terminal_offsets, global_ignores);
     let tokenizer_merge_ms = tokenizer_merge_started.elapsed().as_secs_f64() * 1000.0;
 
-    // Grammar + pairwise follows over the non-emptied composed rules.
+    // Grammar + pairwise follows over the spliced rules.
     let grammar_analysis_started = Instant::now();
     let augmented_start = composed
         .table
@@ -2442,38 +2424,36 @@ pub(crate) fn build_walk_static_boundary_link(
     );
     let disallowed = compute_disallowed_follows(&grammar);
     let grammar_analysis_ms = grammar_analysis_started.elapsed().as_secs_f64() * 1000.0;
-    let component_state_counts: Vec<u32> = tokenizer_inputs
+    let leaf_state_counts: Vec<u32> = tokenizer_inputs
         .iter()
         .map(|(tokenizer, _)| tokenizer.num_states())
         .collect();
 
-    // Expected runtime scoped leaf packing (link-component order).
-    let mut expected_leaf_tokenizer_offsets = Vec::with_capacity(num_components);
+    // Expected runtime scoped leaf packing (leaf order).
+    let mut expected_leaf_tokenizer_offsets = Vec::with_capacity(leaves.len());
     let mut expected_total = 0u32;
-    for &count in &component_state_counts {
+    for &count in &leaf_state_counts {
         expected_leaf_tokenizer_offsets.push(expected_total);
         expected_total = expected_total
             .checked_add(count)
             .ok_or_else(|| "scoped tokenizer state count overflow".to_string())?;
     }
 
-    let empty_output = || WalkStaticLinkOutput {
-        published_shards: Vec::new(),
-        boundary_tokens_by_start_component: vec![Vec::new(); num_components],
-        effective_static_components: effective.clone(),
-        all_dynamic: false,
-        expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
-        expected_total_tokenizer_states: expected_total,
-        expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
-        expected_total_leaf_terminals: expansion.num_terminals,
-        clear_nested_boundary_components: BitSet::new(num_components),
-    };
-    let retain_parent_non_crossing_paths = children
+    let top_components = std::iter::once(inputs.parent)
+        .chain(inputs.children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    debug_assert_eq!(top_components.len(), num_components);
+    let retained_static_coverage = top_components
         .iter()
-        .any(|child| child.constraint.table.embedded_start_nullable());
+        .enumerate()
+        .map(|(top, component)| {
+            expansion.top_leaf_ranges[top].len() <= 1
+                || retained_internal_static_boundary_coverage(component)
+        })
+        .collect::<Vec<_>>();
     let candidate_summary_started = Instant::now();
-    let candidate_summary_profiles = std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
+    let candidate_summary_profiles = top_components
+        .iter()
         .map(|component| {
             let started = Instant::now();
             let (ids, stats) =
@@ -2485,24 +2465,32 @@ pub(crate) fn build_walk_static_boundary_link(
         .iter()
         .map(|(ids, _, _)| ids.clone())
         .collect::<Vec<_>>();
+    // Nullable starts are checked over non-parent tops only: with a composed
+    // parent, top 0 spans several leaves and a leaf-0 skip would wrongly probe
+    // parent-block leaves.
+    let retain_parent_non_crossing_paths = expansion
+        .top_leaf_ranges
+        .iter()
+        .skip(1)
+        .flatten()
+        .any(|&leaf_index| leaves[leaf_index].table.embedded_start_nullable());
     // A flat root has no outer RETURN, and its first crossing must enter one
     // of these children. This additional proof is link-aware, so compute and
     // apply it INSIDE the link timer and never install it on a reusable child
     // or parent artifact. Global ignores and nullable-child non-crossing
     // publication deliberately retain the existing conservative route.
-    let no_ignores = std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
+    let no_ignores = leaves.iter()
         .all(|component| component.ignore_terminal.is_none()
             && component.table.skip_terminals.is_empty());
-    if (!global_ignores || no_ignores) && !retain_parent_non_crossing_paths
+    if !expansion.nested && (!global_ignores || no_ignores) && !retain_parent_non_crossing_paths
         && let Some(existing) = candidate_tokens_by_component[0].as_mut() {
-            let entered = children.iter().map(|child| child.constraint).collect::<Vec<_>>();
-            let calls = children.iter().flat_map(|child| {
+            let entered = inputs.children.iter().map(|child| child.constraint).collect::<Vec<_>>();
+            let calls = inputs.children.iter().flat_map(|child| {
                 std::iter::once(child.placeholder_terminal)
                     .chain(child.additional_placeholder_terminals.iter().copied())
             }).collect::<Vec<_>>();
             if let Ok(refined) = crate::compiler::boundary_tail::build_root_call_candidates(
-                parent, &entered, &calls, vocab,
+                inputs.parent, &entered, &calls, vocab,
             ) {
                 let reusable_count = existing.len();
                 existing.retain(|id| refined.candidate_ids.binary_search(id).is_ok());
@@ -2516,15 +2504,105 @@ pub(crate) fn build_walk_static_boundary_link(
             }
         }
     let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
-    let scoped_adjacent = if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY")
+    for top in 0..num_components {
+        if expansion.top_leaf_ranges[top].len() > 1 && !retained_static_coverage[top] {
+            // Staged legacy fallback: the outer shard is replacing an inner
+            // dynamic/uncertified repair, so it must cover that block's leaf-
+            // internal crossings as well as its outward interface. W_C is only
+            // an outward-interface summary and therefore cannot prune this
+            // replacement lane (e.g. token `mg` crosses mid -> grandchild but
+            // never exits the block). Widen to the full vocabulary and use the
+            // legacy per-leaf ownership predicate below.
+            candidate_tokens_by_component[top] = None;
+        }
+    }
+    let mut clear_nested_boundary_components = BitSet::new(num_components);
+    for (top, (&covered, range)) in retained_static_coverage
+        .iter()
+        .zip(&expansion.top_leaf_ranges)
+        .enumerate()
+    {
+        if range.len() > 1 && !covered {
+            clear_nested_boundary_components.set(top);
+        }
+    }
+
+    let empty_output = || WalkStaticLinkOutput {
+        published_shards: Vec::new(),
+        boundary_tokens_by_start_component: vec![Vec::new(); num_components],
+        effective_static_components: effective.clone(),
+        all_dynamic: false,
+        expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
+        expected_total_tokenizer_states: expected_total,
+        expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
+        expected_total_leaf_terminals: expansion.num_terminals,
+        clear_nested_boundary_components: clear_nested_boundary_components.clone(),
+    };
+    // One walk plan per top-level component. A block with retained static
+    // internal coverage gets one immediate-component ownership class for all
+    // of its leaves. Otherwise keep each leaf in its own class (the legacy
+    // conservative predicate), so the new outer shard continues to cover the
+    // block's internal crossings before those uncertified inner shards are
+    // cleared at install time.
+    let total_states = merged.num_states() as usize;
+    let mut walk_plans = Vec::with_capacity(num_components);
+    let mut leaf_to_immediate = vec![tdwa::scope::ImmediateComponentId(u32::MAX); leaves.len()];
+    for top in 0..num_components {
+        let mut commit = vec![false; total_states];
+        let root_leaf = expansion.top_root_leaves[top] as usize;
+        let crossing_owner = tdwa::scope::ImmediateComponentId(root_leaf as u32);
+        for &leaf_index in &expansion.top_leaf_ranges[top] {
+            leaf_to_immediate[leaf_index] = if retained_static_coverage[top] {
+                crossing_owner
+            } else {
+                tdwa::scope::ImmediateComponentId(leaf_index as u32)
+            };
+            let start = tokenizer_offsets[leaf_index] as usize;
+            let end = start + leaf_state_counts[leaf_index] as usize;
+            if end > commit.len() {
+                return Err(
+                    "nested block commit range lies outside the merged tokenizer".to_string(),
+                );
+            }
+            commit[start..end].fill(true);
+        }
+        walk_plans.push(BoundaryShardWalkPlan {
+            start_component: top,
+            crossing_owner,
+            commit_states: commit,
+            // Immediate terminal ownership is not, by itself, a proof that a
+            // token path stayed inside a nested block. The block may complete
+            // through zero-width returns and re-enter at another call site
+            // before the next visible terminal (e.g. g -> RETURN -> CALL -> m).
+            // The component summary is exactly the proper-prefix outward-event
+            // witness for that case. For those candidate tokens, keep the
+            // lexical non-crossing paths and let the signed parser decide
+            // whether an actual outer repair exists. A proved-empty summary
+            // can still use the narrower block-ownership predicate; Unknown
+            // widens, never prunes.
+            retain_non_crossing_paths: (retain_parent_non_crossing_paths && top == 0)
+                || (retained_static_coverage[top]
+                    && expansion.top_leaf_ranges[top].len() > 1
+                    && candidate_tokens_by_component[top]
+                        .as_ref()
+                        .is_none_or(|tokens| !tokens.is_empty())),
+        });
+    }
+    if leaf_to_immediate
+        .iter()
+        .any(|owner| owner.0 == u32::MAX)
+    {
+        return Err("nested boundary ownership did not cover every leaf".to_string());
+    }
+    let scoped_adjacent = if !expansion.nested && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY")
         && !global_ignores
     {
         let started = Instant::now();
-        let components = std::iter::once(parent).chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>();
+        let components = leaves;
         let counts = components.iter().map(|component| component.table.nonterminal_display_names.len()).collect::<Vec<_>>();
         let labels = components.iter().enumerate().map(|(owner, component)| {
             component.ignore_terminal.into_iter().chain(component.table.skip_terminals.iter().copied())
-                .map(|terminal| terminal + composed.terminal_offsets[owner]).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+                .map(|terminal| terminal + expansion.leaf_terminal_offsets[owner]).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
         }).collect::<Vec<_>>();
         let relation = super::boundary_scoped_follow::optimized_scoped_follow_relation(&grammar, &counts, &labels);
         if compose_profile_enabled() {
@@ -2532,7 +2610,8 @@ pub(crate) fn build_walk_static_boundary_link(
         }
         relation
     } else { None };
-    let link_setup_ms = link_setup_started.elapsed().as_secs_f64() * 1000.0;
+
+    let setup_ms = pre_context_setup_ms + post_context_setup_started.elapsed().as_secs_f64() * 1000.0;
     let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
         &signed_context,
     )?;
@@ -2563,7 +2642,7 @@ pub(crate) fn build_walk_static_boundary_link(
         let (slot_parent, slot_child, slot_terminal) = signed_context
             .links
             .iter()
-            .find(|link| link.child_component as usize == start_component)
+            .find(|link| expansion.top_leaf_ranges[start_component].contains(&(link.child_component as usize)))
             .map(|link| (link.parent_component, link.child_component, link.slot_terminal))
             .unwrap_or((u32::MAX, start_component as u32, u32::MAX));
         let walk_profile = shard.output.profile.clone();
@@ -2621,7 +2700,7 @@ pub(crate) fn build_walk_static_boundary_link(
         let (published, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
             work,
             compiled,
-            crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &component_state_counts },
+            crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &leaf_state_counts },
         )?;
         let shard_publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
         let _ = publish_profile;
@@ -2656,13 +2735,13 @@ pub(crate) fn build_walk_static_boundary_link(
             disallowed_follows: &disallowed,
             ignore_terminal: ignores.canonical,
             follow_transparent_ignores: Some(&ignores.scoped),
-            terminal_offsets: &composed.terminal_offsets,
-            leaf_to_immediate: None,
+            terminal_offsets: &expansion.leaf_terminal_offsets,
+            leaf_to_immediate: Some(&leaf_to_immediate),
             tokenizer_offsets: &tokenizer_offsets,
-            component_state_counts: &component_state_counts,
+            component_state_counts: &leaf_state_counts,
             candidate_tokens_by_component: Some(&candidate_tokens_by_component),
             retain_parent_non_crossing_paths,
-            walk_plans: None,
+            walk_plans: Some(walk_plans),
         },
         &process_shard,
         crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY").then_some(scoped_adjacent.as_ref()).flatten(),
@@ -2694,13 +2773,14 @@ pub(crate) fn build_walk_static_boundary_link(
     let parser_dwa_ms = shard_rows.iter().map(|row| row.parser_dwa_ms).sum::<f64>();
     let publish_ms = shard_rows.iter().map(|row| row.publish_ms).sum::<f64>();
     let total_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
-    let accounted_ms = link_setup_ms
+    let accounted_ms = setup_ms
         + link_context_ms
         + transfer_prepare_ms
         + component_pipeline_wall_ms;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][walk_static_link_breakdown] nested=false components={} total_ms={total_ms:.3} setup_ms={link_setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
+            "[glrmask/profile][walk_static_link_breakdown] nested={} components={} total_ms={total_ms:.3} setup_ms={setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
+            expansion.nested,
             num_components,
             link_profile.flat_ms,
             residual_ms = total_ms - accounted_ms,
@@ -2724,35 +2804,13 @@ pub(crate) fn build_walk_static_boundary_link(
                 row.publish_ms,
             );
         }
-        // Assembled only when profiling is on: with all profile env off the
-        // per-shard row vec is still pushed (pointer clones, no weight work)
-        // but never moved into the breakdown struct.
+    }
+    if compose_profile_enabled() || boundary_analysis_json_enabled() {
         let breakdown = WalkStaticLinkBreakdown {
             total_ms,
-            nested: false,
+            nested: expansion.nested,
             num_components,
-            setup_ms: link_setup_ms,
-            link_context_ms,
-            tokenizer_merge_ms,
-            grammar_analysis_ms,
-            candidate_summary_ms,
-            shared_flat_ms: link_profile.flat_ms,
-            component_pipeline_wall_ms,
-            transfer_prepare_ms,
-            templates_ms,
-            parser_dwa_ms,
-            publish_ms,
-            accounted_ms,
-            residual_ms: total_ms - accounted_ms,
-            per_shard: shard_rows,
-        };
-        emit_boundary_analysis_json(&breakdown);
-    } else if boundary_analysis_json_enabled() {
-        let breakdown = WalkStaticLinkBreakdown {
-            total_ms,
-            nested: false,
-            num_components,
-            setup_ms: link_setup_ms,
+            setup_ms,
             link_context_ms,
             tokenizer_merge_ms,
             grammar_analysis_ms,
@@ -2778,8 +2836,82 @@ pub(crate) fn build_walk_static_boundary_link(
         expected_total_tokenizer_states: expected_total,
         expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
         expected_total_leaf_terminals: expansion.num_terminals,
-        clear_nested_boundary_components: BitSet::new(num_components),
+        clear_nested_boundary_components,
     })
+}
+
+
+/// Grammar analysis uses only the rules, display names, and terminal domain
+/// of the temporary splice. Parser transfers always use intact providers.
+fn link_analysis_splice(
+    inputs: &WalkStaticLinkInputs,
+    expansion: &NestedLinkExpansion<'_>,
+    global_ignores: bool,
+) -> Result<ComposedTable, String> {
+    if expansion.nested {
+        let dfs_order = nested_splice_leaf_order(expansion)?;
+        let mut splice_order = Vec::with_capacity(expansion.leaves.len());
+        let mut composed = splice_nested_block(0, expansion, global_ignores, &mut splice_order)?;
+        if splice_order != dfs_order {
+            return Err(format!(
+                "nested walk splice visit order {splice_order:?} differs from link-tree DFS order {dfs_order:?}",
+            ));
+        }
+        remap_spliced_terminals_to_leaf_order(expansion, &dfs_order, &mut composed)?;
+        if composed.table.num_terminals != expansion.num_terminals {
+            return Err(format!(
+                "nested walk terminal domain {} differs from leaf domain {}",
+                composed.table.num_terminals, expansion.num_terminals,
+            ));
+        }
+
+        Ok(composed)
+    } else {
+        let parent = inputs.parent;
+        let children = inputs.children;
+        let parent_rules = parent.retained_table_rules()?;
+        let child_rules = children
+            .iter()
+            .map(|child| child.constraint.retained_table_rules())
+            .collect::<Result<Vec<_>, String>>()?;
+        let table_inputs: Vec<SubgrammarTableInput> = children
+            .iter()
+            .map(|child| SubgrammarTableInput {
+                placeholder_terminal: child.placeholder_terminal,
+                additional_placeholder_terminals: child.additional_placeholder_terminals,
+                table: &child.constraint.table,
+                ignore_terminal: (!global_ignores)
+                    .then_some(child.constraint.ignore_terminal)
+                    .flatten(),
+                start_nullable: child.constraint.table.embedded_start_nullable(),
+            })
+            .collect();
+        let mut composed = compose_subgrammar_tables_with_rules(
+            &parent.table,
+            parent_rules,
+            (!global_ignores).then_some(parent.ignore_terminal).flatten(),
+            &table_inputs,
+            child_rules.as_slice(),
+        )?;
+        eliminate_composed_runtime_controls(&mut composed)?;
+        if !composed.table.control_terminals.is_empty() || !composed.control_terminals.is_empty()
+        {
+            return Err(
+                "walk static link requires a control-free spliced table".to_string(),
+            );
+        }
+        if composed.terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
+            return Err(format!(
+                "walk static link terminal layout differs from coordinator table: walk {:?} vs coordinator {:?} (leaf_terms {:?}, top_sizes {:?})",
+                composed.terminal_offsets,
+                inputs.expected_terminal_offsets,
+                expansion.leaves.iter().map(|leaf| leaf.table.num_terminals).collect::<Vec<_>>(),
+                expansion.top_terminal_sizes,
+            ));
+        }
+
+        Ok(composed)
+    }
 }
 
 /// Direct child block roots of one leaf in the link tree (sorted, dedup'd:
@@ -3160,501 +3292,6 @@ fn retained_internal_static_boundary_coverage(component: &Constraint) -> bool {
             )
         });
         local_static && retained_internal_static_boundary_coverage(&child.constraint)
-    })
-}
-
-/// Nested production static link: the flat pipeline over recursively expanded
-/// intact leaves with the full multi-level link set (see the flat function
-/// for the pipeline stages). One walk per top-level component; publication
-/// per top-level component with leaf tokenizer coordinates.
-fn build_walk_static_boundary_link_nested(
-    inputs: &WalkStaticLinkInputs,
-    expansion: &NestedLinkExpansion<'_>,
-) -> Result<WalkStaticLinkOutput, String> {
-    let link_total_started = Instant::now();
-    let vocab = inputs.vocab;
-    let num_components = inputs.children.len() + 1;
-    let leaves = &expansion.leaves;
-
-    // The signed-transfer route links intact local tables and never invokes
-    // control elimination. Reject control-bearing leaves first.
-    for leaf in leaves.iter() {
-        if !leaf.table.control_terminals.is_empty() {
-            return Err(
-                "walk static link requires control-free component tables".to_string(),
-            );
-        }
-    }
-
-    // Effective static selection over top-level components: a requested block
-    // needs every leaf in its subtree free of virtual residual runtimes, whose
-    // lazily-allocated tokenizer states the link-time coordinate cannot cover.
-    // A requested-but-blocked block is a loud error, never a silent dynamic
-    // swap; unrequested blocks stay on the exact dynamic walker (hybrid).
-    let mut effective = BitSet::new(num_components);
-    for top in 0..num_components {
-        let requested = inputs
-            .static_components
-            .is_none_or(|bits| bits.contains(top));
-        if !requested {
-            continue;
-        }
-        let mut blocked = None;
-        for &leaf_index in &expansion.top_leaf_ranges[top] {
-            if leaves[leaf_index].tokenizer.has_virtual_residual_runtime() {
-                blocked = Some(leaf_index);
-                break;
-            }
-        }
-        if let Some(leaf_index) = blocked {
-            return Err(format!(
-                "walk static link component {top} requested a static shard but leaf {leaf_index} has a virtual residual runtime; leave it unselected (hybrid) or use the Dynamic boundary backend",
-            ));
-        }
-        effective.set(top);
-    }
-
-    let global_ignores = leaf_ignores_are_globally_erasable(leaves);
-
-    // Signed-transfer context over leaves first: the bounded-closure
-    // certificate declines nullable bound children and link-level cycles
-    // loudly here, before any walks run.
-    let unbound = nested_unbound_slot_terminals(expansion)?;
-    for &terminal in &unbound {
-        if terminal >= expansion.num_terminals {
-            return Err(format!(
-                "unbound slot terminal {terminal} lies outside the composed terminal domain",
-            ));
-        }
-    }
-    let pre_context_setup_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
-    let link_context_started = Instant::now();
-    let signed_context = crate::compiler::boundary_transfer::build_signed_link_context_from_parts(
-        leaves.iter().map(|leaf| &*leaf.table).collect(),
-        leaves.iter().map(|leaf| leaf.ignore_terminal).collect(),
-        expansion.links.clone(),
-        &expansion.leaf_terminal_offsets,
-        expansion.num_terminals,
-        global_ignores,
-        unbound.into_iter().collect(),
-    )?.with_component_template_sources(leaves)?;
-    let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
-    let post_context_setup_started = Instant::now();
-
-    // Packed recursive splice (rules + layout only) for grammar analysis and
-    // the coordinator-layout pin. The splice packs link-tree DFS order, which
-    // interleaves with leaf order on late non-root extensions; pin the splice
-    // traversal against the independent DFS oracle, then remap the packed
-    // rules explicitly into leaf coordinate (never assume the orders coincide).
-    let dfs_order = nested_splice_leaf_order(expansion)?;
-    let mut splice_order = Vec::with_capacity(expansion.leaves.len());
-    let mut composed = splice_nested_block(0, expansion, global_ignores, &mut splice_order)?;
-    if splice_order != dfs_order {
-        return Err(format!(
-            "nested walk splice visit order {splice_order:?} differs from link-tree DFS order {dfs_order:?}",
-        ));
-    }
-    remap_spliced_terminals_to_leaf_order(expansion, &dfs_order, &mut composed)?;
-    if composed.table.num_terminals != expansion.num_terminals {
-        return Err(format!(
-            "nested walk terminal domain {} differs from leaf domain {}",
-            composed.table.num_terminals, expansion.num_terminals,
-        ));
-    }
-    // Coordinator pin on the TOP frame: the splice packs the root block's
-    // direct children (root frame), which coincides with tops only when top 0
-    // is a single leaf. The leaf-expansion top starts must match the
-    // coordinator's per-top starts exactly.
-    if expansion.top_terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
-        return Err(format!(
-            "nested walk top-level layout differs from coordinator table: walk {:?} vs coordinator {:?} (leaf_terms {:?}, top_sizes {:?})",
-            expansion.top_terminal_offsets,
-            inputs.expected_terminal_offsets,
-            expansion.leaves.iter().map(|leaf| leaf.table.num_terminals).collect::<Vec<_>>(),
-            expansion.top_terminal_sizes,
-        ));
-    }
-
-    // Merged tokenizer + names + ignores over leaves.
-    let tokenizer_merge_started = Instant::now();
-    let terminal_names = merged_leaf_terminal_display_names(leaves);
-    let tokenizer_inputs: Vec<(&Tokenizer, u32)> = leaves
-        .iter()
-        .enumerate()
-        .map(|(index, leaf)| {
-            (
-                leaf.composition_tokenizer(),
-                expansion.leaf_terminal_offsets[index],
-            )
-        })
-        .collect();
-    let (mut merged, tokenizer_offsets) =
-        Tokenizer::disjoint_union_with_terminal_offsets(&tokenizer_inputs);
-    if tokenizer_offsets.first() != Some(&1) {
-        return Err(
-            "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
-        );
-    }
-    if merged.terminal_exprs().is_none()
-        && let Some(exprs) = merged_retained_terminal_exprs(
-            leaves,
-            &expansion.leaf_terminal_offsets,
-            expansion.num_terminals,
-        ) {
-            merged.restore_terminal_exprs(Some(exprs))?;
-        }
-    let ignores =
-        merged_leaf_ignore_terminals(leaves, &expansion.leaf_terminal_offsets, global_ignores);
-    let tokenizer_merge_ms = tokenizer_merge_started.elapsed().as_secs_f64() * 1000.0;
-
-    // Grammar + pairwise follows over the spliced rules.
-    let grammar_analysis_started = Instant::now();
-    let augmented_start = composed
-        .table
-        .rules
-        .first()
-        .map(|rule| rule.lhs)
-        .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
-    let grammar = AnalyzedGrammar::from_composed_rules(
-        composed.table.rules.clone(),
-        composed.table.num_terminals,
-        terminal_names,
-        composed.table.nonterminal_display_names.clone(),
-        augmented_start,
-    );
-    let disallowed = compute_disallowed_follows(&grammar);
-    let grammar_analysis_ms = grammar_analysis_started.elapsed().as_secs_f64() * 1000.0;
-    let leaf_state_counts: Vec<u32> = tokenizer_inputs
-        .iter()
-        .map(|(tokenizer, _)| tokenizer.num_states())
-        .collect();
-
-    // Expected runtime scoped leaf packing (leaf order).
-    let mut expected_leaf_tokenizer_offsets = Vec::with_capacity(leaves.len());
-    let mut expected_total = 0u32;
-    for &count in &leaf_state_counts {
-        expected_leaf_tokenizer_offsets.push(expected_total);
-        expected_total = expected_total
-            .checked_add(count)
-            .ok_or_else(|| "scoped tokenizer state count overflow".to_string())?;
-    }
-
-    let top_components = std::iter::once(inputs.parent)
-        .chain(inputs.children.iter().map(|child| child.constraint))
-        .collect::<Vec<_>>();
-    debug_assert_eq!(top_components.len(), num_components);
-    let retained_static_coverage = top_components
-        .iter()
-        .enumerate()
-        .map(|(top, component)| {
-            expansion.top_leaf_ranges[top].len() <= 1
-                || retained_internal_static_boundary_coverage(component)
-        })
-        .collect::<Vec<_>>();
-    let candidate_summary_started = Instant::now();
-    let candidate_summary_profiles = top_components
-        .iter()
-        .map(|component| {
-            let started = Instant::now();
-            let (ids, stats) =
-                crate::compiler::boundary_candidates::boundary_candidate_ids(component, vocab);
-            (ids, stats, started.elapsed().as_secs_f64() * 1000.0)
-        })
-        .collect::<Vec<_>>();
-    let mut candidate_tokens_by_component = candidate_summary_profiles
-        .iter()
-        .map(|(ids, _, _)| ids.clone())
-        .collect::<Vec<_>>();
-    let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
-    for top in 0..num_components {
-        if expansion.top_leaf_ranges[top].len() > 1 && !retained_static_coverage[top] {
-            // Staged legacy fallback: the outer shard is replacing an inner
-            // dynamic/uncertified repair, so it must cover that block's leaf-
-            // internal crossings as well as its outward interface. W_C is only
-            // an outward-interface summary and therefore cannot prune this
-            // replacement lane (e.g. token `mg` crosses mid -> grandchild but
-            // never exits the block). Widen to the full vocabulary and use the
-            // legacy per-leaf ownership predicate below.
-            candidate_tokens_by_component[top] = None;
-        }
-    }
-    let mut clear_nested_boundary_components = BitSet::new(num_components);
-    for (top, (&covered, range)) in retained_static_coverage
-        .iter()
-        .zip(&expansion.top_leaf_ranges)
-        .enumerate()
-    {
-        if range.len() > 1 && !covered {
-            clear_nested_boundary_components.set(top);
-        }
-    }
-
-    let empty_output = || WalkStaticLinkOutput {
-        published_shards: Vec::new(),
-        boundary_tokens_by_start_component: vec![Vec::new(); num_components],
-        effective_static_components: effective.clone(),
-        all_dynamic: false,
-        expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
-        expected_total_tokenizer_states: expected_total,
-        expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
-        expected_total_leaf_terminals: expansion.num_terminals,
-        clear_nested_boundary_components: clear_nested_boundary_components.clone(),
-    };
-    // Nullable starts are checked over non-parent tops only: with a composed
-    // parent, top 0 spans several leaves and a leaf-0 skip would wrongly probe
-    // parent-block leaves.
-    let retain_parent_non_crossing_paths = expansion
-        .top_leaf_ranges
-        .iter()
-        .skip(1)
-        .flatten()
-        .any(|&leaf_index| leaves[leaf_index].table.embedded_start_nullable());
-    // One walk plan per top-level component. A block with retained static
-    // internal coverage gets one immediate-component ownership class for all
-    // of its leaves. Otherwise keep each leaf in its own class (the legacy
-    // conservative predicate), so the new outer shard continues to cover the
-    // block's internal crossings before those uncertified inner shards are
-    // cleared at install time.
-    let total_states = merged.num_states() as usize;
-    let mut walk_plans = Vec::with_capacity(num_components);
-    let mut leaf_to_immediate = vec![tdwa::scope::ImmediateComponentId(u32::MAX); leaves.len()];
-    for top in 0..num_components {
-        let mut commit = vec![false; total_states];
-        let root_leaf = expansion.top_root_leaves[top] as usize;
-        let crossing_owner = tdwa::scope::ImmediateComponentId(root_leaf as u32);
-        for &leaf_index in &expansion.top_leaf_ranges[top] {
-            leaf_to_immediate[leaf_index] = if retained_static_coverage[top] {
-                crossing_owner
-            } else {
-                tdwa::scope::ImmediateComponentId(leaf_index as u32)
-            };
-            let start = tokenizer_offsets[leaf_index] as usize;
-            let end = start + leaf_state_counts[leaf_index] as usize;
-            if end > commit.len() {
-                return Err(
-                    "nested block commit range lies outside the merged tokenizer".to_string(),
-                );
-            }
-            commit[start..end].fill(true);
-        }
-        walk_plans.push(BoundaryShardWalkPlan {
-            start_component: top,
-            crossing_owner,
-            commit_states: commit,
-            // Immediate terminal ownership is not, by itself, a proof that a
-            // token path stayed inside a nested block. The block may complete
-            // through zero-width returns and re-enter at another call site
-            // before the next visible terminal (e.g. g -> RETURN -> CALL -> m).
-            // The component summary is exactly the proper-prefix outward-event
-            // witness for that case. For those candidate tokens, keep the
-            // lexical non-crossing paths and let the signed parser decide
-            // whether an actual outer repair exists. A proved-empty summary
-            // can still use the narrower block-ownership predicate; Unknown
-            // widens, never prunes.
-            retain_non_crossing_paths: (retain_parent_non_crossing_paths && top == 0)
-                || (retained_static_coverage[top]
-                    && expansion.top_leaf_ranges[top].len() > 1
-                    && candidate_tokens_by_component[top]
-                        .as_ref()
-                        .is_none_or(|tokens| !tokens.is_empty())),
-        });
-    }
-    if leaf_to_immediate
-        .iter()
-        .any(|owner| owner.0 == u32::MAX)
-    {
-        return Err("nested boundary ownership did not cover every leaf".to_string());
-    }
-    let setup_ms = pre_context_setup_ms
-        + post_context_setup_started.elapsed().as_secs_f64() * 1000.0;
-    let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
-        &signed_context,
-    )?;
-    let transfer_prepare_ms = transfer_cache.prepare_ms;
-    struct ProcessedNestedShard {
-        start_component: usize,
-        candidates: Vec<u32>,
-        published: Option<PublishedStaticBoundaryShard>,
-        row: Option<WalkStaticLinkShardBreakdown>,
-    }
-    let process_shard = |shard: BuiltBoundaryShardWalk| -> Result<ProcessedNestedShard, String> {
-        let start_component = shard.start_component;
-        let candidates = shard.candidate_tokens.iter().copied().collect::<Vec<_>>();
-        if !effective.contains(start_component) {
-            return Ok(ProcessedNestedShard {
-                start_component,
-                candidates,
-                published: None,
-                row: None,
-            });
-        }
-        let (slot_parent, slot_child, slot_terminal) = signed_context
-            .links
-            .iter()
-            .find(|link| {
-                expansion
-                    .top_leaf_ranges
-                    .get(start_component)
-                    .is_some_and(|range| range.contains(&(link.child_component as usize)))
-            })
-            .map(|link| (link.parent_component, link.child_component, link.slot_terminal))
-            .unwrap_or((u32::MAX, start_component as u32, u32::MAX));
-        let walk_profile = shard.output.profile.clone();
-        let (_, summary_stats, summary_ms) = &candidate_summary_profiles[start_component];
-        let emitted = boundary_emitted_terminals(
-            &shard.output.dwa,
-            composed.table.num_terminals as usize,
-        );
-        let templates_started = Instant::now();
-        let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
-            &signed_context,
-            &transfer_cache,
-            &emitted,
-            start_component as u32,
-        )?;
-        let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
-        #[cfg(test)]
-        trace_boundary_terminal_dwa_words(
-            &format!("component{start_component}"),
-            &shard.output.dwa,
-            composed.table.num_terminals as usize,
-        );
-        let parser_started = Instant::now();
-        let compiled = crate::compiler::boundary_transfer::compile_signed_shard_parser(
-            &signed_context,
-            &library,
-            &shard.output.dwa,
-            &shard.output.id_map,
-            start_component as u32,
-        )?;
-        let parser_dwa_ms = parser_started.elapsed().as_secs_f64() * 1000.0;
-        let work = BoundaryShardMetadata {
-            start_component: start_component as u32,
-            id_map: shard.output.id_map,
-            candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
-        };
-        let publish_started = Instant::now();
-        let (published, _publish_profile) =
-            crate::compiler::boundary_transfer::publish_signed_shard(
-                work,
-                compiled,
-                crate::compiler::constraint_compose::BoundaryTsidLayout::Scoped { offsets: &tokenizer_offsets, counts: &leaf_state_counts },
-            )?;
-        let publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
-        Ok(ProcessedNestedShard {
-            start_component,
-            candidates,
-            published: Some(published),
-            row: Some(WalkStaticLinkShardBreakdown {
-                start_component,
-                parent_component: slot_parent,
-                child_component: slot_child,
-                slot_terminal,
-                walk: walk_profile,
-                summary_ms: *summary_ms,
-                summary_history_positions: summary_stats.history_positions,
-                summary_initial_frontier_pairs: summary_stats.initial_frontier_pairs,
-                summary_byte_steps: summary_stats.byte_steps,
-                summary_peak_frontier_pairs: summary_stats.peak_frontier_pairs,
-                summary_widened_subtrees: summary_stats.widened_subtrees,
-                templates_ms,
-                parser_dwa_ms,
-                publish_ms,
-            }),
-        })
-    };
-    let component_pipeline_started = Instant::now();
-    let Some((processed, link_profile)) = map_boundary_shard_walks_with(
-        &BoundaryShardLinkInputs {
-            merged_tokenizer: &merged,
-            vocab,
-            grammar: &grammar,
-            disallowed_follows: &disallowed,
-            ignore_terminal: ignores.canonical,
-            follow_transparent_ignores: Some(&ignores.scoped),
-            terminal_offsets: &expansion.leaf_terminal_offsets,
-            leaf_to_immediate: Some(&leaf_to_immediate),
-            tokenizer_offsets: &tokenizer_offsets,
-            component_state_counts: &leaf_state_counts,
-            candidate_tokens_by_component: Some(&candidate_tokens_by_component),
-            retain_parent_non_crossing_paths,
-            walk_plans: Some(walk_plans),
-        },
-        &process_shard,
-        None,
-        None, // Nested-coordinate transport retains the exact on-the-fly path.
-    )? else {
-        return Ok(empty_output());
-    };
-    let component_pipeline_wall_ms =
-        component_pipeline_started.elapsed().as_secs_f64() * 1000.0;
-    let mut processed = processed
-        .into_iter()
-        .map(|(_, item)| item)
-        .collect::<Vec<_>>();
-    processed.sort_by_key(|item| item.start_component);
-    let mut published = Vec::new();
-    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
-    let mut shard_rows = Vec::<WalkStaticLinkShardBreakdown>::new();
-    for item in processed {
-        tokens_by_component[item.start_component] = item.candidates;
-        if let Some(shard) = item.published {
-            published.push(shard);
-        }
-        if let Some(row) = item.row {
-            shard_rows.push(row);
-        }
-    }
-    published.sort_by_key(|shard| shard.start_component);
-    shard_rows.sort_by_key(|row| row.start_component);
-    let templates_ms = shard_rows.iter().map(|row| row.templates_ms).sum::<f64>();
-    let parser_dwa_ms = shard_rows.iter().map(|row| row.parser_dwa_ms).sum::<f64>();
-    let publish_ms = shard_rows.iter().map(|row| row.publish_ms).sum::<f64>();
-    let total_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
-    let accounted_ms = setup_ms
-        + link_context_ms
-        + transfer_prepare_ms
-        + component_pipeline_wall_ms;
-    if compose_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][walk_static_link_breakdown] nested=true components={} total_ms={total_ms:.3} setup_ms={setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={:.3}",
-            num_components,
-            link_profile.flat_ms,
-            total_ms - accounted_ms,
-        );
-    }
-    if compose_profile_enabled() || boundary_analysis_json_enabled() {
-        let breakdown = WalkStaticLinkBreakdown {
-            total_ms,
-            nested: true,
-            num_components,
-            setup_ms,
-            link_context_ms,
-            tokenizer_merge_ms,
-            grammar_analysis_ms,
-            candidate_summary_ms,
-            shared_flat_ms: link_profile.flat_ms,
-            component_pipeline_wall_ms,
-            transfer_prepare_ms,
-            templates_ms,
-            parser_dwa_ms,
-            publish_ms,
-            accounted_ms,
-            residual_ms: total_ms - accounted_ms,
-            per_shard: shard_rows,
-        };
-        emit_boundary_analysis_json(&breakdown);
-    }
-    Ok(WalkStaticLinkOutput {
-        published_shards: published,
-        boundary_tokens_by_start_component: tokens_by_component,
-        effective_static_components: effective,
-        all_dynamic: false,
-        expected_leaf_tokenizer_offsets,
-        expected_total_tokenizer_states: expected_total,
-        expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
-        expected_total_leaf_terminals: expansion.num_terminals,
-        clear_nested_boundary_components,
     })
 }
 
