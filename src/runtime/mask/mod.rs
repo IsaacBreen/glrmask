@@ -522,7 +522,7 @@ fn assert_dynamic_mask_equivalence(state: &ConstraintState, static_mask: &[u32])
 
     panic!(
         "dynamic/static mask mismatch at generation {}: differing_tokens={} first_differing_token_ids={:?} parser_state_keys={:?}",
-        state.generation,
+        state.generation(),
         differing_count,
         differing_token_ids,
         state.state.keys().copied().collect::<Vec<_>>(),
@@ -4667,11 +4667,10 @@ impl ConstraintState {
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
             let shadow = ConstraintState {
-            terminated: false,
-            markers: None,
+                markers: None,
                 constraint: component.constraint.as_ref().clone(),
                 state,
-                generation: self.generation,
+                epoch: self.generation(),
                 mask_cache: StateMaskCache::new(),
             };
             // Dispatch through the retained component itself. Static source
@@ -4869,11 +4868,10 @@ impl ConstraintState {
                 .expect("active segmented component requires a mask buffer");
             component_buf.fill(0);
             let shadow = ConstraintState {
-            terminated: false,
-            markers: None,
+                markers: None,
                 constraint: component.constraint.as_ref().clone(),
                 state,
-                generation: self.generation,
+                epoch: self.generation(),
                 mask_cache: StateMaskCache::new(),
             };
             // Preserve the supplied component's runtime backend. A static
@@ -5079,11 +5077,10 @@ impl ConstraintState {
                                         shard.start_component, self.state.len(), frontier.len());
                                 }
                                 let view = ConstraintState {
-                                    terminated: self.terminated,
-            markers: None,
+                                    markers: None,
                                     constraint: self.constraint.clone(),
                                     state: frontier,
-                                    generation: self.generation,
+                                    epoch: self.epoch,
                                     mask_cache: StateMaskCache::new(),
                                 };
                                 vocab.or_mask(&view, buf).expect("exact vocabulary mask failed")
@@ -7185,7 +7182,7 @@ impl ConstraintState {
             return false;
         };
 
-        if cache_data.generation != self.generation {
+        if cache_data.generation != self.generation() {
             return false;
         }
 
@@ -7194,7 +7191,7 @@ impl ConstraintState {
     }
 
     fn store_mask_cache(&self, buf: &[u32], merged_dense: &[u64]) {
-        self.mask_cache.store(self.generation, buf, merged_dense);
+        self.mask_cache.store(self.generation(), buf, merged_dense);
     }
 
     fn fill_single_path_seed_dense(
@@ -7986,13 +7983,13 @@ impl ConstraintState {
     }
 
     fn store_mask_cache_reuse_dense(&self, buf: &[u32]) {
-        self.mask_cache.store(self.generation, buf, &[]);
+        self.mask_cache.store(self.generation(), buf, &[]);
     }
 
     fn touch_mask_cache_generation(&self) {
         let mut cache = self.mask_cache.lock().unwrap();
         if let Some(cache_data) = cache.as_mut() {
-            cache_data.generation = self.generation;
+            cache_data.generation = self.generation();
         }
     }
 
@@ -8676,11 +8673,10 @@ impl ConstraintState {
 
         // A mask-only speculative view clones only the live Arc-backed parser paths.
         let mut shadow = Box::new(ConstraintState {
-            terminated: false,
             markers: None,
             constraint: self.constraint.clone(),
             state: self.state.clone(),
-            generation: self.generation,
+            epoch: self.generation(),
             mask_cache: StateMaskCache::new(),
         });
         for (tokenizer_state, factored) in additions {
@@ -8698,7 +8694,7 @@ impl ConstraintState {
     /// Panics if `bitmask` has fewer than `mask_bit_len().div_ceil(32)` words.
     pub fn fill_mask(&self, bitmask: &mut [u32]) {
         assert!(bitmask.len() >= self.constraint.mask_bit_len().div_ceil(32), "mask buffer has fewer words than required by the mask bit length");
-        if self.terminated {
+        if self.terminated() {
             bitmask.fill(0);
             return;
         }
@@ -8811,7 +8807,7 @@ impl ConstraintState {
             let profile_dynamic_cache = crate::env::var("GLRMASK_PROFILE_DYNAMIC_STATE_CACHE_GENERATION")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
-                == Some(self.generation);
+                == Some(self.generation());
             let local_started = profile_dynamic_cache.then(Instant::now);
             let local_hit = !disable_dynamic_mask_cache && self.try_fill_mask_from_cache(mask);
             let local_us = local_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e6);
@@ -8827,7 +8823,7 @@ impl ConstraintState {
                 if profile_dynamic_cache {
                     eprintln!(
                         "[glrmask/profile][dynamic_state_cache] generation={} local_hit=false local_us={:.1} dynamic_us={:.1} store_us={:.1}",
-                        self.generation,
+                        self.generation(),
                         local_us,
                         dynamic_us,
                         store_us,
@@ -8836,7 +8832,7 @@ impl ConstraintState {
             } else if profile_dynamic_cache {
                 eprintln!(
                     "[glrmask/profile][dynamic_state_cache] generation={} local_hit=true local_us={:.1}",
-                    self.generation,
+                    self.generation(),
                     local_us,
                 );
             }
@@ -8845,7 +8841,7 @@ impl ConstraintState {
             if let Some(clear_started) = clear_started {
                 eprintln!(
                     "[glrmask/profile][dynamic_state_cache] generation={} clear_us={:.1}",
-                    self.generation,
+                    self.generation(),
                     clear_started.elapsed().as_secs_f64() * 1e6,
                 );
             }
@@ -8950,7 +8946,7 @@ impl ConstraintState {
     }
 
     pub(crate) fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
-        if self.terminated || !self.constraint.end_tokens.is_empty() {
+        if self.terminated() || !self.constraint.end_tokens.is_empty() {
             let started = Instant::now();
             self.fill_mask(buf);
             return MaskProfile { total_ns: elapsed_ns(started), ..MaskProfile::default() };

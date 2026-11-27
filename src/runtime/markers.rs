@@ -464,7 +464,7 @@ impl super::ConstraintState {
         let mut markers = MarkerState::new(queries);
         markers.observe(queries, 0, |observer| observer.frontier(&self.constraint, &self.state, 0));
         markers.finish(queries, 0, true);
-        self.markers = Some(markers);
+        self.markers = Some(Arc::new(markers));
     }
 
     /// The markers passed by the most recent commit, or by
@@ -475,7 +475,7 @@ impl super::ConstraintState {
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn marker_events(&self) -> &[MarkerEvent] {
-        self.markers.as_ref().map_or(&[], MarkerState::events)
+        self.markers.as_deref().map_or(&[], MarkerState::events)
     }
 }
 

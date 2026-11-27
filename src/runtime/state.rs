@@ -683,14 +683,13 @@ impl CommitBuffers {
 }
 
 pub struct ConstraintState {
-    pub(crate) terminated: bool,
-    pub(crate) markers: Option<crate::runtime::markers::MarkerState>,
+    pub(crate) markers: Option<Arc<crate::runtime::markers::MarkerState>>,
     pub(crate) constraint: Constraint,
     // Small live frontier; scratch and bounded commit algorithms retain their own capacity.
     pub(crate) state: ParserStateMap,
-    /// Monotonically increasing counter, bumped on every commit.
-    /// Used for cheap cache invalidation in fill_mask.
-    pub(crate) generation: u64,
+    /// Low 63 bits: commit generation; high bit: explicit end-token termination.
+    /// The cache is cleared on generation rollover.
+    pub(crate) epoch: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
     /// Not cloned — clone starts with empty cache.
     pub(crate) mask_cache: StateMaskCache,
@@ -700,11 +699,10 @@ impl Clone for ConstraintState {
 
     fn clone(&self) -> Self {
         ConstraintState {
-            terminated: self.terminated,
             markers: self.markers.clone(),
             constraint: self.constraint.clone(),
             state: self.state.clone(),
-            generation: self.generation,
+            epoch: self.epoch,
             mask_cache: StateMaskCache::new(),
         }
     }
@@ -713,7 +711,7 @@ impl Clone for ConstraintState {
 impl std::fmt::Debug for ConstraintState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConstraintState")
-            .field("terminated", &self.terminated)
+            .field("terminated", &self.terminated())
             .field("state_len", &self.state.len())
             .field("mask_cached", &self.mask_cache.lock().unwrap().is_some())
             .finish()
@@ -721,12 +719,32 @@ impl std::fmt::Debug for ConstraintState {
 }
 
 impl ConstraintState {
+    const TERMINATED_BIT: u64 = 1 << 63;
+    const GENERATION_MASK: u64 = Self::TERMINATED_BIT - 1;
+
+    #[inline]
+    pub(crate) fn generation(&self) -> u64 {
+        self.epoch & Self::GENERATION_MASK
+    }
+
+    #[inline]
+    pub(crate) fn terminated(&self) -> bool {
+        self.epoch & Self::TERMINATED_BIT != 0
+    }
+
+    #[inline]
+    pub(crate) fn advance_generation(&mut self, terminated: bool) {
+        let next = self.epoch.wrapping_add(1) & Self::GENERATION_MASK;
+        // An arbitrarily old cache must not become valid again after rollover.
+        if next == 0 { self.mask_cache.clear(); }
+        self.epoch = next | (u64::from(terminated) << 63);
+    }
+
     pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState) {
         assert!(Arc::ptr_eq(&self.constraint.data, &source.constraint.data));
-        self.terminated = source.terminated;
         self.markers = source.markers.clone();
         self.state = source.state.clone();
-        self.generation = source.generation;
+        self.epoch = source.epoch;
         self.mask_cache.clear();
     }
 
@@ -749,9 +767,9 @@ impl ConstraintState {
     /// Whether the output so far could end here.
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
-            return self.terminated;
+            return self.terminated();
         }
-        frontier_is_accepting(&self.constraint, &self.state, self.terminated)
+        frontier_is_accepting(&self.constraint, &self.state, self.terminated())
     }
 
     /// Whether the parser frontier is a complete grammar match, ignoring any
@@ -821,7 +839,7 @@ impl ConstraintState {
     /// Whether nothing more can be committed.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
-        if self.terminated {
+        if self.terminated() {
             return true;
         }
         if self.state.is_empty() {
@@ -920,8 +938,31 @@ mod clone_and_scratch_tests {
         eprintln!("state={} frontier={} entry={} constraint={} markers={} cache={}",
             std::mem::size_of::<ConstraintState>(), std::mem::size_of::<ParserStateMap>(),
             std::mem::size_of::<(u32, ParserGSS)>(), std::mem::size_of::<Constraint>(),
-            std::mem::size_of::<Option<crate::runtime::markers::MarkerState>>(),
+            std::mem::size_of::<Option<Arc<crate::runtime::markers::MarkerState>>>(),
             std::mem::size_of::<StateMaskCache>());
+    }
+
+    #[test]
+    fn packed_epoch_preserves_termination_and_invalidates_rollover() {
+        let c = constraint("start root; nt root = 'a'+;");
+        let mut state = c.start();
+        state.epoch = ConstraintState::GENERATION_MASK;
+        state.mask_cache.store(0, &[1], &[]);
+        state.advance_generation(true);
+        assert_eq!(state.generation(), 0);
+        assert!(state.terminated());
+        assert!(state.mask_cache.lock().unwrap().is_none());
+        let mut clone = state.clone();
+        assert!(clone.terminated());
+        clone.advance_generation(false);
+        assert_eq!(clone.generation(), 1);
+        assert!(!clone.terminated());
+        assert!(state.terminated());
+        state.copy_snapshot_from(&clone);
+        assert_eq!(state.generation(), 1);
+        assert!(!state.terminated());
+        #[cfg(target_pointer_width = "64")]
+        assert!(std::mem::size_of::<ConstraintState>() <= 112);
     }
 
     #[test]

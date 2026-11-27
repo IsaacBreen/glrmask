@@ -3881,7 +3881,7 @@ fn try_full_walk_mask_in_output_scope(
         )
     {
         let guarded_root_diagnostic = crate::env::var("GLRMASK_DIAG_GUARDED_ROOT_GENERATION")
-            .ok().and_then(|v| v.parse::<u64>().ok()) == Some(state.generation);
+            .ok().and_then(|v| v.parse::<u64>().ok()) == Some(state.generation());
         if guarded_root_diagnostic {
             for (index, branch) in root_branches.iter().enumerate() {
                 let memories = match &branch.initial_prune_guard {
@@ -3889,7 +3889,7 @@ fn try_full_walk_mask_in_output_scope(
                     InitialPruneGuard::Pending { memories } => memories.as_ref(),
                 };
                 eprintln!("[glrmask/profile][guarded_root] generation={} index={} config={} exact={:?} gss={} filtered={} transparent={} memories={:?}",
-                    state.generation, index, branch.tokenizer_config,
+                    state.generation(), index, branch.tokenizer_config,
                     branch.exact_tokenizer_state, branch.gss.ptr_key(),
                     branch.parser_filtered_root, branch.parser_filtered_transparent, memories);
             }
@@ -3947,7 +3947,7 @@ fn try_full_walk_mask_in_output_scope(
                 let new: u32 = scratch.iter().zip(merged.iter())
                     .map(|(&incoming, &old)| (incoming & !old).count_ones()).sum();
                 eprintln!("[glrmask/profile][guarded_root_output] generation={} index={} allowed={} previous={} new={}",
-                    state.generation, root_index, allowed, previous, new);
+                    state.generation(), root_index, allowed, previous, new);
             }
             for (dst, &word) in merged.iter_mut().zip(&scratch) {
                 *dst |= word;
@@ -4137,7 +4137,7 @@ fn try_full_walk_mask_in_output_scope(
         }
         _ => {
             let mut table = FullWalkConfigTransitions::new(
-                lexer_scan_cache, vocab.max_token_byte_len(), state.generation,
+                lexer_scan_cache, vocab.max_token_byte_len(), state.generation(),
             );
             let result = if root_branches.len() == 1 {
                 try_full_walk_mask_with_table_dispatch::<_, true>(
@@ -4512,7 +4512,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
     )
     .is_some();
     let condition_walk_enabled = condition_walk_enabled
-        && (!condition_initial_only || state.generation == 0);
+        && (!condition_initial_only || state.generation() == 0);
 
     // `full_walk_all_consume()` proves there are no synthetic empty-edge
     // records. Each outer iteration therefore begins at a radix-edge START,
@@ -4974,7 +4974,7 @@ fn try_full_walk_mask_with_table<
                         ) {
                             if crate::env::var_os("GLRMASK_DIAG_DEMAND_TERMINAL_PROOF").is_some() {
                                 eprintln!("[demand_terminal_proof] generation={} source={} terminal={} slice={} contained={}",
-                                    state.generation, source, terminal, slice.cache_id(), result);
+                                    state.generation(), source, terminal, slice.cache_id(), result);
                             }
                             return result;
                         }
@@ -5139,7 +5139,7 @@ fn try_full_walk_mask_with_table<
                 if crate::env::var_os("GLRMASK_PROFILE_MASTER_PROFITABILITY").is_some() {
                     eprintln!(
                         "[glrmask/profile][config_master_profitability] generation={} source={} config={} safe_radius={} whitespace={} ordinary_ops={} master_ops={} residual_ops={:?} max_permille={} profitable={}",
-                        state.generation,
+                        state.generation(),
                         source,
                         lexer_state,
                         safe_radius,
@@ -5227,7 +5227,7 @@ fn try_full_walk_mask_with_table<
             if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROOF_PHASES").is_some() {
                 eprintln!(
                     "[glrmask/profile][finite_exclusion_master] generation={} source={} terminal={} safe_radius={} ordinary_ops={} residual_ops={:?} max_permille={} profitable={}",
-                    state.generation,
+                    state.generation(),
                     source,
                     terminal,
                     safe_radius,
@@ -5275,11 +5275,11 @@ fn try_full_walk_mask_with_table<
                 let prefer_word = word_ops.saturating_mul(1000)
                     < existing_ops.saturating_mul(max_permille);
                 if crate::env::var_os("GLRMASK_PROFILE_WORD_ROUTE").is_some()
-                    && dynamic_mask_profile_enabled(state.generation)
+                    && dynamic_mask_profile_enabled(state.generation())
                 {
                     eprintln!(
                         "[glrmask/profile][word_route] generation={} master={:?} word_ops={} existing_ops={} max_permille={} attempt={}",
-                        state.generation, master_decision, word_ops, existing_ops,
+                        state.generation(), master_decision, word_ops, existing_ops,
                         max_permille, prefer_word,
                     );
                 }
@@ -5342,10 +5342,10 @@ fn try_full_walk_mask_with_table<
         && transitions.hot_scalar_lane_enabled()
         && crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_none()
         && (root_branches[0].parser_filtered_root || legacy_hot_conditions_clear);
-    if dynamic_mask_profile_enabled(state.generation) {
+    if dynamic_mask_profile_enabled(state.generation()) {
         eprintln!(
             "[glrmask/profile][hot_scalar_gate] generation={} eligible={} all_consume={} root_config={} exact_raw={:?} hot_id={:?}",
-            state.generation,
+            state.generation(),
             hot_edge_lane_eligible,
             trie.full_walk_all_consume(),
             root_branches.first().map_or(u32::MAX, |root| root.tokenizer_config),
@@ -5699,7 +5699,7 @@ fn try_full_walk_mask_with_table<
         crate::env::var_os("GLRMASK_PROFILE_SKIP_PREFIX_PROBES").is_some()
     });
     let condition_walk_enabled = condition_config_scalar
-        && (!condition_initial_only || state.generation == 0) && !skip_prefix_probes;
+        && (!condition_initial_only || state.generation() == 0) && !skip_prefix_probes;
     let condition_dead_skip = condition_dead_skip && !skip_prefix_probes;
     loop {
         if sparse_positive_rebuild {
@@ -6830,7 +6830,7 @@ fn try_full_walk_mask_with_table<
         if profile_generic_work {
             eprintln!(
                 "[glrmask/profile][generic_adaptive_output] generation={} positive_work={} negative_work={}",
-                state.generation,
+                state.generation(),
                 deferred_positive_work,
                 deferred_negative_work,
             );
@@ -9750,7 +9750,7 @@ fn fill_mask_dynamic_impl(
     tail.fill(0);
     let mut deadline_poll = DynamicDeadlinePoll::new(deadline);
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-    let profile = dynamic_mask_profile_enabled(state.generation);
+    let profile = dynamic_mask_profile_enabled(state.generation());
     let profile_prewalk = dynamic_mask_prewalk_profile_enabled();
     let prewalk_profile_start = profile_prewalk.then(std::time::Instant::now);
     let total_started_at = profile.then(std::time::Instant::now);
@@ -9787,7 +9787,7 @@ fn fill_mask_dynamic_impl(
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_mask] generation={} cache_hit=true key_ms={:.3} total_ms={:.3}",
-                state.generation,
+                state.generation(),
                 key_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -9991,7 +9991,7 @@ fn fill_mask_dynamic_impl(
                         .collect::<Vec<_>>();
                     eprintln!(
                         "[glrmask/profile][dynamic_seed_admitted] generation={} tokenizer_state={} terminals={:?}",
-                        state.generation, tokenizer_state, names
+                        state.generation(), tokenizer_state, names
                     );
                 }
                 let diagnostic_terminals = crate::env::var(
@@ -10078,7 +10078,7 @@ fn fill_mask_dynamic_impl(
                 });
                 eprintln!(
                     "[glrmask/profile][dynamic_seed_parser_signature] generation={} tokenizer_state={} root_admissible={:016x} root_admissible_count={} relevant_signature={:016x} top_action={:?} sole_future_action={:?} post_first={:?}",
-                    state.generation,
+                    state.generation(),
                     tokenizer_state,
                     root_admissible_fingerprint,
                     root_admissible_count,
@@ -10110,14 +10110,14 @@ fn fill_mask_dynamic_impl(
                     .collect::<Vec<_>>();
                 eprintln!(
                     "[glrmask/profile][dynamic_seed_lexical_sets] generation={} tokenizer_state={} matched={:?} futures_first16={:?}",
-                    state.generation, tokenizer_state, matched_named, future_named
+                    state.generation(), tokenizer_state, matched_named, future_named
                 );
                 if let Some(expr) = state.constraint.tokenizer.terminal_expr(79) {
                     eprintln!("[glrmask/profile][terminal79_expr] {:?}", expr);
                 }
                 eprintln!(
                     "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} transitions={} matched={} futures={}",
-                    state.generation,
+                    state.generation(),
                     tokenizer_state,
                     tokenizer_state == exact_initial_tsid,
                     stacks.path_count_at_most(1_000_000),
@@ -10335,7 +10335,7 @@ fn fill_mask_dynamic_impl(
             };
             eprintln!(
                 "[glrmask/profile][dynamic_mask] generation={} full_walk=true layout={} tokenizer_states={} prewalk_ms={:.3} full_walk_ms={:.3} total_ms={:.3}",
-                state.generation,
+                state.generation(),
                 full_walk_layout,
                 lexer_scan_cache.tokenizer().num_states(),
                 prewalk_ms,

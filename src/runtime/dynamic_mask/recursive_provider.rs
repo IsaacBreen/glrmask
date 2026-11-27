@@ -543,7 +543,7 @@ fn with_provider_and_baseline(
     let mut scans = routing.leaves.iter()
         .map(|leaf| DynamicNfaScanCache::new(leaf.constraint, None)).collect::<Vec<_>>();
     let tables = scans.iter_mut().map(|scan| {
-        FullWalkConfigTransitions::new(scan, max_token_len, state.generation)
+        FullWalkConfigTransitions::new(scan, max_token_len, state.generation())
     }).collect();
     let reset_count = routing.leaves.len();
     let mut provider = RecursiveConfigTransitions {
@@ -560,7 +560,7 @@ fn with_provider_and_baseline(
             static GENERATIONS: OnceLock<Vec<u64>> = OnceLock::new();
             let generations = GENERATIONS.get_or_init(|| crate::env::var("GLRMASK_PROFILE_CLOSED_SUPPORT")
                 .unwrap_or_default().split(',').filter_map(|n|n.parse().ok()).collect());
-            generations.contains(&{ state.generation }).then(ScopedSupportProfile::default)
+            generations.contains(&{ state.generation() }).then(ScopedSupportProfile::default)
         },
         projected_resets: FxHashMap::default(),
         project_resets: crate::env::var_os("GLRMASK_PROFILE_SCOPED_RESET_PROJECTION").is_some(),
@@ -581,7 +581,7 @@ fn with_provider_and_baseline(
         eprintln!("[glrmask/profile][recursive_phases] walk_ns={}", start.elapsed().as_nanos());
     }
     if let Some(counts) = &provider.support_profile {
-        eprintln!("[closed-support] generation={} enabled={} {:?}", state.generation, provider.support_enabled, counts);
+        eprintln!("[closed-support] generation={} enabled={} {:?}", state.generation(), provider.support_enabled, counts);
     }
     let finish_start = profile.then(std::time::Instant::now);
     provider.finish()?;

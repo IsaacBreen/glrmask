@@ -3841,7 +3841,7 @@ impl DynamicConstraintState {
             buf.fill(0);
             return;
         };
-        let profile = dynamic_mask_profile_enabled(first.generation);
+        let profile = dynamic_mask_profile_enabled(first.generation());
         let total_started = profile.then(std::time::Instant::now);
         let first_started = profile.then(std::time::Instant::now);
         first.fill_mask(buf);

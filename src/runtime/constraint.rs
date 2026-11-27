@@ -12585,11 +12585,10 @@ impl Constraint {
         }
         let state = self.initial_state_map();
         let mut state = ConstraintState {
-            terminated: false,
             markers: None,
             constraint: self.clone(),
             state,
-            generation: 0,
+            epoch: 0,
             mask_cache: StateMaskCache::new(),
         };
         state.reserve_linear_stack_hot_path();
@@ -12601,11 +12600,10 @@ impl Constraint {
     pub(crate) fn start_dynamic(&self) -> ConstraintState {
         crate::runtime::initialize_hot_path_config();
         let mut state = ConstraintState {
-            terminated: false,
             markers: None,
             constraint: self.clone(),
             state: self.initial_state_map(),
-            generation: 0,
+            epoch: 0,
             mask_cache: StateMaskCache::new(),
         };
         state.reserve_linear_stack_hot_path();

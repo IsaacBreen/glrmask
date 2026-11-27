@@ -1418,7 +1418,7 @@ fn precollapse_master_decision(
     // than inside the hot parser/proof helpers. These knobs are sometimes
     // enabled dynamically by diagnostic harnesses, so unlike ordinary feature
     // flags they should not be process-cached.
-    let profile_mask = dynamic_mask_profile_enabled(state.generation);
+    let profile_mask = dynamic_mask_profile_enabled(state.generation());
     let profile_proof = dynamic_mask_proof_profile_enabled() && profile_mask;
     let proof_definitions_available = vocab.llg_master_trie().is_some()
         && vocab.llg_slice_by_cache_id(LLG_SAFE_PLUS_SLICE as u32).is_some()
@@ -1851,7 +1851,7 @@ pub(super) fn try_scalar_dispatch(
     if !tokenizer.has_scalar_deterministic_dispatch() {
         return Ok(false);
     }
-    let profile = dynamic_mask_profile_enabled(state.generation);
+    let profile = dynamic_mask_profile_enabled(state.generation());
 
     // A pending token-start guard is an exact output filter: its remembered
     // lexer/terminal pairs reject precisely those vocabulary tokens whose
@@ -2172,7 +2172,7 @@ pub(super) fn try_scalar_dispatch(
                     .iter()
                     .position(|subset| subset.as_slice() == physical.as_slice())
                 else {
-                    if dynamic_mask_profile_enabled(state.generation) {
+                    if dynamic_mask_profile_enabled(state.generation()) {
                         eprintln!(
                             "[glrmask/profile][scalar_dispatch] missing_root_subset size={}",
                             physical.len(),
@@ -2249,7 +2249,7 @@ pub(super) fn try_scalar_dispatch(
         );
     }
     if !result {
-        if dynamic_mask_profile_enabled(state.generation) {
+        if dynamic_mask_profile_enabled(state.generation()) {
             eprintln!("[glrmask/profile][scalar_dispatch] walk_declined");
         }
         return Ok(false);
@@ -2288,7 +2288,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
             state.constraint.tokenizer.initial_state(),
         )
     {
-        let profile = dynamic_mask_profile_enabled(state.generation);
+        let profile = dynamic_mask_profile_enabled(state.generation());
         let mut merged = vec![0u32; buf.len()];
         let mut scratch = vec![0u32; buf.len()];
         for branch in root_branches {
@@ -2492,7 +2492,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     &root_states,
                     vocab.max_token_byte_len(),
                 );
-                if dynamic_mask_profile_enabled(state.generation) {
+                if dynamic_mask_profile_enabled(state.generation()) {
                     eprintln!(
                         "[glrmask/profile][dense_subset16_build] roots={} rows={} elapsed_ms={:.3}",
                         root_states.len(),
@@ -5965,11 +5965,11 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
 ) -> Result<bool, String> {
     debug_assert!(trie.full_walk_max_parent_depth() < 255);
 
-    let profile_walk = dynamic_mask_profile_enabled(state.generation);
+    let profile_walk = dynamic_mask_profile_enabled(state.generation());
     let profile_kernel = crate::env::var("GLRMASK_PROFILE_DYNAMIC_KERNEL_GENERATION")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        == Some(state.generation);
+        == Some(state.generation());
     let kernel_started = profile_kernel.then(std::time::Instant::now);
 
     let (mut parser_cache, root_parser_nodes) = FullWalkParserCache::from_roots(
@@ -5994,7 +5994,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                     .collect::<Vec<_>>();
                 eprintln!(
                     "[glrmask/profile][root_lexer_observation] generation={} root={} lexer={} matched={:?} futures={:?}",
-                    state.generation,
+                    state.generation(),
                     root_index,
                     lexer_state,
                     matched,
@@ -6003,7 +6003,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             } else {
                 eprintln!(
                     "[glrmask/profile][root_lexer_observation] generation={} root={} lexer={} subset_extension=true",
-                    state.generation,
+                    state.generation(),
                     root_index,
                     lexer_state,
                 );
@@ -6015,7 +6015,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                 .collect::<Vec<_>>();
             eprintln!(
                 "[glrmask/profile][root_admitted_terminals] generation={} root={} count={} ids={:?}",
-                state.generation,
+                state.generation(),
                 root_index,
                 ids.len(),
                 ids,
@@ -6024,7 +6024,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                 if let Some(expr) = state.constraint.retained_terminal_expr(terminal) {
                     eprintln!(
                         "[glrmask/profile][root_admitted_terminal_expr] generation={} root={} terminal={} expr={:?}",
-                        state.generation,
+                        state.generation(),
                         root_index,
                         terminal,
                         expr,
@@ -6184,7 +6184,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
                 let candidate_limit = if prepared_wide { 8 } else { 2 };
                 if crate::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
                     eprintln!("[candidate_gate] generation={} lexer={} exact={:?} candidates={} limit={} first_bytes_gate={}",
-                        state.generation, lexer_state, exact_source, candidates.len(), candidate_limit, filter_first_bytes);
+                        state.generation(), lexer_state, exact_source, candidates.len(), candidate_limit, filter_first_bytes);
                 }
                 (!candidates.is_empty() && candidates.len() <= candidate_limit)
                     .then_some(candidates)
@@ -6459,7 +6459,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     if crate::env::var_os("GLRMASK_DIAG_SAFE_ENVELOPE_UPPER").is_some() {
         eprintln!(
             "[safe_envelope_upper] generation={} lower={:?} upper={:?} work={:?}",
-            state.generation,
+            state.generation(),
             llg_master_decision.map(|v| v.safe_radius),
             safe_envelope_upper,
             llg_master_decision.and_then(safe_interval_work)
@@ -6484,7 +6484,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             });
         if crate::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
             eprintln!("[candidate_gate_master] generation={} radius={} whitespace={} ordinary={} residual={:?} profitable={}",
-                state.generation, decision.safe_radius, decision.whitespace, ordinary_ops,
+                state.generation(), decision.safe_radius, decision.whitespace, ordinary_ops,
                 vocab.llg_master_residual_ops(decision.safe_radius, decision.whitespace), profitable);
         }
         if !profitable {
@@ -6831,12 +6831,12 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             );
         }
         assert!(marker_start <= token_markers.len(), "root-range E: marker start out of range");
-        let should_print = dense_hot_root_range_assert_generation == Some(state.generation)
+        let should_print = dense_hot_root_range_assert_generation == Some(state.generation())
             || !ROOT_RANGE_ASSERT_PRINTED.swap(true, std::sync::atomic::Ordering::Relaxed);
         if should_print {
             eprintln!(
                 "[glrmask/root_range_assert] generation={} root_lexer={} t={} range=({},{},{}) certified={} walk_ops={}",
-                state.generation, root_lexer, std::any::type_name::<T>(), start, end, marker_start, certified, walk_ops.len()
+                state.generation(), root_lexer, std::any::type_name::<T>(), start, end, marker_start, certified, walk_ops.len()
             );
         }
     }
@@ -6850,11 +6850,11 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         crate::env::var("GLRMASK_PROFILE_DENSE_HOT_SELECTION_GENERATION")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-    }) == Some(state.generation);
+    }) == Some(state.generation());
     if profile_selection {
         eprintln!(
             "[glrmask/profile][dense_hot_selection] generation={} root_lexer={:?} range_span={:?} threshold={} would_hot={} selected_hot={} e_active={}",
-            state.generation,
+            state.generation(),
             hoisted_root_coord,
             sparse_root_range_span,
             dense_hot_min_root_ops,
@@ -6916,7 +6916,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             };
             eprintln!(
                 "[glrmask/profile][dense_hot_selection_choice] generation={} e_active={} selection={}",
-                state.generation, e_active, selection
+                state.generation(), e_active, selection
             );
         }
 
@@ -8452,9 +8452,9 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
             parser_cache.boundary_rows.iter().filter(|row| !row.is_empty()).count(),
             parser_cache.boundary_rows.iter().map(Vec::len).sum::<usize>(),
             parser_cache.nodes.len().saturating_mul(parser_cache.lexer_state_count));
-        eprintln!("[glrmask/profile][live_branch_witness] generation={} subtrees={} rows={}", state.generation, live_witness_subtrees, witness_proofs.rows.len());
+        eprintln!("[glrmask/profile][live_branch_witness] generation={} subtrees={} rows={}", state.generation(), live_witness_subtrees, witness_proofs.rows.len());
         eprintln!("[glrmask/profile][full_walk_acceleration] generation={} enabled={} memo_states={} memo_lookups={} memo_hits={} outer_hits={} identity_subtrees={} identity_ops={} identity_tokens={} canonical_hits={}",
-            state.generation, accelerated, many_transition_memo.states.len(),
+            state.generation(), accelerated, many_transition_memo.states.len(),
             many_transition_memo.lookups, many_transition_memo.hits,
             guarded_outer_cache_hits, identity_subtrees_skipped,
             identity_subtree_ops_skipped, identity_subtree_tokens,
@@ -8465,7 +8465,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     {
         eprintln!(
             "[glrmask/profile][dynamic_kernel_phases] generation={} setup_us={:.1} walk_us={:.1}",
-            state.generation,
+            state.generation(),
             walk_started.duration_since(kernel_started).as_secs_f64() * 1e6,
             walk_elapsed.as_secs_f64() * 1e6,
         );
@@ -8475,7 +8475,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
         if profile_kernel {
             eprintln!(
                 "[glrmask/profile][dynamic_output_deferred] generation={} allowed_markers={} rejected_markers={} dead_subtrees={} positive_mutations={} negative_mutations={} positive_work={} negative_work={}",
-                state.generation,
+                state.generation(),
                 deferred_allowed_markers.len(),
                 deferred_rejected_markers.len(),
                 deferred_dead_subtrees.len(),
@@ -8514,13 +8514,13 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
     }
     if profile_kernel && ignored_output.is_some() {
         eprintln!("[glrmask/profile][root_output_scope] generation={} visited={} skips={} saved_ops={}",
-            state.generation, output_scope_visited, output_scope_skips,
+            state.generation(), output_scope_visited, output_scope_skips,
             output_scope_saved_ops);
     }
     if profile_walk {
         eprintln!(
                 "[glrmask/profile][full_walk_volume] generation={} ops={} byte_ops={} token_endpoints={} finalizing_bytes={} direct_finalizers={} pre_effect_byte_ops={} pre_effect_token_endpoints={} first_effect_frontiers={} scalar_lane_bytes={} two_distinct_lane_bytes={} two_same_lane_bytes={} multi_lane_bytes={} multi_three_same_bytes={} multi_branches_2={} multi_branches_3={} multi_branches_4plus={} multi_two_same_parser={} multi_two_both_passed={} multi_two_one_pending={} multi_two_both_pending={} multi_two_pending_mem1={} multi_two_pending_mem2={} multi_two_pending_mem3plus={} multi_two_guard_eq_passed_lexer={} multi_two_pending_lexer_is_initial={} boundary_calls={} boundary_misses={} parser_advance_calls={} parser_advance_misses={} inadmissible_finalizers={} parser_nodes={} dead_tokens_cleared={} total_ops={} total_tokens={}",
-            state.generation,
+            state.generation(),
             profile_ops,
             profile_bytes,
             profile_token_endpoints,

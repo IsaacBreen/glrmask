@@ -33,8 +33,8 @@ struct View<'a> {
 }
 impl<'a> View<'a> {
     fn of(state:&'a ConstraintState)->Self {
-        Self {constraint:&state.constraint,state:&state.state,terminated:state.terminated,
-            cache:Some(&state.mask_cache),generation:state.generation}
+        Self {constraint:&state.constraint,state:&state.state,terminated:state.terminated(),
+            cache:Some(&state.mask_cache),generation:state.generation()}
     }
     fn stopping(self)->bool {frontier_is_accepting(self.constraint,self.state,self.terminated)}
 }
@@ -490,7 +490,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState])->crate::Result<Vec<u32>> 
         if states.is_empty() || states.iter().any(|s| !s.state.is_empty() && s.is_accepting()){return Ok(Vec::new());}
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
-        let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
+        let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated())
             .map(|s|Cursor {constraint:&s.constraint,state:s.state.clone(),buffers:CommitBuffers::for_mask_only_shadow()})
             .collect::<Vec<_>>();
         let mut output=Vec::new();

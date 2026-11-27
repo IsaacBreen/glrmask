@@ -8572,9 +8572,8 @@ impl ConstraintState {
 
     pub(crate) fn reject_after_failed_commit(&mut self) {
         self.state.clear();
-        self.terminated = false;
-        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
-        self.generation = self.generation.wrapping_add(1);
+        if let Some(markers) = self.markers.as_mut() { std::sync::Arc::make_mut(markers).begin(); }
+        self.advance_generation(false);
         self.mask_cache.clear();
     }
 
@@ -8588,6 +8587,7 @@ impl ConstraintState {
         let Some(markers) = self.markers.as_mut() else {
             return commit_token_impl(constraint, &mut self.state, buffers, token_id);
         };
+        let markers = std::sync::Arc::make_mut(markers);
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
@@ -8609,6 +8609,7 @@ impl ConstraintState {
         let Some(markers) = self.markers.as_mut() else {
             return commit_bytes_impl(constraint, &mut self.state, bytes, buffers);
         };
+        let markers = std::sync::Arc::make_mut(markers);
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
@@ -8629,10 +8630,11 @@ impl ConstraintState {
     /// old GSS identities alive without copying parser stacks.
     #[inline]
     fn snapshot_current_mask_state(&mut self) -> Option<ParserStateMap> {
+        let generation = self.generation();
         let cache = self.mask_cache.get_mut().unwrap();
         cache
             .as_ref()
-            .is_some_and(|cache_data| cache_data.generation == self.generation)
+            .is_some_and(|cache_data| cache_data.generation == generation)
             .then(|| self.state.clone())
     }
 
@@ -8652,8 +8654,8 @@ impl ConstraintState {
         if !commit_succeeded {
             return;
         }
-        let previous_generation = self.generation;
-        self.generation += 1;
+        let previous_generation = self.generation();
+        self.advance_generation(false);
         let Some(previous_state) = previous_state else {
             return;
         };
@@ -8673,11 +8675,12 @@ impl ConstraintState {
             return;
         }
 
+        let generation = self.generation();
         let cache = self.mask_cache.get_mut().unwrap();
         if let Some(cache_data) = cache
             && cache_data.generation == previous_generation
         {
-            cache_data.generation = self.generation;
+            cache_data.generation = generation;
         }
     }
 
@@ -8874,7 +8877,7 @@ impl ConstraintState {
             if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_COMMIT_REUSE").is_some() {
                 eprintln!(
                     "[glrmask/profile][parser_relative_commit_reuse] generation={} result=cache_hit left={} right={} admitted={}",
-                    self.generation,
+                    self.generation(),
                     left_source,
                     right_source,
                     admitted.count_ones(),
@@ -9028,7 +9031,7 @@ impl ConstraintState {
                             byte_step_budget = max_byte_steps;
                             if try_terminal_observation_quotient_commit_reuse(
                                 &mut buffers,
-                                self.generation,
+                                self.generation(),
                                 vocab,
                                 tokenizer,
                                 *left_source,
@@ -9050,7 +9053,7 @@ impl ConstraintState {
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][parser_relative_commit_reuse] generation={} result=decline reason={} nodes={} bytes={} converged={} dead={} elapsed_us={:.1}",
-                                    self.generation,
+                                    self.generation(),
                                     if byte_steps > byte_step_budget { "budget" } else { "epsilon" },
                                     visited_nodes,
                                     byte_steps,
@@ -9068,7 +9071,7 @@ impl ConstraintState {
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][parser_relative_commit_reuse] generation={} result=decline reason=epsilon_target nodes={} bytes={} converged={} dead={} elapsed_us={:.1}",
-                                self.generation,
+                                self.generation(),
                                 visited_nodes,
                                 byte_steps,
                                 converged_subtrees,
@@ -9082,7 +9085,7 @@ impl ConstraintState {
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][parser_relative_commit_reuse] generation={} result=different nodes={} bytes={} converged={} dead={} elapsed_us={:.1}",
-                                self.generation,
+                                self.generation(),
                                 visited_nodes,
                                 byte_steps,
                                 converged_subtrees,
@@ -9114,7 +9117,7 @@ impl ConstraintState {
         if let Some(started) = started {
             eprintln!(
                 "[glrmask/profile][parser_relative_commit_reuse] generation={} result=equal left={} right={} admitted={} nodes={} bytes={} converged={} dead={} elapsed_us={:.1}",
-                self.generation,
+                self.generation(),
                 left_source,
                 right_source,
                 admitted.count_ones(),
@@ -9152,7 +9155,7 @@ impl ConstraintState {
 
     /// Return Some when root termination policy handles this commitment.
     fn commit_end_token(&mut self, token_id: u32) -> Option<Result<(), String>> {
-        if self.terminated {
+        if self.terminated() {
             self.reject_after_failed_commit();
             return Some(Err("sequence has already terminated".to_owned()));
         }
@@ -9167,9 +9170,8 @@ impl ConstraintState {
                 "commit_token: end token {token_id} is not allowed for this prefix"
             )));
         }
-        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
-        self.terminated = true;
-        self.generation = self.generation.wrapping_add(1);
+        if let Some(markers) = self.markers.as_mut() { std::sync::Arc::make_mut(markers).begin(); }
+        self.advance_generation(true);
         self.mask_cache.clear();
         Some(Ok(()))
     }
@@ -9256,7 +9258,7 @@ impl ConstraintState {
     }
 
     pub(crate) fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
-        if self.terminated || !self.constraint.end_tokens.is_empty() {
+        if self.terminated() || !self.constraint.end_tokens.is_empty() {
             let policy_started = std::time::Instant::now();
             if let Some(result) = self.commit_end_token(token_id) {
                 return result.map(|()| policy_started.elapsed().as_nanos() as u64);
@@ -9458,11 +9460,11 @@ impl ConstraintState {
     }
 
     fn commit_bytes_raw_inner(&mut self, bytes: &[u8]) -> Result<(), String> {
-        if self.terminated {
+        if self.terminated() {
             self.reject_after_failed_commit();
             return Err("sequence has already terminated".to_owned());
         }
-        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
+        if let Some(markers) = self.markers.as_mut() { std::sync::Arc::make_mut(markers).begin(); }
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = self.commit_bytes_actual(bytes);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
@@ -9738,7 +9740,7 @@ mod tests {
         // further `a` is an exact lexer self-loop: no parser terminal is
         // consumed and the complete runtime state remains identical.
         let cached_mask = state.mask();
-        let before_generation = state.generation;
+        let before_generation = state.generation();
         let before_state = state.state.clone();
         {
             let cache = state.mask_cache.lock().unwrap();
@@ -9746,11 +9748,11 @@ mod tests {
         }
 
         assert!(state.commit_token(0));
-        assert_eq!(state.generation, before_generation + 1);
+        assert_eq!(state.generation(), before_generation + 1);
         assert_eq!(before_state, state.state);
         {
             let cache = state.mask_cache.lock().unwrap();
-            assert_eq!(cache.as_ref().unwrap().generation, state.generation);
+            assert_eq!(cache.as_ref().unwrap().generation, state.generation());
             assert_eq!(cache.as_ref().unwrap().mask, cached_mask);
         }
         assert_eq!(state.mask(), cached_mask);
@@ -9760,7 +9762,7 @@ mod tests {
         assert!(state.commit_token(2));
         {
             let cache = state.mask_cache.lock().unwrap();
-            assert_ne!(cache.as_ref().unwrap().generation, state.generation);
+            assert_ne!(cache.as_ref().unwrap().generation, state.generation());
         }
     }
 
@@ -9787,7 +9789,7 @@ mod tests {
         assert!(state.commit_token(0)); // opening quote
         assert!(state.commit_token(1)); // first interior 'a'
         let cached_mask = state.mask();
-        let before_generation = state.generation;
+        let before_generation = state.generation();
         let before_state = state.state.clone();
 
         assert!(state.commit_token(1)); // second interior 'a'
@@ -11335,7 +11337,7 @@ nt start = item item? item?;
             vocab.entries_map().get(&0).unwrap(),
             &mut CommitBuffers::for_constraint(&constraint),
         );
-        fast.generation += 1;
+        fast.advance_generation(false);
         assert!(fast_result.is_ok());
         let slow_result = commit_bytes_impl_profiled(
             &constraint,
@@ -11345,7 +11347,7 @@ nt start = item item? item?;
             None,
             false,
         );
-        slow.generation += 1;
+        slow.advance_generation(false);
         assert!(slow_result.is_ok());
         assert_eq!(fast.state, slow.state, "state mismatch after token a");
 
