@@ -279,34 +279,64 @@ fn apply_certificate(
     }
 }
 
-/// Top admission is a three-valued relation; its two bitsets are simply the
-/// hot bulk-query form. Equal exception signatures describe identical rows.
-/// Store one immutable pair for each such signature, not a dense pair for
-/// every stack symbol. A symbol outside the declared alphabet still declines
-/// the certificate and uses the exact input domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TopDispatch {
+    Dense(Arc<[u32]>),
+    Sparse { symbols: u32, exceptions: Arc<[(u32, u32)]> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopCertificateRow {
+    possible: BitSet,
+    // A suffix-independent row has just one bitset. Both certificate
+    // queries borrow that same allocation.
+    unconditional: Option<BitSet>,
+}
+
+impl From<(BitSet, BitSet)> for TopCertificateRow {
+    fn from((possible, unconditional): (BitSet, BitSet)) -> Self {
+        let unconditional = (possible != unconditional).then_some(unconditional);
+        Self { possible, unconditional }
+    }
+}
+
+/// The exact top predicate needs only exception signatures and shared
+/// certificate rows. Dense lookup is retained when the alphabet is busy;
+/// an all-default or sparse alphabet stores no per-symbol dispatch cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TopCertificateRows {
-    row_for_top: Box<[u32]>,
-    rows: Box<[(BitSet, BitSet)]>,
+    dispatch: TopDispatch,
+    rows: Arc<[TopCertificateRow]>,
 }
 
 impl TopCertificateRows {
     #[inline]
-    fn row(&self, top: u32) -> Option<&(BitSet, BitSet)> {
-        self.rows.get(*self.row_for_top.get(top as usize)? as usize)
+    fn row(&self, top: u32) -> Option<&TopCertificateRow> {
+        let id = match &self.dispatch {
+            TopDispatch::Dense(ids) => *ids.get(top as usize)?,
+            TopDispatch::Sparse { symbols, exceptions } => {
+                if top >= *symbols { return None; }
+                exceptions.binary_search_by_key(&top, |&(symbol, _)| symbol)
+                    .ok().map_or(0, |index| exceptions[index].1)
+            }
+        };
+        self.rows.get(id as usize)
     }
 
     #[inline]
     pub(super) fn possible(&self, top: u32) -> Option<&BitSet> {
-        Some(&self.row(top)?.0)
+        Some(&self.row(top)?.possible)
     }
 
     #[inline]
     pub(super) fn unconditional(&self, top: u32) -> Option<&BitSet> {
-        Some(&self.row(top)?.1)
+        let row = self.row(top)?;
+        Some(row.unconditional.as_ref().unwrap_or(&row.possible))
     }
 
-    pub(super) fn stored_rows(&self) -> usize { self.rows.len() * 2 }
+    pub(super) fn stored_rows(&self) -> usize {
+        self.rows.iter().map(|row| 1 + usize::from(row.unconditional.is_some())).sum()
+    }
 }
 
 fn grouped_top_rows(
@@ -323,7 +353,7 @@ fn grouped_top_rows(
     // The domain groups partition terminal IDs. Thus a signature is exact:
     // two tops agree iff every group has the same default or exception value.
     // Visit groups in order, so signatures need no sorting.
-    let mut changes = vec![smallvec::SmallVec::<[(u32, u8); 2]>::new(); symbols as usize];
+    let mut changes = FxHashMap::<u32, smallvec::SmallVec<[(u32, u8); 2]>>::default();
     let code = |value: TopAdmission| match value {
         TopAdmission::Never => 0, TopAdmission::Always => 1,
         TopAdmission::DependsOnSuffix => 2,
@@ -335,16 +365,25 @@ fn grouped_top_rows(
         apply_certificate(&mut defaults.0, &mut defaults.1, &masks[group], default);
         for (top, certificate) in exceptions {
             if certificate == default { continue; }
-            if let Some(signature) = changes.get_mut(top as usize) {
-                signature.push((group as u32, code(certificate)));
+            if top < symbols {
+                changes.entry(top).or_default().push((group as u32, code(certificate)));
             }
         }
     }
 
     let mut ids = FxHashMap::default();
     let mut rows = Vec::new();
-    let mut row_for_top = Vec::with_capacity(symbols as usize);
-    for signature in changes {
+    // Row zero is the default whenever at least one top lacks exceptions.
+    // If every top differs, avoid retaining an unused default certificate.
+    if changes.len() < symbols as usize {
+        rows.push(TopCertificateRow::from(defaults.clone()));
+    }
+    let sparse = changes.len().saturating_mul(2) < symbols as usize;
+    let mut changes = changes.into_iter().collect::<Vec<_>>();
+    changes.sort_unstable_by_key(|(top, _)| *top);
+    let mut dense_ids = if sparse { Vec::new() } else { vec![0u32; symbols as usize] };
+    let mut exception_ids = if sparse { Vec::with_capacity(changes.len()) } else { Vec::new() };
+    for (top, signature) in changes {
         let id = *ids.entry(signature).or_insert_with_key(|signature| {
             let mut row = defaults.clone();
             for &(group, code) in signature {
@@ -355,12 +394,18 @@ fn grouped_top_rows(
                 apply_certificate(&mut row.0, &mut row.1, &masks[group as usize], certificate);
             }
             let id = rows.len() as u32;
-            rows.push(row);
+            rows.push(TopCertificateRow::from(row));
             id
         });
-        row_for_top.push(id);
+        if sparse { exception_ids.push((top, id)); }
+        else { dense_ids[top as usize] = id; }
     }
-    TopCertificateRows { row_for_top: row_for_top.into_boxed_slice(), rows: rows.into_boxed_slice() }
+    let dispatch = if sparse {
+        TopDispatch::Sparse { symbols, exceptions: exception_ids.into() }
+    } else {
+        TopDispatch::Dense(dense_ids.into())
+    };
+    TopCertificateRows { dispatch, rows: rows.into() }
 }
 
 pub(super) fn top_certificate_rows(

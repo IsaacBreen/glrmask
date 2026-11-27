@@ -383,12 +383,13 @@ fn grouped_certificate_masks_cover_aliases_across_word_boundaries() {
 }
 
 #[test]
-fn many_equivalent_tops_share_one_immutable_certificate_pair() {
+fn many_equivalent_tops_share_one_immutable_certificate() {
     let yes = Arc::new(compile_domain(&pop_word(&[], true)).unwrap());
     let no = Arc::new(compile_domain(&pop_word(&[], false)).unwrap());
     let domains = vec![yes; 257];
     let rows = top_certificate_rows(100_000, &domains, &no);
-    assert_eq!(rows.stored_rows(), 2);
+    assert_eq!(rows.stored_rows(), 1);
+    assert!(std::ptr::eq(rows.possible(0).unwrap(), rows.unconditional(0).unwrap()));
     assert!(std::ptr::eq(rows.possible(0).unwrap(), rows.possible(99_999).unwrap()));
     assert_eq!(rows.possible(100_000), None);
 }
