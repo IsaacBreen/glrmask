@@ -2543,7 +2543,6 @@ fn commit_worklist<O: CommitObserver, const PROFILE: bool>(
             p.failed_fast_path_probe_ns += started.elapsed().as_nanos() as u64;
         }
     }
-    state.normalize_duplicate_keys();
     bufs.clear_all();
     let queue_started = if PROFILE { Some(std::time::Instant::now()) } else { None };
     let mut processing_queue = std::mem::take(&mut bufs.processing_queue);
@@ -4591,20 +4590,12 @@ mod tests {
 
         let mut state = constraint.start();
         assert!(state.commit_token(0));
-        assert!(!state.state.has_duplicate_keys());
+        assert!(state.state.keys().zip(state.state.keys().skip(1)).all(|(a,b)| a < b));
         assert!(state.is_accepting());
-
-        let mut normalized = state.clone();
-        normalized.state.normalize_duplicate_keys();
-        assert!(normalized.is_accepting());
-        assert_eq!(
-            canonical_commit_state(&state.state),
-            canonical_commit_state(&normalized.state),
-        );
     }
 
     #[test]
-    fn special_token_advance_matches_normalized_duplicate_key_state() {
+    fn special_token_advance_preserves_canonical_lexer_keys() {
         let constraint = Constraint::from_glrm_with_token_ids(
             r#"
                 start start;
@@ -4622,20 +4613,10 @@ mod tests {
 
         let mut flat = constraint.start();
         assert!(flat.commit_token(0));
-        assert!(!flat.state.has_duplicate_keys());
-
-        let mut normalized = flat.clone();
-        normalized.state.normalize_duplicate_keys();
-        assert_eq!(flat.mask(), normalized.mask());
-
+        assert!(flat.state.keys().zip(flat.state.keys().skip(1)).all(|(a,b)| a < b));
         assert!(flat.commit_token(100));
-        assert!(normalized.commit_token(100));
         assert!(flat.is_accepting());
-        assert!(normalized.is_accepting());
-        assert_eq!(
-            canonical_commit_state(&flat.state),
-            canonical_commit_state(&normalized.state),
-        );
+        assert!(flat.state.keys().zip(flat.state.keys().skip(1)).all(|(a,b)| a < b));
     }
 
     #[test]
@@ -4859,9 +4840,7 @@ nt start = item item? item?;
         assert!(state.commit_token(0));
 
         let tokenizer_state = constraint.runtime_commit_initial_state();
-        // This test exercises the GSS pruning primitive itself, so cross the
-        // bounded flat-state boundary explicitly before inspecting one map value.
-        state.state.normalize_duplicate_keys();
+        // Every lexer key owns its complete correlated parser language.
         let gss = state
             .state
             .get(&tokenizer_state)
@@ -5218,36 +5197,20 @@ nt start = item item? item?;
     }
 
     #[test]
-    fn flat_frontier_accepts_input_past_the_inline_state_capacity() {
-        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
-        let constraint = Constraint::from_glrm_grammar(
-            r#"
-                start start;
-                t A = "a";
-                nt start = A;
-            "#,
-            &vocab,
-        )
-        .expect("single-terminal grammar should compile");
-        let start = constraint.start();
-        let (tokenizer_state, parser_gss) = start.state.entries[0].clone();
-        let mut state = ParserStateMap::default();
-        for _ in 0..=INLINE_PARSER_STATE_CAPACITY {
-            state.insert_flat_alternative(tokenizer_state, parser_gss.clone());
+    fn lexer_frontier_merges_same_key_and_spills_for_distinct_keys() {
+        let acc = TerminalsDisallowed::new();
+        let mut frontier = ParserStateMap::default();
+        for key in (0..=INLINE_PARSER_STATE_CAPACITY as u32).rev() {
+            frontier.merge_insert(key, ParserGSS::from_single_stack(vec![0, key], acc.clone()));
         }
-        assert_eq!(state.len(), INLINE_PARSER_STATE_CAPACITY + 1);
-
-        let mut actual = start.clone();
-        actual.state = state;
-        assert!(actual.commit_bytes(b"a"));
-        let mut expected = start;
-        assert!(expected.commit_bytes(b"a"));
-        assert_eq!(canonical_commit_state(&actual.state), canonical_commit_state(&expected.state));
-        assert_eq!(actual.mask(), expected.mask());
-        assert_eq!(actual.is_accepting(), expected.is_accepting());
-        assert!(actual.is_accepting());
+        assert_eq!(frontier.len(), INLINE_PARSER_STATE_CAPACITY + 1);
+        assert!(frontier.keys().copied().eq(0..=INLINE_PARSER_STATE_CAPACITY as u32));
+        let guard = acc.with_insert(0, 7);
+        frontier.merge_insert(0, ParserGSS::from_single_stack(vec![0, 1], guard.clone()));
+        assert_eq!(frontier.len(), INLINE_PARSER_STATE_CAPACITY + 1);
+        let expected = ParserGSS::from_stacks(&[(vec![0,0], acc), (vec![0,1], guard)]);
+        assert_eq!(frontier.get(&0).unwrap().semantically_eq(&expected, 64), Some(true));
     }
-
     #[test]
     fn flat_frontier_preserves_all_stacks_in_a_live_lexer_continuation_group() {
         let vocab = Vocab::from_entries_unchecked(vec![

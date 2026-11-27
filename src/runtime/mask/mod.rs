@@ -1915,28 +1915,18 @@ mod tests {
     #[test]
     fn direct_mask_spills_past_the_inline_path_capacity() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let constraint = Constraint::from_glrm_grammar(
-            r#"
-                start start;
-                t A = "a";
-                nt start = A;
-            "#,
-            &vocab,
-        )
-        .expect("single-terminal grammar should compile");
+        let literal = "a".repeat(MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY * 2);
+        let grammar = format!("start start; t A = \"{literal}\"; nt start = A;");
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab)
+            .expect("long finite terminal should compile");
         let mut state = constraint.start();
-        let (tokenizer_state, parser_gss) = state.state.entries[0].clone();
-        state.state.entries.clear();
-        for _ in 0..=MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY {
-            state
-                .state
-                .insert_flat_alternative(tokenizer_state, parser_gss.clone());
-        }
-        assert_eq!(
-            state.state.len(),
-            MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY + 1,
-        );
-
+        let parser_gss = state.state.values().next().unwrap().clone();
+        let keys = (0..constraint.tokenizer.num_states())
+            .filter(|&key| constraint.internal_tsids_for_state(key).len() == 1)
+            .take(MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY + 1).collect::<Vec<_>>();
+        assert_eq!(keys.len(), MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY + 1);
+        state.state.clear();
+        for key in keys { state.state.merge_insert(key, parser_gss.clone()); }
         let mut direct = vec![0u32; constraint.body_mask_len()];
         assert!(state.try_fill_mask_single_path_direct(&mut direct));
         let mut dynamic = vec![0u32; constraint.body_mask_len()];
@@ -1955,7 +1945,7 @@ mod tests {
         )
         .expect("routing-test grammar should compile");
         let mut state = constraint.start();
-        let tokenizer_state = state.state.entries[0].0;
+        let tokenizer_state = *state.state.keys().next().unwrap();
         // Deliberately synthetic parser labels: admission must decline BEFORE
         // looking up any of them or evaluating an incomplete subset of paths.
         // Both the one-pass and the many-lexer two-pass admission paths matter.
@@ -1966,8 +1956,8 @@ mod tests {
         );
         for lexer_branches in [1, MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY] {
             state.state.entries.clear();
-            for _ in 0..lexer_branches {
-                state.state.insert_flat_alternative(tokenizer_state, wide.clone());
+            for index in 0..lexer_branches {
+                state.state.merge_insert(tokenizer_state + index as u32, wide.clone());
             }
             let mut mask = vec![0x5a5a_5a5a; constraint.body_mask_len()];
             let before = mask.clone();
@@ -3914,7 +3904,7 @@ impl ConstraintState {
                 for top in keep { branch = branch.merge(&gss.isolate(Some(top))); }
                 branch
             };
-            if !branch.is_empty() { selected.insert_flat_alternative(lexer, branch); }
+            if !branch.is_empty() { selected.merge_insert(lexer, branch); }
         }
         Some(selected)
     }

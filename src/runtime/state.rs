@@ -14,11 +14,8 @@ use super::constraint::Constraint;
 pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
 pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 64;
 
-/// Parser paths grouped by tokenizer state, stored inline for the common small
-/// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat
-/// runtime may temporarily retain multiple single-stack entries with the same
-/// key instead of materializing them into one allocating GSS; general paths
-/// normalize equal-key entries when they need map semantics.
+/// One correlated parser language per lexer key, strictly sorted by key.
+/// Equal keys are merged by the same GSS operation used in commit buckets.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParserStateMap {
     pub(crate) entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>,
@@ -66,94 +63,37 @@ impl ParserStateMap {
         self.entries.iter().map(|(key, _)| key)
     }
 
-    fn equal_range(&self, key: u32) -> std::ops::Range<usize> {
-        let start = self.entries.partition_point(|(entry_key, _)| *entry_key < key);
-        let end = self.entries.partition_point(|(entry_key, _)| *entry_key <= key);
-        start..end
+    #[inline]
+    fn index(&self, key: u32) -> Result<usize, usize> {
+        self.entries.binary_search_by_key(&key, |(key, _)| *key)
     }
 
-    /// Return the sole entry for `key`. A duplicate-key flat frontier is not a
-    /// map value and deliberately returns `None` so map-only optimizations fall
-    /// back rather than observing just one parser alternative.
     pub(crate) fn get(&self, key: &u32) -> Option<&ParserGSS> {
-        let range = self.equal_range(*key);
-        (range.len() == 1).then(|| &self.entries[range.start].1)
+        Some(&self.entries[self.index(*key).ok()?].1)
     }
 
     pub(crate) fn get_mut(&mut self, key: &u32) -> Option<&mut ParserGSS> {
-        let range = self.equal_range(*key);
-        if range.len() != 1 {
-            return None;
-        }
-        Some(&mut self.entries[range.start].1)
+        let index = self.index(*key).ok()?;
+        Some(&mut self.entries[index].1)
     }
 
-    pub(crate) fn values_for_key(&self, key: u32) -> impl Iterator<Item = &ParserGSS> {
-        let range = self.equal_range(key);
-        self.entries[range].iter().map(|(_, value)| value)
-    }
-
-    pub(crate) fn has_duplicate_keys(&self) -> bool {
-        self.entries.windows(2).any(|pair| pair[0].0 == pair[1].0)
-    }
-
-    /// Materialize duplicate-key flat alternatives into one GSS per tokenizer
-    /// state. This is the explicit boundary between the bounded allocation-free
-    /// representation and general map/GSS algorithms.
-    pub(crate) fn normalize_duplicate_keys(&mut self) {
-        if !self.has_duplicate_keys() {
-            return;
-        }
-        let old = std::mem::take(&mut self.entries);
-        for (key, value) in old {
-            self.merge_insert(key, value);
-        }
-    }
-
-    /// Map-style insertion. Any bounded flat alternatives already stored under
-    /// this key are merged into the returned old value before replacement.
     pub(crate) fn insert(&mut self, key: u32, value: ParserGSS) -> Option<ParserGSS> {
-        let range = self.equal_range(key);
-        if range.is_empty() {
-            self.entries.insert(range.start, (key, value));
-            return None;
+        match self.index(key) {
+            Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, value)),
+            Err(index) => { self.entries.insert(index, (key, value)); None }
         }
-
-        let mut old = std::mem::replace(&mut self.entries[range.start].1, value);
-        for _ in range.start + 1..range.end {
-            let (_, duplicate) = self.entries.remove(range.start + 1);
-            old = old.merge(&duplicate);
-        }
-        Some(old)
     }
 
     pub(crate) fn pop_first(&mut self) -> Option<(u32, ParserGSS)> {
         (!self.entries.is_empty()).then(|| self.entries.remove(0))
     }
 
-    pub(crate) fn merge_insert(&mut self, key: u32, mut value: ParserGSS) {
-        let range = self.equal_range(key);
-        if range.is_empty() {
-            self.entries.insert(range.start, (key, value));
-            return;
+    pub(crate) fn merge_insert(&mut self, key: u32, value: ParserGSS) {
+        match self.index(key) {
+            Ok(index) => self.entries[index].1 = value.merge(&self.entries[index].1),
+            Err(index) => self.entries.insert(index, (key, value)),
         }
-        for _ in range.clone() {
-            let (_, existing) = self.entries.remove(range.start);
-            value = value.merge(&existing);
-        }
-        self.entries.insert(range.start, (key, value));
     }
-
-    /// Insert one correlated flat alternative without merging equal keys.
-    ///
-    /// This is the relation-preserving counterpart to `merge_insert`: callers
-    /// use it when the same tokenizer state is paired with distinct parser
-    /// languages that must remain separate for a later lexer transition.
-    pub(crate) fn insert_flat_alternative(&mut self, key: u32, value: ParserGSS) {
-        let index = self.entries.partition_point(|(entry_key, _)| *entry_key <= key);
-        self.entries.insert(index, (key, value));
-    }
-
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&u32, &mut ParserGSS) -> bool) {
         let mut index = 0;
         while index < self.entries.len() {
@@ -169,57 +109,6 @@ impl ParserStateMap {
         }
     }
 
-    /// Replace the sole tokenizer-state key without moving or reallocating its GSS.
-    pub(crate) fn replace_single_key(&mut self, key: u32) -> bool {
-        self.replace_single_keys(std::slice::from_ref(&key))
-    }
-
-    /// Associate the sole existing GSS with a small sorted set of tokenizer
-    /// states. Arc clones are allocation-free and eight entries fit inline.
-    pub(crate) fn replace_single_keys(&mut self, keys: &[u32]) -> bool {
-        if self.entries.len() != 1 || keys.is_empty() || keys.len() > INLINE_PARSER_STATE_CAPACITY {
-            return false;
-        }
-        if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return false;
-        }
-        let (_, gss) = self.entries.pop().unwrap();
-        for &key in &keys[..keys.len() - 1] {
-            self.entries.push((key, gss.clone()));
-        }
-        self.entries.push((*keys.last().unwrap(), gss));
-        true
-    }
-
-
-    /// Replace a small set of structurally identical parser states with one
-    /// shared GSS under a new sorted set of tokenizer-state keys.
-    pub(crate) fn replace_uniform_gss_keys(&mut self, keys: &[u32]) -> bool {
-        if self.entries.is_empty()
-            || keys.is_empty()
-            || keys.len() > INLINE_PARSER_STATE_CAPACITY
-            || keys.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return false;
-        }
-        let representative = &self.entries[0].1;
-        if self
-            .entries
-            .iter()
-            .skip(1)
-            .any(|(_, gss)| !representative.ptr_eq(gss) && representative != gss)
-        {
-            return false;
-        }
-
-        let old = std::mem::take(&mut self.entries);
-        let (_, gss) = old.into_iter().next().expect("nonempty state checked");
-        for &key in &keys[..keys.len() - 1] {
-            self.entries.push((key, gss.clone()));
-        }
-        self.entries.push((*keys.last().unwrap(), gss));
-        true
-    }
 }
 
 impl FromIterator<(u32, ParserGSS)> for ParserStateMap {
@@ -604,7 +493,7 @@ pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserState
             let Some(root_reset) = constraint.recursive_tokenizer_reset_state(0) else {
                 return false;
             };
-            return state.values_for_key(root_reset).any(|stack| {
+            return state.get(&root_reset).is_some_and(|stack| {
                 !stack.is_empty()
                     && constraint
                         .compact_segmented_parser_is_finished(stack)
@@ -614,10 +503,10 @@ pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserState
         let product_initial = constraint.tokenizer.initial_state();
         let commit_initial = constraint.runtime_commit_initial_state();
         state
-            .values_for_key(product_initial)
+            .get(&product_initial).into_iter()
             .chain(
                 (commit_initial != product_initial)
-                    .then(|| state.values_for_key(commit_initial))
+                    .then(|| state.get(&commit_initial))
                     .into_iter()
                     .flatten(),
             )
