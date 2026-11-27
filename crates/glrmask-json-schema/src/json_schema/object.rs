@@ -2355,53 +2355,7 @@ impl<'a> Lowerer<'a> {
         items: &[ObjectItem],
         tail_pair_expr: GrammarExpr,
     ) -> ImportResult<GrammarExpr> {
-        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(items.len());
-        for end_exclusive in 1..=items.len() {
-            let mut alternatives = Vec::new();
-            for start in 0..end_exclusive {
-                if items[start..end_exclusive - 1].iter().any(|item| item.required) {
-                    continue;
-                }
-                if start == 0 {
-                    alternatives.push(items[end_exclusive - 1].pair.clone());
-                } else {
-                    alternatives.push(seq(vec![
-                        r(&prefix_rule_names[start - 1]),
-                        items[end_exclusive - 1].separator_pair.clone(),
-                    ]));
-                }
-            }
-            let rule_name = self.fresh_rule_name("json_open_object_prefix");
-            self.add_nonterminal_rule(&rule_name, choice(alternatives));
-            prefix_rule_names.push(rule_name);
-        }
-
-        let free_nonempty_rule = self.fresh_rule_name("json_open_object_free_nonempty");
-        self.add_nonterminal_rule(
-            &free_nonempty_rule,
-            seq(vec![
-                tail_pair_expr.clone(),
-                GrammarExpr::Quantified(Box::new(seq(vec![
-                    self.item_separator_expr(),
-                    tail_pair_expr,
-                ])), Quantifier::ZeroPlus),
-            ]),
-        );
-
-        let mut body_alternatives = vec![GrammarExpr::Epsilon, r(&free_nonempty_rule)];
-        for (index, prefix_rule_name) in prefix_rule_names.iter().enumerate() {
-            if items[index + 1..].iter().any(|item| item.required) {
-                continue;
-            }
-            body_alternatives.push(r(prefix_rule_name));
-            body_alternatives.push(seq(vec![
-                r(prefix_rule_name),
-                self.item_separator_expr(),
-                r(&free_nonempty_rule),
-            ]));
-        }
-
-        Ok(seq(vec![lit("{"), choice(body_alternatives), lit("}")]))
+        Ok(self.lower_large_object_prefix(items, Some(tail_pair_expr)))
     }
 
     fn lower_required_prefix_large_optional_open_object_fused_prefix_chain(
@@ -2410,112 +2364,60 @@ impl<'a> Lowerer<'a> {
         required_prefix_len: usize,
         tail_pair_expr: GrammarExpr,
     ) -> ImportResult<GrammarExpr> {
-        debug_assert!(required_prefix_len > 0);
-        debug_assert!(required_prefix_len <= items.len());
-
-        let required_prefix = seq(
-            items[..required_prefix_len]
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    if index == 0 {
-                        item.pair.clone()
-                    } else {
-                        item.separator_pair.clone()
-                    }
-                })
-                .collect(),
-        );
-
-        let optional_items = &items[required_prefix_len..];
-        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(optional_items.len());
-        for end_exclusive in 1..=optional_items.len() {
-            let mut alternatives = Vec::new();
-            for start in 0..end_exclusive {
-                if start == 0 {
-                    alternatives.push(optional_items[end_exclusive - 1].pair.clone());
-                } else {
-                    alternatives.push(seq(vec![
-                        r(&prefix_rule_names[start - 1]),
-                        optional_items[end_exclusive - 1].separator_pair.clone(),
-                    ]));
-                }
-            }
-            let rule_name = self.fresh_rule_name("json_open_object_prefix");
-            self.add_nonterminal_rule(&rule_name, choice(alternatives));
-            prefix_rule_names.push(rule_name);
-        }
-
-        let free_nonempty_rule = self.fresh_rule_name("json_open_object_free_nonempty");
-        self.add_nonterminal_rule(
-            &free_nonempty_rule,
-            seq(vec![
-                tail_pair_expr.clone(),
-                GrammarExpr::Quantified(
-                    Box::new(seq(vec![self.item_separator_expr(), tail_pair_expr])),
-                    Quantifier::ZeroPlus,
-                ),
-            ]),
-        );
-
-        let mut suffix_alternatives = vec![r(&free_nonempty_rule)];
-        for prefix_rule_name in &prefix_rule_names {
-            suffix_alternatives.push(r(prefix_rule_name));
-            suffix_alternatives.push(seq(vec![
-                r(prefix_rule_name),
-                self.item_separator_expr(),
-                r(&free_nonempty_rule),
-            ]));
-        }
-
-        Ok(seq(vec![
-            lit("{"),
-            choice(vec![
-                required_prefix.clone(),
-                seq(vec![
-                    required_prefix,
-                    self.item_separator_expr(),
-                    choice(suffix_alternatives),
-                ]),
-            ]),
-            lit("}"),
-        ]))
+        debug_assert!(required_prefix_len > 0 && required_prefix_len <= items.len());
+        Ok(self.lower_large_object_prefix(items, Some(tail_pair_expr)))
     }
 
     fn lower_large_closed_object_prefix_chain(&mut self, items: &[ObjectItem]) -> GrammarExpr {
-        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(items.len());
-        for end_exclusive in 1..=items.len() {
-            let mut alternatives = Vec::new();
-            for start in 0..end_exclusive {
-                if items[start..end_exclusive - 1].iter().any(|item| item.required) {
-                    continue;
-                }
-                if start == 0 {
-                    alternatives.push(items[end_exclusive - 1].pair.clone());
-                } else {
-                    alternatives.push(seq(vec![
-                        r(&prefix_rule_names[start - 1]),
-                        items[end_exclusive - 1].separator_pair.clone(),
-                    ]));
-                }
-            }
-            let rule_name = self.fresh_rule_name("json_closed_object_prefix");
-            self.add_nonterminal_rule(&rule_name, choice(alternatives));
-            prefix_rule_names.push(rule_name);
-        }
+        self.lower_large_object_prefix(items, None)
+    }
 
-        let mut body_alternatives = Vec::new();
-        if items.iter().all(|item| !item.required) {
-            body_alternatives.push(GrammarExpr::Epsilon);
-        }
-        for (index, prefix_rule_name) in prefix_rule_names.iter().enumerate() {
-            if items[index + 1..].iter().any(|item| item.required) {
-                continue;
+    /// Prefix language recurrence: empty is legal exactly when all visited
+    /// properties are optional; nonempty prefixes either append the next
+    /// member (using its fused separator) or skip an optional member.
+    /// This avoids enumerating every pair of optional-property positions.
+    fn lower_large_object_prefix(
+        &mut self,
+        items: &[ObjectItem],
+        tail: Option<GrammarExpr>,
+    ) -> GrammarExpr {
+        let mut empty = true;
+        let mut prefix: Option<String> = None;
+        let rule_prefix = if tail.is_some() { "json_open_object_prefix" } else { "json_closed_object_prefix" };
+        for item in items {
+            let mut alternatives = Vec::with_capacity(2);
+            if empty { alternatives.push(item.pair.clone()); }
+            if let Some(previous) = prefix {
+                let append = if item.required { item.separator_pair.clone() }
+                    else { GrammarExpr::Quantified(Box::new(item.separator_pair.clone()), Quantifier::Optional) };
+                alternatives.push(seq(vec![r(&previous), append]));
             }
-            body_alternatives.push(r(prefix_rule_name));
+            let name = self.fresh_rule_name(rule_prefix);
+            self.add_nonterminal_rule(&name, choice(alternatives));
+            prefix = Some(name);
+            empty &= !item.required;
         }
-
-        seq(vec![lit("{"), choice(body_alternatives), lit("}")])
+        let free = tail.map(|pair| {
+            let name = self.fresh_rule_name("json_open_object_free_nonempty");
+            self.add_nonterminal_rule(&name, seq(vec![
+                pair.clone(),
+                GrammarExpr::Quantified(Box::new(seq(vec![self.item_separator_expr(), pair])), Quantifier::ZeroPlus),
+            ]));
+            name
+        });
+        let mut alternatives = Vec::with_capacity(3);
+        if empty {
+            alternatives.push(GrammarExpr::Epsilon);
+            if let Some(name) = &free { alternatives.push(r(name)); }
+        }
+        if let Some(name) = prefix {
+            let mut body = vec![r(&name)];
+            if let Some(free) = &free {
+                body.push(GrammarExpr::Quantified(Box::new(seq(vec![self.item_separator_expr(), r(free)])), Quantifier::Optional));
+            }
+            alternatives.push(seq(body));
+        }
+        seq(vec![lit("{"), choice(alternatives), lit("}")])
     }
 
     fn lower_property_item(
