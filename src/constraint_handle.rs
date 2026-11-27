@@ -22,7 +22,7 @@ impl Constraint {
 
     /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
     pub fn load(bytes: &[u8], vocab: &Vocab) -> Result<Self> {
-        RuntimeConstraint::load(bytes, vocab).map(Self::from_runtime)
+        crate::artifact_load::guard(|| RuntimeConstraint::load(bytes, vocab).map(Self::from_runtime))
     }
 
     #[cfg(any(test, feature = "internal-api"))]

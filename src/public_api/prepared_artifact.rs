@@ -3,6 +3,7 @@
 //! point backwards in postorder. Loading cannot recurse through attacker-chosen
 //! serialized component graphs or duplicate a shared definition per path.
 use super::*;
+use crate::artifact_load::LoadBudget;
 use std::collections::HashMap;
 
 const MAGIC: &[u8; 8] = b"GLRMOD15";
@@ -179,7 +180,13 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
 }
 
 pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGrammar> {
+    let budget = LoadBudget::new(data.len());
+    load_budgeted(data, supplied, &budget)
+}
+
+pub(super) fn load_budgeted(data: &[u8], supplied: Option<&Vocab>, budget: &LoadBudget) -> Result<PreparedGrammar> {
     use bincode::Options;
+    budget.charge(data.len()).map_err(error)?;
     if data.starts_with(b"GLRMOD") && !data.starts_with(MAGIC) {
         return Err(error("unsupported prepared-grammar artifact version"));
     }
@@ -190,12 +197,18 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     if data.len()>1<<30 || manifest_len>1<<30 {return Err(error("excessive prepared artifact length"));}
     let start = usize::try_from(manifest_len).ok().and_then(|n|n.checked_add(HEADER))
         .filter(|&n|n<=data.len()).ok_or_else(||error("invalid prepared manifest length"))?;
+    let mut cursor = std::io::Cursor::new(&data[HEADER..start]);
     let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(manifest_len)
-        .reject_trailing_bytes().deserialize(&data[HEADER..start])
-        .map_err(|e|error(format!("invalid prepared manifest: {e}")))?;
+        .deserialize_from(&mut cursor).map_err(|e|error(format!("invalid prepared manifest: {e}")))?;
+    if cursor.position() != manifest_len { return Err(error("trailing prepared manifest bytes")); }
     if manifest.instances.is_empty() || manifest.instances.len()>graph::MAX_NODES
         || manifest.definitions.is_empty() || manifest.definitions.len()>graph::MAX_NODES * 2 {
         return Err(error("invalid or excessive prepared graph size"));
+    }
+    budget.charge_items::<Definition>(manifest.definitions.len()).map_err(error)?;
+    budget.charge_items::<Instance>(manifest.instances.len()).map_err(error)?;
+    for instance in &manifest.instances {
+        budget.charge_items::<(String, Binding)>(instance.bindings.len()).map_err(error)?;
     }
     preflight(&manifest)?;
     let mut offset = start;
@@ -210,10 +223,10 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     for (definition,range) in manifest.definitions.iter().zip(slices) {
         let bytes=&data[range];
         let inner=match supplied {
-            Some(vocab) => RuntimeConstraint::load_body_external_artifact(bytes, vocab)?,
+            Some(vocab) => RuntimeConstraint::load_body_external_budgeted(bytes, vocab, &budget.child()?)?,
             None => {
                 let (inner, fingerprint) =
-                    RuntimeConstraint::load_deferred_body(bytes, definition.runnable)?;
+                    RuntimeConstraint::load_deferred_budgeted(bytes, definition.runnable, &budget.child()?)?;
                 if fingerprint != recorded_fingerprint {
                     return Err(error("prepared definition targets a different vocabulary"));
                 }
@@ -294,6 +307,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
 #[cfg(test)]
 mod tests {
     use super::*;
+use crate::artifact_load::LoadBudget;
 
     fn corrupt(bytes: &[u8], mutate: impl FnOnce(&mut Manifest)) -> Vec<u8> {
         let size = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;

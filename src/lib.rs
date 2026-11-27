@@ -81,6 +81,7 @@ pub(crate) mod compiler;
 pub(crate) mod ds;
 pub(crate) mod env;
 mod error;
+mod artifact_load;
 mod public_api;
 // Data-only parser construction remains an unstable tooling API.
 #[cfg(any(test, feature = "internal-api"))]

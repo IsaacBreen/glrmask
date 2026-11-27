@@ -112,3 +112,50 @@ fn ordinary_composition_metadata_unwrap_has_identical_bytes() {
     };
     assert_eq!(encode_composition_metadata_for_save(&constraint), expected);
 }
+
+fn sparse_wire(map_len: u64, live: u64, entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut out = b"SRM3".to_vec();
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&12u64.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // terminal
+    out.extend_from_slice(&0u32.to_le_bytes()); // offset
+    for n in [map_len, live, 0, 0, 1, 0] { out.extend_from_slice(&n.to_le_bytes()); }
+    out.extend_from_slice(b"TKF3");
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    for &(index, state) in entries {
+        out.extend_from_slice(&index.to_le_bytes());
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out
+}
+
+#[test]
+fn malformed_sparse_projection_counts_and_entries_fail_before_expansion() {
+    for bytes in [
+        sparse_wire(u64::MAX, 0, &[]),
+        sparse_wire(1, u64::MAX, &[]),
+        sparse_wire(1, 1, &[]),
+        sparse_wire(1, 1, &[(1, 0)]),
+        sparse_wire(1, 1, &[(0, 1)]),
+        sparse_wire(3, 2, &[(1, 0), (1, 0)]),
+    ] {
+        let backing = Arc::new(bytes);
+        assert!(decode_static_virtual_residual_mask_wire(&backing, Arc::clone(&backing)).is_err());
+    }
+    // Even a plausible dense dimension cannot cause repeated large allocations
+    // in sibling or nested payloads, as admission uses the shared budget.
+    let bytes = Arc::new(sparse_wire(8 * 1024 * 1024, 0, &[]));
+    let budget = LoadBudget::new(0);
+    budget.charge(48 << 20).unwrap();
+    assert!(decode_static_virtual_residual_mask_wire_budgeted(&bytes, Arc::clone(&bytes), &budget).is_err());
+}
+
+#[test]
+fn malformed_compressed_composition_lengths_are_rejected() {
+    let mut bytes = COMPOSITION_METADATA_ZSTD_MAGIC.to_vec();
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+    bytes.push(0);
+    assert!(validate_composition_metadata_wire(&bytes).is_err());
+    assert!(decode_composition_metadata(&bytes).is_err());
+}

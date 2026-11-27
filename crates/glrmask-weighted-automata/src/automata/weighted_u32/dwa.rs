@@ -682,7 +682,9 @@ impl BackedPackedRuntimeDwa {
 
         let geometry_count = read_u32(input, pos)? as usize;
         pos += 4;
-        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        if geometry_count > input.len().saturating_sub(pos) / 4 { return Err("truncated DWA geometry offsets".into()); }
+        let mut geometry_offsets = Vec::new();
+        geometry_offsets.try_reserve_exact(geometry_count).map_err(|_| "DWA geometry allocation failed".to_owned())?;
         for _ in 0..geometry_count {
             geometry_offsets.push(u32::try_from(pos).map_err(|_| "DWF3 geometry offset exceeds u32".to_owned())?);
             let count = read_u32(input, pos)? as usize;
@@ -856,7 +858,9 @@ impl BackedPackedRuntimeDwa {
 
         let geometry_count = read_u32(input, pos)? as usize;
         pos += 4;
-        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        if geometry_count > input.len().saturating_sub(pos) / 4 { return Err("truncated DWA geometry offsets".into()); }
+        let mut geometry_offsets = Vec::new();
+        geometry_offsets.try_reserve_exact(geometry_count).map_err(|_| "DWA geometry allocation failed".to_owned())?;
         for _ in 0..geometry_count {
             geometry_offsets.push(
                 u32::try_from(pos).map_err(|_| "DWF7 geometry offset exceeds u32".to_owned())?,
@@ -1140,7 +1144,9 @@ impl BackedPackedRuntimeDwa {
 
         let geometry_count = read_u32(input, pos)? as usize;
         pos += 4;
-        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        if geometry_count > input.len().saturating_sub(pos) / 4 { return Err("truncated DWA geometry offsets".into()); }
+        let mut geometry_offsets = Vec::new();
+        geometry_offsets.try_reserve_exact(geometry_count).map_err(|_| "DWA geometry allocation failed".to_owned())?;
         let mut narrow_geometry_spans = Vec::<[u32; 2]>::with_capacity(geometry_count);
         let mut narrow_geometry_pairs = Vec::<[u16; 2]>::new();
         for _ in 0..geometry_count {
@@ -4121,7 +4127,9 @@ impl PackedRuntimeDwa {
             // reserve from that hard upper bound so large JS chunks do not
             // repeatedly reallocate/copy tens of thousands of decoded ranges.
             let mut ranges = Vec::<[u32; 2]>::with_capacity(body.len() / 2);
-            let mut spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(set_count);
+            if set_count > body.len().saturating_sub(pos) { return Err("truncated DWA token sets".into()); }
+            let mut spans = Vec::<PackedRuntimeTokenSetSpan>::new();
+            spans.try_reserve_exact(set_count).map_err(|_| "DWA token set allocation failed".to_owned())?;
             for _ in 0..set_count {
                 let range_count = take_var_u32(body, &mut pos)? as usize;
                 let start_index = u32::try_from(ranges.len())
@@ -4236,7 +4244,11 @@ impl PackedRuntimeDwa {
 
         let scan_started = profile.then(std::time::Instant::now);
         let chunk_count = take_fixed_u32(input, &mut pos)? as usize;
-        let mut chunk_bodies = Vec::<&[u8]>::with_capacity(chunk_count);
+        if chunk_count > input.len().saturating_sub(pos) / if dwf2 { 12 } else { 4 } {
+            return Err("truncated DWA token chunk headers".into());
+        }
+        let mut chunk_bodies = Vec::<&[u8]>::new();
+        chunk_bodies.try_reserve_exact(chunk_count).map_err(|_| "DWA chunk allocation failed".to_owned())?;
         let mut chunk_set_counts = Vec::<usize>::with_capacity(if dwf2 { chunk_count } else { 0 });
         let mut chunk_range_counts =
             Vec::<usize>::with_capacity(if dwf2 { chunk_count } else { 0 });
@@ -4252,6 +4264,13 @@ impl PackedRuntimeDwa {
             let body = input
                 .get(pos..end)
                 .ok_or_else(|| "truncated fast DWA token chunk".to_owned())?;
+            if dwf2 {
+                let sets = chunk_set_counts.last().copied().unwrap_or(0);
+                let ranges = chunk_range_counts.last().copied().unwrap_or(0);
+                if sets.checked_add(ranges).is_none_or(|n| n > body.len()) {
+                    return Err("invalid DWA token chunk counts".into());
+                }
+            }
             chunk_bodies.push(body);
             pos = end;
         }
@@ -4274,9 +4293,10 @@ impl PackedRuntimeDwa {
                     sum.checked_add(count)
                         .ok_or_else(|| "fast DWA token-range count overflow".to_owned())
                 })?;
-                let mut ranges = Vec::<std::mem::MaybeUninit<[u32; 2]>>::with_capacity(total_ranges);
-                let mut spans =
-                    Vec::<std::mem::MaybeUninit<PackedRuntimeTokenSetSpan>>::with_capacity(total_sets);
+                let mut ranges = Vec::<std::mem::MaybeUninit<[u32; 2]>>::new();
+                ranges.try_reserve_exact(total_ranges).map_err(|_| "DWA range allocation failed".to_owned())?;
+                let mut spans = Vec::<std::mem::MaybeUninit<PackedRuntimeTokenSetSpan>>::new();
+                spans.try_reserve_exact(total_sets).map_err(|_| "DWA span allocation failed".to_owned())?;
                 // MaybeUninit elements are safe to leave uninitialized while
                 // each chunk owns a disjoint final slice. Successful decoders
                 // write every slot before the slabs are reinterpreted below.
@@ -4367,10 +4387,14 @@ impl PackedRuntimeDwa {
             let mut pos = after_chunks;
             let geometry_started = profile.then(std::time::Instant::now);
             let geometry_count = take_fixed_u32(input, &mut pos)? as usize;
-            let mut geometries = Vec::<Vec<(u32, u32)>>::with_capacity(geometry_count);
+            if geometry_count > input.len().saturating_sub(pos) / 4 { return Err("truncated DWA geometry headers".into()); }
+            let mut geometries = Vec::<Vec<(u32, u32)>>::new();
+            geometries.try_reserve_exact(geometry_count).map_err(|_| "DWA geometry allocation failed".to_owned())?;
             for _ in 0..geometry_count {
                 let len = take_fixed_u32(input, &mut pos)? as usize;
-                let mut geometry = Vec::with_capacity(len);
+                if len > input.len().saturating_sub(pos) / 8 { return Err("truncated DWA geometry".into()); }
+                let mut geometry = Vec::new();
+                geometry.try_reserve_exact(len).map_err(|_| "DWA geometry allocation failed".to_owned())?;
                 for _ in 0..len {
                     geometry.push((
                         take_fixed_u32(input, &mut pos)?,
@@ -5376,7 +5400,9 @@ impl PackedRuntimeDwa {
                     "weight-id sequence",
                 )?;
                 let row_count = take_var_u32(input, &mut pos)? as usize;
-                let mut rows = Vec::with_capacity(row_count);
+                if row_count > input.len().saturating_sub(pos) / 3 { return Err("truncated DWA row inventory".into()); }
+                let mut rows = Vec::new();
+                rows.try_reserve_exact(row_count).map_err(|_| "DWA row allocation failed".to_owned())?;
                 for _ in 0..row_count {
                     rows.push((
                         take_var_u32(input, &mut pos)?,
@@ -6344,7 +6370,9 @@ fn take_length_prefixed_slices<'a>(
     count: usize,
     label: &str,
 ) -> Result<Vec<&'a [u8]>, String> {
-    let mut slices = Vec::with_capacity(count);
+    if count > input.len().saturating_sub(*pos) { return Err(format!("truncated packed DWA {label} inventory")); }
+    let mut slices = Vec::new();
+    slices.try_reserve_exact(count).map_err(|_| "DWA inventory allocation failed".to_owned())?;
     for _ in 0..count {
         let len = take_var_u32(input, pos)? as usize;
         let end = pos

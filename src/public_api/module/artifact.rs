@@ -1,5 +1,6 @@
 //! Versioned postorder DAG. Sources and retained compiled definitions are interned separately.
 use super::*;
+use crate::artifact_load::LoadBudget;
 use bincode::Options;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -174,13 +175,19 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
     if data.len() < 16 || &data[..8] != MAGIC { return Err(err("they aren't a saved module, or were saved by another GLRMask version")); }
     let size = u64::from_le_bytes(data[8..16].try_into().unwrap());
     if size > MAX_BYTES || size != data.len() as u64 - 16 { return Err(err("invalid or excessive Module artifact length")); }
-    let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(size).reject_trailing_bytes()
-        .deserialize(&data[16..]).map_err(|e| err(format!("invalid Module manifest: {e}")))?;
+    let budget = LoadBudget::new(data.len());
+    budget.charge(data.len()).map_err(err)?;
+    let mut cursor = std::io::Cursor::new(&data[16..]);
+    let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(size)
+        .deserialize_from(&mut cursor).map_err(|e| err(format!("invalid Module manifest: {e}")))?;
+    if cursor.position() != size { return Err(err("Slice had bytes remaining after deserialization")); }
     if manifest.instances.is_empty() || manifest.instances.len() > graph::MAX_NODES || manifest.sources.is_empty()
         || manifest.sources.len() > graph::MAX_NODES || manifest.prepared.len() > graph::MAX_NODES {
         return Err(err("invalid or excessive Module graph size"));
     }
 
+    budget.charge_items::<Instance>(manifest.instances.len()).map_err(err)?;
+    budget.charge_items::<Preparation>(manifest.prepared.len()).map_err(err)?;
     let mut heights = Vec::new();
     let mut edges = Vec::new();
     let mut used_sources = BTreeSet::new();
@@ -199,6 +206,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
             }
             used_prepared.insert(p);
         }
+        budget.charge_items::<(String, Value)>(node.bindings.len()).map_err(err)?;
         ports = ports.checked_add(node.bindings.len()).ok_or_else(|| err("Module binding overflow"))?;
         if ports > 1_048_576 { return Err(err("too many Module bindings")); }
         let mut names = BTreeSet::new();
@@ -230,7 +238,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
 
     let sources = manifest.sources.into_iter().map(|s| decode_source(s).map(Arc::new)).collect::<Result<Vec<_>>>()?;
     let prepared = manifest.prepared.into_iter().map(|p| {
-        let mut prepared = prepared_artifact::load(&p.bytes, supplied)?;
+        let mut prepared = prepared_artifact::load_budgeted(&p.bytes, supplied, &budget.child()?)?;
         if let Some(mut tokens) = p.token_set {
             tokens.sort_unstable();
             tokens.dedup();
@@ -309,6 +317,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
 #[cfg(test)]
 mod tests {
     use super::*;
+use crate::artifact_load::LoadBudget;
     fn read(data: &[u8]) -> Manifest { bincode::deserialize(&data[16..]).unwrap() }
     fn write(m: &Manifest) -> Vec<u8> {
         let body = bincode::serialize(m).unwrap();

@@ -388,7 +388,11 @@ pub mod artifact_serde {
                 };
                 let reduce_count =
                     take_fixed_u32(input, pos, "simple GLR split reduce count")? as usize;
-                let mut reduces = Vec::with_capacity(reduce_count);
+                if reduce_count > input.len().saturating_sub(*pos) / 8 {
+                    return Err("truncated GLR reductions".into());
+                }
+                let mut reduces = Vec::new();
+                reduces.try_reserve_exact(reduce_count).map_err(|_| "GLR reduction allocation failed".to_owned())?;
                 for _ in 0..reduce_count {
                     reduces.push((
                         take_fixed_u32(input, pos, "simple GLR split nonterminal")?,
@@ -561,10 +565,14 @@ pub mod artifact_serde {
         expected_rows: usize,
     ) -> Result<Vec<ActionRow>, String> {
         let mut pos = 0usize;
-        let mut rows = Vec::with_capacity(expected_rows);
+        if expected_rows > input.len() / 4 { return Err("truncated GLR action rows".into()); }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(expected_rows).map_err(|_| "GLR row allocation failed".to_owned())?;
         for _ in 0..expected_rows {
             let entry_count = take_fixed_u32(input, &mut pos, "simple GLR action")? as usize;
-            let mut entries = Vec::with_capacity(entry_count);
+            if entry_count > input.len().saturating_sub(pos) / 5 { return Err("truncated GLR actions".into()); }
+            let mut entries = Vec::new();
+            entries.try_reserve_exact(entry_count).map_err(|_| "GLR action allocation failed".to_owned())?;
             for _ in 0..entry_count {
                 let terminal = take_fixed_u32(input, &mut pos, "simple GLR action terminal")?;
                 let action = decode_simple_action(input, &mut pos)?;

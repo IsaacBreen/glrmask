@@ -1252,6 +1252,16 @@ impl SparseBoundedCodeOracleWire {
 
     fn into_oracle(self) -> Option<BoundedCodeIntersectionOracle> {
         let pattern_states = self.pattern.num_states();
+        if pattern_states == 0 || pattern_states > MAX_BOUNDED_CODE_ORACLE_PATTERN_STATES
+            || self.body.num_states() == 0 || self.completion_relations.len() != self.body.num_states()
+            || self.body_productive.len() != self.body.num_states() || self.min > self.max {
+            return None;
+        }
+        let relations = self.completion_relations.iter().filter(|r| r.is_some()).count()
+            .checked_add(self.exact_powers.len())?.checked_add(self.prefix_sums.len())?;
+        let relation_bytes = pattern_states.checked_mul(pattern_states.div_ceil(64))?
+            .checked_mul(8)?.checked_mul(relations)?;
+        if relation_bytes > (1 << 28) { return None; }
         let completion_relations = self
             .completion_relations
             .into_iter()
@@ -2678,6 +2688,8 @@ pub struct VirtualResidualMaskProjectionArtifact {
     compiled_crossed_boundaries: usize,
     #[serde(skip)]
     validated_component_state_count: Option<u32>,
+    #[serde(skip)]
+    sparse_map: Option<(usize, Vec<(u32, u32)>)>,
 }
 
 #[derive(serde::Serialize)]
@@ -2792,6 +2804,53 @@ pub struct VirtualResidualMasterSliceArtifact {
 }
 
 impl VirtualResidualMaskProjectionArtifact {
+    // Sparse maps stay sparse until the oracle's independently computed dense
+    // coordinate width has been validated. Serialized map_len alone is not a
+    // justification to allocate the expanded map.
+    #[doc(hidden)]
+    pub fn from_sparse_wire(
+        terminal: TerminalID, state_offset: u32, map_len: usize,
+        entries: Vec<(u32, u32)>, oracle_bytes: Vec<u8>, runtime_expr_bytes: Vec<u8>,
+        compiled_mask_max: usize, compiled_crossed_boundaries: usize,
+        component_state_count: u32,
+    ) -> Self {
+        Self {
+            terminal, state_offset, local_to_mask_state: Vec::new(), oracle_bytes,
+            runtime_expr_bytes, compiled_mask_max, compiled_crossed_boundaries,
+            validated_component_state_count: Some(component_state_count),
+            sparse_map: Some((map_len, entries)),
+        }
+    }
+
+    fn dense_len(&self) -> usize {
+        self.sparse_map.as_ref().map_or(self.local_to_mask_state.len(), |(len, _)| *len)
+    }
+
+    fn into_dense(self, expected: usize, component_states: u32) -> Result<Arc<[u32]>, String> {
+        if self.dense_len() != expected || expected > MAX_FINITE_MASK_DENSE_STATES {
+            return Err("invalid static residual projection width".into());
+        }
+        let dense = if let Some((len, entries)) = self.sparse_map {
+            let mut dense = Vec::new();
+            dense.try_reserve_exact(len).map_err(|_| "static residual map allocation failed".to_owned())?;
+            dense.resize(len, u32::MAX);
+            for (index, state) in entries {
+                let target = dense.get_mut(index as usize).ok_or_else(|| "static residual map index out of range".to_owned())?;
+                if state >= component_states || *target != u32::MAX {
+                    return Err("invalid static residual map entry".into());
+                }
+                *target = state;
+            }
+            dense
+        } else {
+            self.local_to_mask_state
+        };
+        if dense.iter().any(|&state| state != u32::MAX && state >= component_states) {
+            return Err("static residual map target out of range".into());
+        }
+        Ok(Arc::from(dense.into_boxed_slice()))
+    }
+
     #[doc(hidden)]
     pub fn state_offset(&self) -> u32 {
         self.state_offset
@@ -2831,7 +2890,7 @@ impl VirtualResidualMaskProjectionArtifact {
         Self {
             terminal, state_offset, local_to_mask_state, oracle_bytes, runtime_expr_bytes,
             compiled_mask_max, compiled_crossed_boundaries,
-            validated_component_state_count: None,
+            validated_component_state_count: None, sparse_map: None,
         }
     }
 
@@ -2849,7 +2908,7 @@ impl VirtualResidualMaskProjectionArtifact {
         Self {
             terminal, state_offset, local_to_mask_state, oracle_bytes, runtime_expr_bytes,
             compiled_mask_max, compiled_crossed_boundaries,
-            validated_component_state_count: Some(component_state_count),
+            validated_component_state_count: Some(component_state_count), sparse_map: None,
         }
     }
 }
@@ -6567,23 +6626,17 @@ impl VirtualResidualRuntime {
             .finite_mask_dense_state_count(mask_max)
             .filter(|&states| states <= MAX_FINITE_MASK_DENSE_STATES)
             .ok_or_else(|| "compiled virtual residual projection dense coordinate is invalid".to_owned())?;
-        if artifact.local_to_mask_state.len() != expected_dense_states {
+        if artifact.dense_len() != expected_dense_states {
             return Err(format!(
                 "compiled virtual residual projection map has {} entries, expected {}",
-                artifact.local_to_mask_state.len(), expected_dense_states,
+                artifact.dense_len(), expected_dense_states,
             ));
         }
-        if artifact.validated_component_state_count != Some(component_state_count)
-            && artifact.local_to_mask_state.iter().any(|&state| state != u32::MAX && state >= component_state_count)
-        {
-            return Err(format!(
-                "compiled virtual residual projection references state outside component width {}",
-                component_state_count,
-            ));
-        }
+        let state_offset = artifact.state_offset;
+        let dense = artifact.into_dense(expected_dense_states, component_state_count)?;
         Ok(VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
-            state_offset: artifact.state_offset,
+            state_offset,
             pattern_states: oracle.pattern.num_states(),
             body_states: oracle.body.num_states(),
             prefix_len: oracle.prefix.len(),
@@ -6592,7 +6645,7 @@ impl VirtualResidualRuntime {
             full_max: oracle.max,
             mask_max,
             crossed_boundaries,
-            local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
+            local_to_mask_state: dense,
         })
     }
 
@@ -6643,7 +6696,7 @@ impl VirtualResidualRuntime {
         let mut expected_dense_states = oracle.finite_mask_dense_state_count(mask_max)
             .filter(|&states| states <= MAX_FINITE_MASK_DENSE_STATES)
             .ok_or_else(|| "virtual residual projection dense coordinate is invalid".to_owned())?;
-        if artifact.local_to_mask_state.len() != expected_dense_states {
+        if artifact.dense_len() != expected_dense_states {
             // The descriptor omits dimensions. Recognize only the exact new
             // compact formula for the same known token horizon, not an
             // arbitrary upper bound inferred from attacker-controlled length.
@@ -6660,28 +6713,22 @@ impl VirtualResidualRuntime {
             let compact_dense = oracle.finite_mask_dense_state_count(compact_max)
                 .filter(|&states| states <= MAX_FINITE_MASK_DENSE_STATES)
                 .ok_or_else(|| "virtual residual compact projection dense coordinate is invalid".to_owned())?;
-            if artifact.local_to_mask_state.len() != compact_dense {
+            if artifact.dense_len() != compact_dense {
                 return Err(format!(
                     "virtual residual projection map has {} entries, expected {} or {}",
-                    artifact.local_to_mask_state.len(), expected_dense_states, compact_dense,
+                    artifact.dense_len(), expected_dense_states, compact_dense,
                 ));
             }
             crossed_boundaries = compact;
             mask_max = compact_max;
             expected_dense_states = compact_dense;
         }
-        debug_assert_eq!(artifact.local_to_mask_state.len(), expected_dense_states);
-        if artifact.local_to_mask_state.iter().any(|&state| {
-            state != u32::MAX && state >= component_state_count
-        }) {
-            return Err(format!(
-                "virtual residual projection references state outside component width {}",
-                component_state_count,
-            ));
-        }
+        debug_assert_eq!(artifact.dense_len(), expected_dense_states);
+        let state_offset = artifact.state_offset;
+        let dense = artifact.into_dense(expected_dense_states, component_state_count)?;
         Ok(VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
-            state_offset: artifact.state_offset,
+            state_offset,
             pattern_states: oracle.pattern.num_states(),
             body_states: oracle.body.num_states(),
             prefix_len: oracle.prefix.len(),
@@ -6690,7 +6737,7 @@ impl VirtualResidualRuntime {
             full_max: oracle.max,
             mask_max,
             crossed_boundaries,
-            local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
+            local_to_mask_state: dense,
         })
     }
 

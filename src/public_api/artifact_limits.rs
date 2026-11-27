@@ -13,6 +13,10 @@ where D:Deserializer<'de>,T:Deserialize<'de> {
             let mut out=Vec::new();
             while let Some(value)=seq.next_element()? {
                 if out.len()==MAX {return Err(de::Error::custom("excessive artifact element count"));}
+                if out.len() == out.capacity() {
+                    let additional = (MAX - out.len()).min(out.capacity().max(4));
+                    out.try_reserve_exact(additional).map_err(|_| de::Error::custom("artifact allocation failed"))?;
+                }
                 out.push(value);
             }
             Ok(out)

@@ -2851,7 +2851,11 @@ pub mod artifact_serde {
         let state_id_width = if state_count <= u16::MAX as usize + 1 { 2 } else { 4 };
         let terminal_count = num_terminals as usize;
         let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 { 2 } else { 4 };
-        let mut group_id_to_u8set = Vec::with_capacity(terminal_count);
+        if terminal_count.checked_mul(32).is_none_or(|n| n > input.len().saturating_sub(pos)) {
+            return Err("truncated tokenizer terminal groups".into());
+        }
+        let mut group_id_to_u8set = Vec::new();
+        group_id_to_u8set.try_reserve_exact(terminal_count).map_err(|_| "tokenizer group allocation failed".to_owned())?;
         for _ in 0..terminal_count {
             let mut words = [0u64; 4];
             for word in &mut words {
@@ -2940,6 +2944,10 @@ pub mod artifact_serde {
                 return Err("invalid compressed tokenizer segment state range".to_owned());
             }
             previous_end = end;
+        }
+        if state_count.checked_mul(terminal_count.div_ceil(64))
+            .and_then(|n| n.checked_mul(16)).is_none_or(|n| n > (1 << 28)) {
+            return Err("excessive decoded compressed tokenizer metadata".into());
         }
         let mut dfa = DFA::new_from_sparse_metadata(
             group_id_to_u8set,
@@ -3969,7 +3977,11 @@ pub mod artifact_serde {
             return Err("invalid giant tokenizer dimensions".to_owned());
         }
         let terminal_count = num_terminals as usize;
-        let mut groups = Vec::with_capacity(terminal_count);
+        if terminal_count.checked_mul(32).is_none_or(|n| n > input.len().saturating_sub(pos)) {
+            return Err("truncated tokenizer terminal groups".into());
+        }
+        let mut groups = Vec::new();
+        groups.try_reserve_exact(terminal_count).map_err(|_| "tokenizer group allocation failed".to_owned())?;
         for _ in 0..terminal_count {
             let mut words = [0u64; 4];
             for word in &mut words {
@@ -4001,7 +4013,7 @@ pub mod artifact_serde {
                 .map(|b| u32::from_le_bytes(*b))
                 .collect())
         }
-        let prefix_offsets = read_u32_vec_at(input, &mut pos, prefix_state_count + 1)?;
+        let prefix_offsets = read_u32_vec_at(input, &mut pos, prefix_state_count.checked_add(1).ok_or("prefix count overflow")?)?;
         if prefix_offsets.first().copied() != Some(0)
             || prefix_offsets.last().copied() != Some(residual_transition_count as u32)
             || prefix_offsets.windows(2).any(|pair| pair[0] > pair[1])
@@ -4016,7 +4028,12 @@ pub mod artifact_serde {
             return Err("giant tokenizer residual target out of range".to_owned());
         }
         let mut read_metadata_rows = |count: usize| -> Result<Vec<BitSet>, String> {
-            let mut rows = Vec::with_capacity(count);
+            let width = terminal_count.div_ceil(64).checked_mul(8).ok_or("metadata row width overflow")?;
+            if count > state_count || count.checked_mul(width).is_none_or(|n| n > input.len().saturating_sub(pos) || n > (1 << 28)) {
+                return Err("invalid giant tokenizer metadata dimensions".into());
+            }
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(count).map_err(|_| "tokenizer metadata allocation failed".to_owned())?;
             for _ in 0..count {
                 let mut bits = BitSet::new(terminal_count);
                 for word in bits.words_mut() {
@@ -4057,7 +4074,7 @@ pub mod artifact_serde {
             eprintln!("[glrmask/profile][tks3] meta_ids_validate_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         }
         let epsilon_states = read_u32_vec_at(input, &mut pos, epsilon_state_count)?;
-        let epsilon_offsets = read_u32_vec_at(input, &mut pos, epsilon_state_count + 1)?;
+        let epsilon_offsets = read_u32_vec_at(input, &mut pos, epsilon_state_count.checked_add(1).ok_or("epsilon count overflow")?)?;
         let epsilon_targets = read_u32_vec_at(input, &mut pos, epsilon_target_count)?;
         if epsilon_offsets.first().copied() != Some(0)
             || epsilon_offsets.last().copied() != Some(epsilon_target_count as u32)
@@ -4083,7 +4100,11 @@ pub mod artifact_serde {
             epsilon_offsets: Arc::from(epsilon_offsets.into_boxed_slice()),
             epsilon_targets: Arc::from(epsilon_targets.into_boxed_slice()),
         });
-        let mut packed_segments = Vec::with_capacity(segment_count);
+        if segment_count > state_count || segment_count > input.len().saturating_sub(pos) / 284 {
+            return Err("invalid giant tokenizer segment count".into());
+        }
+        let mut packed_segments = Vec::new();
+        packed_segments.try_reserve_exact(segment_count).map_err(|_| "tokenizer segment allocation failed".to_owned())?;
         let mut expected_state = prefix_state_count as u32;
         let mut segment_expanded = 0usize;
         for _ in 0..segment_count {
@@ -4132,7 +4153,7 @@ pub mod artifact_serde {
                 row_width,
                 backed,
             )?;
-            let row_offsets = read_u32_vec_at(input, &mut pos, row_count + 1)?;
+            let row_offsets = read_u32_vec_at(input, &mut pos, row_count.checked_add(1).ok_or("row count overflow")?)?;
             if row_offsets.first().copied() != Some(0)
                 || row_offsets.last().copied() != Some(entry_count as u32)
                 || row_offsets.windows(2).any(|pair| pair[0] > pair[1])
@@ -4517,7 +4538,11 @@ pub mod artifact_serde {
             (4usize, 4usize)
         };
         let dfa_alloc_started = profile.then(std::time::Instant::now);
-        let mut group_id_to_u8set = Vec::with_capacity(num_terminals as usize);
+        if (num_terminals as usize).checked_mul(32).is_none_or(|n| n > input.len().saturating_sub(pos)) {
+            return Err("truncated tokenizer terminal groups".into());
+        }
+        let mut group_id_to_u8set = Vec::new();
+        group_id_to_u8set.try_reserve_exact(num_terminals as usize).map_err(|_| "tokenizer group allocation failed".to_owned())?;
         for _ in 0..num_terminals as usize {
             let mut words = [0u64; 4];
             for word in &mut words {
@@ -4684,7 +4709,9 @@ pub mod artifact_serde {
 
         if tkf3 {
             let metadata_started = profile.then(std::time::Instant::now);
-            let metadata: FastPackedMetadataArtifact = bincode::deserialize(&input[pos..])
+            use bincode::Options;
+            let metadata: FastPackedMetadataArtifact = bincode::DefaultOptions::new().with_fixint_encoding()
+                .with_limit((input.len() - pos) as u64).deserialize_from(&input[pos..])
                 .map_err(|err| format!("invalid TKF3 metadata: {err}"))?;
             if metadata.finalizer_row_ids.len() != state_count
                 || metadata.future_row_ids.len() != state_count
@@ -4709,6 +4736,11 @@ pub mod artifact_serde {
             {
                 return Err("invalid TKF3 packed metadata".to_owned());
             }
+            let row_count = metadata.finalizer_rows.len().checked_add(metadata.future_rows.len())
+                .ok_or("tokenizer metadata row count overflow")?;
+            let row_bytes = (num_terminals as usize).div_ceil(64).checked_mul(8)
+                .and_then(|n| n.checked_mul(row_count)).ok_or("tokenizer metadata size overflow")?;
+            if row_bytes > (1 << 28) { return Err("excessive decoded tokenizer metadata".into()); }
             let build_rows = |rows: Vec<Box<[u32]>>| {
                 rows.into_iter()
                     .map(|row| {
@@ -4838,6 +4870,10 @@ pub mod artifact_serde {
         // in PackedRuntimeTransitions, so the structural DFA only needs the
         // reset-state stub and terminal byte-group mapping until a later
         // composition/structural mutation explicitly asks to materialize it.
+        if state_count.checked_mul((num_terminals as usize).div_ceil(64))
+            .and_then(|n| n.checked_mul(16)).is_none_or(|n| n > (1 << 28)) {
+            return Err("excessive decoded tokenizer metadata".into());
+        }
         let pack_rows = |offsets: &[u32], values: &[u32]| {
             let mut row_map = FxHashMap::<Box<[u32]>, u32>::default();
             let mut rows = Vec::<BitSet>::new();

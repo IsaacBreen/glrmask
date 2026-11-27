@@ -1,4 +1,11 @@
 use crate::ErrorExt as _;
+use crate::artifact_load::{LoadBudget, reserve, copy_bytes};
+use bincode::Options;
+fn decode_bincode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> bincode::Result<T> {
+    bincode::DefaultOptions::new().with_fixint_encoding().with_limit(bytes.len() as u64)
+        .allow_trailing_bytes().deserialize_from(bytes)
+}
+
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 // PRE-RELEASE COMPATIBILITY POLICY
@@ -343,10 +350,10 @@ fn decode_current_core(
             flags & CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0,
         );
     let decoded = if has_late_slots {
-        bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(&input[header_len..base_end])
+        decode_bincode::<ConstraintArtifactCurrentCoreBase>(&input[header_len..base_end])
             .map_err(|err| err.to_string())
     } else if has_current_overlay {
-        bincode::deserialize::<ConstraintArtifactPreviousOverlayCoreBase>(
+        decode_bincode::<ConstraintArtifactPreviousOverlayCoreBase>(
             &input[header_len..base_end],
         )
         .map(|base| ConstraintArtifactCurrentCoreBase {
@@ -358,7 +365,7 @@ fn decode_current_core(
         })
         .map_err(|err| err.to_string())
     } else {
-        bincode::deserialize::<ConstraintArtifactPreviousCurrentCoreBase>(
+        decode_bincode::<ConstraintArtifactPreviousCurrentCoreBase>(
             &input[header_len..base_end],
         )
         .map(|base| ConstraintArtifactCurrentCoreBase {
@@ -760,6 +767,7 @@ fn decode_composition_metadata_part<'a>(
     raw_len: usize,
     compressed: bool,
 ) -> Result<Cow<'a, [u8]>, String> {
+    if raw_len > (1 << 28) { return Err("excessive composition metadata size".into()); }
     if !compressed {
         if wire.len() != raw_len {
             return Err("invalid raw split composition metadata length".to_owned());
@@ -814,6 +822,9 @@ fn split_composition_metadata_parts(
     }
     let link_compressed = flags & COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED != 0;
     let cache_compressed = flags & COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED != 0;
+    if link_raw_len.checked_add(cache_raw_len).is_none_or(|n| n > (1 << 28)) {
+        return Err("excessive decoded composition metadata".into());
+    }
     if !link_compressed && link_wire_len != link_raw_len {
         return Err("invalid raw split composition link length".to_owned());
     }
@@ -979,10 +990,11 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
             .expect("composition metadata raw length has fixed width"),
     ))
     .map_err(|_| "composition metadata raw length does not fit platform".to_owned())?;
+    if raw_len > (1 << 28) { return Err("excessive composition metadata size".into()); }
     if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
     {
-        if input.len() != COMPOSITION_METADATA_HEADER_LEN + raw_len {
+        if COMPOSITION_METADATA_HEADER_LEN.checked_add(raw_len) != Some(input.len()) {
             return Err("invalid raw composition metadata section length".to_owned());
         }
         Ok(())
@@ -1023,11 +1035,11 @@ fn decode_composition_link_metadata(
             parts.link_compressed,
         )?;
         if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
-            return bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string());
+            return decode_bincode(raw.as_ref()).map_err(|err| err.to_string());
         }
         if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
             let old: PreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+                decode_bincode(raw.as_ref()).map_err(|err| err.to_string())?;
             return Ok(ConstraintCompositionLinkMetadata {
                 composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
                 unbound_grammar_placeholders: old.unbound_grammar_placeholders,
@@ -1037,7 +1049,7 @@ fn decode_composition_link_metadata(
             });
         }
         let old: PreviousPreviousConstraintCompositionLinkMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+            decode_bincode(raw.as_ref()).map_err(|err| err.to_string())?;
         return Ok(ConstraintCompositionLinkMetadata {
             composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
             unbound_grammar_placeholders: old.unbound_grammar_placeholders,
@@ -1087,11 +1099,11 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             parts.cache_compressed,
         )?;
         let link = if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
-            bincode::deserialize::<ConstraintCompositionLinkMetadata>(link_raw.as_ref())
+            decode_bincode::<ConstraintCompositionLinkMetadata>(link_raw.as_ref())
                 .map_err(|err| err.to_string())?
         } else if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
             let old: PreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
+                decode_bincode(link_raw.as_ref()).map_err(|err| err.to_string())?;
             ConstraintCompositionLinkMetadata {
                 composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
                 unbound_grammar_placeholders: old.unbound_grammar_placeholders,
@@ -1101,7 +1113,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             }
         } else {
             let old: PreviousPreviousConstraintCompositionLinkMetadata =
-                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
+                decode_bincode(link_raw.as_ref()).map_err(|err| err.to_string())?;
             ConstraintCompositionLinkMetadata {
                 composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
                 unbound_grammar_placeholders: old.unbound_grammar_placeholders,
@@ -1111,7 +1123,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             }
         };
         let cache: ConstraintCompositionCacheMetadata =
-            bincode::deserialize(cache_raw.as_ref()).map_err(|err| err.to_string())?;
+            decode_bincode(cache_raw.as_ref()).map_err(|err| err.to_string())?;
         return Ok(ConstraintCompositionMetadata {
             composition_reset_tokens_by_terminal: link.composition_reset_tokens_by_terminal,
             unbound_grammar_placeholders: link.unbound_grammar_placeholders,
@@ -1142,7 +1154,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
     };
     if previous {
         let old: PreviousConstraintCompositionMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+            decode_bincode(raw.as_ref()).map_err(|err| err.to_string())?;
         Ok(ConstraintCompositionMetadata {
             composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
             unbound_grammar_placeholders: BTreeMap::new(),
@@ -1155,7 +1167,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
         })
     } else {
         let old: PreTriggerConstraintCompositionMetadata =
-            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+            decode_bincode(raw.as_ref()).map_err(|err| err.to_string())?;
         Ok(ConstraintCompositionMetadata {
             composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
             unbound_grammar_placeholders: old.unbound_grammar_placeholders,
@@ -1417,8 +1429,8 @@ fn decode_word_sparse_token_mask_cache(input: &[u8]) -> Result<Vec<InternalToken
     }
     let group_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
     let entry_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
-    let offsets_bytes = (group_count + 1)
-        .checked_mul(4)
+    let offsets_bytes = group_count.checked_add(1)
+        .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| "sparse word-group cache offsets overflow".to_owned())?;
     let entries_bytes = entry_count
         .checked_mul(6)
@@ -1755,8 +1767,8 @@ fn decode_token_mask_cache_impl(
         let tail_end = FAST_HEADER_LEN
             .checked_add(tail_len)
             .ok_or_else(|| "fast token-mask cache tail overflow".to_owned())?;
-        let offsets_bytes = (word_groups + 1)
-            .checked_mul(4)
+        let offsets_bytes = word_groups.checked_add(1)
+            .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| "fast token-mask sparse offsets overflow".to_owned())?;
         let entries_bytes = word_entries
             .checked_mul(6)
@@ -1798,11 +1810,11 @@ fn decode_token_mask_cache_impl(
             .get(FAST_HEADER_LEN..tail_end)
             .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?;
         let irregular = if compact_seed {
-            bincode::deserialize::<TokenMaskCacheIrregularV5>(tail_bytes)
+            decode_bincode::<TokenMaskCacheIrregularV5>(tail_bytes)
                 .map_err(|err| err.to_string())?
                 .into_irregular()?
         } else {
-            bincode::deserialize::<TokenMaskCacheIrregular>(tail_bytes)
+            decode_bincode::<TokenMaskCacheIrregular>(tail_bytes)
                 .map_err(|err| err.to_string())?
         };
         let tail_ms = tail_started
@@ -1920,7 +1932,7 @@ fn decode_token_mask_cache_impl(
         .ok_or_else(|| "token-mask cache tail overflow".to_owned())?;
     let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
     let tail_started = profile.then(std::time::Instant::now);
-    let tail = bincode::deserialize::<TokenMaskCacheTail>(
+    let tail = decode_bincode::<TokenMaskCacheTail>(
         input
             .get(HEADER_LEN..tail_end)
             .ok_or_else(|| "truncated token-mask cache tail".to_owned())?,
@@ -2148,8 +2160,8 @@ fn decode_internal_token_buf_masks(
     }
     let group_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
     let entry_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
-    let offsets_bytes = (group_count + 1)
-        .checked_mul(4)
+    let offsets_bytes = group_count.checked_add(1)
+        .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| "internal-token buffer-mask offsets overflow".to_owned())?;
     let entry_width = if fixed {
         std::mem::size_of::<PackedInternalTokenBufMask>()
@@ -2832,6 +2844,13 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     section: &[u8],
     backing: Arc<Vec<u8>>,
 ) -> Result<DecodedStaticVirtualResidualMask, String> {
+    let budget = LoadBudget::new(section.len());
+    decode_static_virtual_residual_mask_wire_budgeted(section, backing, &budget)
+}
+
+fn decode_static_virtual_residual_mask_wire_budgeted(
+    section: &[u8], backing: Arc<Vec<u8>>, budget: &LoadBudget,
+) -> Result<DecodedStaticVirtualResidualMask, String> {
     if section.len() < 16 {
         return Err("invalid static residual mask wire header".to_owned());
     }
@@ -2848,7 +2867,8 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     let mut pos = 16usize;
     let descriptor_end = pos.checked_add(descriptor_bytes).ok_or_else(|| "static residual descriptor overflow".to_owned())?;
     if descriptor_end > section.len() { return Err("truncated static residual descriptors".to_owned()); }
-    let mut descriptors = Vec::with_capacity(count);
+    budget.charge_items::<(u32, u32, usize, usize, usize, usize, usize, usize)>(count)?;
+    let mut descriptors = reserve(count)?;
     while pos < descriptor_end {
         let terminal = u32::from_le_bytes(section[pos..pos+4].try_into().unwrap()); pos += 4;
         let state_offset = u32::from_le_bytes(section[pos..pos+4].try_into().unwrap()); pos += 4;
@@ -2893,9 +2913,13 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
     }
     let base = backing.as_ptr() as usize;
     let section_start = (section.as_ptr() as usize).checked_sub(base).ok_or_else(|| "static residual section does not belong to artifact backing".to_owned())?;
+    if section_start.checked_add(section.len()).is_none_or(|end| end > backing.len()) {
+        return Err("static residual section outside artifact backing".into());
+    }
     let tokenizer_start = section_start.checked_add(tokenizer_local_start).ok_or_else(|| "static residual tokenizer backing offset overflow".to_owned())?;
     pos = tokenizer_local_end;
-    let mut projections = Vec::with_capacity(count);
+    budget.charge_items::<crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact>(count)?;
+    let mut projections = reserve(count)?;
     for (descriptor_index, (terminal, state_offset, map_len, live_count, oracle_len, expr_len, mask_max, crossed_boundaries)) in descriptors.iter().copied().enumerate() {
         let component_state_count = if sparse {
             descriptors
@@ -2906,11 +2930,19 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
         } else {
             0
         };
-        let mut map = if sparse { vec![u32::MAX; map_len] } else { Vec::with_capacity(map_len) };
+        // Dense coordinate size is not the mask tokenizer state count. The
+        // latter bounds targets; the oracle independently proves dense width
+        // before the sparse map is expanded.
+        if map_len > 8 * 1024 * 1024 { return Err("excessive static residual projection map".into()); }
+        budget.charge_items::<u32>(map_len)?;
+        let mut map = Vec::new();
+        let mut sparse_entries = Vec::new();
         if sparse {
             let map_bytes = live_count.checked_mul(8).ok_or_else(|| "static residual sparse map byte length overflow".to_owned())?;
             let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual sparse map range overflow".to_owned())?;
             if map_end > section.len() { return Err("truncated static residual sparse projection map".to_owned()); }
+            budget.charge_items::<(u32, u32)>(live_count)?;
+            sparse_entries = reserve(live_count)?;
             let mut previous = None;
             for pair in section[pos..map_end].as_chunks::<8>().0.iter() {
                 let index = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
@@ -2922,7 +2954,7 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
                 {
                     return Err("invalid static residual sparse projection entry".to_owned());
                 }
-                map[index] = state;
+                sparse_entries.push((index as u32, state));
                 previous = Some(index);
             }
             pos = map_end;
@@ -2930,20 +2962,23 @@ pub(crate) fn decode_static_virtual_residual_mask_wire(
             let map_bytes = map_len.checked_mul(4).ok_or_else(|| "static residual map byte length overflow".to_owned())?;
             let map_end = pos.checked_add(map_bytes).ok_or_else(|| "static residual map range overflow".to_owned())?;
             if map_end > section.len() { return Err("truncated static residual projection map".to_owned()); }
+            map = reserve(map_len)?;
             for word in section[pos..map_end].as_chunks::<4>().0.iter() { map.push(u32::from_le_bytes(*word)); }
             pos = map_end;
         }
         let oracle_end = pos.checked_add(oracle_len).ok_or_else(|| "static residual oracle range overflow".to_owned())?;
         if oracle_end > section.len() { return Err("truncated static residual oracle".to_owned()); }
-        let oracle_bytes = section[pos..oracle_end].to_vec();
+        budget.charge(oracle_len)?;
+        let oracle_bytes = copy_bytes(&section[pos..oracle_end])?;
         pos = oracle_end;
         let expr_end = pos.checked_add(expr_len).ok_or_else(|| "static residual expression range overflow".to_owned())?;
         if expr_end > section.len() { return Err("truncated static residual expression".to_owned()); }
-        let runtime_expr_bytes = section[pos..expr_end].to_vec();
+        budget.charge(expr_len)?;
+        let runtime_expr_bytes = copy_bytes(&section[pos..expr_end])?;
         pos = expr_end;
         let projection = if sparse {
-            crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact::from_validated_wire(
-                terminal, state_offset, map, oracle_bytes, runtime_expr_bytes, mask_max,
+            crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact::from_sparse_wire(
+                terminal, state_offset, map_len, sparse_entries, oracle_bytes, runtime_expr_bytes, mask_max,
                 crossed_boundaries, component_state_count,
             )
         } else {
@@ -2983,6 +3018,13 @@ fn decode_current_runtime_wire(
     section: &[u8],
     backing: Arc<Vec<u8>>,
 ) -> Result<(ConstraintArtifactCurrentRuntime, Option<DecodedStaticVirtualResidualMask>), String> {
+    let budget = LoadBudget::new(section.len());
+    decode_current_runtime_wire_budgeted(section, backing, &budget)
+}
+
+fn decode_current_runtime_wire_budgeted(
+    section: &[u8], backing: Arc<Vec<u8>>, budget: &LoadBudget,
+) -> Result<(ConstraintArtifactCurrentRuntime, Option<DecodedStaticVirtualResidualMask>), String> {
     if section.len() < CURRENT_RUNTIME_HEADER_LEN || !section.starts_with(&CURRENT_RUNTIME_MAGIC) {
         return Err("invalid current runtime wire header".to_owned());
     }
@@ -2991,9 +3033,9 @@ fn decode_current_runtime_wire(
     let meta_end = CURRENT_RUNTIME_HEADER_LEN.checked_add(meta_len).ok_or_else(|| "runtime metadata range overflow".to_owned())?;
     let static_end = meta_end.checked_add(static_len).ok_or_else(|| "runtime static range overflow".to_owned())?;
     if static_end != section.len() { return Err("invalid current runtime wire lengths".to_owned()); }
-    let mut runtime: ConstraintArtifactCurrentRuntime = bincode::deserialize(&section[CURRENT_RUNTIME_HEADER_LEN..meta_end]).map_err(|err| err.to_string())?;
+    let mut runtime: ConstraintArtifactCurrentRuntime = decode_bincode(&section[CURRENT_RUNTIME_HEADER_LEN..meta_end]).map_err(|err| err.to_string())?;
     if runtime.static_virtual_residual_mask.is_some() { return Err("current runtime metadata unexpectedly embeds static residual payload".to_owned()); }
-    let static_mask = if static_len == 0 { None } else { Some(decode_static_virtual_residual_mask_wire(&section[meta_end..static_end], backing)?) };
+    let static_mask = if static_len == 0 { None } else { Some(decode_static_virtual_residual_mask_wire_budgeted(&section[meta_end..static_end], backing, budget)?) };
     runtime.static_virtual_residual_mask = None;
     Ok((runtime, static_mask))
 }
@@ -3508,6 +3550,7 @@ fn restore_segmented_runtime_v22(
     constraint: &mut Constraint,
     runtime: SegmentedRuntimeArtifactV22,
     vocab: &crate::Vocab,
+    budget: &LoadBudget,
 ) -> crate::Result<()> {
     let global_state_count = constraint.table.num_states as usize;
     let global_terminal_count = constraint.table.num_terminals as usize;
@@ -3545,7 +3588,7 @@ fn restore_segmented_runtime_v22(
                 component.root_entry_terminals.len(),
             )));
         }
-        let child = Constraint::load_body_external_artifact(component.constraint_artifact, vocab)?;
+        let child = Constraint::load_body_external_budgeted(component.constraint_artifact, vocab, &budget.child()?)?;
         if component
             .terminal_offset
             .checked_add(child.table.num_terminals)
@@ -3823,6 +3866,7 @@ fn restore_segmented_runtime_v23(
     runtime: SegmentedRuntimeArtifactV23,
     allow_empty_component_start_states: bool,
     vocab: &crate::Vocab,
+    budget: &LoadBudget,
 ) -> crate::Result<()> {
     let SegmentedRuntimeArtifactV23 {
         materialized_static_component_parser,
@@ -3843,7 +3887,7 @@ fn restore_segmented_runtime_v23(
             boundary_parser: None,
             boundary_terminal_trie: None,
         },
-        vocab,
+        vocab, budget,
     )?;
 
     let global_state_count = constraint.table.num_states as usize;
@@ -3980,6 +4024,7 @@ fn restore_segmented_runtime_v24(
     constraint: &mut Constraint,
     runtime: SegmentedRuntimeArtifactV24,
     vocab: &crate::Vocab,
+    budget: &LoadBudget,
 ) -> crate::Result<()> {
     let SegmentedRuntimeArtifactV24 {
         materialized_static_component_parser,
@@ -4019,7 +4064,7 @@ fn restore_segmented_runtime_v24(
             boundary_shards,
         },
         !segmented_parser_links.is_empty(),
-        vocab,
+        vocab, budget,
     )?;
 
     let global_terminal_count = constraint.table.num_terminals;
@@ -4145,6 +4190,7 @@ fn restore_recursive_segmented_runtime_v27(
     constraint: &mut Constraint,
     runtime: RecursiveSegmentedRuntimeArtifactV27,
     vocab: &crate::Vocab,
+    budget: &LoadBudget,
 ) -> crate::Result<()> {
     if !runtime.segmented_mask_authoritative {
         return Err(crate::Error::Serialization(
@@ -4169,7 +4215,7 @@ fn restore_recursive_segmented_runtime_v27(
         .components
         .into_par_iter()
         .map(|component| {
-            let child = Constraint::load_body_external_artifact(&component.constraint_artifact, vocab)?;
+            let child = Constraint::load_body_external_budgeted(component.constraint_artifact, vocab, &budget.child()?)?;
             Ok::<_, crate::Error>((component, child))
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -4370,20 +4416,21 @@ fn restore_segmented_runtime_v27(
     constraint: &mut Constraint,
     runtime: SegmentedRuntimeArtifactV27,
     vocab: &crate::Vocab,
+    budget: &LoadBudget,
 ) -> crate::Result<()> {
     match runtime {
         SegmentedRuntimeArtifactV27::Recursive(runtime) => {
-            restore_recursive_segmented_runtime_v27(constraint, runtime, vocab)
+            restore_recursive_segmented_runtime_v27(constraint, runtime, vocab, budget)
         }
         SegmentedRuntimeArtifactV27::LegacyV24(runtime) => {
-            restore_segmented_runtime_v24(constraint, runtime, vocab)
+            restore_segmented_runtime_v24(constraint, runtime, vocab, budget)
         }
         SegmentedRuntimeArtifactV27::RecursiveProjected(_runtime, _observation) => {
             Err(crate::Error::Serialization(
                 "experimental projected artifact lacks a full-vocabulary observation contract; rebuild it".into()))
         }
         SegmentedRuntimeArtifactV27::RecursiveObserved(runtime, observation) => {
-            restore_recursive_segmented_runtime_v27(constraint, runtime, vocab)?;
+            restore_recursive_segmented_runtime_v27(constraint, runtime, vocab, budget)?;
             observation.validate(constraint).map_err(crate::Error::Serialization)?;
             constraint.static_dynamic_overlay.as_mut().expect("restored recursive overlay")
                 .recursive_static_observation = Some(Arc::new(observation));
@@ -4817,7 +4864,7 @@ impl Constraint {
             // This vector is the first field of ConstraintCompositionCacheMetadata
             // in every split format. Deserialize that field with a bounded slice
             // reader, leaving its unrelated characterization vector untouched.
-            let templates = bincode::deserialize_from(cache_raw.as_ref())
+            let templates = decode_bincode(cache_raw.as_ref())
                 .map_err(|error| error.to_string())?;
             Ok(Cow::Owned(templates))
         } else {
@@ -4973,6 +5020,14 @@ impl Constraint {
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
+        let bytes = bytes.into();
+        let budget = LoadBudget::new(bytes.len());
+        Self::load_body_external_budgeted(bytes, vocab, &budget)
+    }
+
+    pub(crate) fn load_body_external_budgeted<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>, vocab: &crate::Vocab, budget: &LoadBudget,
+    ) -> crate::Result<Self> {
         crate::with_deep_stack(|| {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             if recorded != crate::compiler::compile::vocab_fingerprint(vocab) {
@@ -4980,7 +5035,7 @@ impl Constraint {
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
-            Self::load_body_artifact_with_vocab(body, vocab)
+            Self::load_body_artifact_with_vocab_budgeted(body, vocab, budget)
         })
     }
 
@@ -5909,15 +5964,17 @@ impl Constraint {
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
         crate::error::check_vocab_token_ids(vocab)?;
+        let bytes = bytes.into();
+        let budget = LoadBudget::new(bytes.len());
         crate::with_deep_stack(|| {
-            let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
+            let (body, recorded) = Self::decode_artifact_envelope(bytes)?;
             let expected = crate::compiler::compile::vocab_fingerprint(vocab);
             if recorded != expected {
                 return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
-            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
+            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab), &budget)?;
             constraint
                 .bind_vocab_exact(vocab)
                 .map_err(crate::Error::Serialization)?;
@@ -5935,12 +5992,20 @@ impl Constraint {
         bytes: impl Into<Cow<'b, [u8]>>,
         closed_root: bool,
     ) -> crate::Result<(Self, [u8; 32])> {
+        let bytes = bytes.into();
+        let budget = LoadBudget::new(bytes.len());
+        Self::load_deferred_budgeted(bytes, closed_root, &budget)
+    }
+
+    pub(crate) fn load_deferred_budgeted<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>, closed_root: bool, budget: &LoadBudget,
+    ) -> crate::Result<(Self, [u8; 32])> {
         crate::with_deep_stack(|| {
             let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
             let mut constraint = if closed_root {
-                Self::load_with_vocab_policy(body, None)?
+                Self::load_with_vocab_policy(body, None, budget)?
             } else {
-                Self::load_body_with_vocab_policy(body, None)?
+                Self::load_body_with_vocab_policy(body, None, budget)?
             };
             constraint.pending_vocab_fingerprint = Some(recorded);
             Ok((constraint, recorded))
@@ -5972,9 +6037,9 @@ impl Constraint {
         Ok((body, fingerprint))
     }
 
-    fn load_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
+    fn load_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>, budget: &LoadBudget) -> crate::Result<Self> {
         if !bytes.starts_with(ROOT_POLICY_MAGIC) {
-            let body = Self::load_body_with_vocab_policy(bytes, supplied_vocab)?;
+            let body = Self::load_body_with_vocab_policy(bytes, supplied_vocab, budget)?;
             if !body.late_grammar_slots.is_empty() {
                 return Err(crate::Error::Serialization(
                     "constraint artifact has unresolved slots; load it as an UnlinkedConstraint instead"
@@ -6007,8 +6072,8 @@ impl Constraint {
             return Err(crate::Error::Serialization("noncanonical root vocabulary policy".to_owned()));
         }
         let mut body = match bytes {
-            Cow::Owned(mut bytes) => Self::load_body_with_vocab_policy(Cow::Owned(bytes.split_off(start)), supplied_vocab)?,
-            Cow::Borrowed(bytes) => Self::load_body_with_vocab_policy(Cow::Borrowed(&bytes[start..]), supplied_vocab)?,
+            Cow::Owned(mut bytes) => Self::load_body_with_vocab_policy(Cow::Owned(bytes.split_off(start)), supplied_vocab, budget)?,
+            Cow::Borrowed(bytes) => Self::load_body_with_vocab_policy(Cow::Borrowed(&bytes[start..]), supplied_vocab, budget)?,
         };
         if !body.late_grammar_slots.is_empty() {
             return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
@@ -6031,9 +6096,9 @@ impl Constraint {
             .map_err(|error| crate::Error::Serialization(error.to_string()))
     }
 
-    fn load_body_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
+    fn load_body_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>, budget: &LoadBudget) -> crate::Result<Self> {
         if !bytes.starts_with(MARKER_BODY_MAGIC) {
-            return Self::load_body_core_with_vocab_policy(bytes, supplied_vocab);
+            return Self::load_body_core_with_vocab_policy(bytes, supplied_vocab, budget);
         }
         let fail = |message: &str| crate::Error::Serialization(message.to_owned());
         if bytes.len() < MARKER_BODY_HEADER_LEN { return Err(fail("truncated marker artifact header")); }
@@ -6064,8 +6129,8 @@ impl Constraint {
             marker_id: u32::from_le_bytes(record[4..].try_into().expect("fixed record")),
         }).collect::<Vec<_>>();
         let mut constraint = match bytes {
-            Cow::Owned(mut bytes) => Self::load_body_core_with_vocab_policy(Cow::Owned(bytes.split_off(body_start)), supplied_vocab)?,
-            Cow::Borrowed(bytes) => Self::load_body_core_with_vocab_policy(Cow::Borrowed(&bytes[body_start..]), supplied_vocab)?,
+            Cow::Owned(mut bytes) => Self::load_body_core_with_vocab_policy(Cow::Owned(bytes.split_off(body_start)), supplied_vocab, budget)?,
+            Cow::Borrowed(bytes) => Self::load_body_core_with_vocab_policy(Cow::Borrowed(&bytes[body_start..]), supplied_vocab, budget)?,
         };
         for marker in &terminals {
             if marker.terminal_id >= constraint.parser_terminal_count()
@@ -6083,13 +6148,13 @@ impl Constraint {
         Ok(constraint)
     }
 
-    fn load_body_core_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
+    fn load_body_core_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>, budget: &LoadBudget) -> crate::Result<Self> {
         let constraint = match bytes {
             Cow::Owned(bytes) => {
                 let backing = std::sync::Arc::new(bytes);
-                Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)), supplied_vocab)
+                Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)), supplied_vocab, budget)
             }
-            Cow::Borrowed(bytes) => Self::load_impl(bytes, None, supplied_vocab),
+            Cow::Borrowed(bytes) => Self::load_impl(bytes, None, supplied_vocab, budget),
         }?;
         constraint.prepare_commit_reset_frontier();
         Ok(constraint)
@@ -6100,7 +6165,15 @@ impl Constraint {
     pub(crate) fn load_body_artifact_with_vocab<'b>(
         bytes: impl Into<Cow<'b, [u8]>>, vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
-        let mut constraint = Self::load_body_with_vocab_policy(bytes.into(), Some(vocab))?;
+        let bytes = bytes.into();
+        let budget = LoadBudget::new(bytes.len());
+        Self::load_body_artifact_with_vocab_budgeted(bytes, vocab, &budget)
+    }
+
+    fn load_body_artifact_with_vocab_budgeted<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>, vocab: &crate::Vocab, budget: &LoadBudget,
+    ) -> crate::Result<Self> {
+        let mut constraint = Self::load_body_with_vocab_policy(bytes.into(), Some(vocab), budget)?;
         constraint.bind_vocab_exact(vocab).map_err(crate::Error::Serialization)?;
         Ok(constraint)
     }
@@ -6111,15 +6184,16 @@ impl Constraint {
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
+        let bytes = bytes.into();
+        let budget = LoadBudget::new(bytes.len());
         crate::with_deep_stack(|| {
-            let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
-            let expected = crate::compiler::compile::vocab_fingerprint(vocab);
+            let (body, recorded) = Self::decode_artifact_envelope(bytes)?;
             if recorded != expected {
                 return Err(crate::Error::VocabMismatch(
                     "the constraint was saved with a different vocabulary".to_owned(),
                 ));
             }
-            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
+            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab), &budget)?;
             constraint
                 .bind_vocab_exact(vocab)
                 .map_err(crate::Error::Serialization)?;
@@ -6142,6 +6216,7 @@ impl Constraint {
         profile: bool,
         packed_dwa_inventory: &mut Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
         prepared_completion_wire: &mut Option<Arc<[u8]>>,
+        budget: &LoadBudget,
     ) -> crate::Result<DecodedNativeArtifactLoad> {
         let external_layout = matches!(
             version,
@@ -6188,6 +6263,19 @@ impl Constraint {
             Some(token_mask_cache),
             Some(composition_metadata),
         );
+        let (composition_wire, _) = crate::compiler::boundary_precomputed_completion::split_envelope(composition_metadata)
+            .map_err(crate::Error::Serialization)?;
+        validate_composition_metadata_wire(composition_wire).map_err(crate::Error::Serialization)?;
+        if composition_wire.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+            || composition_wire.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+            || composition_wire.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
+            let parts = split_composition_metadata_parts(composition_wire).map_err(crate::Error::Serialization)?;
+            budget.charge(parts.link_raw_len + parts.cache_raw_len).map_err(crate::Error::Serialization)?;
+        } else if !composition_wire.is_empty() {
+            let raw = usize::try_from(u64::from_le_bytes(composition_wire[4..12].try_into().unwrap()))
+                .map_err(|_| crate::Error::Serialization("composition metadata length overflow".into()))?;
+            budget.charge(raw).map_err(crate::Error::Serialization)?;
+        }
         let (((dwa_result, (table_result, runtime_result)), ((tokenizer_result, original_token_map_result), (internal_token_buf_masks_result, token_mask_cache_result))), core_result) = rayon::join(
             || rayon::join(
                 || rayon::join(
@@ -6342,7 +6430,7 @@ impl Constraint {
                                         .as_ref()
                                         .ok_or_else(|| bincode::Error::new(bincode::ErrorKind::Custom("current runtime has no artifact backing".to_owned())))
                                         .and_then(|backing| {
-                                            decode_current_runtime_wire(runtime_section, std::sync::Arc::clone(backing))
+                                            decode_current_runtime_wire_budgeted(runtime_section, std::sync::Arc::clone(backing), budget)
                                                 .map_err(|err| bincode::Error::new(bincode::ErrorKind::Custom(err)))
                                         })
                                     .and_then(|(runtime, static_virtual_residual_mask)| {
@@ -6598,7 +6686,7 @@ impl Constraint {
                             false,
                         );
                     let core_started = profile.then(std::time::Instant::now);
-                    let decoded = if uses_external_runtime_sections(version) {
+                    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if uses_external_runtime_sections(version) {
                         if core_section.starts_with(&CURRENT_CORE_MAGIC)
                             || core_section.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC)
                             || core_section.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
@@ -6629,7 +6717,7 @@ impl Constraint {
                         }
                     } else {
                         Err("unsupported constraint core version".to_owned())
-                    };
+                    })).unwrap_or_else(|_| Err("invalid constraint core metadata".to_owned()));
                     let deferred_token_bytes =
                         crate::runtime::artifact::token_bytes_artifact_serde::take_deferred();
                     let deferred_weight_ids = if weight_count.is_some() {
@@ -6876,7 +6964,10 @@ impl Constraint {
         bytes: &[u8],
         owned_artifact: Option<std::sync::Arc<Vec<u8>>>,
         supplied_vocab: Option<&crate::Vocab>,
+        budget: &LoadBudget,
     ) -> crate::Result<Self> {
+        budget.charge(bytes.len().checked_mul(2).ok_or_else(|| crate::Error::Serialization("artifact length overflow".into()))?)
+            .map_err(crate::Error::Serialization)?;
         let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let decompress_ms = 0.0;
@@ -6917,11 +7008,10 @@ impl Constraint {
         // If the caller did not transfer ownership, make the one compatibility
         // copy up front so every retained view and the unchanged-resave cache
         // share the same backing allocation.
-        let current_backing = Some(
-            owned_artifact
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::new(bytes.to_vec())),
-        );
+        let current_backing = Some(match owned_artifact.clone() {
+            Some(backing) => backing,
+            None => Arc::new(copy_bytes(bytes).map_err(crate::Error::Serialization)?),
+        });
         let section_bytes = current_backing
             .as_ref()
             .map_or(bytes, |backing| backing.as_slice());
@@ -6939,7 +7029,7 @@ impl Constraint {
             let decoded = Self::decode_native_artifact_for_load(
                 version, serialized, section_bytes, &current_backing,
                 external_vocab, deferred, profile, &mut packed_dwa_inventory,
-                &mut prepared_completion_wire,
+                &mut prepared_completion_wire, budget,
             )?;
             let mut constraint = decoded.constraint;
             let runtime = decoded.runtime;
@@ -7012,7 +7102,7 @@ impl Constraint {
                 }
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v27
                     && !deferred {
-                        restore_segmented_runtime_v27(&mut constraint, segmented_runtime, external_vocab.expect("segmented runtime requires its Vocab"))?;
+                        restore_segmented_runtime_v27(&mut constraint, segmented_runtime, external_vocab.expect("segmented runtime requires its Vocab"), budget)?;
                     }
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
