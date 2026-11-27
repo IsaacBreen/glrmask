@@ -24,7 +24,7 @@ mod tests {
         );
         assert_eq!(
             format!("{:?}", push_suffixes::prepare(template)),
-            format!("{:?}", push_suffixes::from_prepared(&prepared, PreparedPhaseDag::from_prepared(&prepared).as_ref().map(|plan| plan.push_paths())))
+            format!("{:?}", push_suffixes::from_prepared(&prepared))
         );
     }
 

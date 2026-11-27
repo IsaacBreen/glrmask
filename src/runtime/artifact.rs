@@ -1795,8 +1795,7 @@ impl FastCommitTemplateDfas {
         prepared: Option<&super::commit::template_prepare::TemplatePreparation<'_>>) -> Self {
         let phase_dag = prepared.and_then(super::commit::phase_dag::PreparedPhaseDag::from_prepared);
         let push_suffixes = match prepared {
-            Some(prepared) => super::commit::push_suffixes::from_prepared(
-                prepared, phase_dag.as_ref().map(|plan| plan.push_paths())),
+            Some(prepared) => super::commit::push_suffixes::from_prepared(prepared),
             // A legacy malformed optional graph may still have a valid PUSH
             // language. Preserve this bounded independent fallback.
             None => super::commit::push_suffixes::prepare(template),

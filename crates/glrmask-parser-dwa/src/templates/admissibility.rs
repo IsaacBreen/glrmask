@@ -11,6 +11,7 @@
 //! retained when it overrides an otherwise productive DEFAULT transition.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use std::collections::BTreeSet;
 use rustc_hash::FxHashMap;
@@ -126,8 +127,66 @@ fn validate_links(links: &[Option<u32>], source_len: usize, target_len: usize, n
     Ok(())
 }
 
-fn linked_productive(links: &[Option<u32>], source: usize, productive: &[bool]) -> bool {
-    links.get(source).copied().flatten().is_some_and(|target| productive[target as usize])
+fn linked_productive(links: &[Option<u32>], source: usize, paths: &[u8]) -> bool {
+    links.get(source).copied().flatten().is_some_and(|target| paths[target as usize] != 0)
+}
+
+/// Saturation is sufficient for both existential PUSH productivity and
+/// bounded output-word materialization. Above the limit, use graph execution.
+pub const PUSH_PATH_LIMIT: u8 = 64;
+
+fn push_path_counts(graph: &DFA, order: &[usize]) -> Arc<[u8]> {
+    let mut counts = vec![0u8; graph.states.len()];
+    for &id in order.iter().rev() {
+        let row = &graph.states[id];
+        counts[id] = row.transitions.values().fold(u8::from(row.is_accepting), |count, &target| {
+            count.saturating_add(counts[target as usize]).min(PUSH_PATH_LIMIT + 1)
+        });
+    }
+    counts.into()
+}
+
+/// Scratch for both exact input-domain projection and execution preparation.
+/// READ observes one unchanged top, so reachability alone is not sufficient:
+/// only edges whose destination accepts the SAME symbol can succeed.
+#[derive(Debug)]
+struct TemplateInputFacts {
+    push_paths: Arc<[u8]>,
+    read_empty: Vec<bool>,
+    read_labels: Vec<Vec<u32>>,
+    pop_productive: Vec<bool>,
+}
+
+impl TemplateInputFacts {
+    fn new(template: &CommitTemplateDfas, orders: &[Vec<usize>; 3]) -> Self {
+        let push_paths = push_path_counts(&template.push, &orders[2]);
+        let mut read_empty = vec![false; template.read.states.len()];
+        let mut read_labels = vec![Vec::<u32>::new(); template.read.states.len()];
+        for &id in orders[1].iter().rev() {
+            let state = &template.read.states[id];
+            read_empty[id] = state.is_accepting
+                || linked_productive(&template.read_to_push, id, &push_paths);
+            if !read_empty[id] {
+                read_labels[id] = state.transitions.iter().filter_map(|(&label, &target)| {
+                    let target = target as usize;
+                    (read_empty[target] || read_labels[target].binary_search(&(label as u32)).is_ok())
+                        .then_some(label as u32)
+                }).collect();
+            }
+        }
+        let mut pop_productive = vec![false; template.pop.states.len()];
+        for &id in orders[0].iter().rev() {
+            let row = &template.pop.states[id];
+            let read = template.pop_to_read.get(id).copied().flatten().map(|r| r as usize);
+            // An existential DEFAULT may still have no witness in a caller's
+            // finite alphabet. This only prunes definitely impossible states.
+            pop_productive[id] = row.is_accepting
+                || linked_productive(&template.pop_to_push, id, &push_paths)
+                || read.is_some_and(|r| read_empty[r] || !read_labels[r].is_empty())
+                || row.transitions.values().any(|&target| pop_productive[target as usize]);
+        }
+        Self { push_paths, read_empty, read_labels, pop_productive }
+    }
 }
 
 /// Merge two already-ordered sources of root transitions. READ acceptance
@@ -167,6 +226,7 @@ pub struct ValidatedTemplate<'a> {
     template: &'a CommitTemplateDfas,
     orders: [Vec<usize>; 3],
     largest_symbol: Option<u32>,
+    facts: OnceLock<TemplateInputFacts>,
 }
 
 impl<'a> ValidatedTemplate<'a> {
@@ -178,12 +238,39 @@ impl<'a> ValidatedTemplate<'a> {
         validate_links(&template.pop_to_push, template.pop.states.len(), template.push.states.len(), "POP->PUSH")?;
         validate_links(&template.read_to_push, template.read.states.len(), template.push.states.len(), "READ->PUSH")?;
         let largest_symbol = [pop_symbol, read_symbol, push_symbol].into_iter().flatten().max();
-        Ok(Self { template, orders: [pop, read, push], largest_symbol })
+        Ok(Self { template, orders: [pop, read, push], largest_symbol, facts: OnceLock::new() })
     }
 
     pub fn template(&self) -> &'a CommitTemplateDfas { self.template }
     pub fn orders(&self) -> &[Vec<usize>; 3] { &self.orders }
     pub fn push_order(&self) -> &[usize] { &self.orders[2] }
+
+    fn facts(&self) -> &TemplateInputFacts {
+        self.facts.get_or_init(|| TemplateInputFacts::new(self.template, &self.orders))
+    }
+
+    pub fn push_paths(&self) -> &Arc<[u8]> { &self.facts().push_paths }
+
+    /// Structural feasibility for execution scheduling, not a finite alphabet
+    /// or stack-specific admission proof.
+    pub fn productive(&self, phase: usize, id: usize) -> bool {
+        let facts = self.facts();
+        match phase {
+            0 => facts.pop_productive[id],
+            1 => facts.read_empty[id] || !facts.read_labels[id].is_empty(),
+            2 => facts.push_paths[id] != 0,
+            _ => false,
+        }
+    }
+
+    /// Legacy optional templates may fail complete preparation while their
+    /// PUSH phase remains usable. Reuse the same graph validation and count
+    /// recurrence for that independent bounded accelerator.
+    pub fn push_only_facts(template: &CommitTemplateDfas) -> Result<(Vec<usize>, Arc<[u8]>), String> {
+        let (order, _) = topological_order(&template.push, Phase::Push)?;
+        let counts = push_path_counts(&template.push, &order);
+        Ok((order, counts))
+    }
 
     /// Alphabet checks reuse the maximum observed during graph validation,
     /// including labels in unreachable states. This is not a promise about an
@@ -204,32 +291,11 @@ impl TemplateDomain {
     /// Derive the exact input domain while reusing a complete graph validation.
     pub fn from_validated(validated: &ValidatedTemplate<'_>) -> Result<Self, String> {
         let template = validated.template();
-        let [pop_order, read_order, push_order] = validated.orders();
-
-        let mut push_good = vec![false; template.push.states.len()];
-        for &id in push_order.iter().rev() {
-            let state = &template.push.states[id];
-            push_good[id] = state.is_accepting
-                || state.transitions.values().any(|&target| push_good[target as usize]);
-        }
-        let mut read_without_input = vec![false; template.read.states.len()];
-        // Each input row already has strictly ordered, unique labels. Filtering
-        // it preserves those properties; no ordered-tree insertion is needed
-        // for the derived READ certificate set.
-        let mut read_labels = vec![Vec::<u32>::new(); template.read.states.len()];
-        for &id in read_order.iter().rev() {
-            let i = id;
-            let state = &template.read.states[i];
-            read_without_input[i] = state.is_accepting
-                || linked_productive(&template.read_to_push, i, &push_good);
-            if read_without_input[i] { continue; }
-            let labels: Vec<u32> = state.transitions.iter().filter_map(|(&label, &target)| {
-                let target = target as usize;
-                (read_without_input[target] || read_labels[target].binary_search(&(label as u32)).is_ok())
-                    .then_some(label as u32)
-            }).collect();
-            read_labels[i] = labels;
-        }
+        let pop_order = &validated.orders()[0];
+        let facts = validated.facts();
+        let push_good = &facts.push_paths;
+        let read_without_input = &facts.read_empty;
+        let read_labels = &facts.read_labels;
 
         // ID zero is universal prefix acceptance. REJECT has no allocated
         // state. Every interned nonterminal row is productive; all children
@@ -246,7 +312,7 @@ impl TemplateDomain {
             let i = id;
             let state = &template.pop.states[i];
             let read = template.pop_to_read.get(i).copied().flatten().map(|v| v as usize);
-            if state.is_accepting || linked_productive(&template.pop_to_push, i, &push_good)
+            if state.is_accepting || linked_productive(&template.pop_to_push, i, push_good)
                 || read.is_some_and(|r| read_without_input[r])
             {
                 canonical[i] = 0;

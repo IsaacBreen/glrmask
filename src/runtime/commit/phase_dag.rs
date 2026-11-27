@@ -13,6 +13,8 @@
 //! correlated annotations retain the established ordered interpreter.
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::Arc;
+pub(super) use glrmask_parser_dwa::__private::templates::admissibility::PUSH_PATH_LIMIT;
 
 use rustc_hash::FxHashMap;
 
@@ -26,30 +28,17 @@ use super::template_advance::Phase;
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedPhaseDag {
     ranks: [Box<[u32]>; 3],
-    push_paths: Box<[u8]>,
-    input_productive: [Box<[bool]>; 2],
+    push_paths: Arc<[u8]>,
 }
 
-fn ranks_from_order(order: &[usize]) -> Option<Box<[u32]>> {
-    let mut rank = vec![0u32; order.len()];
-    for (i, &id) in order.iter().enumerate() { rank[id] = u32::try_from(i).ok()?; }
-    Some(rank.into_boxed_slice())
-}
+const DEAD_RANK: u32 = u32::MAX;
 
-/// One saturated count is both the PUSH productivity fact and the small
-/// output enumeration bound. The same fact serves every execution plan.
-pub(super) const PUSH_PATH_LIMIT: u8 = 64;
-
-pub(super) fn push_path_counts(template: &CommitTemplateDfas, order: &[usize]) -> Box<[u8]> {
-    let graph = &template.push;
-    let mut counts = vec![0u8; graph.states.len()];
-    for &id in order.iter().rev() {
-        let row = &graph.states[id];
-        counts[id] = row.transitions.values().fold(u8::from(row.is_accepting), |count, &target| {
-            count.saturating_add(counts[target as usize]).min(PUSH_PATH_LIMIT + 1)
-        });
+fn ranks_from_order(order: &[usize], mut productive: impl FnMut(usize) -> bool) -> Option<Box<[u32]>> {
+    let mut rank = vec![DEAD_RANK; order.len()];
+    for (i, &id) in order.iter().enumerate() {
+        if productive(id) { rank[id] = u32::try_from(i).ok()?; }
     }
-    counts.into_boxed_slice()
+    Some(rank.into_boxed_slice())
 }
 
 impl PreparedPhaseDag {
@@ -59,40 +48,16 @@ impl PreparedPhaseDag {
 
     pub(crate) fn from_prepared(prepared: &super::template_prepare::TemplatePreparation<'_>) -> Option<Self> {
         let orders = prepared.orders();
-        let template = prepared.template();
-        let push_paths = push_path_counts(template, &orders[2]);
-        let mut input_productive: [Box<[bool]>; 2] = [
-            vec![false; template.pop.states.len()].into_boxed_slice(),
-            vec![false; template.read.states.len()].into_boxed_slice(),
+        let ranks = [
+            ranks_from_order(&orders[0], |id| prepared.productive(0, id))?,
+            ranks_from_order(&orders[1], |id| prepared.productive(1, id))?,
+            ranks_from_order(&orders[2], |id| prepared.productive(2, id))?,
         ];
-        // READ tests the same top repeatedly; this is deliberately a
-        // conservative productivity fact, never an admission certificate.
-        for phase in (0..2).rev() {
-            let graph = if phase == 0 { &template.pop } else { &template.read };
-            let push_links = if phase == 0 { &template.pop_to_push } else { &template.read_to_push };
-            for &id in orders[phase].iter().rev() {
-                let row = &graph.states[id];
-                let live = row.is_accepting
-                    || row.transitions.values().any(|&target| input_productive[phase][target as usize])
-                    || push_links.get(id).copied().flatten().is_some_and(|target| push_paths[target as usize] != 0)
-                    || phase == 0 && template.pop_to_read.get(id).copied().flatten()
-                        .is_some_and(|target| input_productive[1][target as usize]);
-                input_productive[phase][id] = live;
-            }
-        }
-        Some(Self {
-            ranks: [ranks_from_order(&orders[0])?, ranks_from_order(&orders[1])?,
-                ranks_from_order(&orders[2])?],
-            push_paths,
-            input_productive,
-        })
+        Some(Self { ranks, push_paths: Arc::clone(prepared.push_paths()) })
     }
 
-    pub(crate) fn push_paths(&self) -> &[u8] { &self.push_paths }
-
     pub(super) fn productive(&self, phase: usize, id: u32) -> Option<bool> {
-        if phase == 2 { return self.push_paths.get(id as usize).map(|&count| count != 0); }
-        self.input_productive.get(phase)?.get(id as usize).copied()
+        self.ranks.get(phase)?.get(id as usize).map(|&rank| rank != DEAD_RANK)
     }
 
     pub(super) fn apply_large_push(
@@ -123,7 +88,7 @@ impl PreparedPhaseDag {
                        phase: u8, id: u32, stacks: ParserGSS| {
             if stacks.is_empty() { return; }
             let Some(&rank) = self.ranks[phase as usize].get(id as usize) else { return; };
-            if self.productive(phase as usize, id) != Some(true) { return; }
+            if rank == DEAD_RANK { return; }
             match incoming.entry((phase, id)) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let merged = entry.get().merge(&stacks); entry.insert(merged);

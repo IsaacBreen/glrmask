@@ -5,7 +5,7 @@
 //! Large uniform-annotation languages use the shared phase dataflow;
 //! correlated annotations retain the ordered exact template evaluator. The
 //! usual shared GSS branch constructor owns all stack storage.
-use crate::compiler::glr::labels::{is_negative_label, negative_to_positive_label};
+use crate::compiler::glr::labels::negative_to_positive_label;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::runtime::CommitTemplateDfas;
 
@@ -47,42 +47,16 @@ impl PreparedPushSuffixes {
 }
 
 pub(crate) fn prepare(template: &CommitTemplateDfas) -> Vec<Option<PreparedPushSuffixes>> {
-    let graph = &template.push;
-    let n = graph.states.len();
-    let empty = || (0..n).map(|_| None).collect::<Vec<_>>();
-    let mut indegree = vec![0usize; n];
-    for state in &graph.states {
-        for (&label, &target) in &state.transitions {
-            if !is_negative_label(label) { return empty(); }
-            let Some(degree) = indegree.get_mut(target as usize) else { return empty(); };
-            *degree += 1;
-        }
-    }
-    let mut order: Vec<_> = indegree.iter().enumerate()
-        .filter_map(|(i, &d)| (d == 0).then_some(i)).collect();
-    let mut head = 0;
-    while head < order.len() {
-        let source = order[head]; head += 1;
-        for &target in graph.states[source].transitions.values() {
-            indegree[target as usize] -= 1;
-            if indegree[target as usize] == 0 { order.push(target as usize); }
-        }
-    }
-    if order.len() != n { return empty(); }
-    let counts = super::phase_dag::push_path_counts(template, &order);
+    let Ok((order, counts)) = super::template_prepare::TemplatePreparation::push_only_facts(template) else {
+        return (0..template.push.states.len()).map(|_| None).collect();
+    };
     prepare_with_order(template, &order, &counts)
 }
 
 pub(crate) fn from_prepared(
     prepared: &super::template_prepare::TemplatePreparation<'_>,
-    counts: Option<&[u8]>,
 ) -> Vec<Option<PreparedPushSuffixes>> {
-    let owned;
-    let counts = if let Some(counts) = counts { counts } else {
-        owned = super::phase_dag::push_path_counts(prepared.template(), prepared.push_order());
-        &owned
-    };
-    prepare_with_order(prepared.template(), prepared.push_order(), counts)
+    prepare_with_order(prepared.template(), prepared.push_order(), prepared.push_paths())
 }
 
 fn prepare_with_order(template: &CommitTemplateDfas, order: &[usize], counts: &[u8]) -> Vec<Option<PreparedPushSuffixes>> {
