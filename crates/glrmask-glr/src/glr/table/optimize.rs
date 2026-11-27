@@ -1447,11 +1447,9 @@ impl GLRTable {
         let constituent_sets: Vec<StateSubset> = (0..original_num_states)
             .map(|state| smallvec![state])
             .collect();
-        let predecessors = build_runtime_state_predecessors(
-            self,
-            original_num_states,
-            &constituent_sets,
-        );
+        let Ok(predecessors) = build_runtime_state_predecessors(self, &constituent_sets) else {
+            return (0..original_num_states).collect();
+        };
 
         // The predecessor recurrence above is exact for ordinary Shift/Split
         // shift and goto edges. If a state can be entered by a precompiled
@@ -2344,11 +2342,11 @@ impl GLRTable {
                 .unwrap_or(0.0);
             let predecessors_started_at = profile_enabled.then(std::time::Instant::now);
             if !using_worklist {
-                cached_predecessors = Some(build_runtime_state_predecessors(
-                    self,
-                    original_num_states,
-                    &constituent_sets,
-                ));
+                let Ok(predecessors) = build_runtime_state_predecessors(self, &constituent_sets) else {
+                    budget.abort(ABORT_REFRESH_REBUILD);
+                    break;
+                };
+                cached_predecessors = Some(predecessors);
             }
             let predecessors = cached_predecessors
                 .as_ref()
@@ -2746,462 +2744,7 @@ impl GLRTable {
         }
     }
 
-    /// Merge states that are equivalent for recognition purposes.
-    ///
-    /// Unlike `merge_identical_rows` which requires exact action/goto match,
-    /// this treats two Reduce actions as equivalent when they have the same
-    /// `(lhs, rhs_len)`, since the parser only uses those two fields.
-    /// It also merges goto columns for nonterminals that become equivalent.
-    /// Iterates until stable.
-    pub(super) fn merge_recognizer_equivalent(&mut self) {
-        loop {
-            let prev_states = self.num_states;
 
-            // Step 1: With Reduce(nt, len) representation, reduces are already
-            // canonicalized by (lhs, rhs_len). Just merge identical rows.
-
-            // Step 2: Merge states with identical rows.
-            self.merge_identical_rows();
-
-            // Step 3: Merge goto columns for nonterminals whose goto vectors
-            // are identical across all states (i.e., they always land in the
-            // same state, or are both absent).
-            let nstates = self.num_states as usize;
-            let mut all_nts: BTreeSet<NonterminalID> = BTreeSet::new();
-            let mut columns_by_nt: FxHashMap<NonterminalID, Vec<(u32, (u32, bool))>> =
-                FxHashMap::default();
-            for (state, goto_row) in self.goto.iter().enumerate() {
-                for (&nt, &target) in goto_row {
-                    all_nts.insert(nt);
-                    columns_by_nt
-                        .entry(nt)
-                        .or_default()
-                        .push((state as u32, target));
-                }
-            }
-
-            // Build sparse goto signatures for each nonterminal and group by them.
-            let mut column_to_canon: FxHashMap<Vec<(u32, (u32, bool))>, NonterminalID> =
-                FxHashMap::default();
-            let mut nt_remap: FxHashMap<NonterminalID, NonterminalID> = FxHashMap::default();
-            for &nt in &all_nts {
-                let col = columns_by_nt.remove(&nt).unwrap_or_default();
-                if let Some(&canon) = column_to_canon.get(&col) {
-                    nt_remap.insert(nt, canon);
-                } else {
-                    column_to_canon.insert(col, nt);
-                }
-            }
-
-            if !nt_remap.is_empty() {
-                // Rewrite goto entries: merge columns.
-                for state in 0..nstates {
-                    let old = std::mem::take(&mut self.goto[state]);
-                    let mut new_goto = GotoRow::default();
-                    for (&nt, &target) in old.iter() {
-                        let canon_nt = nt_remap.get(&nt).copied().unwrap_or(nt);
-                        // All remapped NTs should have the same target; just insert.
-                        new_goto.insert(canon_nt, target);
-                    }
-                    self.goto[state] = new_goto;
-                }
-
-                // Rewrite nonterminal IDs in action entries (Reduce and Split reduces).
-                for state in 0..nstates {
-                    let old = std::mem::take(&mut self.action[state]);
-                    let new_action: ActionRow = old
-                        .iter()
-                        .map(|(tid, action)| {
-                            let remapped = match action {
-                                Action::Reduce(nt, len) => {
-                                    let canon = nt_remap.get(nt).copied().unwrap_or(*nt);
-                                    Action::Reduce(canon, *len)
-                                }
-                                Action::StackShifts(shifts) => Action::StackShifts(shifts.clone()),
-                                Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(shifts.clone()),
-                                Action::Split { shift, reduces, accept } => {
-                                    let reduces = reduces
-                                        .iter()
-                                        .map(|(nt, len)| {
-                                            let canon = nt_remap.get(nt).copied().unwrap_or(*nt);
-                                            (canon, *len)
-                                        })
-                                        .collect();
-                                    Action::Split { shift: *shift, reduces, accept: *accept }
-                                }
-                                other => other.clone(),
-                            };
-                            (tid, remapped)
-                        })
-                        .collect();
-                    self.action[state] = new_action;
-                }
-
-                // Rewrite rule LHS to use canonical NTs.
-                for rule in &mut self.rules {
-                    if let Some(&canon) = nt_remap.get(&rule.lhs) {
-                        rule.lhs = canon;
-                    }
-                }
-
-                // Rewrite rule RHS nonterminals to use canonical NTs.
-                for rule in &mut self.rules {
-                    for sym in &mut rule.rhs {
-                        if let Symbol::Nonterminal(nt) = sym
-                            && let Some(&canon) = nt_remap.get(nt) {
-                                *nt = canon;
-                            }
-                    }
-                }
-
-                // Merge identical rows again after NT merging.
-                self.merge_identical_rows();
-            }
-
-            // Step 4: Local split collapsing.
-            // For each remaining Split action, check if all reduces land in the
-            // same goto target from every predecessor state.  If so, the split
-            // is invisible to a recognizer and we can collapse it.
-            //
-            // Two sub-passes:
-            //  4a (original) — immediate goto-target equality from all static predecessors.
-            //  4b (new)      — speculative reduce-chain convergence: simulate
-            //      each alternative reduce for up to MAX_SPEC_DEPTH steps,
-            //      collecting the set of (top-state) the chain reaches.
-            //      If all alternatives converge to the same set, collapse.
-            let nstates2 = self.num_states as usize;
-
-            // Build predecessor map: for each state, which states can be
-            // "goto_from" after a rhs_len=K pop.
-            // For rhs_len=1: predecessor is any state X such that
-            //   goto[X][*] == this_state  OR  shift in action[X][*] -> this_state
-            let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates2];
-            for x in 0..nstates2 {
-                for (_, action) in &self.action[x] {
-                    if let Some(target) = action.shift_target() {
-                        predecessors[target as usize].insert(x as u32);
-                    }
-                }
-                for (_, &(target, _)) in &self.goto[x] {
-                    predecessors[target as usize].insert(x as u32);
-                }
-            }
-
-            let mut collapsed_any = false;
-            let mut collapses: Vec<(usize, TerminalID, (NonterminalID, u32))> = Vec::new();
-            for state in 0..nstates2 {
-                for (tid, action) in &self.action[state] {
-                    if let Action::Split { shift, reduces, accept } = action {
-                        // Only handle pure-reduce splits (no shift, no accept).
-                        if shift.is_some() || *accept {
-                            continue;
-                        }
-                        if reduces.is_empty() {
-                            continue;
-                        }
-                        // Check: do all reduces have the same rhs_len?
-                        let (_, rhs_len) = reduces[0];
-                        if reduces.iter().any(|&(_, l)| l != rhs_len) {
-                            continue;
-                        }
-                        // For rhs_len=K, find all states that are K levels
-                        // up in the stack (predecessors^K).
-                        let mut candidate_froms: BTreeSet<u32> = BTreeSet::new();
-                        candidate_froms.insert(state as u32);
-                        for _ in 0..rhs_len {
-                            let mut next = BTreeSet::new();
-                            for &s in &candidate_froms {
-                                if let Some(preds) = predecessors.get(s as usize) {
-                                    next.extend(preds);
-                                }
-                            }
-                            candidate_froms = next;
-                        }
-                        if candidate_froms.is_empty() {
-                            continue;
-                        }
-                        // Check if all reduces lead to the same goto target
-                        // from every predecessor.
-                        let lhss: Vec<NonterminalID> = reduces
-                            .iter()
-                            .map(|&(nt, _)| nt)
-                            .collect();
-                        let mut all_same = true;
-                        'pred_loop: for &pred in &candidate_froms {
-                            let first_target = self.goto[pred as usize].get(&lhss[0]).map(|&(t, _)| t);
-                            for &lhs in &lhss[1..] {
-                                let target = self.goto[pred as usize].get(&lhs).map(|&(t, _)| t);
-                                if target != first_target {
-                                    all_same = false;
-                                    break 'pred_loop;
-                                }
-                            }
-                        }
-                        if all_same {
-                            collapses.push((state, tid, reduces[0]));
-                        }
-                    }
-                }
-            }
-
-            for (state, tid, reduce_info) in collapses {
-                self.action[state].insert(tid, Action::Reduce(reduce_info.0, reduce_info.1));
-                collapsed_any = true;
-            }
-
-            // Step 4b: Deep split collapsing via stack-relative chain following.
-            //
-            // For pure R/R splits not collapsed in 4a, simulate the full reduce
-            // chain for each alternative.  Track predecessor depth relative to
-            // the ORIGINAL split state S (not intermediate chain states).
-            //
-            // The stack at the split: …→ preds^K(S) →…→ S (top)
-            //
-            // After alternative reduce Ri (pop=rhs_len(Ri)):
-            //   - Expose state at depth rhs_len(Ri) below S
-            //   - goto from that state with lhs(Ri) → push T1
-            //   - If T1 has another reduce on the same terminal, follow it:
-            //     pop rhs_len from T1's position, which goes further below S
-            //   - Continue until we reach a non-reduce action
-            //
-            // If all alternatives' chains converge to the same final state
-            // (same goto target from preds^(total_depth) of S), collapse.
-            //
-            // Two sub-passes:
-            //  4b-i: filter out split-state predecessors (handles circular deps)
-            //  4b-ii: deep chain following for remaining unconverged splits
-            let mut spec_collapses: Vec<(usize, TerminalID, (NonterminalID, u32))> = Vec::new();
-
-            // Build set of (state, terminal) pairs that have pure R/R splits
-            let pure_rr_splits: BTreeSet<(usize, TerminalID)> = {
-                let mut set = BTreeSet::new();
-                for s in 0..nstates2 {
-                    for (t, a) in &self.action[s] {
-                        if let Action::Split { shift, reduces: _, accept } = a
-                            && shift.is_none() && !*accept {
-                                set.insert((s, t));
-                            }
-                    }
-                }
-                set
-            };
-
-            for state in 0..nstates2 {
-                for (tid, action) in &self.action[state] {
-                    let Action::Split { shift, reduces, accept } = action else { continue };
-                    if shift.is_some() || *accept { continue }
-                    if reduces.is_empty() { continue }
-
-                    let (_, rhs_len) = reduces[0];
-                    if reduces.iter().any(|&(_, l)| l != rhs_len) {
-                        continue;
-                    }
-                    let reduces = reduces.clone();
-
-                    // Compute candidate_froms (predecessors^K of the split state)
-                    let mut candidate_froms: BTreeSet<u32> = BTreeSet::new();
-                    candidate_froms.insert(state as u32);
-                    for _ in 0..rhs_len {
-                        let mut next = BTreeSet::new();
-                        for &s in &candidate_froms {
-                            if let Some(preds) = predecessors.get(s as usize) {
-                                next.extend(preds);
-                            }
-                        }
-                        candidate_froms = next;
-                    }
-                    if candidate_froms.is_empty() { continue }
-
-                    // 4b-i: Filter out predecessors that are themselves split states
-                    let filtered: BTreeSet<u32> = candidate_froms.iter()
-                        .filter(|&&p| !pure_rr_splits.contains(&(p as usize, tid)))
-                        .copied()
-                        .collect();
-
-                    if filtered.is_empty() {
-                        spec_collapses.push((state, tid, reduces[0]));
-                        continue;
-                    }
-
-                    // Simple check: do all reduces converge from filtered preds?
-                    let lhss: Vec<NonterminalID> = reduces
-                        .iter()
-                        .map(|&(nt, _)| nt)
-                        .collect();
-                    let mut simple_converge = true;
-                    'pred_simple: for &pred in &filtered {
-                        let first_target = self.goto[pred as usize].get(&lhss[0]).map(|&(t, _)| t);
-                        for &lhs in &lhss[1..] {
-                            if self.goto[pred as usize].get(&lhs).map(|&(t, _)| t) != first_target {
-                                simple_converge = false;
-                                break 'pred_simple;
-                            }
-                        }
-                    }
-                    if simple_converge {
-                        spec_collapses.push((state, tid, reduces[0]));
-                        continue;
-                    }
-
-
-                    // 4b-ii: Deep chain following.
-                    // For each alternative, simulate the reduce chain and track
-                    // the total depth popped from the original split state S.
-                    //
-                    // Stack model: After initial reduce Ri (pop=K) from S:
-                    //   base_depth = K (below S)
-                    //   goto_from = preds^K(S)
-                    //   push T1 = goto[goto_from][lhs(Ri)]
-                    //   T1 sits at depth K-1 (one above goto_from)
-                    //
-                    // After follow-up reduce Rj (pop=M) from T1:
-                    //   We pop M items from T1's position. T1 is at K-1.
-                    //   Popping 1 removes T1 itself (back to K).
-                    //   Popping M total goes to depth K + M - 1.
-                    //   base_depth = K + M - 1
-                    //   goto_from = preds^(K+M-1)(S)
-                    //   push T2, sits at K + M - 2
-                    //
-                    // In general: after n reduces with pop values K1,K2,...,Kn,
-                    //   base_depth = K1 + K2 + ... + Kn - (n-1)
-                    //   = sum(Ki) - n + 1
-                    //
-                    // The chain terminates when the action at the pushed state
-                    // is not a Reduce on terminal T.
-                    //
-                    // All alternatives converge if they reach the same
-                    // (base_depth, final_lhs) and goto[preds^base_depth][lhs]
-                    // agrees for all preds.
-                    const MAX_CHAIN: usize = 32;
-
-                    // Follow one alternative's chain.  Returns (base_depth, final_lhs)
-                    // or None if the chain diverges or is too deep.
-                    let follow = |first_nt: NonterminalID, _first_len: u32| -> Option<(usize, NonterminalID)> {
-                        let mut depth = rhs_len as usize; // after initial reduce
-
-                        // Compute goto targets from preds^depth(state) with lhs
-                        let preds_at_depth = |d: usize| -> BTreeSet<u32> {
-                            let mut s = BTreeSet::new();
-                            s.insert(state as u32);
-                            for _ in 0..d {
-                                let mut next = BTreeSet::new();
-                                for &st in &s {
-                                    if let Some(ps) = predecessors.get(st as usize) {
-                                        next.extend(ps);
-                                    }
-                                }
-                                s = next;
-                            }
-                            s
-                        };
-
-                        let mut current_lhs = first_nt;
-                        for _ in 0..MAX_CHAIN {
-                            let preds = preds_at_depth(depth);
-                            if preds.is_empty() { return None }
-
-                            // Get goto targets
-                            let mut goto_targets: BTreeSet<u32> = BTreeSet::new();
-                            for &p in &preds {
-                                if let Some(&(gt, _)) = self.goto[p as usize].get(&current_lhs) {
-                                    goto_targets.insert(gt);
-                                }
-                            }
-                            if goto_targets.is_empty() { return None }
-
-                            // Check action at goto targets on terminal tid
-                            let mut next_reduce: Option<(NonterminalID, u32)> = None;
-                            let mut all_reduce = true;
-                            for &gt in &goto_targets {
-                                match self.action.get(gt as usize).and_then(|r| r.get(&tid)) {
-                                    Some(Action::Reduce(nt, len)) => {
-                                        let info = (*nt, *len);
-                                        match next_reduce {
-                                            None => next_reduce = Some(info),
-                                            Some(nr) if nr == info => {}
-                                            _ => { all_reduce = false; break }
-                                        }
-                                    }
-                                    _ => {
-                                        // Chain terminates
-                                        return Some((depth, current_lhs));
-                                    }
-                                }
-                            }
-                            if !all_reduce { return None }
-
-                            // Follow the next reduce
-                            let (next_nt, next_len) = next_reduce.unwrap();
-                            depth = depth + next_len as usize - 1;
-                            current_lhs = next_nt;
-                        }
-                        None // Too deep
-                    };
-
-                    // Follow all alternatives
-                    let mut first_result: Option<(usize, NonterminalID)> = None;
-                    let mut chain_converge = true;
-                    for &(nt, len) in &reduces {
-                        match follow(nt, len) {
-                            Some(result) => {
-                                match first_result {
-                                    None => first_result = Some(result),
-                                    Some(prev) if prev == result => {}
-                                    _ => { chain_converge = false; break }
-                                }
-                            }
-                            None => { chain_converge = false; break }
-                        }
-                    }
-
-                    if !chain_converge { continue }
-                    let Some((final_depth, final_lhs)) = first_result else { continue };
-
-                    // All alternatives converge to (final_depth, final_lhs).
-                    // Check: from preds^final_depth(state), do all gotos agree?
-                    let mut final_preds = BTreeSet::new();
-                    final_preds.insert(state as u32);
-                    for _ in 0..final_depth {
-                        let mut next = BTreeSet::new();
-                        for &s in &final_preds {
-                            if let Some(ps) = predecessors.get(s as usize) {
-                                next.extend(ps);
-                            }
-                        }
-                        final_preds = next;
-                    }
-
-                    let mut goto_target_val: Option<Option<u32>> = None;
-                    let mut targets_agree = true;
-                    for &pred in &final_preds {
-                        let target = self.goto[pred as usize].get(&final_lhs).map(|&(t, _)| t);
-                        match goto_target_val {
-                            None => goto_target_val = Some(target),
-                            Some(prev) if prev == target => {}
-                            _ => { targets_agree = false; break }
-                        }
-                    }
-
-                    if targets_agree {
-                        spec_collapses.push((state, tid, reduces[0]));
-                    }
-                }
-            }
-
-            for (state, tid, reduce_info) in spec_collapses {
-                self.action[state].insert(tid, Action::Reduce(reduce_info.0, reduce_info.1));
-                collapsed_any = true;
-            }
-
-            if collapsed_any {
-                self.merge_identical_rows();
-            }
-
-            if self.num_states == prev_states {
-                break;
-            }
-        }
-    }
 
     /// Collapse recognizer-equivalent stack-effect alternatives by replacing a
     /// set of pushed LR stack suffixes with one synthetic suffix state.
@@ -4177,249 +3720,12 @@ fn action_predecessor_signature(action: &Action) -> Option<&Action> {
     }
 }
 
-/// Reusable buffers for [`states_at_predecessor_depth`]. `seen` has one bit per
-/// state and is all-zero between calls, so a call costs time proportional to
-/// the predecessor rows it visits rather than to the number of states.
-struct PredecessorWalkScratch {
-    seen: Vec<u64>,
-    current: PredecessorSet,
-    next: PredecessorSet,
-}
-
-impl PredecessorWalkScratch {
-    fn new(num_states: usize) -> Self {
-        Self {
-            seen: vec![0; num_states.div_ceil(64)],
-            current: PredecessorSet::new(),
-            next: PredecessorSet::new(),
-        }
-    }
-}
-
-/// States that reach `src` in exactly `depth` predecessor steps.
-///
-/// Depth 0 is `{src}`. For depth >= 2 the result is sorted and deduplicated;
-/// depth 1 returns the stored row as-is, exactly like the original walk, which
-/// never entered its level loop. `scratch` only deduplicates one level at a
-/// time and is left all-zero, so the walk reads the live predecessor rows and
-/// allocates nothing proportional to the number of states.
-fn states_at_predecessor_depth(
-    src: u32,
-    depth: u32,
-    predecessors: &[PredecessorSet],
-    scratch: &mut PredecessorWalkScratch,
-) -> PredecessorSet {
-    if depth == 0 {
-        return smallvec![src];
-    }
-    scratch.current = predecessors[src as usize].clone();
-    for _ in 1..depth {
-        if scratch.current.is_empty() {
-            break;
-        }
-        scratch.next.clear();
-        for &st in &scratch.current {
-            if let Some(preds) = predecessors.get(st as usize) {
-                for &pred in preds {
-                    let word = pred as usize / 64;
-                    let bit = 1u64 << (pred % 64);
-                    if scratch.seen[word] & bit == 0 {
-                        scratch.seen[word] |= bit;
-                        scratch.next.push(pred);
-                    }
-                }
-            }
-        }
-        // Clear exactly the bits this level set so the next call starts clean.
-        for &pred in &scratch.next {
-            scratch.seen[pred as usize / 64] &= !(1u64 << (pred % 64));
-        }
-        std::mem::swap(&mut scratch.current, &mut scratch.next);
-    }
-    if depth > 1 {
-        scratch.current.sort_unstable();
-    }
-    std::mem::take(&mut scratch.current)
-}
-
 fn build_runtime_state_predecessors(
     table: &GLRTable,
-    _original_num_states: u32,
     constituent_sets: &[StateSubset],
-) -> RuntimePredecessors {
-    let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
-
-    let add_direct_edge = |pred: u32, dst: u32, preds: &mut [PredecessorSet]| {
-        if (dst as usize) < preds.len() {
-            // Constituent expansion is an over-approximation, not a
-            // replacement for the concrete runtime label. A later pop can
-            // traverse this literal synthetic symbol to its own predecessors.
-            preds[dst as usize].push(pred);
-            if let Some(constituents) = constituent_sets.get(pred as usize) {
-                preds[dst as usize].extend_from_slice(constituents);
-            }
-        }
-    };
-
-    // Phase 1: Collect direct (pop == 0 and internal push pairs) edges first.
-    // A deep shift (pop > 1) is the only reason the phase-2 walk needs depth-k
-    // predecessor sets, so track that while the rows are already being scanned.
-    let mut has_deep_shifts = false;
-    for src in 0..table.num_states as usize {
-        for (tid, action) in table.action[src].iter() {
-            match action {
-                // A forwarded replace-flagged Shift is semantically an append.
-                // The literal source label must then precede its target.
-                Action::Shift(dst, replace)
-                    if !*replace || table.forwarded_shifts.contains(&(src as u32, tid)) =>
-                {
-                    add_direct_edge(src as u32, *dst, &mut predecessors);
-                }
-                Action::Split { shift: Some((dst, replace)), .. }
-                    if !*replace || table.forwarded_shifts.contains(&(src as u32, tid)) =>
-                {
-                    add_direct_edge(src as u32, *dst, &mut predecessors);
-                }
-                Action::StackShifts(shifts) => {
-                    for shift in shifts {
-                        has_deep_shifts |= shift.pop > 1;
-                        for i in 0..shift.pushes.len().saturating_sub(1) {
-                            add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
-                        }
-                        if shift.pop == 0 && let Some(&first) = shift.pushes.first() {
-                            add_direct_edge(src as u32, first, &mut predecessors);
-                        }
-                    }
-                }
-                Action::GuardedStackShifts(shifts) => {
-                    for shift in shifts {
-                        has_deep_shifts |= shift.pop > 1;
-                        for i in 0..shift.pushes.len().saturating_sub(1) {
-                            add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
-                        }
-                        if shift.pop == 0 && let Some(&first) = shift.pushes.first() {
-                            add_direct_edge(src as u32, first, &mut predecessors);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        for &(dst, replace) in table.goto[src].values() {
-            if !replace {
-                add_direct_edge(src as u32, dst, &mut predecessors);
-            }
-        }
-    }
-    for predecessors_for_state in &mut predecessors {
-        predecessors_for_state.sort_unstable();
-        predecessors_for_state.dedup();
-    }
-
-    // Phase 2: Replacement and pop >= 1 edges propagate via fixed point.
-    let propagate_to_dst = |dst: u32, incoming: &[u32], preds: &mut [PredecessorSet]| -> bool {
-        if (dst as usize) >= preds.len() || incoming.is_empty() {
-            return false;
-        }
-        let destination_preds = &mut preds[dst as usize];
-        let before = destination_preds.len();
-        destination_preds.extend_from_slice(incoming);
-        destination_preds.sort_unstable();
-        destination_preds.dedup();
-        destination_preds.len() != before
-    };
-
-    // Phase 2 walks depth-k predecessor sets straight from the live rows. The
-    // scratch is one bit per state, so it stays O(states); allocate it only
-    // when phase 1 saw a deep shift.
-    let mut walk_scratch =
-        has_deep_shifts.then(|| PredecessorWalkScratch::new(table.num_states as usize));
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for src in 0..table.num_states as usize {
-            let src_preds = predecessors[src].clone();
-
-            for (tid, action) in table.action[src].iter() {
-                match action {
-                    // Ordinary replacement inherits the popped state's source
-                    // predecessors; forwarded replacement is handled as append
-                    // by the direct-edge collection above.
-                    Action::Shift(dst, true)
-                        if !table.forwarded_shifts.contains(&(src as u32, tid)) =>
-                    {
-                        changed |= propagate_to_dst(*dst, &src_preds, &mut predecessors);
-                    }
-                    Action::Split { shift: Some((dst, true)), .. }
-                        if !table.forwarded_shifts.contains(&(src as u32, tid)) =>
-                    {
-                        changed |= propagate_to_dst(*dst, &src_preds, &mut predecessors);
-                    }
-                    Action::ReplaceShifts(targets) => {
-                        for &dst in targets.iter() {
-                            changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
-                        }
-                    }
-                    Action::StackShifts(shifts) => {
-                        for shift in shifts {
-                            if let Some(&dst) = shift.pushes.first() {
-                                if shift.pop == 1 {
-                                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
-                                } else if shift.pop > 1 {
-                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
-                                    // shift, so the scratch exists for exactly the calls
-                                    // that need it.
-                                    let scratch = walk_scratch
-                                        .as_mut()
-                                        .expect("deep shifts allocate the walk scratch in phase 1");
-                                    let at_depth = states_at_predecessor_depth(
-                                        src as u32,
-                                        shift.pop,
-                                        &predecessors,
-                                        scratch,
-                                    );
-                                    changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
-                                }
-                            }
-                        }
-                    }
-                    Action::GuardedStackShifts(shifts) => {
-                        for shift in shifts {
-                            if let Some(&dst) = shift.pushes.first() {
-                                if shift.pop == 1 {
-                                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
-                                } else if shift.pop > 1 {
-                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
-                                    // shift, so the scratch exists for exactly the calls
-                                    // that need it.
-                                    let scratch = walk_scratch
-                                        .as_mut()
-                                        .expect("deep shifts allocate the walk scratch in phase 1");
-                                    let at_depth = states_at_predecessor_depth(
-                                        src as u32,
-                                        shift.pop,
-                                        &predecessors,
-                                        scratch,
-                                    );
-                                    changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            for &(dst, replace) in table.goto[src].values() {
-                if replace {
-                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
-                }
-            }
-        }
-    }
-
-    predecessors
+) -> Result<RuntimePredecessors, String> {
+    let equations = PredecessorEquations::extract(table, Some(constituent_sets))?;
+    PredecessorSolver::new(&equations).solve(None)
 }
 
 fn control_elimination_failure(
@@ -4444,6 +3750,7 @@ pub fn control_elimination_budget_exhausted(error: &str) -> bool {
     error.contains("reason=stack_effect_visits") || error.contains("reason=elapsed_ms")
 }
 
+#[cfg(test)]
 fn for_each_action_stack_rewrite(action: &Action, mut visit: impl FnMut(u32, &[u32])) {
     // Predecessor construction observes potential stack rewrites, including
     // guarded alternatives, but a Skip contributes no predecessor edge.
@@ -4484,78 +3791,167 @@ fn predecessor_states_at_depth(
     states
 }
 
-/// Bit rows indexed by copy SCC. The full policy allocates every row; demand
-/// allocates only activated rows. Both share the same contiguous word arena,
-/// avoiding a separate heap allocation and union algorithm per sparse row.
+/// Original-state sets in a copy-SCC row. Small sparse rows never allocate
+/// a full state-width bitmap; dense rows keep word-wise union throughput.
+/// Promotion is monotone and leaves the lattice unchanged.
+#[derive(Clone)]
+enum PredecessorBits {
+    Sparse(PredecessorSet),
+    Dense(Vec<u64>),
+}
+
+impl PredecessorBits {
+    fn empty() -> Self {
+        Self::Sparse(PredecessorSet::new())
+    }
+
+    fn from_seeds(seeds: &[u32], width: usize) -> Result<Self, String> {
+        let mut bits = Self::Sparse(PredecessorSet::from_slice(seeds));
+        bits.promote(width)?;
+        Ok(bits)
+    }
+
+    fn promote(&mut self, width: usize) -> Result<(), String> {
+        let Self::Sparse(states) = self else { return Ok(()); };
+        let words = width.div_ceil(64);
+        if states.len() <= words.saturating_mul(2).max(8) {
+            return Ok(());
+        }
+        let mut bits = Vec::new();
+        bits.try_reserve_exact(words)
+            .map_err(|_| "control predecessor bitmap exceeds available memory".to_owned())?;
+        bits.resize(words, 0u64);
+        for &state in states.iter() {
+            bits[state as usize / 64] |= 1u64 << (state % 64);
+        }
+        *self = Self::Dense(bits);
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Sparse(states) => states.is_empty(),
+            // Dense rows are only created by promotion of nonempty sets.
+            Self::Dense(_) => false,
+        }
+    }
+
+    fn visit(&self, width: usize, mut visit: impl FnMut(u32)) {
+        match self {
+            Self::Sparse(states) => states.iter().copied().for_each(visit),
+            Self::Dense(bits) => for_each_set_bit(bits, width, &mut visit),
+        }
+    }
+
+    fn union(&mut self, source: &Self, width: usize) -> Result<bool, String> {
+        if source.is_empty() {
+            return Ok(false);
+        }
+        if matches!(source, Self::Dense(_)) && let Self::Sparse(states) = self {
+            let mut bits = Vec::new();
+            let words = width.div_ceil(64);
+            bits.try_reserve_exact(words)
+                .map_err(|_| "control predecessor bitmap exceeds available memory".to_owned())?;
+            bits.resize(words, 0u64);
+            for &state in states.iter() {
+                bits[state as usize / 64] |= 1u64 << (state % 64);
+            }
+            *self = Self::Dense(bits);
+        }
+        let changed = match (&mut *self, source) {
+            (Self::Dense(dst), Self::Dense(src)) => {
+                let mut changed = false;
+                for (slot, &word) in dst.iter_mut().zip(src) {
+                    let merged = *slot | word;
+                    changed |= merged != *slot;
+                    *slot = merged;
+                }
+                changed
+            }
+            (Self::Dense(dst), Self::Sparse(src)) => {
+                let mut changed = false;
+                for &state in src {
+                    let slot = &mut dst[state as usize / 64];
+                    let mask = 1u64 << (state % 64);
+                    changed |= *slot & mask == 0;
+                    *slot |= mask;
+                }
+                changed
+            }
+            (Self::Sparse(dst), Self::Sparse(src)) => {
+                // Insert small lists in place; avoid allocating a merge row
+                // for the overwhelmingly common singleton copy.
+                let mut changed = false;
+                for &state in src {
+                    if let Err(index) = dst.binary_search(&state) {
+                        dst.insert(index, state);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            (Self::Sparse(_), Self::Dense(_)) => unreachable!("dense source promotes destination"),
+        };
+        self.promote(width)?;
+        Ok(changed)
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match self {
+            Self::Sparse(states) => states.len() * std::mem::size_of::<u32>(),
+            Self::Dense(bits) => bits.len() * std::mem::size_of::<u64>(),
+        }
+    }
+}
+
 struct PredecessorRows {
     bit_len: usize,
-    words_per_row: usize,
-    offsets: Vec<usize>,
-    words: Vec<u64>,
+    rows: Vec<Option<PredecessorBits>>,
 }
 
 impl PredecessorRows {
     fn new(components: usize, bit_len: usize) -> Self {
-        Self {
-            bit_len,
-            words_per_row: bit_len.div_ceil(64),
-            offsets: vec![usize::MAX; components],
-            words: Vec::new(),
-        }
+        Self { bit_len, rows: vec![None; components] }
     }
 
     fn active(&self, component: u32) -> bool {
-        self.offsets[component as usize] != usize::MAX
+        self.rows[component as usize].is_some()
     }
 
     fn activate(&mut self, component: u32, seeds: &[u32]) -> Result<bool, String> {
-        if self.active(component) {
+        let slot = &mut self.rows[component as usize];
+        if slot.is_some() {
             return Ok(false);
         }
-        self.words.try_reserve(self.words_per_row)
-            .map_err(|_| "control predecessor matrix exceeds available memory".to_owned())?;
-        let start = self.words.len();
-        let end = start.checked_add(self.words_per_row)
-            .ok_or_else(|| "control predecessor matrix size overflow".to_owned())?;
-        self.words.resize(end, 0);
-        self.offsets[component as usize] = start;
-        for &state in seeds {
-            self.words[start + state as usize / 64] |= 1u64 << (state % 64);
-        }
+        *slot = Some(PredecessorBits::from_seeds(seeds, self.bit_len)?);
         Ok(true)
     }
 
-    fn row(&self, component: u32) -> &[u64] {
-        let start = self.offsets[component as usize];
-        &self.words[start..start + self.words_per_row]
+    fn row(&self, component: u32) -> &PredecessorBits {
+        self.rows[component as usize].as_ref().expect("active predecessor row")
     }
 
-    fn union_row(&mut self, source: u32, destination: u32) -> bool {
+    fn union_row(&mut self, source: u32, destination: u32) -> Result<bool, String> {
+        let (source, destination) = (source as usize, destination as usize);
         if source == destination {
-            return false;
+            return Ok(false);
         }
-        let source_start = self.offsets[source as usize];
-        let destination_start = self.offsets[destination as usize];
-        let mut changed = false;
-        for offset in 0..self.words_per_row {
-            let source_word = self.words[source_start + offset];
-            let slot = &mut self.words[destination_start + offset];
-            let merged = *slot | source_word;
-            changed |= merged != *slot;
-            *slot = merged;
-        }
-        changed
+        let (src, dst) = if source < destination {
+            let (left, right) = self.rows.split_at_mut(destination);
+            (&left[source], &mut right[0])
+        } else {
+            let (left, right) = self.rows.split_at_mut(source);
+            (&right[0], &mut left[destination])
+        };
+        dst.as_mut().unwrap().union(src.as_ref().unwrap(), self.bit_len)
     }
 
-    fn union_words(&mut self, destination: u32, source: &[u64]) -> bool {
-        let start = self.offsets[destination as usize];
-        let mut changed = false;
-        for (slot, &word) in self.words[start..start + self.words_per_row].iter_mut().zip(source) {
-            let merged = *slot | word;
-            changed |= merged != *slot;
-            *slot = merged;
-        }
-        changed
+    fn union_bits(&mut self, destination: u32, bits: &PredecessorBits) -> Result<bool, String> {
+        self.rows[destination as usize].as_mut().unwrap().union(bits, self.bit_len)
+    }
+
+    fn storage_bytes(&self) -> usize {
+        self.rows.iter().flatten().map(PredecessorBits::storage_bytes).sum()
     }
 }
 
@@ -4688,13 +4084,19 @@ struct PredecessorEquations {
 }
 
 impl PredecessorEquations {
-    fn extract(table: &GLRTable) -> Result<Self, String> {
+    fn extract(table: &GLRTable, constituents: Option<&[StateSubset]>) -> Result<Self, String> {
         let n = table.num_states as usize;
         let mut direct = vec![PredecessorSet::new(); n];
         let mut copies = vec![PredecessorSet::new(); n];
         let mut deep_rules = Vec::<(u32, u32, u32)>::new();
         let mut rewrite_count = 0usize;
         let mut invalid = false;
+        let seed = |row: &mut PredecessorSet, state: u32| {
+            row.push(state);
+            if let Some(members) = constituents.and_then(|sets| sets.get(state as usize)) {
+                row.extend_from_slice(members);
+            }
+        };
         for source in 0..table.num_states {
             let mut record = |pop: u32, pushes: &[u32]| {
                 rewrite_count += 1;
@@ -4704,16 +4106,20 @@ impl PredecessorEquations {
                 }
                 let Some(&destination) = pushes.first() else { return; };
                 for pair in pushes.windows(2) {
-                    direct[pair[1] as usize].push(pair[0]);
+                    seed(&mut direct[pair[1] as usize], pair[0]);
                 }
                 match pop {
-                    0 => direct[destination as usize].push(source),
+                    0 => seed(&mut direct[destination as usize], source),
                     1 => copies[source as usize].push(destination),
                     _ => deep_rules.push((source, pop, destination)),
                 }
             };
-            for action in table.action[source as usize].values() {
-                for_each_action_stack_rewrite(action, &mut record);
+            for (terminal, action) in &table.action[source as usize] {
+                let forwarded = matches!(action, Action::Shift(..) | Action::Split { .. })
+                    && table.forwarded_shifts.contains(&(source, terminal));
+                action.for_each_stack_effect(|_, pop, pushes| {
+                    record(if forwarded { 0 } else { pop }, pushes);
+                });
             }
             for &(target, replace) in table.goto[source as usize].values() {
                 record(u32::from(replace), std::slice::from_ref(&target));
@@ -4817,35 +4223,35 @@ impl<'a> PredecessorSolver<'a> {
         Ok(())
     }
 
-    fn propagate_copies(&mut self) {
+    fn propagate_copies(&mut self) -> Result<(), String> {
         for &source in &self.equations.topological_order {
             if !std::mem::replace(&mut self.dirty[source as usize], false) {
                 continue;
             }
             for &destination in &self.equations.copy_destinations[source as usize] {
-                if self.rows.active(destination) && self.rows.union_row(source, destination) {
+                if self.rows.active(destination) && self.rows.union_row(source, destination)? {
                     self.changed_copies += 1;
                     self.dirty[destination as usize] = true;
                 }
             }
         }
+        Ok(())
     }
 
     /// Walk the ORIGINAL predecessor relation at an arbitrary pop depth,
     /// reading equal copy-SCC rows only once per layer. Newly discovered
     /// component dependencies are seeded immediately, and their pending
     /// equations force another monotone round before publication.
-    fn at_depth(&mut self, origin: u32, depth: u32) -> Result<Vec<u64>, String> {
+    fn at_depth(&mut self, origin: u32, depth: u32) -> Result<PredecessorBits, String> {
         debug_assert!(depth >= 1);
         self.demand(origin)?;
-        let mut current = self.rows.row(origin).to_vec();
-        let mut next = vec![0u64; self.rows.words_per_row];
+        let mut current = self.rows.row(origin).clone();
         let mut components = Vec::<u32>::new();
         for _ in 1..depth {
-            if current.iter().all(|&word| word == 0) {
+            if current.is_empty() {
                 break;
             }
-            next.fill(0);
+            let mut next = PredecessorBits::empty();
             components.clear();
             self.generation = self.generation.wrapping_add(1);
             if self.generation == 0 {
@@ -4855,7 +4261,7 @@ impl<'a> PredecessorSolver<'a> {
             let generation = self.generation;
             let state_to_component = &self.equations.state_to_component;
             let marks = &mut self.depth_marks;
-            for_each_set_bit(&current, self.rows.bit_len, |state| {
+            current.visit(self.rows.bit_len, |state| {
                 let component = state_to_component[state as usize];
                 let mark = &mut marks[component as usize];
                 if *mark != generation {
@@ -4865,11 +4271,9 @@ impl<'a> PredecessorSolver<'a> {
             });
             for &component in &components {
                 self.demand(component)?;
-                for (destination, &source) in next.iter_mut().zip(self.rows.row(component)) {
-                    *destination |= source;
-                }
+                next.union(self.rows.row(component), self.rows.bit_len)?;
             }
-            std::mem::swap(&mut current, &mut next);
+            current = next;
         }
         Ok(current)
     }
@@ -4878,7 +4282,7 @@ impl<'a> PredecessorSolver<'a> {
         let active = self.active.clone();
         let mut missing = Vec::new();
         for component in active {
-            for_each_set_bit(self.rows.row(component), self.rows.bit_len, |state| {
+            self.rows.row(component).visit(self.rows.bit_len, |state| {
                 let predecessor = self.equations.state_to_component[state as usize];
                 if !self.rows.active(predecessor) {
                     missing.push(predecessor);
@@ -4913,9 +4317,9 @@ impl<'a> PredecessorSolver<'a> {
         for _ in 0..pass_limit {
             self.rounds += 1;
             self.activate_dependencies()?;
-            self.propagate_copies();
+            self.propagate_copies()?;
             let mut changed = false;
-            let mut cache = FxHashMap::<(u32, u32), Vec<u64>>::default();
+            let mut cache = FxHashMap::<(u32, u32), PredecessorBits>::default();
             for &(source, pop, destination) in &equations.deep_rules {
                 if !self.rows.active(destination) {
                     continue;
@@ -4926,7 +4330,7 @@ impl<'a> PredecessorSolver<'a> {
                         entry.insert(self.at_depth(source, pop)?)
                     }
                 };
-                if self.rows.union_words(destination, bases) {
+                if self.rows.union_bits(destination, bases)? {
                     changed = true;
                     self.changed_deep += 1;
                     self.dirty[destination as usize] = true;
@@ -4947,7 +4351,7 @@ impl<'a> PredecessorSolver<'a> {
             let result = equations.state_to_component.iter().map(|&component| {
                 let mut row = PredecessorSet::new();
                 if self.rows.active(component) {
-                    for_each_set_bit(self.rows.row(component), self.rows.bit_len, |state| row.push(state));
+                    self.rows.row(component).visit(self.rows.bit_len, |state| row.push(state));
                 }
                 row
             }).collect();
@@ -4959,7 +4363,7 @@ impl<'a> PredecessorSolver<'a> {
 
 fn solve_control_predecessors(table: &GLRTable, origins: Option<&[u32]>) -> Result<RuntimePredecessors, String> {
     let started = std::time::Instant::now();
-    let equations = PredecessorEquations::extract(table)?;
+    let equations = PredecessorEquations::extract(table, None)?;
     let mut solver = PredecessorSolver::new(&equations);
     let result = solver.solve(origins)?;
     if origins.is_some() && std::env::var_os("GLRMASK_VALIDATE_CONTROL_PREDECESSOR_DEMAND").is_some() {
@@ -4976,7 +4380,7 @@ fn solve_control_predecessors(table: &GLRTable, origins: Option<&[u32]>) -> Resu
             equations.rewrite_count, equations.deep_rules.len(), solver.rounds,
             solver.changed_copies, solver.changed_deep, result.iter().map(|row| row.len()).sum::<usize>(),
             result.iter().map(|row| row.len()).max().unwrap_or(0),
-            solver.rows.words.len() as f64 * 8.0 / (1024.0 * 1024.0),
+            solver.rows.storage_bytes() as f64 / (1024.0 * 1024.0),
             started.elapsed().as_secs_f64() * 1000.0);
     }
     Ok(result)
@@ -5008,8 +4412,12 @@ fn build_control_elimination_predecessors_synchronous_reference(
 
         for source in 0..table.num_states {
             let mut rewrites = Vec::<(u32, Vec<u32>)>::new();
-            for action in table.action[source as usize].values() {
-                rewrites.extend(action_stack_rewrites(action));
+            for (terminal, action) in &table.action[source as usize] {
+                let forwarded = matches!(action, Action::Shift(..) | Action::Split { .. })
+                    && table.forwarded_shifts.contains(&(source, terminal));
+                for (pop, pushes) in action_stack_rewrites(action) {
+                    rewrites.push((if forwarded { 0 } else { pop }, pushes));
+                }
             }
             rewrites.extend(
                 table.goto[source as usize]
