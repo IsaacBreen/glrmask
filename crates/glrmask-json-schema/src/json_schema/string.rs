@@ -4838,36 +4838,42 @@ fn is_regex_compile_limit_error(error: &SchemaImportError) -> bool {
     error.message().contains("Compiled regex exceeds size limit")
 }
 
-pub fn string_value_satisfies_schema(
-    value: &serde_json::Value,
-    schema: &StringSchema,
-) -> ImportResult<bool> {
-    let Some(text) = value.as_str() else {
-        return Ok(true);
-    };
-    if let Some(pattern) = &schema.pattern {
-        let normalized = preprocess_ascii_shorthand(pattern);
-        let matches = Regex::new(&normalized)
-            .map(|regex| regex.is_match(text))
-            .map_err(|error| SchemaImportError::new(format!("unsupported or malformed string pattern {pattern:?}: {error}")))?;
-        if !matches { return Ok(false); }
-    }
-    let length = text.chars().count();
-    if length < schema.min_length || schema.max_length.is_some_and(|max| length > max) {
-        return Ok(false);
-    }
-    if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
-        let regex = Regex::new(&format!(r#"^(?:{format_body_regex})$"#)).map_err(|error| {
-            SchemaImportError::new(format!(
-                "invalid recognized string format regex {:?}: {error}",
-                schema.format
-            ))
-        })?;
-        return Ok(regex.is_match(text));
-    }
-    Ok(true)
+/// A decoded-value predicate, compiled once per assertion rather than once
+/// per enum member. Its meaning is independent of JSON lexical spellings.
+pub(super) struct StringValuePredicate {
+    min: usize,
+    max: Option<usize>,
+    pattern: Option<Regex>,
+    format: Option<Regex>,
 }
 
+impl StringValuePredicate {
+    pub(super) fn new(schema: &StringSchema) -> ImportResult<Self> {
+        let pattern = schema.pattern.as_ref().map(|pattern| {
+            Regex::new(&preprocess_ascii_shorthand(pattern)).map_err(|error| {
+                SchemaImportError::new(format!("unsupported or malformed string pattern {pattern:?}: {error}"))
+            })
+        }).transpose()?;
+        let format = recognized_string_format_body_regex(schema.format.as_deref()).map(|body| {
+            Regex::new(&format!("^(?:{body})$")).map_err(|error| {
+                SchemaImportError::new(format!("invalid recognized string format regex {:?}: {error}", schema.format))
+            })
+        }).transpose()?;
+        Ok(Self { min: schema.min_length, max: schema.max_length, pattern, format })
+    }
+
+    pub(super) fn accepts(&self, text: &str) -> bool {
+        let length = text.chars().count();
+        length >= self.min && self.max.is_none_or(|max| length <= max)
+            && self.pattern.as_ref().is_none_or(|pattern| pattern.is_match(text))
+            && self.format.as_ref().is_none_or(|format| format.is_match(text))
+    }
+}
+
+pub fn string_value_satisfies_schema(value: &serde_json::Value, schema: &StringSchema) -> ImportResult<bool> {
+    let Some(text) = value.as_str() else { return Ok(true); };
+    Ok(StringValuePredicate::new(schema)?.accepts(text))
+}
 #[cfg(test)]
 mod tests {
     use regex::Regex;

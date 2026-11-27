@@ -16,7 +16,7 @@ use super::lower::{
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
     JSON_VALUE_RULE,
 };
-use super::string::{plain_fully_anchored_ascii_literal, string_value_satisfies_schema};
+use super::string::{plain_fully_anchored_ascii_literal, StringValuePredicate};
 
 // Conservative supersets used only to prove oneOf branch separation. Number
 // and integer are interpreted by the shared disjoint-atom domain algebra.
@@ -1540,13 +1540,14 @@ impl<'a> Lowerer<'a> {
                 all_subsumed
             }
             (SchemaKind::Assertions(superset_assertions), SchemaKind::Assertions(subset_assertions)) => {
-                if let (Some(string_schema), Some(values)) = (
-                    broad_string_assertions(superset_assertions),
-                    string_literal_values(subset_assertions),
-                ) {
-                    values
-                        .iter()
-                        .all(|value| string_value_satisfies_schema(value, string_schema).unwrap_or(false))
+                if let Some(string_schema) = broad_string_assertions(superset_assertions)
+                    && let Some(operand) = StringOperand::parse(subset)
+                    && operand.finite_size().is_some()
+                {
+                    let predicate = StringValuePredicate::new(string_schema)?;
+                    let mut all = true;
+                    operand.visit_finite(&mut |text| all &= predicate.accepts(text))?;
+                    all
                 } else if let (Some(superset_object), Some(subset_object)) =
                     (object_branch(superset), object_branch(subset))
                 {
@@ -1746,303 +1747,181 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
     ))
 }
 
-/// Collapse a finite string literal language intersected with simple string
-/// constraints by evaluating those constraints at import time.
-///
-/// This is particularly important for discriminator-like schemas such as
-///
-///   enum["atomic", "compound", ...] ∩ pattern("atomic")
-///
-/// which otherwise lower as an `allOf` parser intersection and keep multiple
-/// equivalent parser histories alive long after the discriminator value has
-/// been consumed.  The finite side gives us an exact, cheap decision procedure:
-/// test each literal and retain only the survivors.
-fn merge_all_of_finite_string_literals(branches: &[Schema]) -> ImportResult<Option<Schema>> {
-    if let Some(merged) = merge_finite_string_union_with_exact_pattern(branches) {
-        return Ok(Some(merged));
-    }
-
-    let mut finite_index = None;
-    let mut finite_values = Vec::<Value>::new();
-
-    for (index, branch) in branches.iter().enumerate() {
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            return Ok(None);
-        };
-        let values = if let Some(values) = string_literal_values(assertions) {
-            Some(values.into_iter().cloned().collect::<Vec<_>>())
-        } else {
-            pure_any_of_string_literal_values(assertions)
-        };
-        let Some(values) = values else {
-            continue;
-        };
-        // Keep this first version deliberately narrow: exactly one finite
-        // branch, containing string literals only. A pure anyOf of finite
-        // string branches is equally finite and is common after object-choice
-        // distribution of discriminator schemas.
-        if finite_index.is_some() {
-            return Ok(None);
-        }
-        finite_index = Some(index);
-        finite_values.extend(values);
-    }
-
-    let Some(finite_index) = finite_index else {
-        return Ok(None);
-    };
-
-    for (index, branch) in branches.iter().enumerate() {
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            return Ok(None);
-        };
-
-        let string_schema = if index == finite_index {
-            // `string_literal_values` already rejected other assertion
-            // families, but the finite branch itself may also carry a string
-            // constraint.
-            assertions.string.as_ref()
-        } else {
-            // The finite branch already proves every survivor is a string, so
-            // an untyped string assertion is safe to use purely as a filter:
-            // JSON Schema ignores string keywords on non-strings, but those
-            // values cannot survive the finite conjunct anyway.
-            let Some(string_schema) = finite_string_filter_assertions(assertions) else {
-                return Ok(None);
-            };
-            Some(string_schema)
-        };
-
-        let Some(string_schema) = string_schema else {
-            continue;
-        };
-        // `string_value_satisfies_schema` currently treats pattern as an
-        // early-return check, so only use it when pattern is the sole string
-        // restriction.  Pattern-free length/format schemas are also exact.
-        if string_schema.pattern.is_some()
-            && (string_schema.min_length != 0
-                || string_schema.max_length.is_some()
-                || string_schema.format.is_some())
-        {
-            return Ok(None);
-        }
-
-        let mut survivors = Vec::with_capacity(finite_values.len());
-        if string_schema.min_length == 0
-            && string_schema.max_length.is_none()
-            && string_schema.format.is_none()
-            && let Some(pattern) = string_schema.pattern.as_deref()
-            && let Some(literal) = plain_fully_anchored_ascii_literal(pattern)
-        {
-            for value in finite_values {
-                if value.as_str() == Some(literal) {
-                    survivors.push(value);
-                }
-            }
-        } else {
-            for value in finite_values {
-                if string_value_satisfies_schema(&value, string_schema)? {
-                    survivors.push(value);
-                }
-            }
-        }
-        finite_values = survivors;
-        if finite_values.is_empty() {
-            return Ok(Some(Schema::never("<merged-allOf-finite-string-literals:empty>")));
-        }
-    }
-
-    Ok(Some(Schema::assertions(
-        "<merged-allOf-finite-string-literals>",
-        SchemaAssertions {
-            types: Some(vec![SchemaType::String]),
-            enum_values: Some(finite_values),
-            ..SchemaAssertions::default()
-        },
-    )))
+/// Borrowed exact string-domain operands. A finite operand proves that
+/// every JSON value in its language is a string; a filter may also admit
+/// nonstrings and is used only after a finite conjunct establishes the type.
+enum StringOperand<'a> {
+    Empty,
+    Finite(&'a SchemaAssertions),
+    Union(&'a [Schema]),
+    Filter { domain: TypeDomain, constraint: Option<&'a super::ast::StringSchema> },
 }
 
-/// Fast exact case for the common intersection
-///
-/// ```text
-/// ("a" | "b" | ... | "z") ∩ /^k$/
-/// ```
-///
-/// where the finite side may be represented as a pure `anyOf` of singleton
-/// const/enum schemas. The generic finite merge below materializes every value;
-/// doing that once per discriminator branch turns a linear membership question
-/// into repeated allocation of the whole union. Here we only inspect the one
-/// candidate proved by the exact pattern.
-fn merge_finite_string_union_with_exact_pattern(branches: &[Schema]) -> Option<Schema> {
-    if branches.len() != 2 {
-        return None;
+impl<'a> StringOperand<'a> {
+    fn parse(schema: &'a Schema) -> Option<Self> {
+        let assertions = match &schema.kind {
+            SchemaKind::Never => return Some(Self::Empty),
+            SchemaKind::Any => return Some(Self::Filter { domain: TypeDomain::ANY, constraint: None }),
+            SchemaKind::Ref(_) => return None,
+            SchemaKind::Assertions(assertions) => assertions,
+        };
+        if pure_any_of_assertions(assertions) {
+            return Some(Self::Union(&assertions.any_of));
+        }
+        if assertions.object.is_some() || assertions.array.is_some() || assertions.number.is_some()
+            || !assertions.any_of.is_empty() || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty() || assertions.not.is_some() {
+            return None;
+        }
+        if let Some(values) = Self::literal_seeds(assertions) {
+            return values.iter().all(Value::is_string).then_some(Self::Finite(assertions));
+        }
+        Some(Self::Filter {
+            domain: TypeDomain::declared(assertions.types.as_deref()),
+            constraint: assertions.string.as_ref(),
+        })
     }
 
-    for pattern_index in 0..2 {
-        let finite_index = 1 - pattern_index;
-        let SchemaKind::Assertions(pattern_assertions) = &branches[pattern_index].kind else {
-            continue;
-        };
-        let Some(string) = finite_string_filter_assertions(pattern_assertions) else {
-            continue;
-        };
-        if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
-            continue;
-        }
-        let Some(pattern) = string.pattern.as_deref() else {
-            continue;
-        };
-        let Some(literal) = plain_fully_anchored_ascii_literal(pattern) else {
-            continue;
-        };
-        let Some(contains) =
-            finite_string_literal_language_contains(&branches[finite_index], literal)
-        else {
-            continue;
-        };
-        if !contains {
-            return Some(Schema::never(
-                "<merged-allOf-finite-string-literals:empty-singleton>",
-            ));
-        }
-        return Some(Schema::assertions(
-            "<merged-allOf-finite-string-literals:singleton>",
-            SchemaAssertions {
-                types: Some(vec![SchemaType::String]),
-                enum_values: Some(vec![Value::String(literal.to_string())]),
-                ..SchemaAssertions::default()
-            },
-        ));
+    fn literal_seeds(assertions: &'a SchemaAssertions) -> Option<&'a [Value]> {
+        assertions.const_value.as_ref().map(std::slice::from_ref).or(assertions.enum_values.as_deref())
     }
-    None
+
+    fn finite_size(&self) -> Option<usize> {
+        match self {
+            Self::Empty => Some(0),
+            Self::Finite(assertions) => Some(Self::literal_seeds(assertions)?.len()),
+            Self::Union(branches) => branches.iter().try_fold(0usize, |sum, branch| {
+                sum.checked_add(Self::parse(branch)?.finite_size()?)
+            }),
+            Self::Filter { .. } => None,
+        }
+    }
+
+    /// Traverse only finite operands; don't allocate a union of thousands
+    /// of discriminator literals just to ask whether one value belongs.
+    fn visit_finite(&self, visitor: &mut impl FnMut(&'a str)) -> ImportResult<()> {
+        match self {
+            Self::Empty => {}
+            Self::Finite(assertions) => {
+                let predicate = assertions.string.as_ref().map(StringValuePredicate::new).transpose()?;
+                if TypeDomain::declared(assertions.types.as_deref()).includes(TypeDomain::of(SchemaType::String)) {
+                    for value in Self::literal_seeds(assertions).expect("finite operand") {
+                        let text = value.as_str().expect("string literal operand");
+                        if assertions.enum_values.as_ref().is_none_or(|values| {
+                            assertions.const_value.is_none() || values.iter().any(|value| value.as_str() == Some(text))
+                        }) && predicate.as_ref().is_none_or(|predicate| predicate.accepts(text)) {
+                            visitor(text);
+                        }
+                    }
+                }
+            }
+            Self::Union(branches) => {
+                for branch in *branches {
+                    Self::parse(branch).expect("validated finite union").visit_finite(visitor)?;
+                }
+            }
+            Self::Filter { .. } => unreachable!("finite traversal requires a finite-size proof"),
+        }
+        Ok(())
+    }
+
+    fn exact_pattern_literal(&self) -> Option<&'a str> {
+        let Self::Filter { domain, constraint: Some(string) } = self else { return None; };
+        if !domain.includes(TypeDomain::of(SchemaType::String))
+            || string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
+            return None;
+        }
+        plain_fully_anchored_ascii_literal(string.pattern.as_deref()?)
+    }
+
+    fn filter(&self, values: &mut Vec<&'a str>) -> ImportResult<()> {
+        match self {
+            Self::Filter { domain, constraint } => {
+                let predicate = constraint.map(StringValuePredicate::new).transpose()?;
+                values.retain(|text| domain.includes(TypeDomain::of(SchemaType::String))
+                    && predicate.as_ref().is_none_or(|predicate| predicate.accepts(text)));
+            }
+            _ => {
+                if values.len() == 1 {
+                    let wanted = values[0];
+                    let mut present = false;
+                    self.visit_finite(&mut |text| present |= text == wanted)?;
+                    if !present { values.clear(); }
+                } else {
+                    let mut allowed = BTreeSet::new();
+                    self.visit_finite(&mut |text| { allowed.insert(text); })?;
+                    values.retain(|text| allowed.contains(text));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn string_literal_result(values: Vec<&str>) -> Schema {
+    if values.is_empty() {
+        Schema::never("<merged-allOf-finite-string-literals:empty>")
+    } else {
+        Schema::assertions("<merged-allOf-finite-string-literals>", SchemaAssertions {
+            types: Some(vec![SchemaType::String]),
+            enum_values: Some(values.into_iter().map(|text| Value::String(text.to_owned())).collect()),
+            ..SchemaAssertions::default()
+        })
+    }
+}
+
+fn merge_all_of_finite_string_literals(branches: &[Schema]) -> ImportResult<Option<Schema>> {
+    let Some(operands) = branches.iter().map(StringOperand::parse).collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    // Prove every union is finite; a disjunction containing a general filter
+    // is not a finite set and must remain with the normal lowering path.
+    if operands.iter().any(|operand| matches!(operand, StringOperand::Union(_)) && operand.finite_size().is_none()) {
+        return Ok(None);
+    }
+    let Some((anchor, _)) = operands.iter().enumerate()
+        .filter_map(|(index, operand)| operand.finite_size().map(|size| (index, size)))
+        .min_by_key(|&(_, size)| size) else { return Ok(None); };
+
+    // A singleton pattern is a smaller candidate universe than a large enum.
+    // It is safe only because the finite anchor proves the JSON type.
+    let mut values = Vec::new();
+    let seed = if let Some((index, literal)) = operands.iter().enumerate()
+        .find_map(|(index, operand)| operand.exact_pattern_literal().map(|literal| (index, literal))) {
+        values.push(literal);
+        index
+    } else {
+        let mut seen = BTreeSet::new();
+        operands[anchor].visit_finite(&mut |text| {
+            if seen.insert(text) { values.push(text); }
+        })?;
+        anchor
+    };
+    for (index, operand) in operands.iter().enumerate() {
+        if index != seed { operand.filter(&mut values)?; }
+    }
+    Ok(Some(string_literal_result(values)))
 }
 
 pub(super) fn simplify_finite_string_allof_schema(schema: &Schema) -> Option<Schema> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
+    let SchemaKind::Assertions(assertions) = &schema.kind else { return None; };
     simplify_finite_string_allof_assertions(assertions)
 }
 
 fn simplify_finite_string_allof_assertions(assertions: &SchemaAssertions) -> Option<Schema> {
-    if assertions.types.is_some()
-        || assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.object.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || assertions.not.is_some()
-    {
+    if assertions.has_value_assertions_without_combinators() || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty() || assertions.not.is_some() {
         return None;
     }
-    merge_finite_string_union_with_exact_pattern(&assertions.all_of)
+    // Keep the pre-memoization acceleration targeted at a known singleton
+    // filter; the ordinary allOf path handles other finite intersections.
+    if !assertions.all_of.iter().any(|branch| {
+        StringOperand::parse(branch).and_then(|operand| operand.exact_pattern_literal()).is_some()
+    }) {
+        return None;
+    }
+    merge_all_of_finite_string_literals(&assertions.all_of).ok().flatten()
 }
-
-fn finite_string_literal_language_contains(schema: &Schema, wanted: &str) -> Option<bool> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-
-    if assertions.const_value.is_some() || assertions.enum_values.is_some() {
-        if assertions.const_value.is_some() && assertions.enum_values.is_some() {
-            return None;
-        }
-        let values = string_literal_values(assertions)?;
-        return Some(values.into_iter().any(|value| value.as_str() == Some(wanted)));
-    }
-
-    if assertions.any_of.is_empty()
-        || assertions.types.is_some()
-        || assertions.object.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return None;
-    }
-
-    let mut found = false;
-    for branch in &assertions.any_of {
-        let SchemaKind::Assertions(branch_assertions) = &branch.kind else {
-            return None;
-        };
-        if branch_assertions.string.is_some()
-            || (branch_assertions.const_value.is_some()
-                && branch_assertions.enum_values.is_some())
-        {
-            return None;
-        }
-        let values = string_literal_values(branch_assertions)?;
-        found |= values
-            .into_iter()
-            .any(|value| value.as_str() == Some(wanted));
-    }
-    Some(found)
-}
-
-/// Exact finite string language for a pure `anyOf` whose branches are direct
-/// string const/enum schemas. No sibling assertions are allowed here: this is
-/// used as a set-valued operand of an `allOf` simplification, so fail closed
-/// rather than trying to reason about mixed-family unions.
-fn pure_any_of_string_literal_values(assertions: &SchemaAssertions) -> Option<Vec<Value>> {
-    if assertions.any_of.is_empty()
-        || assertions.types.is_some()
-        || assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.object.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return None;
-    }
-
-    let mut values = Vec::new();
-    for branch in &assertions.any_of {
-        let SchemaKind::Assertions(branch_assertions) = &branch.kind else {
-            return None;
-        };
-        if branch_assertions.string.is_some() {
-            return None;
-        }
-        let branch_values = string_literal_values(branch_assertions)?;
-        values.extend(branch_values.into_iter().cloned());
-    }
-    Some(values)
-}
-
-fn finite_string_filter_assertions(
-    assertions: &SchemaAssertions,
-) -> Option<&super::ast::StringSchema> {
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.object.is_some()
-        || assertions.array.is_some()
-        || assertions.number.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return None;
-    }
-    if let Some(types) = &assertions.types
-        && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
-    {
-        return None;
-    }
-    assertions.string.as_ref()
-}
-
 fn intersect_schema_types(left: &[SchemaType], right: &[SchemaType]) -> Vec<SchemaType> {
     TypeDomain::from_types(left).meet(TypeDomain::from_types(right)).declared_types()
 }
@@ -2616,29 +2495,6 @@ fn broad_string_assertions(assertions: &SchemaAssertions) -> Option<&super::ast:
         return None;
     }
     assertions.string.as_ref()
-}
-
-fn string_literal_values(assertions: &SchemaAssertions) -> Option<Vec<&serde_json::Value>> {
-    if assertions.object.is_some()
-        || assertions.array.is_some()
-        || assertions.number.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-        || assertions.not.is_some()
-    {
-        return None;
-    }
-    if let Some(types) = &assertions.types
-        && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
-    {
-        return None;
-    }
-    if let Some(value) = &assertions.const_value {
-        return value.is_string().then_some(vec![value]);
-    }
-    let values = assertions.enum_values.as_ref()?;
-    values.iter().all(|value| value.is_string()).then_some(values.iter().collect())
 }
 
 fn schemas_shape_equivalent(left: &Schema, right: &Schema) -> bool {
