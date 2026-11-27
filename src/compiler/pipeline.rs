@@ -4407,7 +4407,7 @@ impl CompileDag<'_> {
                 templates_started_ms,
                 templates_finished_ms,
             } = templates;
-    
+
             let terminal_run_collapse_started_at = Instant::now();
             let terminal_run_collapse_profile =
                 crate::compiler::terminal_run_collapse::collapse_certified_terminal_runs(
@@ -4423,7 +4423,7 @@ impl CompileDag<'_> {
                     >= terminal_run_collapse_profile.certificate_ms
                         + terminal_run_collapse_profile.rewrite_ms
             );
-    
+
             let (templates, prebuilt_parser_dwa, prebuilt_token_mask_caches) =
                 if dwa_pm_mode.does_terminal_reconcile() {
                     (Some(templates), None, None)
@@ -4502,7 +4502,7 @@ impl CompileDag<'_> {
                         prebuilt_token_mask_caches,
                     )
                 };
-    
+
             *self.result.lock().expect("compile DAG result poisoned") = Some(CompileDagResult {
                 tokenizer: tokenizer.tokenizer,
                 synthetic_candidate_terminals: tokenizer.synthetic_candidate_terminals,
@@ -4589,7 +4589,7 @@ impl CompileDag<'_> {
             );
             terminal_phase_profile.terminal_dwa_ms += elapsed_ms(special_started_at);
             let terminal_dwa_finished_ms = elapsed_ms(compile_started_at);
-    
+
             self.publish(scope, CompileDagEvent::Terminal(TerminalDagResult {
                     tokenizer,
                     analysis,
@@ -4646,7 +4646,7 @@ impl CompileDag<'_> {
                 );
             }
             let classify_finished_ms = elapsed_ms(compile_started_at);
-    
+
             self.publish(scope, CompileDagEvent::Classify(ClassifyDagLane {
                 shared_classify_cache,
                 classify_ms,
@@ -5450,86 +5450,57 @@ fn compile_prepared_with_profile_and_table_construction(
             let mut terminal_pm_pair = MappedArtifact::from((family_vec, possible_matches));
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
 
-            let parser_dwa = if dwa_pm_mode.does_terminal_compact() {
-                let compact_plan_started_at = Instant::now();
-                let terminal_compaction_plan =
-                    terminal_pm_pair.plan_dimensions_compaction(true, true);
-                profile.compact_ms += elapsed_ms(compact_plan_started_at);
-
-                if dwa_pm_mode.does_pre_parser_compact() {
-                    let compact_apply_started_at = Instant::now();
-                    terminal_pm_pair.apply_compaction_plan(&terminal_compaction_plan);
-                    profile.compact_ms += elapsed_ms(compact_apply_started_at);
-                    let ((family_artifacts, possible_matches_artifact), compacted_ids) =
-                        terminal_pm_pair.into_parts();
-                    terminal_dwas = restore_terminal_dwa_families(
-                        MappedArtifact::new(family_artifacts, compacted_ids.clone()),
-                        family_layout,
-                    );
-                    possible_matches =
-                        MappedArtifact::new(possible_matches_artifact, compacted_ids);
-                    build_and_merge_parser_dwa_families(
-                        &terminal_dwas,
-                        &table,
-                        &analyzed_grammar,
-                        prepared_grammar.ignore_terminal,
-                        retained_templates,
-                        &tokenizer,
-                        vocab,
-                        None,
-                    )
+            let compaction = if dwa_pm_mode.does_terminal_compact() {
+                let started = Instant::now();
+                let plan = terminal_pm_pair.plan_dimensions_compaction(true, true);
+                profile.compact_ms += elapsed_ms(started);
+                Some(plan)
+            } else {
+                None
+            };
+            // Reconcile once; choose the side of parser construction on which
+            // the same coordinate transform is applied. Only post-parser
+            // compaction needs a precompact snapshot of the terminal families.
+            let prebuilt = if let Some(plan) = &compaction {
+                let parser = if dwa_pm_mode.does_pre_parser_compact() {
+                    None
                 } else {
-                    let precompact_families = restore_terminal_dwa_families(
+                    let families = restore_terminal_dwa_families(
                         MappedArtifact::new(
                             terminal_pm_pair.artifact().0.clone(),
                             terminal_pm_pair.id_map().clone(),
                         ),
                         family_layout,
                     );
-                    let mut parser_dwa = build_and_merge_parser_dwa_families(
-                        &precompact_families,
-                        &table,
-                        &analyzed_grammar,
-                        prepared_grammar.ignore_terminal,
-                        retained_templates,
-                        &tokenizer,
-                        vocab,
-                        None,
-                    );
-                    let compact_apply_started_at = Instant::now();
-                    terminal_pm_pair.apply_compaction_plan(&terminal_compaction_plan);
-                    parser_dwa.apply_compaction_plan(&terminal_compaction_plan);
-                    profile.compact_ms += elapsed_ms(compact_apply_started_at);
-                    let ((family_artifacts, possible_matches_artifact), compacted_ids) =
-                        terminal_pm_pair.into_parts();
-                    terminal_dwas = restore_terminal_dwa_families(
-                        MappedArtifact::new(family_artifacts, compacted_ids.clone()),
-                        family_layout,
-                    );
-                    possible_matches =
-                        MappedArtifact::new(possible_matches_artifact, compacted_ids);
-                    parser_dwa
-                }
+                    Some(build_and_merge_parser_dwa_families(
+                        &families, &table, &analyzed_grammar,
+                        prepared_grammar.ignore_terminal, retained_templates,
+                        &tokenizer, vocab, None,
+                    ))
+                };
+                let started = Instant::now();
+                terminal_pm_pair.apply_compaction_plan(plan);
+                let parser = parser.map(|mut parser| {
+                    parser.apply_compaction_plan(plan);
+                    parser
+                });
+                profile.compact_ms += elapsed_ms(started);
+                parser
             } else {
-                let ((family_artifacts, possible_matches_artifact), reconciled_ids) =
-                    terminal_pm_pair.into_parts();
-                terminal_dwas = restore_terminal_dwa_families(
-                    MappedArtifact::new(family_artifacts, reconciled_ids.clone()),
-                    family_layout,
-                );
-                possible_matches =
-                    MappedArtifact::new(possible_matches_artifact, reconciled_ids);
-                build_and_merge_parser_dwa_families(
-                    &terminal_dwas,
-                    &table,
-                    &analyzed_grammar,
-                    prepared_grammar.ignore_terminal,
-                    retained_templates,
-                    &tokenizer,
-                    vocab,
-                    None,
-                )
+                None
             };
+            let ((family_artifacts, possible_matches_artifact), ids) =
+                terminal_pm_pair.into_parts();
+            terminal_dwas = restore_terminal_dwa_families(
+                MappedArtifact::new(family_artifacts, ids.clone()),
+                family_layout,
+            );
+            possible_matches = MappedArtifact::new(possible_matches_artifact, ids);
+            let parser_dwa = prebuilt.unwrap_or_else(|| build_and_merge_parser_dwa_families(
+                &terminal_dwas, &table, &analyzed_grammar,
+                prepared_grammar.ignore_terminal, retained_templates,
+                &tokenizer, vocab, None,
+            ));
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
         };
         if (compile_profile_enabled() || compile_top_profile_enabled())
@@ -6166,12 +6137,83 @@ pub(crate) fn compile_dynamic_owned_unfinalized_with_backend(
 
 
 
-type DynamicTokenizerLaneResult = (
-    Tokenizer,
-    Option<(Tokenizer, Vec<u32>)>,
-    Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)>,
-);
+/// The exact commit lexer and, optionally, one separately certified mask
+/// coordinate. These two projection forms are mutually exclusive.
+struct DynamicTokenizerLaneResult {
+    tokenizer: Tokenizer,
+    mask: Option<DynamicMaskProjection>,
+}
 
+enum DynamicMaskProjection {
+    TokenQuotient(Tokenizer, Vec<u32>),
+    VirtualResidual(Tokenizer, Vec<VirtualResidualMaskProjection>),
+}
+
+fn finish_dynamic_compile(
+    prepared_grammar: GrammarDef,
+    table: GLRTable,
+    lexer: DynamicTokenizerLaneResult,
+    direct_regular_automaton: Option<crate::grammar::flat::DirectRegularAutomaton>,
+    dynamic_mask_vocab: crate::runtime::DynamicMaskVocab,
+    vocab: &Vocab,
+    finalize_runtime: bool,
+    start_nullable: bool,
+    use_lr: bool,
+    remainder_parent: Option<u64>,
+) -> crate::Result<DynamicConstraint> {
+    let terminal_display_names = (0..prepared_grammar.num_terminals())
+        .map(|terminal| prepared_grammar.terminal_display_name(terminal))
+        .collect();
+    let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_backend_unfinalized(
+        crate::runtime::parser_backend::DynamicParserBackend::from_use_lr(use_lr),
+        table,
+        terminal_display_names,
+        lexer.tokenizer,
+        direct_regular_automaton,
+        prepared_grammar.ignore_terminal,
+        collect_special_token_terminals(&prepared_grammar),
+        vocab,
+        dynamic_mask_vocab,
+    )?;
+    constraint.inner.install_grammar_markers(&prepared_grammar)
+        .map_err(crate::Error::Compilation)?;
+    match lexer.mask {
+        Some(DynamicMaskProjection::TokenQuotient(mask, map)) =>
+            constraint.inner.dynamic_mask_vocab.set_mask_tokenizer_quotient(mask, map),
+        Some(DynamicMaskProjection::VirtualResidual(mask, projections)) =>
+            constraint.inner.dynamic_mask_vocab.set_virtual_residuals_mask_projection(mask, projections),
+        None => {}
+    }
+    if finalize_runtime {
+        let _span = crate::dynamic_constraint::remainder_trace::Span::new(
+            "dynamic.runtime_caches", remainder_parent);
+        constraint.inner.rebuild_dynamic_runtime_caches();
+    }
+    {
+        let _span = crate::dynamic_constraint::remainder_trace::Span::new(
+            "dynamic.source_and_composition_metadata", remainder_parent);
+        constraint.inner.set_composition_start_nullable(start_nullable);
+        constraint.set_composition_grammar(prepared_grammar);
+    }
+    if finalize_runtime {
+        constraint.cache_external_vocab_artifact_for_save();
+    }
+    Ok(constraint)
+}
+
+fn prepare_dynamic_lexer_lane(
+    grammar: &GrammarDef,
+    prefactored: Option<Vec<Expr>>,
+    vocab: &Vocab,
+    finalize_runtime: bool,
+    profile: bool,
+) -> (crate::Result<(DynamicTokenizerLaneResult, f64)>, f64) {
+    let started = profile.then(Instant::now);
+    let expressions = prefactored.unwrap_or_else(|| prepare_factored_terminal_expressions(grammar));
+    let factor_ms = started.map_or(0.0, elapsed_ms);
+    let giant = expressions.iter().any(expression_contains_large_bounded_repeat);
+    (build_dynamic_tokenizer_lane(grammar, &expressions, giant, vocab, finalize_runtime, profile), factor_ms)
+}
 fn build_dynamic_tokenizer_lane(
     grammar: &GrammarDef,
     prepared_expressions: &[Expr],
@@ -6270,11 +6312,15 @@ fn build_dynamic_tokenizer_lane(
         }
     }
     Ok((
-        (
+        DynamicTokenizerLaneResult {
             tokenizer,
-            mask_tokenizer_quotient,
-            prebuilt_virtual_residual_projection,
-        ),
+            mask: match (mask_tokenizer_quotient, prebuilt_virtual_residual_projection) {
+                (Some((mask, map)), None) => Some(DynamicMaskProjection::TokenQuotient(mask, map)),
+                (None, Some((mask, projections))) => Some(DynamicMaskProjection::VirtualResidual(mask, projections)),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("mutually exclusive lexer projections"),
+            },
+        },
         elapsed_ms(started_at),
     ))
 }
@@ -6306,20 +6352,10 @@ fn compile_dynamic_owned_early_overlap(
             || -> crate::Result<(DynamicTokenizerLaneResult, f64, f64)> {
                 let _span = crate::dynamic_constraint::remainder_trace::Span::new(
                     "dynamic.early_tokenizer.worker", remainder_parent);
-                let factor_started = profile.then(Instant::now);
-                let prepared_expressions = prepare_factored_terminal_expressions(&lexer_grammar);
-                let factor_ms = factor_started.map_or(0.0, elapsed_ms);
-                let prepared_has_giant_repeat = prepared_expressions
-                    .iter()
-                    .any(expression_contains_large_bounded_repeat);
-                let (result, tokenizer_ms) = build_dynamic_tokenizer_lane(
-                    &lexer_grammar,
-                    &prepared_expressions,
-                    prepared_has_giant_repeat,
-                    vocab,
-                    finalize_runtime,
-                    profile,
-                )?;
+                let (result, factor_ms) = prepare_dynamic_lexer_lane(
+                    &lexer_grammar, None, vocab, finalize_runtime, profile,
+                );
+                let (result, tokenizer_ms) = result?;
                 Ok((result, factor_ms, tokenizer_ms))
             },
             || -> crate::Result<(GrammarDef, GLRTable, bool, f64, f64, f64)> {
@@ -6365,7 +6401,7 @@ fn compile_dynamic_owned_early_overlap(
         crate::dynamic_constraint::remainder_trace::mark(
             "dynamic.early_join.return", remainder_parent);
         let (
-            (mut tokenizer, mut mask_tokenizer_quotient, mut prebuilt_virtual_residual_projection),
+            mut lexer,
             mut factor_ms,
             mut tokenizer_ms,
         ) = tokenizer_result?;
@@ -6378,21 +6414,12 @@ fn compile_dynamic_owned_early_overlap(
             table_ms,
         ) = parser_result?;
         if terminal_domain_changed {
-            let factor_started = profile.then(Instant::now);
-            let prepared_expressions = prepare_factored_terminal_expressions(&prepared_grammar);
-            factor_ms += factor_started.map_or(0.0, elapsed_ms);
-            let prepared_has_giant_repeat = prepared_expressions
-                .iter()
-                .any(expression_contains_large_bounded_repeat);
-            let (rebuilt, rebuilt_ms) = build_dynamic_tokenizer_lane(
-                &prepared_grammar,
-                &prepared_expressions,
-                prepared_has_giant_repeat,
-                vocab,
-                finalize_runtime,
-                profile,
-            )?;
-            (tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection) = rebuilt;
+            let (rebuilt, rebuild_factor_ms) = prepare_dynamic_lexer_lane(
+                &prepared_grammar, None, vocab, finalize_runtime, profile,
+            );
+            factor_ms += rebuild_factor_ms;
+            let (rebuilt, rebuilt_ms) = rebuilt?;
+            lexer = rebuilt;
             tokenizer_ms += rebuilt_ms;
         }
         let dynamic_vocab_started = profile.then(Instant::now);
@@ -6402,48 +6429,11 @@ fn compile_dynamic_owned_early_overlap(
             crate::runtime::DynamicMaskVocab::default()
         };
         let dynamic_vocab_ms = dynamic_vocab_started.map_or(0.0, elapsed_ms);
-        let terminal_display_names = (0..prepared_grammar.num_terminals())
-            .map(|terminal| prepared_grammar.terminal_display_name(terminal))
-            .collect::<Vec<_>>();
         let finalize_started = profile.then(Instant::now);
-        let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_backend_unfinalized(
-            crate::runtime::parser_backend::DynamicParserBackend::from_use_lr(use_lr),
-            table,
-            terminal_display_names,
-            tokenizer,
-            None,
-            prepared_grammar.ignore_terminal,
-            collect_special_token_terminals(&prepared_grammar),
-            vocab,
-            dynamic_mask_vocab,
+        let constraint = finish_dynamic_compile(
+            prepared_grammar, table, lexer, None, dynamic_mask_vocab, vocab,
+            finalize_runtime, start_nullable, use_lr, remainder_parent,
         )?;
-        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
-        if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
-            constraint
-                .inner
-                .dynamic_mask_vocab
-                .set_mask_tokenizer_quotient(mask_tokenizer, full_to_mask_state);
-        }
-        if let Some((mask_tokenizer, projections)) = prebuilt_virtual_residual_projection {
-            constraint
-                .inner
-                .dynamic_mask_vocab
-                .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
-        }
-        if finalize_runtime {
-            let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                "dynamic.runtime_caches", remainder_parent);
-            constraint.inner.rebuild_dynamic_runtime_caches();
-        }
-        {
-            let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                "dynamic.source_and_composition_metadata", remainder_parent);
-            constraint.inner.set_composition_start_nullable(start_nullable);
-            constraint.set_composition_grammar(prepared_grammar);
-        }
-        if finalize_runtime {
-            constraint.cache_external_vocab_artifact_for_save();
-        }
         if profile {
             eprintln!(
                 "[glrmask/profile][dynamic_early_overlap] shared_ms={shared_ms:.3} clone_ms={clone_ms:.3} terminal_domain_changed={terminal_domain_changed} factor_ms={factor_ms:.3} parser_prepare_ms={parser_prepare_ms:.3} analysis_ms={analysis_ms:.3} tokenizer_ms={tokenizer_ms:.3} table_ms={table_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} finalize_ms={:.3} total_ms={:.3}",
@@ -6655,9 +6645,6 @@ fn compile_dynamic_owned_impl(
             .as_ref()
             .map(|automaton| automaton.states.len());
         let num_terminals = prepared_grammar.num_terminals();
-        let terminal_display_names = (0..num_terminals)
-            .map(|terminal| prepared_grammar.terminal_display_name(terminal))
-            .collect::<Vec<_>>();
         // Rayon scheduling is a measurable fraction of total build time for
         // genuinely tiny dynamic grammars. Keep those cores sequential; a
         // large lexer can still arise from a compact grammar, but in that case
@@ -6687,22 +6674,9 @@ fn compile_dynamic_owned_impl(
             parallel_dynamic_core,
             "dynamic_tokenizer_and_table_vocab",
             || {
-                let factor_started_at = profile.then(Instant::now);
-                let prepared_expressions = prefactored_expressions
-                    .unwrap_or_else(|| prepare_factored_terminal_expressions(&prepared_grammar));
-                let factor_ms = factor_started_at.map_or(0.0, elapsed_ms);
-                let prepared_has_giant_repeat = prepared_expressions
-                    .iter()
-                    .any(expression_contains_large_bounded_repeat);
-                let result = build_dynamic_tokenizer_lane(
-                    &prepared_grammar,
-                    &prepared_expressions,
-                    prepared_has_giant_repeat,
-                    vocab,
-                    finalize_runtime,
-                    profile,
-                );
-                (result, factor_ms)
+                prepare_dynamic_lexer_lane(
+                    &prepared_grammar, prefactored_expressions, vocab, finalize_runtime, profile,
+                )
             },
             || macro_join_if(
                 parallel_dynamic_core,
@@ -6758,7 +6732,7 @@ fn compile_dynamic_owned_impl(
             ),
         );
         let (table, table_ms, analysis_ms) = table_result?;
-        let ((tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection), tokenizer_ms) =
+        let (lexer, tokenizer_ms) =
             tokenizer_result?;
         if profile && defer_factoring {
             eprintln!(
@@ -6767,47 +6741,10 @@ fn compile_dynamic_owned_impl(
         }
 
         let finalize_started_at = profile.then(Instant::now);
-        // Build unfinalized so a mask-only finite-token quotient can be
-        // attached before dynamic runtime caches/projections are constructed.
-        // The exact full tokenizer above remains authoritative for commit.
-        let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_backend_unfinalized(
-            crate::runtime::parser_backend::DynamicParserBackend::from_use_lr(use_lr),
-            table,
-            terminal_display_names,
-            tokenizer,
-            direct_regular_automaton,
-            prepared_grammar.ignore_terminal,
-            collect_special_token_terminals(&prepared_grammar),
-            vocab,
-            dynamic_mask_vocab,
+        let constraint = finish_dynamic_compile(
+            prepared_grammar, table, lexer, direct_regular_automaton,
+            dynamic_mask_vocab, vocab, finalize_runtime, start_nullable, use_lr, remainder_parent,
         )?;
-        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
-        if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
-            constraint
-                .inner
-                .dynamic_mask_vocab
-                .set_mask_tokenizer_quotient(mask_tokenizer, full_to_mask_state);
-        }
-        if let Some((mask_tokenizer, projections)) = prebuilt_virtual_residual_projection {
-            constraint
-                .inner
-                .dynamic_mask_vocab
-                .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
-        }
-        if finalize_runtime {
-            let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                "dynamic.runtime_caches", remainder_parent);
-            constraint.inner.rebuild_dynamic_runtime_caches();
-        }
-        {
-            let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                "dynamic.source_and_composition_metadata", remainder_parent);
-            constraint.inner.set_composition_start_nullable(start_nullable);
-            constraint.set_composition_grammar(prepared_grammar);
-        }
-        if finalize_runtime {
-            constraint.cache_external_vocab_artifact_for_save();
-        }
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
