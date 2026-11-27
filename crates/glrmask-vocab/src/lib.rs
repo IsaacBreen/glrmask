@@ -33,9 +33,6 @@ impl fmt::Debug for TokenSet {
 
 impl TokenSet {
     /// Builds a normalized set of IDs.
-    ///
-    /// # Panics
-    /// Panics if an ID is outside the supported range (far above any real vocabulary).
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self::from_pairs(ids.into_iter().map(|id| {
             assert!(id <= MAX_TOKEN_ID, "token ID {id} is outside the supported range");
@@ -44,9 +41,6 @@ impl TokenSet {
     }
 
     /// Builds a normalized set from half-open ranges. Empty ranges contribute no IDs.
-    ///
-    /// # Panics
-    /// Panics if an ID is outside the supported range (far above any real vocabulary).
     pub fn from_ranges(ranges: impl IntoIterator<Item = Range<u32>>) -> Self {
         Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| {
             let last = r.end - 1;

@@ -124,7 +124,7 @@ Empty ranges are no-ops; reversed ranges are invalid. Externs views are shallow,
 
 ## Errors
 
-Arguments of the wrong type throw `TypeError`, and token IDs out of range throw `RangeError`. Everything else throws a
+Arguments of the wrong type throw `TypeError`. Native GLRMask errors throw a
 `GLRMaskError`, whose `code` is one of:
 
 | Code | |
