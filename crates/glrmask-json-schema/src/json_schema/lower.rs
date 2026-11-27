@@ -75,7 +75,268 @@ enum StructuralSchemaSite {
     AdditionalProperties,
 }
 
-#[derive(Debug, Clone)]+= 1;
+#[derive(Debug, Clone)]
+struct StructuralSchemaCacheKey {
+    schema: Schema,
+    terminal_partition_class: JsonTerminalPartitionClass,
+    site: StructuralSchemaSite,
+    object_variant_ref_stack: Vec<String>,
+}
+
+struct StructuralSchemaQuery<'a> {
+    shape: SchemaShape<'a>,
+    schema: &'a Schema,
+    terminal_partition_class: JsonTerminalPartitionClass,
+    site: StructuralSchemaSite,
+    object_variant_ref_stack: Vec<String>,
+}
+
+impl StructuralSchemaQuery<'_> {
+    fn fingerprint(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        self.shape.fingerprint().hash(&mut hasher);
+        self.terminal_partition_class.hash(&mut hasher);
+        self.site.hash(&mut hasher);
+        self.object_variant_ref_stack.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn matches(&self, key: &StructuralSchemaCacheKey) -> bool {
+        self.terminal_partition_class == key.terminal_partition_class
+            && self.site == key.site
+            && self.object_variant_ref_stack == key.object_variant_ref_stack
+            && self.shape.equals(SchemaShape::lowering(&key.schema))
+    }
+
+    fn into_owned(self) -> StructuralSchemaCacheKey {
+        StructuralSchemaCacheKey {
+            schema: self.schema.clone(),
+            terminal_partition_class: self.terminal_partition_class,
+            site: self.site,
+            object_variant_ref_stack: self.object_variant_ref_stack,
+        }
+    }
+}
+
+#[cfg(test)]
+impl StructuralSchemaCacheKey {
+    fn fingerprint(&self) -> u64 {
+        StructuralSchemaQuery {
+            shape: SchemaShape::lowering(&self.schema),
+            schema: &self.schema,
+            terminal_partition_class: self.terminal_partition_class,
+            site: self.site,
+            object_variant_ref_stack: self.object_variant_ref_stack.clone(),
+        }.fingerprint()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StructuralSchemaCacheEntry {
+    key: StructuralSchemaCacheKey,
+    expr: GrammarExpr,
+}
+
+#[derive(Default)]
+struct JsonNameProvenanceBuilder {
+    sidecar: JsonNameProvenanceSidecar,
+    predicate_ids: BTreeMap<JsonNamePredicateProvenance, u32>,
+}
+
+impl JsonNameProvenanceBuilder {
+    fn intern_predicate(&mut self, predicate: JsonNamePredicateProvenance) -> u32 {
+        if let Some(&id) = self.predicate_ids.get(&predicate) {
+            return id;
+        }
+        let id = self.sidecar.predicates.len() as u32;
+        self.sidecar.predicates.push(predicate.clone());
+        self.predicate_ids.insert(predicate, id);
+        id
+    }
+}
+
+fn structural_schema_memo_enabled() -> bool {
+    std::env::var(DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV)
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+impl JsonTerminalPartitionClass {
+    pub fn merge(self, other: Self) -> Self {
+        use JsonTerminalPartitionClass::{Literal, Other, Pattern};
+        match (self, other) {
+            (Pattern, _) | (_, Pattern) => Pattern,
+            (Literal, _) | (_, Literal) => Literal,
+            (Other, Other) => Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct JsonPatternPartitionKey {
+    min_length: usize,
+    max_length: Option<usize>,
+    pattern: Option<String>,
+    format: Option<String>,
+}
+
+impl From<&StringSchema> for JsonPatternPartitionKey {
+    fn from(schema: &StringSchema) -> Self {
+        Self {
+            min_length: schema.min_length,
+            max_length: schema.max_length,
+            pattern: schema.pattern.clone(),
+            format: schema.format.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FixedObjectShapeProfile {
+    pub calls: usize,
+    pub item_symbol_ms: f64,
+    pub graph_build_ms: f64,
+    pub determinize_minimize_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Default)]
+pub struct FixedObjectLowerProfile {
+    pub calls: usize,
+    pub total_items: usize,
+    pub template_hits: usize,
+    pub template_misses: usize,
+    pub shapes: BTreeMap<(usize, usize), FixedObjectShapeProfile>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FixedObjectTemplateKey {
+    pub required: Vec<bool>,
+    /// ExprNfaBuilder label IDs in the exact order the fixed-object builder
+    /// first observes them. This captures equality relationships between key,
+    /// value, and separator expressions while abstracting their identities.
+    pub symbol_occurrences: Vec<i32>,
+}
+
+pub fn lower_document(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+) -> ImportResult<NamedGrammar> {
+    Ok(lower_document_with_options(document, config, false)?.grammar)
+}
+
+pub(crate) fn lower_document_with_name_provenance(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+) -> ImportResult<JsonSchemaNamedGrammar> {
+    lower_document_with_options(document, config, true)
+}
+
+pub(crate) fn lower_document_with_options(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+) -> ImportResult<JsonSchemaNamedGrammar> {
+    lower_document_with_runtime_pruning(document, config, collect_name_provenance, false)
+}
+
+pub(crate) fn lower_document_with_runtime_pruning(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+    early_prune: bool,
+) -> ImportResult<JsonSchemaNamedGrammar> {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let started_at = profile_enabled.then(std::time::Instant::now);
+    let lowerer = Lowerer::new_with_name_provenance(document, config, collect_name_provenance);
+    let setup_ms = started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let lowered = lowerer.finish_with_early_rule_pruning(early_prune)?;
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][json_schema_lower_document] setup_ms={:.3} finish_ms={:.3} total_ms={:.3}",
+            setup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0 - setup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(lowered)
+}
+
+pub struct Lowerer<'a> {
+    pub document: &'a SchemaDocument,
+    pub config: JsonSchemaConfig,
+    pub rules: Vec<NamedRule>,
+    pub shared_string_exact_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_close_rules: BTreeMap<usize, String>,
+    pub shared_string_unbounded_rules: BTreeMap<(usize, bool, bool), String>,
+    pub shared_string_exact_open_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_wrapped_rules: BTreeMap<usize, String>,
+    pub shared_string_bounded_wrapped_rules: BTreeMap<(usize, usize), String>,
+    pub shared_ap_literal_keys: BTreeSet<String>,
+    pub shared_ap_patterns: Vec<String>,
+    pub shared_ap_base_rule: Option<String>,
+    pub shared_ap_excluded_rule: Option<String>,
+    pub shared_additional_key_colon_local_rules: BTreeMap<(Vec<String>, Vec<String>), String>,
+    pub shared_ap_pattern_rules: BTreeMap<String, String>,
+    pub shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
+    pub shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
+    pub shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
+    pub property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
+    pub(crate) pattern_key_colon_regex_cache: Arc<Mutex<HashMap<String, Result<super::string::PatternKeyColonLowered, String>>>>,
+    json_name_provenance: Option<Arc<Mutex<JsonNameProvenanceBuilder>>>,
+    pub fixed_object_profile: Option<FixedObjectLowerProfile>,
+    pub fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
+    pub terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+    pub terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
+    pub(crate) repeated_pattern_property_keys: BTreeSet<JsonPatternPartitionKey>,
+    pub(super) shared_integer_atoms: Vec<super::number::SharedIntegerAtom>,
+    pub(super) shared_integer_atom_rules_installed: bool,
+    terminal_partition_class: JsonTerminalPartitionClass,
+    definition_rules: BTreeMap<String, String>,
+    definition_by_pointer: BTreeMap<String, &'a Schema>,
+    pub object_variant_ref_stack: BTreeSet<String>,
+    structural_schema_memo_enabled: bool,
+    structural_schema_expr_cache: HashMap<u64, Vec<StructuralSchemaCacheEntry>>,
+    // In-flight calls are separate from completed memo entries, preserving the
+    // original result lookup and completion order for all terminating imports.
+    active_schema_lowerings: Vec<(u64, StructuralSchemaCacheKey, usize)>,
+    structural_schema_cache_hits: usize,
+    structural_schema_cache_misses: usize,
+    used_rule_names: BTreeSet<String>,
+    next_rule_id: usize,
+}
+
+fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
+    seq(vec![
+        lit("\""),
+        GrammarExpr::Quantified(Box::new(r(char_rule)), Quantifier::ZeroPlus),
+        lit("\""),
+    ])
+}
+
+fn collect_pattern_property_key_counts(
+    schema: &Schema,
+    counts: &mut BTreeMap<JsonPatternPartitionKey, usize>,
+) {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return;
+    };
+    if let Some(object) = assertions.object.as_ref() {
+        for property in &object.properties {
+            if let SchemaKind::Assertions(property_assertions) = &property.schema.kind
+                && let Some(string_schema) = property_assertions.string.as_ref()
+                && string_schema.pattern.is_some()
+            {
+                *counts.entry(JsonPatternPartitionKey::from(string_schema)).or_default() += 1;
             }
             collect_pattern_property_key_counts(&property.schema, counts);
         }
