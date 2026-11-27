@@ -7899,20 +7899,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                         support_transposition_checks += class.members.len();
                         accepted_representative_members += class.members.len();
                         for (terminal, map) in class.members {
-                            result
-                                .get_mut(&representative)
-                                .expect("raw TI batch representative must remain present")
-                                .insert(terminal);
-                            let removed = result.remove(&terminal);
-                            debug_assert!(
-                                removed.is_some(),
-                                "raw TI batch member must remain a singleton until merged",
-                            );
-                            let replaced = accepted_maps.insert(
-                                (representative, terminal),
-                                Arc::new(map.scanner_state_map()),
-                            );
-                            debug_assert!(replaced.is_none());
+                            record_certified_member(                                 &mut result,                                 &mut accepted_maps,                                 representative,                                 terminal,                                 map,                             );
                         }
                     }
                 }
@@ -8002,23 +7989,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                 support_transposition_checks += group.len() - 1;
                 accepted_representative_members += group.len() - 1;
                 for (&terminal, map) in group[1..].iter().zip(maps) {
-                    result
-                        .get_mut(&representative)
-                        .expect("TI direct batch representative must retain its singleton partition entry")
-                        .insert(terminal);
-                    let removed = result.remove(&terminal);
-                    debug_assert!(
-                        removed.is_some(),
-                        "TI direct batch member must retain its singleton partition entry"
-                    );
-                    let replaced = accepted_maps.insert(
-                        (representative, terminal),
-                        Arc::new(map.scanner_state_map()),
-                    );
-                    debug_assert!(
-                        replaced.is_none(),
-                        "TI direct batch must accept each pair once"
-                    );
+                    record_certified_member(                         &mut result,                         &mut accepted_maps,                         representative,                         terminal,                         map,                     );
                 }
             }
             residual_groups
@@ -8148,20 +8119,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                     support_transposition_checks += group.len() - 1;
                     accepted_representative_members += group.len() - 1;
                     for (&terminal, map) in group[1..].iter().zip(maps) {
-                        result
-                            .get_mut(&representative)
-                            .expect("TI batch representative must retain its singleton partition entry")
-                            .insert(terminal);
-                        let removed = result.remove(&terminal);
-                        debug_assert!(
-                            removed.is_some(),
-                            "TI batch member must retain its singleton partition entry"
-                        );
-                        let replaced = accepted_maps.insert(
-                            (representative, terminal),
-                            Arc::new(map.scanner_state_map()),
-                        );
-                        debug_assert!(replaced.is_none(), "TI batch must accept each pair once");
+                        record_certified_member(                             &mut result,                             &mut accepted_maps,                             representative,                             terminal,                             map,                         );
                     }
                 }
             }
@@ -8311,17 +8269,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                         if let Some(map) = map {
                             accepted_this_pivot += 1;
                             accepted_representative_members += 1;
-                            result
-                                .get_mut(&representative)
-                                .expect("TI representative must retain its singleton partition entry")
-                                .insert(terminal);
-                            let removed = result.remove(&terminal);
-                            debug_assert!(removed.is_some(), "TI member must retain its singleton partition entry");
-                            let replaced = accepted_maps.insert(
-                                (representative, terminal),
-                                Arc::new(map.scanner_state_map()),
-                            );
-                            debug_assert!(replaced.is_none(), "TI round must accept each pair once");
+                            record_certified_member(                                 &mut result,                                 &mut accepted_maps,                                 representative,                                 terminal,                                 map,                             );
                         } else {
                             next_unresolved.push(terminal);
                         }
@@ -8443,23 +8391,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                                 if let Some(map) = map {
                                     let terminal = batch_members[member_index];
                                     accepted_representative_members += 1;
-                                    result
-                                        .get_mut(&representative)
-                                        .expect("TI batch replay representative must retain its singleton partition entry")
-                                        .insert(terminal);
-                                    let removed = result.remove(&terminal);
-                                    debug_assert!(
-                                        removed.is_some(),
-                                        "TI batch replay member must retain its singleton partition entry"
-                                    );
-                                    let replaced = accepted_maps.insert(
-                                        (representative, terminal),
-                                        Arc::new(map.scanner_state_map()),
-                                    );
-                                    debug_assert!(
-                                        replaced.is_none(),
-                                        "TI batch replay must accept each retained pair once"
-                                    );
+                                    record_certified_member(                                         &mut result,                                         &mut accepted_maps,                                         representative,                                         terminal,                                         map,                                     );
                                 } else {
                                     next_remaining.push(member_index);
                                 }
@@ -8597,17 +8529,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
                     if let Some(map) = map {
                         let storage_started_at = profile_timing.then(Instant::now);
                         accepted_representative_members += 1;
-                        result
-                            .get_mut(&representative)
-                            .expect("TI representative must retain its singleton partition entry")
-                            .insert(terminal);
-                        let removed = result.remove(&terminal);
-                        debug_assert!(removed.is_some(), "TI member must retain its singleton partition entry");
-                        let replaced = accepted_maps.insert(
-                            (representative, terminal),
-                            Arc::new(map.scanner_state_map()),
-                        );
-                        debug_assert!(replaced.is_none(), "TI round must accept each pair once");
+                        record_certified_member(                             &mut result,                             &mut accepted_maps,                             representative,                             terminal,                             map,                         );
                         if let Some(started_at) = storage_started_at {
                             accepted_map_storage_ns += started_at.elapsed().as_nanos() as u64;
                         }
@@ -8856,6 +8778,26 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
             maps: accepted_maps,
         }
     }
+
+fn record_certified_member(
+    partition: &mut BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    maps: &mut BTreeMap<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>,
+    representative: TerminalID,
+    terminal: TerminalID,
+    map: InterchangeMap,
+) {
+    partition
+        .get_mut(&representative)
+        .expect("TI representative must remain present")
+        .insert(terminal);
+    let removed = partition.remove(&terminal);
+    debug_assert!(removed.is_some(), "TI member must remain present until merged");
+    let replaced = maps.insert(
+        (representative, terminal),
+        Arc::new(map.scanner_state_map()),
+    );
+    debug_assert!(replaced.is_none(), "TI round must accept each pair once");
+}
 
 /// Return the singleton-inclusive one-round partition for the current active
 /// terminal mask. Inactive terminals are deliberately absent: this same mask
