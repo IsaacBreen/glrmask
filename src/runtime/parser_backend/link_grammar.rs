@@ -57,8 +57,7 @@ mod forest_tests {
                     let parent = leaf(parent_nullable, empty, 91);
                     let child = leaf(child_nullable, empty, 92);
                     let linked = LinkGrammar::compose_sources(vec![parent.clone(), child.clone()],
-                        vec![0, 2], vec![vec![0]], vec![0, 2], 4,
-                        vec![(0, 0, 1, 0, 1, child_nullable)]).unwrap();
+                        2, vec![ChildBinding { slots: vec![0], states: 2, return_pop: 1, nullable: child_nullable }]).unwrap();
                     assert!(!linked.is_materialized());
                     assert!(Arc::ptr_eq(&linked.source.as_ref().unwrap().sources[0], &parent));
                     assert!(Arc::ptr_eq(&linked.source.as_ref().unwrap().sources[1], &child));
@@ -96,13 +95,13 @@ mod forest_tests {
     fn later_nullable_root_and_nested_sources_keep_exact_epsilon_rules() {
         let parent = leaf(false, false, 91);
         let child = leaf(false, false, 92);
-        let mut first = LinkGrammar::compose_sources(vec![parent, child], vec![0, 2],
-            vec![vec![0]], vec![0, 2], 4, vec![(0, 0, 1, 0, 1, false)]).unwrap();
+        let mut first = LinkGrammar::compose_sources(vec![parent, child], 2,
+            vec![ChildBinding { slots: vec![0], states: 2, return_pop: 1, nullable: false }]).unwrap();
         first.root_nullable = true;
         first.embedded_end_token_ids = vec![99];
         let first = Arc::new(first);
         let second = LinkGrammar::compose_sources(vec![first.clone(), leaf(true, false, 93)],
-            vec![0, 4], vec![vec![2]], vec![0, 4], 6, vec![(0, 2, 1, 0, 1, true)]).unwrap();
+            4, vec![ChildBinding { slots: vec![2], states: 2, return_pop: 1, nullable: true }]).unwrap();
         assert!(!first.is_materialized() && !second.is_materialized());
         assert_eq!(second.embedded_end_token_ids, vec![93, 99]);
         assert_eq!(second.rules().iter().filter(|r| r.lhs == 1 && r.rhs.is_empty()).count(), 1);
@@ -121,19 +120,44 @@ mod forest_tests {
         let mut flat = parent.flat().clone();
         flat.rules = Arc::from(vec![Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] }]);
         assert!(bincode::deserialize::<LinkGrammar>(&bincode::serialize(&flat).unwrap()).is_err());
-        assert!(LinkGrammar::compose_sources(vec![parent.clone(), parent], vec![0, 3],
-            vec![vec![0]], vec![0, 2], 4, vec![(0, 0, 1, 0, 1, false)]).is_err());
+        assert!(LinkGrammar::compose_sources(vec![parent.clone(), parent], 2,
+            vec![ChildBinding { slots: vec![3], states: 2, return_pop: 1, nullable: false }]).is_err());
     }
+}
+
+#[derive(Debug)]
+struct ChildBinding {
+    slots: Vec<u32>,
+    states: u32,
+    return_pop: u32,
+    nullable: bool,
 }
 
 #[derive(Debug)]
 struct CompositionRecipe {
     sources: Vec<Arc<LinkGrammar>>,
-    terminal_offsets: Vec<u32>,
-    slots: Vec<Vec<u32>>,
-    state_offsets: Vec<u32>,
-    state_count: u32,
-    effect_links: Vec<(u32, u32, u32, u32, u32, bool)>,
+    parent_states: u32,
+    children: Vec<ChildBinding>,
+}
+
+impl CompositionRecipe {
+    // Coordinates and effect links are projections of the component bindings.
+    fn effect_layout(&self) -> (Vec<u32>, Vec<u32>, u32, Vec<(u32, u32, u32, u32, u32, bool)>) {
+        let mut state_offsets = vec![0];
+        let mut terminal_offsets = vec![0];
+        let mut states = self.parent_states;
+        let mut terminals = self.sources[0].terminal_count;
+        let mut links = Vec::new();
+        for (index, binding) in self.children.iter().enumerate() {
+            state_offsets.push(states);
+            terminal_offsets.push(terminals);
+            states += binding.states;
+            terminals += self.sources[index + 1].terminal_count;
+            links.extend(binding.slots.iter().map(|&slot|
+                (0, slot, index as u32 + 1, 0, binding.return_pop, binding.nullable)));
+        }
+        (state_offsets, terminal_offsets, states, links)
+    }
 }
 
 impl LinkGrammar {
@@ -207,26 +231,30 @@ impl LinkGrammar {
         if sources.len() != terminal_offsets.len() || slots.len() + 1 != sources.len() {
             return Err("template composition grammar layout mismatch".into());
         }
-        let mut offsets = Vec::new(); let mut states = 0u32;
-        for component in components {
-            offsets.push(states);
-            states = states.checked_add(component.template_parser().unwrap().state_count)
-                .ok_or("composition parser coordinate overflow")?;
+        let mut terminals = 0u32;
+        for (source, &offset) in sources.iter().zip(terminal_offsets) {
+            if offset != terminals { return Err("composition grammar terminal layout mismatch".into()); }
+            terminals = terminals.checked_add(source.terminal_count)
+                .ok_or("composition terminal overflow")?;
         }
-        let links = slots.iter().enumerate().flat_map(|(child, slots)| {
-            let embedding = components[child + 1].template_parser().unwrap().embedding.as_ref().unwrap();
-            slots.iter().map(move |&slot| (0, slot, child as u32 + 1, 0, embedding.return_pop, embedding.nullable))
+        let parent_states = components[0].template_parser().unwrap().state_count;
+        let children = slots.iter().enumerate().map(|(child, slots)| {
+            let parser = components[child + 1].template_parser().unwrap();
+            let embedding = parser.embedding.as_ref().unwrap();
+            ChildBinding { slots: slots.clone(), states: parser.state_count,
+                return_pop: embedding.return_pop, nullable: embedding.nullable }
         }).collect();
-        Self::compose_sources(sources, terminal_offsets.to_vec(), slots.to_vec(), offsets, states, links)
+        Self::compose_sources(sources, parent_states, children)
             .map(|grammar| Some(Arc::new(grammar)))
     }
 
-    fn compose_sources(sources: Vec<Arc<Self>>, terminal_offsets: Vec<u32>, slots: Vec<Vec<u32>>,
-        state_offsets: Vec<u32>, state_count: u32,
-        effect_links: Vec<(u32, u32, u32, u32, u32, bool)>) -> Result<Self, String> {
-        if sources.is_empty() || sources.len() != terminal_offsets.len()
-            || sources.len() != state_offsets.len() || slots.len() + 1 != sources.len()
-        { return Err("template composition grammar layout mismatch".into()); }
+    fn compose_sources(sources: Vec<Arc<Self>>, parent_states: u32,
+        children: Vec<ChildBinding>) -> Result<Self, String> {
+        if sources.is_empty() || children.len() + 1 != sources.len() {
+            return Err("template composition grammar layout mismatch".into());
+        }
+        children.iter().try_fold(parent_states, |states, child|
+            states.checked_add(child.states).ok_or("composition parser coordinate overflow"))?;
         let parent = &sources[0];
         parent.validate_manifest()?;
         let mut terminals = parent.terminal_count;
@@ -235,10 +263,7 @@ impl LinkGrammar {
         let mut controls = parent.control_terminals.clone();
         for (index, child) in sources.iter().enumerate().skip(1) {
             child.validate_manifest()?;
-            if terminal_offsets[index] != terminals {
-                return Err("composition grammar terminal layout mismatch".into());
-            }
-            if slots[index - 1].iter().any(|&slot| slot >= parent.terminal_count) {
+            if children[index - 1].slots.iter().any(|&slot| slot >= parent.terminal_count) {
                 return Err("composition slot outside parent terminal coordinate".into());
             }
             let nt_offset = u32::try_from(nonterminals).map_err(|_| "composition nonterminal overflow")?;
@@ -248,8 +273,9 @@ impl LinkGrammar {
             rules = rules.checked_add(child.rule_count)
                 .and_then(|count| count.checked_add(usize::from(child.root_nullable && !child.root_has_empty_rule)))
                 .ok_or("composition rule count overflow")?;
+            let terminal_offset = terminals;
             terminals = terminals.checked_add(child.terminal_count).ok_or("composition terminal overflow")?;
-            controls.extend(child.control_terminals.iter().map(|&t| t + terminal_offsets[index]));
+            controls.extend(child.control_terminals.iter().map(|&t| t + terminal_offset));
         }
         let mut ends = sources.iter().flat_map(|source| source.embedded_end_token_ids.iter().copied()).collect::<Vec<_>>();
         ends.sort_unstable(); ends.dedup();
@@ -258,8 +284,7 @@ impl LinkGrammar {
             root_nullable: parent.root_nullable, embedded_end_token_ids: ends,
             nonterminal_count: nonterminals, rule_count: rules, root_nonterminal: parent.root_nonterminal,
             root_has_empty_rule: parent.root_has_empty_rule || parent.root_nullable,
-            source: Some(Arc::new(CompositionRecipe { sources, terminal_offsets, slots,
-                state_offsets, state_count, effect_links })), flat: OnceLock::new(),
+            source: Some(Arc::new(CompositionRecipe { sources, parent_states, children })), flat: OnceLock::new(),
             deferred_boundary_summary: OnceLock::new(),
             flat_boundary_tail_r1: OnceLock::new(),
             entry_prefix_cover: OnceLock::new(),
@@ -375,8 +400,6 @@ impl FlatLinkGrammar {
     /// ordinary grammar analysis without constructing any parser table.
     fn compose(recipe: &CompositionRecipe) -> Result<Arc<Self>, String> {
         let sources = recipe.sources.iter().map(|source| source.flat()).collect::<Vec<_>>();
-        let terminal_offsets = &recipe.terminal_offsets;
-        let slots = &recipe.slots;
         let parent = sources[0];
         let mut rules = parent.rules.to_vec();
         let parent_rules = rules.len();
@@ -390,12 +413,11 @@ impl FlatLinkGrammar {
         let mut terminals = parent.terminal_count;
         for (index, child) in sources.iter().enumerate().skip(1) {
             let nt_offset = u32::try_from(names.len()).map_err(|_| "composition nonterminal overflow")?;
-            let terminal_offset = terminal_offsets[index];
-            if terminal_offset != terminals { return Err("composition grammar terminal layout mismatch".into()); }
+            let terminal_offset = terminals;
             let root = child.root().checked_add(nt_offset).ok_or("composition root overflow")?;
             for rule in &mut rules[..parent_rules] {
                 for symbol in &mut rule.rhs {
-                    if let Symbol::Terminal(terminal) = *symbol && slots[index-1].contains(&terminal) {
+                    if let Symbol::Terminal(terminal) = *symbol && recipe.children[index-1].slots.contains(&terminal) {
                         *symbol = Symbol::Nonterminal(root);
                     }
                 }
@@ -421,11 +443,9 @@ impl FlatLinkGrammar {
         embedded_end_token_ids.dedup();
         let summaries = sources.iter().map(|source| source.stack_effects.as_ref()).collect::<Option<Vec<_>>>();
         let stack_effects = summaries.and_then(|summaries| {
-            let offsets = &recipe.state_offsets;
-            let states = recipe.state_count;
-            let links = &recipe.effect_links;
+            let (offsets, terminal_offsets, states, links) = recipe.effect_layout();
             crate::compiler::boundary_stack_support::CompilerEffects::compose(
-                &summaries,offsets,terminal_offsets,links,states,terminals).ok()
+                &summaries,&offsets,&terminal_offsets,&links,states,terminals).ok()
         });
         let grammar = Self { rules: Arc::from(rules), nonterminal_names: names,
             terminal_count: terminals, control_terminals: controls, root_nullable: parent.root_nullable,
