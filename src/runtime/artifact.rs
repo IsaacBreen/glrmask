@@ -3876,6 +3876,26 @@ impl DynamicMaskSliceTrie {
         self.full_walk_token_markers.as_ref()
     }
 
+    /// Share only if every logical row has exactly the same original IDs.
+    /// Foreign canonical coordinates remain independently flat.
+    fn try_share_aliases(&mut self, owner: &Arc<CanonicalAliasRows>) {
+        let SliceAliasRows::Flat { offsets, originals } = &self.aliases else { return; };
+        let matches = self.trie.all_subtree_tokens().iter().enumerate().all(|(ordinal, &canonical)| {
+            let index = canonical as usize;
+            let Some(bounds) = owner.canonical_original_token_offsets.get(index..index + 2) else {
+                return false;
+            };
+            let start = offsets[ordinal] as usize;
+            let end = offsets[ordinal + 1] as usize;
+            originals[start..end] == owner.canonical_original_tokens[bounds[0] as usize..bounds[1] as usize]
+        });
+        if matches {
+            let preorder_offsets = DynamicMaskVocab::permuted_alias_offsets(
+                &self.trie, &owner.canonical_original_token_offsets,
+            ).map_or_else(|| Arc::clone(&owner.canonical_original_token_offsets), Arc::new);
+            self.aliases = SliceAliasRows::Shared { owner: Arc::clone(owner), preorder_offsets };
+        }
+    }
     fn original_aliases_at(&self, ordinal: usize) -> WalkMarkerAliases<'_> {
         match &self.aliases {
             SliceAliasRows::Shared { owner, .. } => {
@@ -3966,7 +3986,8 @@ struct LegacySliceWire {
     cache_id: u32,
     dfa: Arc<VocabPartitionDfa>,
     trie: Arc<DynamicMaskTrie>,
-    full_walk_token_markers: Arc<Vec<u64>>,
+    #[serde(rename = "full_walk_token_markers")]
+    _full_walk_token_markers: LegacyTrieDerived<u64>,
     subtree_original_token_offsets: Arc<Vec<u32>>,
     subtree_original_tokens: Arc<Vec<u32>>,
     slice_original_token_words: Arc<Vec<u32>>,
@@ -3983,13 +4004,20 @@ impl<'de> serde::Deserialize<'de> for DynamicMaskSliceTrie {
         if offsets.len() != count + 1 || offsets.first() != Some(&0)
             || offsets.windows(2).any(|pair| pair[0] > pair[1])
             || offsets.last().copied().map(|n| n as usize) != Some(wire.subtree_original_tokens.len())
-            || wire.full_walk_token_markers.len() != count.saturating_sub(usize::from(wire.trie.node(0).token_id.is_some()))
+            || wire.subtree_original_tokens.iter().any(|&id| id > crate::MAX_TOKEN_ID)
         {
             return Err(D::Error::custom("invalid dynamic mask slice alias rows"));
         }
+        let markers = wire.trie.all_subtree_tokens().iter().enumerate()
+            .skip(usize::from(wire.trie.node(0).token_id.is_some()))
+            .map(|(ordinal, &canonical)| {
+                let start = offsets[ordinal] as usize;
+                let end = offsets[ordinal + 1] as usize;
+                DynamicMaskVocab::encode_walk_marker(canonical, &wire.subtree_original_tokens[start..end])
+            }).collect();
         Ok(Self {
             cache_id: wire.cache_id, dfa: wire.dfa, trie: wire.trie,
-            full_walk_token_markers: wire.full_walk_token_markers,
+            full_walk_token_markers: Arc::new(markers),
             aliases: SliceAliasRows::Flat {
                 offsets: wire.subtree_original_token_offsets,
                 originals: wire.subtree_original_tokens,
@@ -4499,7 +4527,7 @@ impl DynamicMaskVocab {
     ) -> Self {
         let indexes = Self::build_vocab_indexes(
             trie.as_ref(), offsets, originals, true,
-            prepared_all_original_token_words, None,
+            prepared_all_original_token_words,
         );
         Self {
             trie,
@@ -4514,9 +4542,8 @@ impl DynamicMaskVocab {
         canonical_original_tokens: Arc<Vec<u32>>,
         ordered: bool,
         prepared_all_original_token_words: Option<Arc<Vec<u32>>>,
-        prepared_word_masks: Option<(Arc<Vec<u32>>, Arc<Vec<(u32, u32)>>)>,
     ) -> RuntimeVocabIndexes {
-        let build_words = || prepared_word_masks.unwrap_or_else(|| {
+        let build_words = || {
             if ordered {
                 Self::build_canonical_original_word_masks_sorted(
                     &canonical_original_token_offsets, &canonical_original_tokens,
@@ -4526,7 +4553,7 @@ impl DynamicMaskVocab {
                     &canonical_original_token_offsets, &canonical_original_tokens,
                 )
             }
-        });
+        };
         let build_markers = || Self::build_full_walk_token_markers(
             trie, &canonical_original_token_offsets, &canonical_original_tokens,
         );
@@ -4629,47 +4656,11 @@ impl DynamicMaskVocab {
     }
 
     fn from_alias_store(trie: Arc<DynamicMaskTrie>, token_aliases: DynamicMaskAliasStore) -> Self {
-        Self::from_alias_store_with_slices(trie, token_aliases, None)
-    }
-
-    fn from_alias_store_with_slices(
-        trie: Arc<DynamicMaskTrie>,
-        token_aliases: DynamicMaskAliasStore,
-        slices: Option<&[Arc<DynamicMaskSliceTrie>]>,
-    ) -> Self {
-        let (canonical_original_token_offsets, canonical_original_tokens) =
-            Self::flatten_canonical_original_tokens(&token_aliases);
-        let master_layout_classes = slices.and_then(|slices| {
-            Self::llg_master_layout_classes_from_slices(
-                slices,
-                canonical_original_token_offsets.len().saturating_sub(1),
-            )
-        });
-        let (
-            canonical_original_word_offsets,
-            canonical_original_word_masks,
-            fused_master_admission,
-        ) = if let Some(classes) = master_layout_classes.as_deref() {
-            Self::build_canonical_original_word_masks_and_master_admission(
-                &canonical_original_token_offsets,
-                &canonical_original_tokens,
-                classes,
-            )
-        } else {
-            let (offsets, masks) = Self::build_canonical_original_word_masks(
-                &canonical_original_token_offsets,
-                &canonical_original_tokens,
-            );
-            (offsets, masks, None)
-        };
-        let indexes = Self::build_vocab_indexes(
-            trie.as_ref(), canonical_original_token_offsets, canonical_original_tokens,
-            false, None, Some((canonical_original_word_offsets, canonical_original_word_masks)),
-        );
+        let (offsets, originals) = Self::flatten_canonical_original_tokens(&token_aliases);
+        let indexes = Self::build_vocab_indexes(&trie, offsets, originals, false, None);
         Self {
             trie,
             alias_state: VocabAliasState::Runtime(Arc::new(indexes)),
-            llg_master_admission: fused_master_admission.map(Arc::new),
             ..Self::default()
         }
     }
@@ -4705,7 +4696,7 @@ impl DynamicMaskVocab {
         };
         let (offsets, originals) = Self::flatten_owned_ordered_aliases(aliases);
         self.alias_state = VocabAliasState::Runtime(Arc::new(Self::build_vocab_indexes(
-            &self.trie, offsets, originals, ordered, None, None,
+            &self.trie, offsets, originals, ordered, None,
         )));
         true
     }
@@ -4746,120 +4737,6 @@ impl DynamicMaskVocab {
             offsets.push(originals.len() as u32);
         }
         (Arc::new(offsets), Arc::new(originals))
-    }
-
-    fn llg_master_layout_classes_from_slices(
-        slices: &[Arc<DynamicMaskSliceTrie>],
-        canonical_count: usize,
-    ) -> Option<Vec<u16>> {
-        let master = slices
-            .iter()
-            .find(|slice| slice.cache_id() == DYNAMIC_MASK_LLG_MASTER_CACHE_ID)?;
-        let trie = master.trie();
-        let mut classes = vec![0u16; canonical_count];
-        let mut seen = vec![false; canonical_count];
-        if let Some(root_token) = trie.node(0).token_id {
-            let slot = root_token as usize;
-            if slot >= canonical_count {
-                return None;
-            }
-            seen[slot] = true;
-        }
-        let all_tokens = trie.all_subtree_tokens();
-        for (root_slot, edge) in trie.children(0).iter().enumerate() {
-            let class = trie.root_layout_class(root_slot)?;
-            let canonical_tokens = all_tokens.get(trie.subtree_token_index_range(edge.child))?;
-            for &canonical in canonical_tokens {
-                let slot = canonical as usize;
-                if slot >= canonical_count {
-                    return None;
-                }
-                if seen[slot] && classes[slot] != class {
-                    return None;
-                }
-                classes[slot] = class;
-                seen[slot] = true;
-            }
-        }
-        seen.iter().all(|&value| value).then_some(classes)
-    }
-
-    fn build_canonical_original_word_masks_and_master_admission(
-        canonical_offsets: &[u32],
-        canonical_original_tokens: &[u32],
-        master_layout_classes: &[u16],
-    ) -> (
-        Arc<Vec<u32>>,
-        Arc<Vec<(u32, u32)>>,
-        Option<MasterAdmissionWords>,
-    ) {
-        let canonical_count = canonical_offsets.len().saturating_sub(1);
-        if master_layout_classes.len() != canonical_count {
-            let (offsets, masks) = Self::build_canonical_original_word_masks(
-                canonical_offsets,
-                canonical_original_tokens,
-            );
-            return (offsets, masks, None);
-        }
-        let word_len = canonical_original_tokens
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |token| token as usize / 32 + 1);
-        let max_safe_chars = master_layout_classes
-            .iter()
-            .copied()
-            .map(dynamic_mask_llg_master_safe_chars)
-            .max()
-            .unwrap_or(0);
-        let mut exact_safe_words =
-            vec![vec![0u32; word_len]; usize::from(max_safe_chars) + 1];
-        let mut whitespace_words = vec![0u32; word_len];
-        let mut scratch = vec![0u32; word_len];
-        let mut touched = Vec::<u32>::new();
-        let mut offsets = Vec::<u32>::with_capacity(canonical_count + 1);
-        let mut masks = Vec::<(u32, u32)>::new();
-        offsets.push(0);
-        for canonical in 0..canonical_count {
-            let class = master_layout_classes[canonical];
-            let safe_chars = dynamic_mask_llg_master_safe_chars(class);
-            let is_whitespace = dynamic_mask_llg_master_is_whitespace(class);
-            let start = canonical_offsets[canonical] as usize;
-            let end = canonical_offsets[canonical + 1] as usize;
-            for &token_id in &canonical_original_tokens[start..end] {
-                let word = token_id / 32;
-                let word_slot = word as usize;
-                let bit = 1u32 << (token_id % 32);
-                let slot = unsafe { scratch.get_unchecked_mut(word_slot) };
-                if *slot == 0 {
-                    touched.push(word);
-                }
-                *slot |= bit;
-                if safe_chars != 0 {
-                    unsafe {
-                        *exact_safe_words
-                            .get_unchecked_mut(usize::from(safe_chars))
-                            .get_unchecked_mut(word_slot) |= bit;
-                    }
-                }
-                if is_whitespace {
-                    unsafe { *whitespace_words.get_unchecked_mut(word_slot) |= bit; }
-                }
-            }
-            for word in touched.drain(..) {
-                let bits = unsafe { *scratch.get_unchecked(word as usize) };
-                debug_assert_ne!(bits, 0);
-                masks.push((word, bits));
-                unsafe { *scratch.get_unchecked_mut(word as usize) = 0; }
-            }
-            offsets.push(masks.len() as u32);
-        }
-
-        (
-            Arc::new(offsets),
-            Arc::new(masks),
-            Some(MasterAdmissionWords::from_exact(exact_safe_words, Arc::new(whitespace_words))),
-        )
     }
 
     fn build_canonical_original_word_masks(
@@ -6568,27 +6445,31 @@ impl DynamicMaskVocab {
         Some(counts)
     }
 
+    fn encode_walk_marker(canonical_token: u32, aliases: &[u32]) -> u64 {
+        const FALLBACK_TAG: u64 = 1u64 << 63;
+        let fallback = FALLBACK_TAG | (canonical_token as u64 + 1);
+        let Some(&first_token) = aliases.first() else { return fallback; };
+        let word = first_token / 32;
+        let mut bits = 0u32;
+        for &token_id in aliases {
+            if token_id / 32 != word { return fallback; }
+            bits |= 1u32 << (token_id % 32);
+        }
+        (u64::from(word) << 32) | u64::from(bits)
+    }
+
     fn build_full_walk_token_markers(
         trie: &DynamicMaskTrie,
         canonical_offsets: &[u32],
         canonical_original_tokens: &[u32],
     ) -> Arc<Vec<u64>> {
-        const FALLBACK_TAG: u64 = 1u64 << 63;
-        Arc::new(trie.all_subtree_tokens()[usize::from(trie.node(0).token_id.is_some())..].iter().map(|&canonical_token| {
-            let index = canonical_token as usize;
-            let start = canonical_offsets[index] as usize;
-            let end = canonical_offsets[index + 1] as usize;
-            let aliases = &canonical_original_tokens[start..end];
-            let fallback = FALLBACK_TAG | (canonical_token as u64 + 1);
-            let Some(&first_token) = aliases.first() else { return fallback; };
-            let word = first_token / 32;
-            let mut bits = 0u32;
-            for &token_id in aliases {
-                if token_id / 32 != word { return fallback; }
-                bits |= 1u32 << (token_id % 32);
-            }
-            (u64::from(word) << 32) | u64::from(bits)
-        }).collect())
+        Arc::new(trie.all_subtree_tokens()[usize::from(trie.node(0).token_id.is_some())..]
+            .iter().map(|&canonical_token| {
+                let index = canonical_token as usize;
+                let start = canonical_offsets[index] as usize;
+                let end = canonical_offsets[index + 1] as usize;
+                Self::encode_walk_marker(canonical_token, &canonical_original_tokens[start..end])
+            }).collect())
     }
     #[inline]
     pub(crate) fn subtree_original_tokens(&self, node: u32) -> SubtreeOriginalTokens<'_> {
@@ -8224,33 +8105,42 @@ impl DynamicMaskVocab {
         if artifact.trie.nodes.is_empty() {
             return Err("dynamic-mask vocabulary artifact has no trie root".to_owned());
         }
-        let llg_slice_leftovers = artifact.llg_slice_leftovers;
+        let (offsets, originals) = Self::flatten_canonical_original_tokens(&artifact.token_aliases);
+        if offsets.first() != Some(&0)
+            || offsets.last().copied().map(|n| n as usize) != Some(originals.len())
+            || offsets.windows(2).any(|pair| pair[0] > pair[1])
+            || originals.iter().any(|&id| id > crate::MAX_TOKEN_ID)
+        {
+            return Err("dynamic-mask vocabulary artifact has invalid alias rows".into());
+        }
+        let mut total = 0u32;
+        for &canonical in artifact.trie.all_subtree_tokens() {
+            let index = canonical as usize;
+            let Some(bounds) = offsets.get(index..index + 2) else {
+                return Err("dynamic-mask vocabulary artifact references an invalid alias row".into());
+            };
+            total = total.checked_add(bounds[1] - bounds[0])
+                .ok_or("dynamic-mask vocabulary artifact alias length overflow")?;
+        }
+        let mut llg_slice_leftovers = artifact.llg_slice_leftovers;
         let external_acceleration = artifact.grammar_quotiented
             && llg_slice_leftovers.is_empty()
             && full_vocab_template.is_some();
-        let mut result = if external_acceleration {
-            DynamicMaskVocab::from_alias_store(
-                Arc::new(artifact.trie),
-                artifact.token_aliases,
-            )
-        } else {
-            DynamicMaskVocab::from_alias_store_with_slices(
-                Arc::new(artifact.trie),
-                artifact.token_aliases,
-                Some(&llg_slice_leftovers),
-            )
-        };
+        let mut result = Self::from_alias_store(
+            Arc::new(artifact.trie),
+            DynamicMaskAliasStore::Flat { offsets, originals },
+        );
         if external_acceleration {
             result.inherit_llg_vocab_acceleration_without_master_from(
                 full_vocab_template.expect("external acceleration template checked above"),
             );
         } else {
-            result.llg_slice_leftovers = Arc::new(llg_slice_leftovers);
-            if result.llg_master_admission.is_none() {
-                result.rebuild_llg_master_admitted_words_from_master_trie();
-            } else {
-                result.rebuild_llg_master_residual_ops_from_master_trie();
+            let owner = Arc::clone(&result.indexes().aliases);
+            for slice in &mut llg_slice_leftovers {
+                Arc::make_mut(slice).try_share_aliases(&owner);
             }
+            result.llg_slice_leftovers = Arc::new(llg_slice_leftovers);
+            result.rebuild_llg_master_admitted_words_from_master_trie();
         }
         result.grammar_quotiented = artifact.grammar_quotiented;
         result.source_vocab_digest = artifact.source_vocab_digest;
