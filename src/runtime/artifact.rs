@@ -3724,7 +3724,8 @@ impl DynamicMaskSliceTrie {
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
     pub(crate) trie: Arc<DynamicMaskTrie>,
-    token_aliases: DynamicMaskAliasStore,
+    // Only the transfer-only producer retains grouped aliases without runtime indexes.
+    transfer_aliases: Option<Arc<Vec<Vec<u32>>>>,
     canonical_original_token_offsets: Arc<Vec<u32>>,
     canonical_original_tokens: Arc<Vec<u32>>,
     canonical_original_word_offsets: Arc<Vec<u32>>,
@@ -4026,53 +4027,32 @@ impl DynamicMaskVocab {
         token_aliases: Arc<Vec<Vec<u32>>>,
         prepared_all_original_token_words: Option<Arc<Vec<u32>>>,
     ) -> Self {
-        // Grammar quotients can contain one overwhelmingly large alias group
-        // (for example the permanently-dead class of a singleton language).
-        // When this Arc is uniquely owned and its first group already reserved
-        // enough capacity for the complete flattened list, reuse that Vec as
-        // the canonical runtime storage instead of copying ~the whole model
-        // vocabulary into a second allocation. Small/shared callers retain the
-        // established grouped representation.
-        let (token_aliases, preflattened) = match Arc::try_unwrap(token_aliases) {
+        // Consume grouped aliases into the canonical CSR relation. If the
+        // first group already reserved the full capacity, reuse its buffer.
+        let (offsets, originals) = match Arc::try_unwrap(token_aliases) {
             Ok(groups) => {
-                let total = groups.iter().map(Vec::len).sum::<usize>();
-                let can_reuse_first = groups
-                    .first()
-                    .is_some_and(|first| first.len() >= 4_096 && first.capacity() >= total);
-                if can_reuse_first {
-                    let mut offsets = Vec::with_capacity(groups.len() + 1);
-                    offsets.push(0);
-                    for group in &groups {
-                        offsets.push(offsets.last().copied().unwrap_or(0) + group.len() as u32);
-                    }
-                    let mut iter = groups.into_iter();
-                    let mut originals = iter.next().unwrap_or_default();
-                    for group in iter {
-                        originals.extend_from_slice(&group);
-                    }
-                    let offsets = Arc::new(offsets);
-                    let originals = Arc::new(originals);
-                    (
-                        DynamicMaskAliasStore::Flat {
-                            offsets: Arc::clone(&offsets),
-                            originals: Arc::clone(&originals),
-                        },
-                        Some((offsets, originals)),
-                    )
-                } else {
-                    (DynamicMaskAliasStore::Ordered(Arc::new(groups)), None)
+                let mut offsets = Vec::with_capacity(groups.len() + 1);
+                offsets.push(0);
+                for group in &groups {
+                    offsets.push(offsets.last().copied().unwrap_or(0) + group.len() as u32);
                 }
+                let total = offsets.last().copied().unwrap_or(0) as usize;
+                let mut iter = groups.into_iter();
+                let mut originals = iter.next().unwrap_or_default();
+                originals.reserve(total.saturating_sub(originals.len()));
+                for group in iter {
+                    originals.extend_from_slice(&group);
+                }
+                (Arc::new(offsets), Arc::new(originals))
             }
-            Err(token_aliases) => (DynamicMaskAliasStore::Ordered(token_aliases), None),
+            Err(groups) => Self::flatten_canonical_original_tokens(
+                &DynamicMaskAliasStore::Ordered(groups),
+            ),
         };
-        let (canonical_original_token_offsets, canonical_original_tokens) =
-            preflattened.unwrap_or_else(|| Self::flatten_canonical_original_tokens(&token_aliases));
         Self::from_ordered_alias_parts(
-            trie, token_aliases, canonical_original_token_offsets,
-            canonical_original_tokens, prepared_all_original_token_words,
+            trie, offsets, originals, prepared_all_original_token_words,
         )
     }
-
     /// Build the same owned runtime vocabulary from preflattened, sorted aliases.
     /// Each offsets interval corresponds to one canonical trie token.
     pub(crate) fn from_materialized_flat_ordered(
@@ -4085,15 +4065,11 @@ impl DynamicMaskVocab {
         assert!(offsets.windows(2).all(|p| p[0] <= p[1]));
         debug_assert!(offsets.windows(2).all(|p| originals[p[0] as usize..p[1] as usize]
             .windows(2).all(|q| q[0] <= q[1])));
-        let token_aliases = DynamicMaskAliasStore::Flat {
-            offsets: Arc::clone(&offsets), originals: Arc::clone(&originals),
-        };
-        Self::from_ordered_alias_parts(trie, token_aliases, offsets, originals, None)
+        Self::from_ordered_alias_parts(trie, offsets, originals, None)
     }
 
     fn from_ordered_alias_parts(
         trie: Arc<DynamicMaskTrie>,
-        token_aliases: DynamicMaskAliasStore,
         canonical_original_token_offsets: Arc<Vec<u32>>,
         canonical_original_tokens: Arc<Vec<u32>>,
         prepared_all_original_token_words: Option<Arc<Vec<u32>>>,
@@ -4168,7 +4144,7 @@ impl DynamicMaskVocab {
         };
         Self {
             trie,
-            token_aliases,
+            transfer_aliases: None,
             canonical_original_token_offsets,
             canonical_original_tokens,
             canonical_original_word_offsets,
@@ -4248,7 +4224,7 @@ impl DynamicMaskVocab {
     ) -> Self {
         Self {
             trie,
-            token_aliases: DynamicMaskAliasStore::Ordered(token_aliases),
+            transfer_aliases: Some(token_aliases),
             pending_source: None,
             initialized: true,
             ..Self::default()
@@ -4260,7 +4236,7 @@ impl DynamicMaskVocab {
         debug_assert!(self.pending_source.is_none());
         Self {
             trie: Arc::clone(&self.trie),
-            token_aliases: self.token_aliases.clone(),
+            transfer_aliases: self.transfer_aliases.clone(),
             canonical_original_token_offsets: Arc::clone(
                 &self.canonical_original_token_offsets,
             ),
@@ -4331,70 +4307,8 @@ impl DynamicMaskVocab {
     }
 
     fn from_source(source: DynamicMaskVocabSource) -> Self {
-        Self {
-            trie: Arc::new(DynamicMaskTrie::new()),
-            token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
-            canonical_original_token_offsets: Arc::new(vec![0]),
-            canonical_original_tokens: Arc::new(Vec::new()),
-            canonical_original_word_offsets: Arc::new(vec![0]),
-            canonical_original_word_masks: Arc::new(Vec::new()),
-            node_token_markers: Arc::new(vec![0]),
-            full_walk_token_markers: Arc::new(Vec::new()),
-            subtree_original_token_offsets: Arc::new(vec![0]),
-            subtree_original_tokens: Arc::new(Vec::new()),
-            all_original_token_words: Arc::new(Vec::new()),
-            llg_slice_leftovers: Arc::new(Vec::new()),
-            llg_master_admitted_words: Arc::new(Vec::new()),
-            llg_master_residual_ops: Arc::new(Vec::new()),
-            llg_master_max_safe_chars: 0,
-            prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_prover_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_master_coverage_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_master_coverage_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_plus_complete_terminals: Arc::from(Vec::<TerminalID>::new()),
-            prepared_safe_radius_row_ids: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_offsets: Arc::from(Vec::<u32>::new()),
-            prepared_safe_radius_entries: Arc::from(Vec::<(TerminalID, u16)>::new()),
-            pending_source: Some(source),
-            initialized: false,
-            grammar_quotiented: false,
-            source_vocab_digest: None,
-            mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
-            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
-            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
-            self_loop_projections: Arc::new(Vec::new()),
-            projection_by_source: Arc::from(Vec::<u32>::new()),
-            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
-            projection_alias_h64: Arc::from(Vec::<u32>::new()),
-            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
-            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
-            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
-            runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
-            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_quotients_prepared: false,
-            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            mask_tokenizer: None,
-            mask_determinized_tokenizer: None,
-            mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
-            mask_tokenizer_fast_transitions: None,
-            full_to_mask_state: Arc::from(Vec::<u32>::new()),
-            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
-            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
-            virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projections: Vec::new(),
-            virtual_residual_projections: Vec::new(),
-        }
+        Self { pending_source: Some(source), ..Self::default() }
     }
-
     pub(crate) fn mark_grammar_quotiented(&mut self) {
         self.grammar_quotiented = true;
     }
@@ -4469,7 +4383,7 @@ impl DynamicMaskVocab {
             Self::build_all_original_token_words(&subtree_original_tokens);
         Self {
             trie,
-            token_aliases,
+            transfer_aliases: None,
             canonical_original_token_offsets,
             canonical_original_tokens,
             canonical_original_word_offsets,
@@ -4542,9 +4456,8 @@ impl DynamicMaskVocab {
             return false;
         };
         self.trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(source.trie.as_ref()));
-        self.token_aliases = DynamicMaskAliasStore::Ordered(source.token_aliases);
         (self.canonical_original_token_offsets, self.canonical_original_tokens) =
-            Self::flatten_canonical_original_tokens(&self.token_aliases);
+            Self::flatten_canonical_original_tokens(&DynamicMaskAliasStore::Ordered(source.token_aliases));
         (self.canonical_original_word_offsets, self.canonical_original_word_masks) =
             Self::build_canonical_original_word_masks(
                 &self.canonical_original_token_offsets,
@@ -6648,17 +6561,11 @@ impl DynamicMaskVocab {
 
     #[inline]
     pub(crate) fn canonical_token_count(&self) -> usize {
-        let indexed = self.canonical_original_token_offsets.len().saturating_sub(1);
-        if indexed != 0 {
-            return indexed;
-        }
-        match &self.token_aliases {
-            DynamicMaskAliasStore::Ordered(aliases) => aliases.len(),
-            DynamicMaskAliasStore::Flat { offsets, .. } => offsets.len().saturating_sub(1),
-            DynamicMaskAliasStore::Packed(aliases) => aliases.len(),
-        }
+        self.transfer_aliases.as_ref().map_or_else(
+            || self.canonical_original_token_offsets.len().saturating_sub(1),
+            |aliases| aliases.len(),
+        )
     }
-
     pub(crate) fn token_ids(&self, canonical_token_id: u32) -> Option<&[u32]> {
         let index = canonical_token_id as usize;
         let end_index = index.checked_add(1)?;
@@ -8445,7 +8352,13 @@ impl DynamicMaskVocab {
             .flatten();
         Some(DynamicMaskVocabArtifact {
             trie: self.trie.as_ref().clone(),
-            token_aliases: self.token_aliases.clone(),
+            token_aliases: match &self.transfer_aliases {
+                Some(aliases) => DynamicMaskAliasStore::Ordered(Arc::clone(aliases)),
+                None => DynamicMaskAliasStore::Flat {
+                    offsets: Arc::clone(&self.canonical_original_token_offsets),
+                    originals: Arc::clone(&self.canonical_original_tokens),
+                },
+            },
             llg_slice_leftovers: self.llg_slice_leftovers.as_ref().clone(),
             mask_tokenizer: mask_quotient.as_ref().map(|(tokenizer, _)| tokenizer.clone()),
             full_to_mask_state: mask_quotient
@@ -8802,7 +8715,7 @@ impl Default for DynamicMaskVocab {
     fn default() -> Self {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
-            token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
+            transfer_aliases: None,
             canonical_original_token_offsets: Arc::new(vec![0]),
             canonical_original_tokens: Arc::new(Vec::new()),
             canonical_original_word_offsets: Arc::new(vec![0]),
@@ -9993,9 +9906,9 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         let fresh = template.fresh_runtime_instance();
 
         assert!(Arc::ptr_eq(&template.trie, &fresh.trie));
-        match (&template.token_aliases, &fresh.token_aliases) {
-            (DynamicMaskAliasStore::Ordered(left), DynamicMaskAliasStore::Ordered(right)) => {
-                assert!(Arc::ptr_eq(left, right));
+        assert!(template.transfer_aliases.is_none());
+        assert!(fresh.transfer_aliases.is_none());
+        assert!(Arc::ptr_eq(left, right));
             }
             _ => panic!("materialized ordered vocabulary changed alias representation"),
         }
