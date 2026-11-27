@@ -10,9 +10,7 @@ use crate::ds::compressed_state_set::{CompressedStateSet, SparseStateSet};
 use crate::ds::u8set::U8Set;
 
 use super::dfa::DFA;
-use super::nfa::{CompactNFA, Nfa};
-
-const EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD: u32 = 1;
+use super::nfa::Nfa;
 
 fn compute_subset_metadata(
     nfa: &Nfa,
@@ -224,158 +222,75 @@ fn build_remapped_transitions(nfa: &Nfa, class_map: &[u8]) -> RemappedTransition
     }
 }
 
-fn dfs_selective_post_order(
-    state: usize,
-    compact_nfa: &CompactNFA,
-    out_degree: &[u32],
-    threshold: u32,
-    visited: &mut [bool],
-    post_order: &mut Vec<usize>,
-) {
-    if visited[state] {
-        return;
-    }
-    visited[state] = true;
-
-    let start = compact_nfa.epsilon_offsets[state] as usize;
-    let end = compact_nfa.epsilon_offsets[state + 1] as usize;
-    for &target in &compact_nfa.epsilon_targets[start..end] {
-        dfs_selective_post_order(
-            target as usize,
-            compact_nfa,
-            out_degree,
-            threshold,
-            visited,
-            post_order,
-        );
-    }
-
-    if out_degree[state] >= threshold {
-        post_order.push(state);
-    }
+/// Only states that consume or finalize are observable in a subset.
+/// One epsilon component has one such frontier; unary epsilon chains
+/// share their successor's immutable row rather than copying it.
+#[derive(Clone)]
+enum Frontier {
+    Empty,
+    Singleton(usize),
+    Set(Arc<CompressedStateSet>),
 }
 
-fn precompute_epsilon_closures(
-    compact_nfa: &CompactNFA,
-    out_degree: &[u32],
-    retained_word_masks: &[u64],
-) -> Vec<Option<CompressedStateSet>> {
-    let num_states = out_degree.len();
-    let mut high_degree_closures: Vec<Option<CompressedStateSet>> = vec![None; num_states];
-    let mut visited = vec![false; num_states];
-    let mut post_order = Vec::with_capacity(num_states);
-
-    for state in 0..num_states {
-        if out_degree[state] < EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD {
-            continue;
+impl Frontier {
+    fn union_into(&self, target: &mut SparseStateSet) {
+        match self {
+            Self::Empty => {}
+            Self::Singleton(state) => { target.insert(*state); }
+            Self::Set(set) => target.union_compressed(set),
         }
-
-        dfs_selective_post_order(
-            state,
-            compact_nfa,
-            out_degree,
-            EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD,
-            &mut visited,
-            &mut post_order,
-        );
     }
-
-    let mut epsilon_stack = Vec::with_capacity(num_states);
-    let mut closure = SparseStateSet::new(num_states);
-    for &state in &post_order {
-        closure.clear();
-        closure.insert(state);
-        epsilon_stack.push(state);
-
-        while let Some(current) = epsilon_stack.pop() {
-            let start = compact_nfa.epsilon_offsets[current] as usize;
-            let end = compact_nfa.epsilon_offsets[current + 1] as usize;
-            for index in start..end {
-                let next = compact_nfa.epsilon_targets[index] as usize;
-                if closure.insert(next) {
-                    if let Some(ref precomputed) = high_degree_closures[next] {
-                        closure.union_compressed(precomputed);
-                    } else if out_degree[next] > 0 {
-                        epsilon_stack.push(next);
-                    }
-                }
-            }
-        }
-
-        high_degree_closures[state] = Some(CompressedStateSet::from_sparse_masked(
-            &closure,
-            retained_word_masks,
-        ));
-    }
-
-    high_degree_closures
-}
-
-fn build_start_closure(
-    start_state: usize,
-    retained_states: &[bool],
-    precomputed_closures: &[Option<CompressedStateSet>],
-    num_states: usize,
-) -> SparseStateSet {
-    let mut closure = SparseStateSet::new(num_states);
-    if let Some(precomputed) = &precomputed_closures[start_state] {
-        closure.union_compressed(precomputed);
-    } else if retained_states[start_state] {
-        closure.insert(start_state);
-    }
-    closure
 }
 
 struct ClosedStateTargets {
-    offsets: Vec<u32>,
-    word_indices: Vec<u32>,
-    words: Vec<u64>,
+    component_of: Vec<usize>,
+    rows: Vec<Frontier>,
 }
 
 impl ClosedStateTargets {
-    #[inline]
-    fn words_for_state(&self, state: u32) -> (&[u32], &[u64]) {
-        let start = self.offsets[state as usize] as usize;
-        let end = self.offsets[state as usize + 1] as usize;
-        (&self.word_indices[start..end], &self.words[start..end])
-    }
-}
-
-fn build_closed_state_targets(
-    num_states: usize,
-    retained_states: &[bool],
-    precomputed_closures: &[Option<CompressedStateSet>],
-) -> ClosedStateTargets {
-    let total_words = precomputed_closures
-        .iter()
-        .enumerate()
-        .map(|(state, closure)| {
-            closure
-                .as_ref()
-                .map_or(usize::from(retained_states[state]), |closure| closure.words.len())
-        })
-        .sum();
-    let mut result = ClosedStateTargets {
-        offsets: Vec::with_capacity(num_states + 1),
-        word_indices: Vec::with_capacity(total_words),
-        words: Vec::with_capacity(total_words),
-    };
-    result.offsets.push(0);
-    for state in 0..num_states {
-        if let Some(closure) = &precomputed_closures[state] {
-            result
-                .word_indices
-                .extend(closure.words.iter().map(|&(word_index, _)| word_index));
-            result.words.extend(closure.words.iter().map(|&(_, bits)| bits));
-        } else if retained_states[state] {
-            result.word_indices.push((state / 64) as u32);
-            result.words.push(1u64 << (state % 64));
+    fn build(nfa: &Nfa) -> Self {
+        let n = nfa.states.len();
+        let edges = |state: usize| nfa.states[state].epsilon_transitions.iter().map(|&t| t as usize);
+        let components = super::graph::components(n, edges);
+        let successors = components.successors(edges);
+        let mut seeds = vec![smallvec::SmallVec::<[usize; 1]>::new(); components.count];
+        for (state, row) in nfa.states.iter().enumerate() {
+            if !row.transitions.is_empty() || !row.finalizers.is_empty() {
+                seeds[components.of[state]].push(state);
+            }
         }
-        result.offsets.push(result.words.len() as u32);
+        let mut rows = Vec::<Frontier>::with_capacity(components.count);
+        let mut scratch = SparseStateSet::new(n);
+        for (local, children) in seeds.into_iter().zip(successors) {
+            let row = if local.is_empty() && children.len() == 1 {
+                rows[children[0]].clone()
+            } else if children.is_empty() && local.len() <= 1 {
+                local.first().map_or(Frontier::Empty, |&state| Frontier::Singleton(state))
+            } else {
+                scratch.clear();
+                for state in local { scratch.insert(state); }
+                for child in children { rows[child].union_into(&mut scratch); }
+                let singleton = scratch.dirty_words.first().copied().filter(|&word| {
+                    scratch.dirty_words.len() == 1 && scratch.words[word].is_power_of_two()
+                });
+                if scratch.dirty_words.is_empty() {
+                    Frontier::Empty
+                } else if let Some(word) = singleton {
+                    Frontier::Singleton(word * 64 + scratch.words[word].trailing_zeros() as usize)
+                } else {
+                    Frontier::Set(Arc::new(CompressedStateSet::from_sparse(&scratch)))
+                }
+            };
+            rows.push(row);
+        }
+        Self { component_of: components.of, rows }
     }
-    result
-}
 
+    #[inline]
+    fn frontier(&self, state: u32) -> &Frontier {
+        &self.rows[self.component_of[state as usize]]
+    }
+}
 fn collect_closed_transition_targets(
     subset: &CompressedStateSet,
     remapped_transitions: &RemappedTransitions,
@@ -396,9 +311,8 @@ fn collect_closed_transition_targets(
             for transition in start..end {
                 let class_set = remapped_transitions.class_sets[transition];
                 let next_state = remapped_transitions.targets[transition];
-                let (closed_word_indices, closed_words) =
-                    closed_state_targets.words_for_state(next_state);
-                if closed_words.is_empty() {
+                let frontier = closed_state_targets.frontier(next_state);
+                if matches!(frontier, Frontier::Empty) {
                     continue;
                 }
                 for class_id in class_set.iter() {
@@ -407,8 +321,7 @@ fn collect_closed_transition_targets(
                         seen_class[class_index] = true;
                         used_classes.push(class_index);
                     }
-                    transition_targets[class_index]
-                        .union_indexed_words(closed_word_indices, closed_words);
+                    frontier.union_into(&mut transition_targets[class_index]);
                 }
             }
         }
@@ -526,44 +439,13 @@ impl Nfa {
         let remap_ms = remap_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-        let compact_started_at = profile.then(std::time::Instant::now);
-        let compact_nfa = self.build_compact_nfa();
-        let compact_ms = compact_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let num_nfa_states = self.states.len();
-        let out_degree: Vec<u32> = (0..num_nfa_states)
-            .map(|state| compact_nfa.epsilon_offsets[state + 1] - compact_nfa.epsilon_offsets[state])
-            .collect();
-
         let closure_precompute_started_at = profile.then(std::time::Instant::now);
-        let retained_states = self
-            .states
-            .iter()
-            .map(|state| !state.transitions.is_empty() || !state.finalizers.is_empty())
-            .collect::<Vec<_>>();
-        let mut retained_word_masks = vec![0u64; num_nfa_states.div_ceil(64)];
-        for (state, &retained) in retained_states.iter().enumerate() {
-            if retained {
-                retained_word_masks[state / 64] |= 1u64 << (state % 64);
-            }
-        }
-        let high_degree_closures =
-            precompute_epsilon_closures(&compact_nfa, &out_degree, &retained_word_masks);
-        let closed_state_targets = build_closed_state_targets(
-            num_nfa_states,
-            &retained_states,
-            &high_degree_closures,
-        );
+        let closed_state_targets = ClosedStateTargets::build(self);
         let closure_precompute_ms = closure_precompute_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let start_closure = build_start_closure(
-            self.start_state as usize,
-            &retained_states,
-            &high_degree_closures,
-            num_nfa_states,
-        );
-
-        let start_key = CompressedStateSet::from_sparse(&start_closure);
+        let mut start_closure = SparseStateSet::new(num_nfa_states);
+        closed_state_targets.frontier(self.start_state).union_into(&mut start_closure);        let start_key = CompressedStateSet::from_sparse(&start_closure);
         let single_group_finalizer_words = (group_count == 1).then(|| {
             let mut words = vec![0u64; num_nfa_states.div_ceil(64)];
             for (state, nfa_state) in self.states.iter().enumerate() {
@@ -761,7 +643,7 @@ impl Nfa {
                 reachable_ms,
                 classes_ms,
                 remap_ms,
-                compact_ms,
+                0.0,
                 closure_precompute_ms,
                 collect_duration.as_secs_f64() * 1000.0,
                 compress_duration.as_secs_f64() * 1000.0,
