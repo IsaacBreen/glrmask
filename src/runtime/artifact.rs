@@ -3861,6 +3861,12 @@ impl DynamicMaskSliceTrie {
         self.full_walk_token_markers.as_ref()
     }
 
+    fn original_aliases_at(&self, ordinal: usize) -> &[u32] {
+        let start = self.subtree_original_token_offsets[ordinal] as usize;
+        let end = self.subtree_original_token_offsets[ordinal + 1] as usize;
+        &self.subtree_original_tokens[start..end]
+    }
+
     #[inline(always)]
     fn subtree_original_tokens(&self, node: u32) -> &[u32] {
         let canonical_range = self.trie.subtree_token_index_range(node);
@@ -4052,6 +4058,46 @@ impl<'a> Iterator for SubtreeOriginalTokens<'a> {
 }
 
 impl ExactSizeIterator for SubtreeOriginalTokens<'_> {}
+
+/// The encoded marker's direct word is coordinate-free. Its fallback is
+/// not: inherited slice tries may use an entirely different canonical ID
+/// space. Resolve the owner once before walking, and use preorder ordinals
+/// for legacy slice alias rows.
+pub(crate) enum WalkMarkerAliases<'a> {
+    Words(&'a [(u32, u32)]),
+    Tokens(&'a [u32]),
+}
+
+enum WalkMarkerOwner<'a> {
+    Main(&'a DynamicMaskVocab),
+    Slice(&'a DynamicMaskSliceTrie),
+}
+
+pub(crate) struct WalkTokenMarkers<'a> {
+    pub(crate) values: &'a [u64],
+    owner: WalkMarkerOwner<'a>,
+}
+
+impl<'a> WalkTokenMarkers<'a> {
+    pub(crate) fn fallback(&self, ordinal: usize, canonical: u32) -> WalkMarkerAliases<'a> {
+        match self.owner {
+            WalkMarkerOwner::Main(vocab) => WalkMarkerAliases::Words(vocab.token_word_masks(canonical)),
+            WalkMarkerOwner::Slice(slice) => {
+                let index = ordinal + usize::from(slice.trie.node(0).token_id.is_some());
+                WalkMarkerAliases::Tokens(slice.original_aliases_at(index))
+            }
+        }
+    }
+
+    pub(crate) fn root(&self) -> Option<WalkMarkerAliases<'a>> {
+        match self.owner {
+            WalkMarkerOwner::Main(vocab) => vocab.trie.node(0).token_id
+                .map(|canonical| WalkMarkerAliases::Words(vocab.token_word_masks(canonical))),
+            WalkMarkerOwner::Slice(slice) => slice.trie.node(0).token_id
+                .map(|_| WalkMarkerAliases::Tokens(slice.original_aliases_at(0))),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct RuntimeVocabIndexes {
@@ -6355,19 +6401,17 @@ impl DynamicMaskVocab {
     }
 
     #[inline(always)]
-    pub(crate) fn full_walk_token_markers_for(&self, trie: &DynamicMaskTrie) -> &[u64] {
+    pub(crate) fn full_walk_token_markers_for(&self, trie: &DynamicMaskTrie) -> WalkTokenMarkers<'_> {
         if std::ptr::eq(trie, self.trie.as_ref()) {
-            return self.full_walk_token_markers();
+            return WalkTokenMarkers { values: self.full_walk_token_markers(), owner: WalkMarkerOwner::Main(self) };
         }
-        if let Some(slice) = self
-            .llg_slice_leftovers
-            .iter()
+        if let Some(slice) = self.llg_slice_leftovers.iter()
             .find(|slice| std::ptr::eq(trie, slice.trie()))
         {
-            return slice.full_walk_token_markers();
+            return WalkTokenMarkers { values: slice.full_walk_token_markers(), owner: WalkMarkerOwner::Slice(slice) };
         }
         debug_assert!(false, "unknown dynamic-mask walk trie");
-        &[]
+        WalkTokenMarkers { values: &[], owner: WalkMarkerOwner::Main(self) }
     }
 
     #[inline(always)]

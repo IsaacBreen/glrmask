@@ -25,7 +25,7 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::{
     Constraint, DynamicLazyUnionCache, DynamicLazyUnionMetadata, DynamicMaskLexerStateKey,
     DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskTrieFullWalkOp, DynamicMaskVocab,
-    FastTokenizerTransitions, dynamic_mask_llg_master_is_whitespace,
+    FastTokenizerTransitions, WalkMarkerAliases, WalkTokenMarkers, dynamic_mask_llg_master_is_whitespace,
     dynamic_mask_llg_master_safe_chars,
 };
 use super::state::ConstraintState;
@@ -3881,7 +3881,7 @@ impl DeferredWalkOutput {
         self.spans.push((start..end, allowed));
     }
 
-    fn emit(self, vocab: &DynamicMaskVocab, token_markers: &[u64], buf: &mut [u32]) {
+    fn emit(self, vocab: &DynamicMaskVocab, token_markers: &WalkTokenMarkers<'_>, buf: &mut [u32]) {
         let positive = self.work[1] <= self.work[0];
         if positive {
             buf.fill(0);
@@ -3893,11 +3893,11 @@ impl DeferredWalkOutput {
         }
         for (span, allowed) in self.spans {
             if allowed != positive { continue; }
-            for &marker in &token_markers[span] {
+            for ordinal in span {
                 if positive {
-                    mark_dynamic_token_marker(vocab, marker, buf);
+                    apply_dynamic_token_marker::<true>(token_markers, ordinal, buf);
                 } else {
-                    clear_dynamic_token_marker(vocab, marker, buf);
+                    apply_dynamic_token_marker::<false>(token_markers, ordinal, buf);
                 }
             }
         }
@@ -4230,7 +4230,7 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                     profile_token_endpoints += 1;
                     profile_first_match_direct_endpoints += usize::from(frame.direct.is_some());
                 }
-                let token_marker = token_markers[token_marker_index];
+                let ordinal = token_marker_index;
                 token_marker_index += 1;
                 let direct_allowed = frame.direct.is_some_and(|direct| {
                     *first_match_direct_future_cache.entry(direct.coordinate).or_insert_with(|| {
@@ -4242,20 +4242,20 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
                     if profile_generic_work { profile_allowed_token_endpoints += 1; }
                     if deferred_output {
                         deferred.record(token_marker_index - 1, token_marker_index, true,
-                            dynamic_token_marker_original_count(vocab, token_marker));
+                            dynamic_token_marker_original_count(&token_markers, ordinal));
                     } else if positive_rebuild || sparse_positive_rebuild {
-                        mark_dynamic_token_marker(vocab, token_marker, buf);
+                        apply_dynamic_token_marker::<true>(&token_markers, ordinal, buf);
                     }
                 } else {
                     if profile_generic_work {
                         profile_blocked_token_endpoints += 1;
-                        profile_blocked_original_tokens += dynamic_token_marker_original_count(vocab, token_marker);
+                        profile_blocked_original_tokens += dynamic_token_marker_original_count(&token_markers, ordinal);
                     }
                     if deferred_output {
                         deferred.record(token_marker_index - 1, token_marker_index, false,
-                            dynamic_token_marker_original_count(vocab, token_marker));
+                            dynamic_token_marker_original_count(&token_markers, ordinal));
                     } else if !positive_rebuild && !sparse_positive_rebuild {
-                        clear_dynamic_token_marker(vocab, token_marker, buf);
+                        apply_dynamic_token_marker::<false>(&token_markers, ordinal, buf);
                     }
                 }
             }
@@ -4272,14 +4272,12 @@ fn execute_full_walk_product<T: FullWalkTransitionTable>(
 
     if deferred_output {
         let [deferred_negative_work, deferred_positive_work] = deferred.work;
-        deferred.emit(vocab, token_markers, buf);
+        deferred.emit(vocab, &token_markers, buf);
         // Empty-byte aliases live at the root, outside the edge-marker stream.
         // The eager output starts with these set; reproduce that exact root
         // contribution when the positive adaptive emitter starts from zero.
-        if include_empty_root && let Some(canonical) = trie.node(0).token_id {
-            for &(word, bits) in vocab.token_word_masks(canonical) {
-                if let Some(slot) = buf.get_mut(word as usize) { *slot |= bits; }
-            }
+        if include_empty_root && let Some(aliases) = token_markers.root() {
+            apply_marker_aliases::<true>(aliases, buf);
         }
         if profile_generic_work {
             eprintln!(
@@ -4438,58 +4436,54 @@ fn clear_mask_bit_known_in_range(buf: &mut [u32], token_id: u32) {
 const DYNAMIC_TOKEN_MARKER_FALLBACK: u64 = 1u64 << 63;
 
 #[inline(always)]
-fn dynamic_token_marker_original_count(vocab: &DynamicMaskVocab, marker: u64) -> usize {
+fn dynamic_token_marker_original_count(markers: &WalkTokenMarkers<'_>, ordinal: usize) -> usize {
+    let marker = markers.values[ordinal];
     if marker & DYNAMIC_TOKEN_MARKER_FALLBACK == 0 {
         (marker as u32).count_ones() as usize
     } else {
-        let canonical_token = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
-        vocab
-            .token_word_masks(canonical_token)
-            .iter()
-            .map(|&(_, bits)| bits.count_ones() as usize)
-            .sum()
-    }
-}
-
-#[inline(always)]
-fn mark_dynamic_token_marker(vocab: &DynamicMaskVocab, marker: u64, buf: &mut [u32]) {
-    debug_assert_ne!(marker, 0);
-    if marker & DYNAMIC_TOKEN_MARKER_FALLBACK == 0 {
-        let word = (marker >> 32) as usize;
-        let bits = marker as u32;
-        debug_assert_ne!(bits, 0);
-        debug_assert!(word < buf.len());
-        unsafe {
-            *buf.get_unchecked_mut(word) |= bits;
+        let canonical = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
+        match markers.fallback(ordinal, canonical) {
+            WalkMarkerAliases::Words(words) => words.iter().map(|&(_, bits)| bits.count_ones() as usize).sum(),
+            WalkMarkerAliases::Tokens(tokens) => tokens.len(),
         }
-        return;
-    }
-
-    let canonical_token = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
-    for &(word, bits) in vocab.token_word_masks(canonical_token) {
-        debug_assert!((word as usize) < buf.len());
-        unsafe { *buf.get_unchecked_mut(word as usize) |= bits; }
     }
 }
 
 #[inline(always)]
-fn clear_dynamic_token_marker(vocab: &DynamicMaskVocab, marker: u64, buf: &mut [u32]) {
-    debug_assert_ne!(marker, 0);
-    if marker & DYNAMIC_TOKEN_MARKER_FALLBACK == 0 {
-        let word = (marker >> 32) as usize;
-        let bits = marker as u32;
-        debug_assert_ne!(bits, 0);
-        debug_assert!(word < buf.len());
-        unsafe { *buf.get_unchecked_mut(word) &= !bits; }
-        return;
-    }
-    let canonical_token = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
-    for &(word, bits) in vocab.token_word_masks(canonical_token) {
-        debug_assert!((word as usize) < buf.len());
-        unsafe { *buf.get_unchecked_mut(word as usize) &= !bits; }
+fn apply_marker_word<const SET: bool>(word: usize, bits: u32, buf: &mut [u32]) {
+    debug_assert!(word < buf.len());
+    if let Some(slot) = buf.get_mut(word) {
+        if SET { *slot |= bits; } else { *slot &= !bits; }
     }
 }
 
+#[inline(always)]
+fn apply_marker_aliases<const SET: bool>(aliases: WalkMarkerAliases<'_>, buf: &mut [u32]) {
+    match aliases {
+        WalkMarkerAliases::Words(words) => {
+            for &(word, bits) in words {
+                apply_marker_word::<SET>(word as usize, bits, buf);
+            }
+        }
+        WalkMarkerAliases::Tokens(tokens) => {
+            for &token in tokens {
+                apply_marker_word::<SET>((token / 32) as usize, 1u32 << (token % 32), buf);
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn apply_dynamic_token_marker<const SET: bool>(markers: &WalkTokenMarkers<'_>, ordinal: usize, buf: &mut [u32]) {
+    let marker = markers.values[ordinal];
+    debug_assert_ne!(marker, 0);
+    if marker & DYNAMIC_TOKEN_MARKER_FALLBACK == 0 {
+        apply_marker_word::<SET>((marker >> 32) as usize, marker as u32, buf);
+    } else {
+        let canonical = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
+        apply_marker_aliases::<SET>(markers.fallback(ordinal, canonical), buf);
+    }
+}
 
 const DYNAMIC_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const DYNAMIC_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
