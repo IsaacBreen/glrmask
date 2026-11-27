@@ -307,7 +307,6 @@ pub(super) fn load_budgeted(data: &[u8], supplied: Option<&Vocab>, budget: &Load
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::artifact_load::LoadBudget;
 
     fn corrupt(bytes: &[u8], mutate: impl FnOnce(&mut Manifest)) -> Vec<u8> {
         let size = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;

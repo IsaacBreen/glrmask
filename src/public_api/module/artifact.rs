@@ -317,7 +317,6 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::artifact_load::LoadBudget;
     fn read(data: &[u8]) -> Manifest { bincode::deserialize(&data[16..]).unwrap() }
     fn write(m: &Manifest) -> Vec<u8> {
         let body = bincode::serialize(m).unwrap();
