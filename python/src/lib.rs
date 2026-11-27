@@ -188,7 +188,7 @@ fn with_mask_buffer(
     required: usize,
     fill: impl FnOnce(&mut [u32]),
 ) -> PyResult<()> {
-    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D uint32 or int32 NumPy array");
+    let invalid = || PyTypeError::new_err("fill_mask needs a contiguous, writable 1-D uint32 NumPy array; for an int32 array pass arr.view(np.uint32)");
     let checked = |len| {
         if len < required {
             Err(glrmask_error("invalid_input", format!("the mask array needs at least {required} words")))
@@ -201,13 +201,6 @@ fn with_mask_buffer(
         let slice = array.as_slice_mut().map_err(|_| invalid())?;
         checked(slice.len())?;
         fill(slice);
-    } else if let Ok(array) = bitmask.cast::<PyArray1<i32>>() {
-        let mut array = array.try_readwrite().map_err(|_| invalid())?;
-        let slice = array.as_slice_mut().map_err(|_| invalid())?;
-        checked(slice.len())?;
-        // SAFETY: i32 and u32 have identical size, alignment and valid bit patterns.
-        // The NumPy write guard remains held throughout the call.
-        fill(unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast::<u32>(), slice.len()) });
     } else {
         return Err(invalid());
     }

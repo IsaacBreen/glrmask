@@ -329,13 +329,14 @@ def test_fill_mask_dtype_and_layout():
     words = np.zeros(4, dtype=np.uint32)
     state.fill_mask(words)
     signed = np.zeros(4, dtype=np.int32)
-    state.fill_mask(signed)
+    state.fill_mask(signed.view(np.uint32))
     assert np.array_equal(words, signed.view(np.uint32))
     readonly = words.copy()
     readonly.flags.writeable = False
-    for array in (np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.uint32), words[::2], readonly):
-        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D uint32 or int32 NumPy array"):
+    for array in (signed, np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.uint32), words[::2], readonly):
+        with pytest.raises(TypeError) as exc:
             state.fill_mask(array)
+        assert str(exc.value) == "fill_mask needs a contiguous, writable 1-D uint32 NumPy array; for an int32 array pass arr.view(np.uint32)"
 
 
 @pytest.mark.parametrize("strategy", [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS])
@@ -385,7 +386,7 @@ def test_signed_mask_sign_bit_and_repr():
     assert repr(state) == "<glrmask.ConstraintState accepting=False terminated=False>"
     expected = state.mask()
     signed = np.zeros((2, len(expected)), dtype=np.int32)
-    state.fill_mask(signed[1])
+    state.fill_mask(signed[1].view(np.uint32))
     assert np.array_equal(signed[1].view(np.uint32), expected)
     assert signed[1, 0] < 0 and signed[1, 1] < 0
     assert not signed[0].any()
@@ -393,7 +394,7 @@ def test_signed_mask_sign_bit_and_repr():
     if importlib.util.find_spec("torch") is not None:
         import torch
         tensor = torch.zeros(len(expected), dtype=torch.int32, device="cpu")
-        state.fill_mask(tensor.numpy())
+        state.fill_mask(tensor.numpy().view(np.uint32))
         assert np.array_equal(tensor.numpy().view(np.uint32), expected)
     assert state.commit_token(31)
     assert repr(state) == f"<glrmask.ConstraintState accepting={state.is_accepting()} terminated={state.is_terminated()}>"

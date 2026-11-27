@@ -25,10 +25,14 @@ for(const {label:maskStrategy,options} of strategies) {
     const backing=new Uint32Array(7).fill(123),view=backing.subarray(1,6);
     assert.equal(s.fillMask(view),undefined);assert.deepEqual(view.slice(0,3),initial);
     assert.deepEqual(Array.from(backing),[123,...initial,0,0,123]);
-    const signed = new Int32Array(5).fill(123);
-    s.fillMask(signed);
-    assert.deepEqual(new Uint32Array(signed.buffer), new Uint32Array([...initial,0,0]));
+    const backingSigned = new Int32Array(7).fill(123);
+    const signed = backingSigned.subarray(1,6);
+    assert.throws(()=>s.fillMask(signed), {name:'TypeError',message:'fillMask needs a Uint32Array; for an Int32Array pass new Uint32Array(a.buffer, a.byteOffset, a.length)'});
+    const unsigned = new Uint32Array(signed.buffer,signed.byteOffset,signed.length);
+    s.fillMask(unsigned);
+    assert.deepEqual(unsigned, new Uint32Array([...initial,0,0]));
     assert.ok(signed[0] < 0);
+    assert.equal(backingSigned[0],123); assert.equal(backingSigned[6],123);
     assert.equal(require("node:util").inspect(c), "<glrmask.Constraint mask_bit_len=66>");
     assert.equal(require("node:util").inspect(s), "<glrmask.ConstraintState accepting=false terminated=false>");
     const short=new Uint32Array([123]);
@@ -172,7 +176,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   assert.deepEqual(s.mask(),initial);
   const sharedWords=new Uint32Array(new SharedArrayBuffer(16));
   assert.throws(()=>s.fillMask(sharedWords),/SharedArrayBuffer/);
-  assert.throws(()=>s.fillMask(new Int32Array(new SharedArrayBuffer(16))),/SharedArrayBuffer/);
+  assert.throws(()=>s.fillMask(new Int32Array(new SharedArrayBuffer(16))),TypeError);
   const sharedBytes=new Uint8Array(new SharedArrayBuffer(4));
   assert.throws(()=>s.commitBytes(sharedBytes),/SharedArrayBuffer/);
   assert.throws(()=>raw.NativeVocab.fromEntries([0],[sharedBytes],[]),/SharedArrayBuffer/);

@@ -231,7 +231,7 @@ class ConstraintState:
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
         """Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead."""
         ...
-    def fill_mask(self, bitmask: NDArray[np.uint32] | NDArray[np.int32], /) -> None:
+    def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
         """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
         ...
     @property

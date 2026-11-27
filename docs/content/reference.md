@@ -44,7 +44,7 @@ Python `mask(*, dtype=np.uint32)` defaults to packed uint32; `mask(dtype=bool)` 
 one Boolean per token slot. Use `mask().view(np.int32)` for signed packed words without copying.
 To pad to wider logits, allocate a zeroed Boolean array and copy the logical mask into its prefix as above.
 For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
-1-D NumPy uint32 or int32 arrays; surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
+1-D NumPy uint32 arrays; for an int32 buffer, pass `buf.view(np.uint32)`; surplus words are zeroed. The GIL is released during mask computation. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
 
 For PyTorch serving with V equal to the logits width (at least every state mask bit length):
 

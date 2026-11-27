@@ -343,7 +343,7 @@ class ConstraintState extends Owned {
   clone() { return wrap(ConstraintState, invoke(() => handle(this, ConstraintState).clone())); }
   mask() { return invoke(() => handle(this, ConstraintState).mask()); }
   fillMask(output) {
-    if (!types.isUint32Array(output) && !types.isInt32Array(output)) throw new TypeError('fillMask requires a Uint32Array or Int32Array');
+    if (!types.isUint32Array(output)) throw new TypeError('fillMask needs a Uint32Array; for an Int32Array pass new Uint32Array(a.buffer, a.byteOffset, a.length)');
     invoke(() => handle(this, ConstraintState).fillMask(output));
   }
   commitToken(id) {

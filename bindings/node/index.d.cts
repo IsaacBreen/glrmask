@@ -157,7 +157,7 @@ export declare class ConstraintState implements Disposable {
   /** Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`. */
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Extra words are set to 0. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
-  fillMask(output: Uint32Array | Int32Array): void;
+  fillMask(output: Uint32Array): void;
   /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
   /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
