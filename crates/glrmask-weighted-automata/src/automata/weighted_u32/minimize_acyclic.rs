@@ -346,6 +346,12 @@ fn restricted_weights_agree(a: &Weight, b: &Weight, da: &Weight, db: &Weight) ->
     if a.is_empty() { return b.is_disjoint(da); }
     if b.is_empty() { return a.is_disjoint(db); }
     if da.storage_ptr_eq(db) || da == db { return false; }
+    // ALL is encoded as a reserved sentinel, not an ordinary TSID interval.
+    // Keep it out of the finite-region sweep.
+    if a.is_full() { return b == db; }
+    if b.is_full() { return a == da; }
+    if da.is_full() { return a.intersection(db) == *b; }
+    if db.is_full() { return b.intersection(da) == *a; }
 
     let mut a = RegionCursor::new(a.range_entries());
     let mut b = RegionCursor::new(b.range_entries());
