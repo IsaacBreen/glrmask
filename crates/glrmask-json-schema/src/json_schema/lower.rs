@@ -2252,8 +2252,7 @@ fn number_value_satisfies_schema(value: &Value, schema: &NumberSchema) -> bool {
         }
     }
     if let Some(multiple) = schema.multiple_of {
-        let quotient = value / multiple;
-        if (quotient - quotient.round()).abs() > 1e-9 {
+        if !super::number::number_is_multiple(number, multiple) {
             return false;
         }
     }

@@ -270,60 +270,167 @@ fn integer_upper_bound(schema: &NumberSchema) -> Option<i64> {
     Some(upper)
 }
 
-#[inline]
+/// A finite decimal magnitude n * 10^e. Factors of ten are removed so
+/// equality and divisibility do not depend on redundant decimal zeroes.
+#[derive(Clone, Copy)]
+struct DecimalMagnitude {
+    digits: u128,
+    exponent: i32,
+}
+
+impl DecimalMagnitude {
+    fn new(mut digits: u128, mut exponent: i32) -> Self {
+        if digits == 0 { return Self { digits, exponent: 0 }; }
+        while digits.is_multiple_of(10) {
+            digits /= 10;
+            exponent += 1;
+        }
+        Self { digits, exponent }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim_start_matches(['-', '+']);
+        let (mantissa, exponent) = if let Some((mantissa, exponent)) = text.split_once(['e', 'E']) {
+            (mantissa, exponent.parse::<i32>().ok()?)
+        } else { (text, 0) };
+        let mut digits = 0u128;
+        let mut fraction = 0i32;
+        let mut trailing_zeroes = 0u32;
+        let mut after_point = false;
+        for byte in mantissa.bytes() {
+            if byte == b'.' && !after_point { after_point = true; continue; }
+            if !byte.is_ascii_digit() { return None; }
+            if after_point { fraction = fraction.checked_add(1)?; }
+            if byte == b'0' {
+                if digits != 0 { trailing_zeroes = trailing_zeroes.checked_add(1)?; }
+                continue;
+            }
+            if digits != 0 {
+                digits = digits.checked_mul(10u128.checked_pow(trailing_zeroes.checked_add(1)?)?)?;
+            }
+            digits = digits.checked_add(u128::from(byte - b'0'))?;
+            trailing_zeroes = 0;
+        }
+        Some(Self::new(digits, exponent.checked_sub(fraction)?.checked_add(i32::try_from(trailing_zeroes).ok()?)?))
+    }
+
+    fn from_float(value: f64) -> Option<Self> {
+        if !value.is_finite() { return None; }
+        let magnitude = value.abs();
+        // Integral binary floats may print a nearby rounded decimal rather
+        // than the exact represented integer. Preserve the latter.
+        if magnitude.fract() == 0.0 && magnitude < u128::MAX as f64 {
+            Some(Self::new(magnitude as u128, 0))
+        } else {
+            Self::parse(&magnitude.to_string())
+        }
+    }
+
+    fn from_number(value: &serde_json::Number) -> Option<Self> {
+        if let Some(value) = value.as_u64() { return Some(Self::new(u128::from(value), 0)); }
+        if let Some(value) = value.as_i64() { return Some(Self::new(u128::from(value.unsigned_abs()), 0)); }
+        Self::from_float(value.as_f64()?)
+    }
+
+    fn divides(self, value: Self) -> bool {
+        if self.digits == 0 { return false; }
+        if value.digits == 0 { return true; }
+        let gcd = gcd_u128(self.digits, value.digits);
+        let denominator = self.digits / gcd;
+        let mut numerator = value.digits / gcd;
+        let exponent = value.exponent - self.exponent;
+        if exponent >= 0 {
+            cancel_decimal_denominator(denominator, exponent as u32) == 1
+        } else {
+            if denominator != 1 { return false; }
+            for _ in 0..exponent.unsigned_abs() {
+                if !numerator.is_multiple_of(10) { return false; }
+                numerator /= 10;
+            }
+            true
+        }
+    }
+}
+
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 { (a, b) = (b, a % b); }
+    a
+}
+
+fn cancel_decimal_denominator(mut numerator: u128, scale_digits: u32) -> u128 {
+    // gcd(n, 10^k) requires only the two prime factors of ten; the
+    // denominator itself need not fit in a machine integer.
+    for prime in [2, 5] {
+        for _ in 0..scale_digits {
+            if !numerator.is_multiple_of(prime) { break; }
+            numerator /= prime;
+        }
+    }
+    numerator
+}
+
+pub(super) fn number_is_multiple(value: &serde_json::Number, multiple: f64) -> bool {
+    if !multiple.is_finite() || multiple <= 0.0 { return false; }
+    DecimalMagnitude::from_float(multiple).zip(DecimalMagnitude::from_number(value))
+        .is_some_and(|(divisor, value)| divisor.divides(value))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntegerDivisor {
+    Exact(u64),
+    LargerThanU64,
+}
+
+impl IntegerDivisor {
+    fn from_multiple(multiple: Option<f64>) -> Option<Self> {
+        let Some(multiple) = multiple else { return Some(Self::Exact(1)); };
+        if !multiple.is_finite() || multiple <= 0.0 { return None; }
+        let decimal = DecimalMagnitude::from_float(multiple)?;
+        let divisor = if decimal.exponent < 0 {
+            Some(cancel_decimal_denominator(decimal.digits, decimal.exponent.unsigned_abs()))
+        } else {
+            10u128.checked_pow(decimal.exponent as u32).and_then(|scale| decimal.digits.checked_mul(scale))
+        };
+        Some(divisor.and_then(|value| u64::try_from(value).ok())
+            .map_or(Self::LargerThanU64, Self::Exact))
+    }
+
+    fn accepts(self, value: i64) -> bool {
+        match self {
+            Self::Exact(divisor) => value.unsigned_abs().is_multiple_of(divisor),
+            Self::LargerThanU64 => value == 0,
+        }
+    }
+
+    fn bounded_choice(self, lower: i64, upper: i64) -> Option<GrammarExpr> {
+        let divisor = match self {
+            Self::LargerThanU64 => return Some(if lower <= 0 && upper >= 0 {
+                lit_bytes(b"0".to_vec())
+            } else { never() }),
+            Self::Exact(divisor) => i128::from(divisor),
+        };
+        let lower = i128::from(lower);
+        let upper = i128::from(upper);
+        let first = (lower / divisor + i128::from(lower % divisor > 0)) * divisor;
+        if first > upper { return Some(never()); }
+        let count = (upper - first) / divisor + 1;
+        if count > i128::from(MAX_EXPLICIT_INTEGER_MULTIPLES) { return None; }
+        Some(choice((0..count).map(|index| {
+            lit_bytes((first + index * divisor).to_string().into_bytes())
+        }).collect()))
+    }
+}
+
 fn integer_multiple_is_vacuous(multiple: Option<f64>) -> bool {
-    multiple.is_none_or(|multiple| multiple == 1.0)
+    IntegerDivisor::from_multiple(multiple) == Some(IntegerDivisor::Exact(1))
 }
 
 fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
-    let Some(multiple) = multiple else {
-        return true;
-    };
-    if !multiple.is_finite() || multiple <= 0.0 {
-        return false;
-    }
-    if multiple.fract() == 0.0 {
-        // Every i64 magnitude is below 2^64. Avoid both a saturating float
-        // conversion at that boundary and loss of integer precision above2^53.
-        if multiple >= u64::MAX as f64 {
-            return value == 0;
-        }
-        return value.unsigned_abs().is_multiple_of(multiple as u64);
-    }
-    let quotient = (value as f64) / multiple;
-    (quotient - quotient.round()).abs() < 1e-9
+    IntegerDivisor::from_multiple(multiple).is_some_and(|divisor| divisor.accepts(value))
 }
 
-fn bounded_integer_multiple_choice(
-    lower: i64,
-    upper: i64,
-    multiple: Option<f64>,
-) -> Option<GrammarExpr> {
-    let multiple = i128::from(positive_integer_multiple_value(multiple?)?);
-    let lower = i128::from(lower);
-    let upper = i128::from(upper);
-    let quotient = lower / multiple;
-    let first = (quotient + i128::from(lower % multiple > 0)) * multiple;
-    if first > upper {
-        return Some(never());
-    }
-    let count = ((upper - first) / multiple) + 1;
-    if count > i128::from(MAX_EXPLICIT_INTEGER_MULTIPLES) {
-        return None;
-    }
-    let alternatives = (0..count)
-        .map(|index| {
-            let value = first + index * multiple;
-            lit_bytes(value.to_string().into_bytes())
-        })
-        .collect::<Vec<_>>();
-    Some(choice(alternatives))
-}
-
-fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
-    let quotient = value / divisor;
-    let remainder = value % divisor;
-    if remainder > 0 { quotient + 1 } else { quotient }
+fn bounded_integer_multiple_choice(lower: i64, upper: i64, multiple: Option<f64>) -> Option<GrammarExpr> {
+    IntegerDivisor::from_multiple(multiple)?.bounded_choice(lower, upper)
 }
 
 fn integer_multiple_expr(multiple: f64) -> Option<GrammarExpr> {
@@ -444,32 +551,12 @@ struct DecimalStep {
 }
 
 fn parse_decimal_step(multiple: f64) -> Option<DecimalStep> {
-    if !multiple.is_finite() || multiple <= 0.0 || multiple.fract() == 0.0 {
-        return None;
-    }
-
-    let text = format!("{multiple}");
-    if text.contains(['e', 'E']) {
-        return None;
-    }
-
-    let (integer_part, fractional_part) = text.split_once('.')?;
-    if integer_part != "0" || fractional_part.is_empty() || !fractional_part.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-
-    let scale_digits = fractional_part.len();
-    let scale = 10u64.checked_pow(scale_digits as u32)?;
-    let numerator = fractional_part.parse::<u64>().ok()?;
-    if numerator == 0 || numerator >= scale {
-        return None;
-    }
-
-    Some(DecimalStep {
-        numerator,
-        scale,
-        scale_digits,
-    })
+    if !multiple.is_finite() || multiple <= 0.0 || multiple >= 1.0 { return None; }
+    let decimal = DecimalMagnitude::from_float(multiple)?;
+    let scale_digits = decimal.exponent.unsigned_abs() as usize;
+    let scale = 10u64.checked_pow(u32::try_from(scale_digits).ok()?)?;
+    let numerator = u64::try_from(decimal.digits).ok()?;
+    (numerator != 0 && numerator < scale).then_some(DecimalStep { numerator, scale, scale_digits })
 }
 
 fn decimal_fraction_regex(step: &DecimalStep) -> Option<String> {
@@ -600,6 +687,18 @@ mod integer_modulo_tests {
         let expected = choice([i64::MIN, -(1i64 << 62), 0, 1i64 << 62]
             .into_iter().map(|value| lit_bytes(value.to_string().into_bytes())).collect());
         assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn decimal_multiple_reduces_to_exact_integer_divisor() {
+        for (multiple, divisor) in [(0.03, 3i64), (1.5, 3), (2.5, 5), (0.01, 1)] {
+            for value in -100..=100 {
+                assert_eq!(integer_satisfies_multiple(value, Some(multiple)), value % divisor == 0);
+            }
+        }
+        let value = serde_json::Number::from_f64(0.3).unwrap();
+        assert!(number_is_multiple(&value, 0.1));
+        assert!(!number_is_multiple(&value, 0.2));
     }
 
     #[test]
