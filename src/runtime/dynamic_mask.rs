@@ -435,20 +435,36 @@ impl ResidualCoordinate {
     }
 }
 
+/// The two packed flat encodings differ only in storage width and flag position.
+trait FlatWalkCell: Copy + Eq + Into<u32> {
+    const DEAD: Self;
+    const FINALIZER_BIT: u32;
+}
+
+impl FlatWalkCell for u16 {
+    const DEAD: Self = u16::MAX;
+    const FINALIZER_BIT: u32 = 0x8000;
+}
+
+impl FlatWalkCell for u32 {
+    const DEAD: Self = u32::MAX;
+    const FINALIZER_BIT: u32 = 0x8000_0000;
+}
+
 #[derive(Clone, Copy)]
-struct FullWalkFlat16<'a> {
-    transitions: &'a [u16],
+struct FullWalkFlat<'a, C> {
+    transitions: &'a [C],
     finalizer_code: &'a [u32],
     single_finalizer_continues: &'a [u8],
     tokenizer: &'a Tokenizer,
     vocab: &'a DynamicMaskVocab,
 }
 
-impl FullWalkTransitionTable for FullWalkFlat16<'_> {
-    type Cell = u16;
+impl<C: FlatWalkCell> FullWalkTransitionTable for FullWalkFlat<'_, C> {
+    type Cell = C;
 
     #[inline(always)]
-    fn cell(&mut self, state: u32, byte: u8) -> u16 {
+    fn cell(&mut self, state: u32, byte: u8) -> C {
         unsafe {
             *self
                 .transitions
@@ -457,112 +473,18 @@ impl FullWalkTransitionTable for FullWalkFlat16<'_> {
     }
 
     #[inline(always)]
-    fn cell_is_dead(cell: u16) -> bool {
-        cell == u16::MAX
+    fn cell_is_dead(cell: C) -> bool {
+        cell == C::DEAD
     }
 
     #[inline(always)]
-    fn cell_has_finalizer(cell: u16) -> bool {
-        cell & 0x8000 != 0
+    fn cell_has_finalizer(cell: C) -> bool {
+        cell.into() & C::FINALIZER_BIT != 0
     }
 
     #[inline(always)]
-    fn cell_target(cell: u16) -> u32 {
-        u32::from(cell & 0x7fff)
-    }
-
-    #[inline(always)]
-    fn root_state(&mut self, state: u32) -> Result<u32, String> { Ok(state) }
-
-    #[inline(always)]
-    fn finalizer_code(&self, state: u32) -> u32 {
-        unsafe { *self.finalizer_code.get_unchecked(state as usize) }
-    }
-
-    #[inline(always)]
-    fn single_finalizer_continues(&mut self, state: u32) -> bool {
-        unsafe { *self.single_finalizer_continues.get_unchecked(state as usize) != 0 }
-    }
-
-    #[inline]
-    fn matched_terminals(&self, state: u32) -> SmallVec<[TerminalID; 4]> {
-        self.tokenizer.matched_terminals_slice(state).iter().copied().collect()
-    }
-
-    #[inline(always)]
-    fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
-        self.tokenizer.possible_future_terminals(state).contains(terminal as usize)
-    }
-
-    #[inline(always)]
-    fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        !terminals.is_disjoint(self.tokenizer.possible_future_terminals(state))
-    }
-
-    fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
-        self.vocab.mask_projection_state_for_projection_states(states)
-    }
-
-    #[inline(always)]
-    fn dense_state_count(&self) -> Option<usize> { Some(self.tokenizer.num_states() as usize) }
-
-    #[inline(always)]
-    fn token_boundary_allowed(
-        &mut self,
-        parser_cache: &mut FullWalkParserCache,
-        constraint: &Constraint,
-        initial_lexer_state: u32,
-        lexer_state: u32,
-        parser_node: u32,
-    ) -> bool {
-        parser_cache.token_boundary_allowed_dense(
-            constraint,
-            self.tokenizer,
-            initial_lexer_state,
-            lexer_state,
-            parser_node,
-        )
-    }
-
-    #[inline(always)]
-    fn exact_raw_state(&self, state: u32) -> Option<u32> { Some(state) }
-
-}
-
-#[derive(Clone, Copy)]
-struct FullWalkFlat32<'a> {
-    transitions: &'a [u32],
-    finalizer_code: &'a [u32],
-    single_finalizer_continues: &'a [u8],
-    tokenizer: &'a Tokenizer,
-    vocab: &'a DynamicMaskVocab,
-}
-
-impl FullWalkTransitionTable for FullWalkFlat32<'_> {
-    type Cell = u32;
-
-    #[inline(always)]
-    fn cell(&mut self, state: u32, byte: u8) -> u32 {
-        unsafe {
-            *self
-                .transitions
-                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-        }
-    }
-
-    #[inline(always)]
-    fn cell_is_dead(cell: u32) -> bool {
-        cell == u32::MAX
-    }
-
-    #[inline(always)]
-    fn cell_has_finalizer(cell: u32) -> bool {
-        cell & 0x8000_0000 != 0
-    }
-
-    #[inline(always)]
-    fn cell_target(cell: u32) -> u32 {
-        cell & 0x7fff_ffff
+    fn cell_target(cell: C) -> u32 {
+        cell.into() & (C::FINALIZER_BIT - 1)
     }
 
     #[inline(always)]
@@ -3992,32 +3914,14 @@ fn try_full_walk_mask_in_output_scope(
                 }
                 return result;
             }
-            let mut table = FullWalkFlat16 {
+            let mut table = FullWalkFlat {
                 transitions: transitions.as_ref(),
                 finalizer_code: finalizer_code.as_ref(),
                 single_finalizer_continues: single_finalizer_continues.as_ref(),
                 tokenizer,
                 vocab,
             };
-            if root_branches.len() == 1 {
-                try_full_walk_mask_with_table_dispatch::<_, true>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            } else {
-                try_full_walk_mask_with_table_dispatch::<_, false>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            }
+            try_full_walk_mask_with_table_dispatch(state, vocab, trie, root_branches, buf, &mut table)
         }
         Some(FastTokenizerTransitions::Flat32 {
             transitions,
@@ -4056,56 +3960,20 @@ fn try_full_walk_mask_in_output_scope(
                 }
                 return result;
             }
-            let mut table = FullWalkFlat32 {
+            let mut table = FullWalkFlat {
                 transitions: transitions.as_ref(),
                 finalizer_code: finalizer_code.as_ref(),
                 single_finalizer_continues: single_finalizer_continues.as_ref(),
                 tokenizer,
                 vocab,
             };
-            if root_branches.len() == 1 {
-                try_full_walk_mask_with_table_dispatch::<_, true>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            } else {
-                try_full_walk_mask_with_table_dispatch::<_, false>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            }
+            try_full_walk_mask_with_table_dispatch(state, vocab, trie, root_branches, buf, &mut table)
         }
         _ => {
             let mut table = FullWalkConfigTransitions::new(
                 lexer_scan_cache, vocab.max_token_byte_len(), state.generation,
             );
-            let result = if root_branches.len() == 1 {
-                try_full_walk_mask_with_table_dispatch::<_, true>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            } else {
-                try_full_walk_mask_with_table_dispatch::<_, false>(
-                    state,
-                    vocab,
-                    trie,
-                    root_branches,
-                    buf,
-                    &mut table,
-                )
-            };
+            let result = try_full_walk_mask_with_table_dispatch(state, vocab, trie, root_branches, buf, &mut table);
             match result {
                 Ok(used) => {
                     table.finish()?;
@@ -4686,10 +4554,7 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn try_full_walk_mask_with_table_dispatch<
-    T: FullWalkTransitionTable,
-    const HOT_SINGLE_ROOT: bool,
->(
+fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     state: &ConstraintState,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
@@ -4697,24 +4562,22 @@ fn try_full_walk_mask_with_table_dispatch<
     buf: &mut [u32],
     transitions: &mut T,
 ) -> Result<bool, String> {
-    if direct_residual_defer_finalizer_experiment_enabled() {
-        try_full_walk_mask_with_table::<T, HOT_SINGLE_ROOT, true>(
-            state,
-            vocab,
-            trie,
-            root_branches,
-            buf,
-            transitions,
-        )
-    } else {
-        try_full_walk_mask_with_table::<T, HOT_SINGLE_ROOT, false>(
-            state,
-            vocab,
-            trie,
-            root_branches,
-            buf,
-            transitions,
-        )
+    match (
+        root_branches.len() == 1,
+        direct_residual_defer_finalizer_experiment_enabled(),
+    ) {
+        (true, true) => try_full_walk_mask_with_table::<T, true, true>(
+            state, vocab, trie, root_branches, buf, transitions,
+        ),
+        (true, false) => try_full_walk_mask_with_table::<T, true, false>(
+            state, vocab, trie, root_branches, buf, transitions,
+        ),
+        (false, true) => try_full_walk_mask_with_table::<T, false, true>(
+            state, vocab, trie, root_branches, buf, transitions,
+        ),
+        (false, false) => try_full_walk_mask_with_table::<T, false, false>(
+            state, vocab, trie, root_branches, buf, transitions,
+        ),
     }
 }
 
@@ -9158,25 +9021,7 @@ fn fill_recursive_mask_using_roots<T: FullWalkTransitionTable>(
         state.clear_late_grammar_placeholder_mask(buf);
         return Ok(true);
     }
-    let filled = if roots.len() == 1 {
-        try_full_walk_mask_with_table_dispatch::<_, true>(
-            state,
-            vocab,
-            trie,
-            roots,
-            buf,
-            transitions,
-        )
-    } else {
-        try_full_walk_mask_with_table_dispatch::<_, false>(
-            state,
-            vocab,
-            trie,
-            roots,
-            buf,
-            transitions,
-        )
-    }?;
+    let filled = try_full_walk_mask_with_table_dispatch(state, vocab, trie, roots, buf, transitions)?;
     if filled && let Some(canonical) = trie.node(0).token_id {
         // A radix-root entry consumes no bytes. Current composition semantics
         // admit such an ID only through its exact special-token terminal, not
