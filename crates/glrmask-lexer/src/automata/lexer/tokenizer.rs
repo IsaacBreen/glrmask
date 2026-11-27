@@ -7353,55 +7353,61 @@ impl Tokenizer {
         true
     }
 
-    /// Fully determinize the current runtime tokenizer by exact subset
-    /// construction.  Each returned DFA state carries the epsilon-closed set of
-    /// source states it represents so callers can transport the already-final
-    /// tokenizer-state ID map without rebuilding compiler analyses.
+    /// Complete subset DFA reachable from the reset coordinate.
     pub fn try_full_determinization(
         &self,
         state_limit: usize,
         transition_limit: usize,
     ) -> Option<FullTokenizerDeterminization> {
-        // Virtual states live outside the materialized DFA state array. A
-        // physical subset construction cannot represent or epsilon-close
-        // those coordinates, so it must never be used as an implicit
-        // materialization fallback for any virtual runtime family.
-        if self.virtual_unit_repeat.is_some()
-            || !self.virtual_repeat_intersections.is_empty()
-            || !self.virtual_residuals.is_empty()
+        self.try_subset_determinization(false, state_limit, transition_limit)
+            .map(|(built, _)| built)
+    }
+
+    /// Complete subset DFA containing every singleton epsilon closure as a
+    /// legal entry coordinate. All published states have complete rows: a
+    /// subset may be reused as a root without a remaining-horizon condition.
+    pub fn try_full_determinization_all_starts(
+        &self,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
+        self.try_subset_determinization(true, state_limit, transition_limit)
+    }
+
+    fn try_subset_determinization(
+        &self,
+        all_starts: bool,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
+        if self.has_any_virtual_runtime()
             || state_limit == 0
             || transition_limit == 0
             || !self.has_epsilon_transitions()
         {
             return None;
         }
-
-        let closures = self.all_singleton_epsilon_closures();
-        let start = closures[self.initial_state_id() as usize].to_vec();
-        if start.is_empty() {
+        if all_starts && self.num_states() as usize > state_limit
+            && self.epsilon_graph_is_acyclic()
+        {
             return None;
         }
 
+        let closures = self.all_singleton_epsilon_closures();
+        let initial = self.initial_state_id() as usize;
+        let start = closures.get(initial)?;
+        if start.is_empty() {
+            return None;
+        }
         let mut dfa = DFA::new(1);
         dfa.ensure_group_capacity(self.num_terminals as usize);
         for terminal in 0..self.num_terminals {
-            dfa.set_group_u8set(
-                terminal,
-                *self.dfa.group_id_to_u8set(terminal),
-            );
+            dfa.set_group_u8set(terminal, *self.dfa.group_id_to_u8set(terminal));
         }
-
         let metadata = |subset: &[u32]| {
             let mut finalizers = BitSet::new(self.num_terminals as usize);
             let mut futures = BitSet::new(self.num_terminals as usize);
             for &state in subset {
-                // Structural tokenizer composition may append DFA components
-                // whose per-state metadata bitsets were created in a smaller
-                // local terminal domain. Their set bits are already rebased to
-                // global group IDs, but the backing BitSet width need not have
-                // been eagerly widened on every historical state. Product
-                // construction needs set union, not identical storage widths;
-                // materialize that union into the known global domain.
                 for terminal in self.state_finalizers(state).iter() {
                     finalizers.set(terminal);
                 }
@@ -7411,19 +7417,44 @@ impl Tokenizer {
             }
             (finalizers, futures)
         };
-        let (start_finalizers, start_futures) = metadata(&start);
-        dfa.overwrite_state_metadata(0, start_finalizers, start_futures);
 
-        let start: Box<[u32]> = start.into_boxed_slice();
+        let (finalizers, futures) = metadata(start);
+        dfa.overwrite_state_metadata(0, finalizers, futures);
+        let start = start.to_vec().into_boxed_slice();
         let mut source_subsets = vec![start.clone()];
         let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
         state_by_subset.insert(start, 0);
-        let mut worklist = VecDeque::from([0u32]);
+        let mut full_to_determinized = Vec::new();
+        if all_starts {
+            full_to_determinized.reserve(closures.len());
+            for closure in closures.iter() {
+                let state = if let Some(&state) = state_by_subset.get(closure.as_ref()) {
+                    state
+                } else {
+                    if source_subsets.len() >= state_limit {
+                        return None;
+                    }
+                    let state = dfa.add_state();
+                    let key = closure.to_vec().into_boxed_slice();
+                    let (finalizers, futures) = metadata(&key);
+                    dfa.overwrite_state_metadata(state, finalizers, futures);
+                    state_by_subset.insert(key.clone(), state);
+                    source_subsets.push(key);
+                    state
+                };
+                full_to_determinized.push(state);
+            }
+        }
+
+        // Appending interned states supplies the worklist directly. Every row
+        // is expanded once, including those unreachable from reset but legal
+        // as committed roots.
+        let mut cursor = 0usize;
         let mut transitions_built = 0usize;
         let mut byte_targets: [SmallVec<[u32; 8]>; 256] =
             std::array::from_fn(|_| SmallVec::new());
-        while let Some(determinized_state) = worklist.pop_front() {
-            let subset = source_subsets[determinized_state as usize].clone();
+        while cursor < source_subsets.len() {
+            let subset = source_subsets[cursor].clone();
             let mut transitions = Vec::<(u8, u32)>::new();
             let completed = self.for_each_determinization_subset_successor(
                 &subset,
@@ -7440,15 +7471,13 @@ impl Tokenizer {
                         if source_subsets.len() >= state_limit {
                             return false;
                         }
-                        let new_state = dfa.add_state();
-                        debug_assert_eq!(new_state as usize, source_subsets.len());
+                        let state = dfa.add_state();
                         let (finalizers, futures) = metadata(closed);
-                        dfa.overwrite_state_metadata(new_state, finalizers, futures);
-                        let closed = closed.to_vec().into_boxed_slice();
-                        state_by_subset.insert(closed.clone(), new_state);
-                        source_subsets.push(closed);
-                        worklist.push_back(new_state);
-                        new_state
+                        dfa.overwrite_state_metadata(state, finalizers, futures);
+                        let key = closed.to_vec().into_boxed_slice();
+                        state_by_subset.insert(key.clone(), state);
+                        source_subsets.push(key);
+                        state
                     };
                     transitions.push((byte, target));
                     true
@@ -7457,175 +7486,31 @@ impl Tokenizer {
             if !completed {
                 return None;
             }
-            dfa.set_transitions_from_sorted_entries(determinized_state, transitions);
+            dfa.set_transitions_from_sorted_entries(cursor as u32, transitions);
+            cursor += 1;
         }
 
-        Some(FullTokenizerDeterminization {
-            tokenizer: Tokenizer {
-                dfa,
-                num_terminals: self.num_terminals,
-                packed_runtime_transition_segments: Arc::from([]),
-                compressed_transition_segments: Arc::from([]),
-                packed_runtime_metadata_segments: Arc::from([]),
-                packed_compressed_transition_segments: Arc::from([]),
-                virtual_unit_repeat: None,
-                virtual_repeat_intersections: Vec::new(),
-                virtual_residuals: Vec::new(),
-                exprs: self.exprs.clone(),
-                terminal_residual_coordinates: None,
-                singleton_epsilon_closures: OnceLock::new(),
-                matched_terminals_cache: OnceLock::new(),
-            initial_byte_frontiers: OnceLock::new(),
-                all_self_loop_bytes_cache: OnceLock::new(),
-                transition_count_cache: OnceLock::new(),
-                forced_minimized_state_count_cache: OnceLock::new(),
-                scalar_deterministic_dispatch_cache: OnceLock::new(),
-                sorted_dispatch_roots_cache: OnceLock::new(),
-                state_first_bytes_cache: OnceLock::new(),
+        Some((
+            FullTokenizerDeterminization {
+                tokenizer: Tokenizer::from_parts(dfa, self.num_terminals, self.exprs.clone()),
+                source_subsets,
             },
-            source_subsets,
-        })
+            full_to_determinized,
+        ))
     }
-
-    /// Fully determinize the physical tokenizer from every raw runtime state.
-    ///
-    /// The ordinary full determinization only contains subsets reachable from
-    /// the global reset state. Dynamic masking can begin at any exact raw lexer
-    /// state retained by the committed parser frontier, so a mask-only
-    /// deterministic coordinate also needs every singleton epsilon closure as
-    /// a legal entry state. This extends the ordinary exact subset DFA with
-    /// those additional roots and anything reachable from them.
-    pub fn try_full_determinization_all_starts(
-        &self,
-        state_limit: usize,
-        transition_limit: usize,
-    ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
-        // Every singleton epsilon closure is a required legal entry state in
-        // the all-starts coordinate.  When the epsilon graph is acyclic those
-        // closures are necessarily distinct: equal closures for two distinct
-        // raw states would make each state epsilon-reachable from the other,
-        // hence form a cycle.  Therefore an acyclic source with more raw
-        // states than the output state budget provably cannot fit.  Reject it
-        // before paying for subset construction; cyclic graphs deliberately
-        // retain the general path because an SCC can collapse several raw
-        // states to one singleton closure.
-        if self.num_states() as usize > state_limit && self.epsilon_graph_is_acyclic() {
-            return None;
-        }
-        let mut built = self.try_full_determinization(state_limit, transition_limit)?;
-        let closures = self.all_singleton_epsilon_closures();
-        let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
-        state_by_subset.reserve(state_limit.min(closures.len().saturating_mul(2)));
-        for (state, subset) in built.source_subsets.iter().enumerate() {
-            state_by_subset.insert(subset.clone(), state as u32);
-        }
-
-        let metadata = |subset: &[u32]| {
-            let mut finalizers = BitSet::new(self.num_terminals as usize);
-            let mut futures = BitSet::new(self.num_terminals as usize);
-            for &state in subset {
-                for terminal in self.state_finalizers(state).iter() {
-                    finalizers.set(terminal);
-                }
-                for terminal in self.state_futures(state).iter() {
-                    futures.set(terminal);
-                }
-            }
-            (finalizers, futures)
-        };
-
-        let mut full_to_determinized = vec![u32::MAX; closures.len()];
-        let mut worklist = VecDeque::<u32>::new();
-        for (raw_state, closure) in closures.iter().enumerate() {
-            if let Some(&state) = state_by_subset.get(closure.as_ref()) {
-                full_to_determinized[raw_state] = state;
-                continue;
-            }
-            if built.source_subsets.len() >= state_limit {
-                return None;
-            }
-            let state = built.tokenizer.dfa.add_state();
-            debug_assert_eq!(state as usize, built.source_subsets.len());
-            let key = closure.to_vec().into_boxed_slice();
-            let (finalizers, futures) = metadata(&key);
-            built
-                .tokenizer
-                .dfa
-                .overwrite_state_metadata(state, finalizers, futures);
-            state_by_subset.insert(key.clone(), state);
-            built.source_subsets.push(key);
-            full_to_determinized[raw_state] = state;
-            worklist.push_back(state);
-        }
-
-        let mut transitions_built = (0..built.tokenizer.num_states())
-            .map(|state| built.tokenizer.transitions_from(state).count())
-            .sum::<usize>();
-        let mut byte_targets: [SmallVec<[u32; 8]>; 256] =
-            std::array::from_fn(|_| SmallVec::new());
-        while let Some(determinized_state) = worklist.pop_front() {
-            let subset = built.source_subsets[determinized_state as usize].clone();
-            let mut transitions = Vec::<(u8, u32)>::new();
-            let completed = self.for_each_determinization_subset_successor(
-                &subset,
-                closures.as_ref(),
-                &mut byte_targets,
-                |byte, closed| {
-                    transitions_built = transitions_built.saturating_add(1);
-                    if transitions_built > transition_limit {
-                        return false;
-                    }
-                    let target = if let Some(&existing) = state_by_subset.get(closed) {
-                        existing
-                    } else {
-                        if built.source_subsets.len() >= state_limit {
-                            return false;
-                        }
-                        let new_state = built.tokenizer.dfa.add_state();
-                        debug_assert_eq!(new_state as usize, built.source_subsets.len());
-                        let (finalizers, futures) = metadata(closed);
-                        built
-                            .tokenizer
-                            .dfa
-                            .overwrite_state_metadata(new_state, finalizers, futures);
-                        let closed = closed.to_vec().into_boxed_slice();
-                        state_by_subset.insert(closed.clone(), new_state);
-                        built.source_subsets.push(closed);
-                        worklist.push_back(new_state);
-                        new_state
-                    };
-                    transitions.push((byte, target));
-                    true
-                },
-            );
-            if !completed {
-                return None;
-            }
-            built
-                .tokenizer
-                .dfa
-                .set_transitions_from_sorted_entries(determinized_state, transitions);
-        }
-
-        built.tokenizer.invalidate_derived_caches();
-        Some((built, full_to_determinized))
-    }
-
-    /// Exact finite-horizon determinization which preserves existing raw state
+    /// Complete all-start determinization which preserves existing raw state
     /// IDs whenever possible. Each raw state is reinterpreted as its singleton
     /// epsilon closure at the same ID; states without epsilon fan-out therefore
     /// keep their existing deterministic rows unchanged. Only genuinely new
     /// multi-state subsets are appended. This is substantially cheaper for the
     /// common partitioned-lexer shape where a small epsilon dispatcher fans out
     /// into large independently deterministic components.
-    pub fn try_reusing_horizon_determinization_all_starts(
+    pub fn try_reusing_full_determinization_all_starts(
         &self,
-        horizon: usize,
         state_limit: usize,
         transition_limit: usize,
     ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
         if self.has_any_virtual_runtime()
-            || horizon == 0
             || state_limit == 0
             || transition_limit == 0
             || !self.has_epsilon_transitions()
@@ -7669,7 +7554,7 @@ impl Tokenizer {
         let mut source_subsets = Vec::<Box<[u32]>>::with_capacity(raw_state_count);
         let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
         state_by_subset.reserve(raw_state_count.saturating_mul(2).min(state_limit));
-        let mut worklist = VecDeque::<(u32, usize)>::new();
+        let mut worklist = VecDeque::<u32>::new();
 
         for (raw_state, closure) in closures.iter().enumerate() {
             let raw_state = raw_state as u32;
@@ -7682,11 +7567,18 @@ impl Tokenizer {
             if key.len() != 1 || key[0] != raw_state {
                 let (finalizers, futures) = metadata(&key);
                 dfa.overwrite_state_metadata(raw_state, finalizers, futures);
-                worklist.push_back((raw_state, 0));
+                worklist.push_back(raw_state);
             }
         }
 
-        let mut transitions_built = 0usize;
+        // Unchanged scalar rows are part of the published machine too.
+        let mut transitions_built = closures.iter().enumerate()
+            .filter(|(id, closure)| closure.len() == 1 && closure[0] as usize == *id)
+            .map(|(id, _)| dfa.states()[id].transitions.len())
+            .sum::<usize>();
+        if transitions_built > transition_limit {
+            return None;
+        }
         let mut byte_targets: [SmallVec<[u32; 8]>; 256] =
             std::array::from_fn(|_| SmallVec::new());
         let singleton_closed_rows =
@@ -7697,10 +7589,7 @@ impl Tokenizer {
         // row writes until construction is complete; appended deterministic
         // states can be populated immediately.
         let mut raw_transition_overrides = Vec::<(u32, Vec<(u8, u32)>)>::new();
-        while let Some((determinized_state, depth)) = worklist.pop_front() {
-            if depth >= horizon {
-                continue;
-            }
+        while let Some(determinized_state) = worklist.pop_front() {
             let subset = source_subsets[determinized_state as usize].clone();
 
             let mut transitions = Vec::<(u8, u32)>::new();
@@ -7717,7 +7606,7 @@ impl Tokenizer {
                 let closed = closed.to_vec().into_boxed_slice();
                 state_by_subset.insert(closed.clone(), new_state);
                 source_subsets.push(closed);
-                worklist.push_back((new_state, depth + 1));
+                worklist.push_back(new_state);
                 pending_states.push((new_state, finalizers, futures));
                 Some(new_state)
             };
@@ -7785,169 +7674,6 @@ impl Tokenizer {
         );
         tokenizer.invalidate_derived_caches();
         let full_to_determinized = (0..raw_state_count as u32).collect::<Vec<_>>();
-        Some((
-            FullTokenizerDeterminization {
-                tokenizer,
-                source_subsets,
-            },
-            full_to_determinized,
-        ))
-    }
-
-    /// Determinize every raw runtime entry state only to the finite byte
-    /// horizon observable by one mask walk. Unlike full all-start
-    /// determinization, this deliberately does not construct transitions out
-    /// of subsets first reached at `horizon`: no vocabulary token can observe
-    /// them. The returned states and metadata are otherwise exact subset-DFA
-    /// coordinates, so callers may use them exactly like a full
-    /// determinization during a bounded vocabulary walk.
-    pub fn try_horizon_determinization_all_starts(
-        &self,
-        horizon: usize,
-        state_limit: usize,
-        transition_limit: usize,
-    ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
-        if self.virtual_unit_repeat.is_some()
-            || !self.virtual_repeat_intersections.is_empty()
-            || !self.virtual_residuals.is_empty()
-            || horizon == 0
-            || state_limit == 0
-            || transition_limit == 0
-            || !self.has_epsilon_transitions()
-        {
-            return None;
-        }
-
-        let closures = self.all_singleton_epsilon_closures();
-        let initial = self.initial_state_id();
-        let initial_closure = closures.get(initial as usize)?.to_vec().into_boxed_slice();
-        if initial_closure.is_empty() {
-            return None;
-        }
-
-        let mut dfa = DFA::new(1);
-        dfa.ensure_group_capacity(self.num_terminals as usize);
-        for terminal in 0..self.num_terminals {
-            dfa.set_group_u8set(terminal, *self.dfa.group_id_to_u8set(terminal));
-        }
-
-        let metadata = |subset: &[u32]| {
-            let mut finalizers = BitSet::new(self.num_terminals as usize);
-            let mut futures = BitSet::new(self.num_terminals as usize);
-            for &state in subset {
-                for terminal in self.state_finalizers(state).iter() {
-                    finalizers.set(terminal);
-                }
-                for terminal in self.state_futures(state).iter() {
-                    futures.set(terminal);
-                }
-            }
-            (finalizers, futures)
-        };
-
-        let (initial_finalizers, initial_futures) = metadata(&initial_closure);
-        dfa.overwrite_state_metadata(0, initial_finalizers, initial_futures);
-        let mut source_subsets = vec![initial_closure.clone()];
-        let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
-        state_by_subset.insert(initial_closure, 0);
-        let mut full_to_determinized = vec![u32::MAX; closures.len()];
-        full_to_determinized[initial as usize] = 0;
-
-        // Seed every raw runtime state before expanding anything. This makes
-        // each singleton epsilon closure a depth-zero root, exactly matching
-        // the fact that a committed dynamic state may begin its next mask walk
-        // at any raw lexer coordinate.
-        let mut worklist = VecDeque::<(u32, usize)>::new();
-        worklist.push_back((0, 0));
-        for (raw_state, closure) in closures.iter().enumerate() {
-            if raw_state == initial as usize {
-                continue;
-            }
-            if let Some(&state) = state_by_subset.get(closure.as_ref()) {
-                full_to_determinized[raw_state] = state;
-                continue;
-            }
-            if source_subsets.len() >= state_limit {
-                return None;
-            }
-            let key = closure.to_vec().into_boxed_slice();
-            let state = dfa.add_state();
-            debug_assert_eq!(state as usize, source_subsets.len());
-            let (finalizers, futures) = metadata(&key);
-            dfa.overwrite_state_metadata(state, finalizers, futures);
-            state_by_subset.insert(key.clone(), state);
-            source_subsets.push(key);
-            full_to_determinized[raw_state] = state;
-            worklist.push_back((state, 0));
-        }
-
-        let mut transitions_built = 0usize;
-        let mut byte_targets: [SmallVec<[u32; 8]>; 256] =
-            std::array::from_fn(|_| SmallVec::new());
-        while let Some((determinized_state, depth)) = worklist.pop_front() {
-            if depth >= horizon {
-                continue;
-            }
-            let subset = source_subsets[determinized_state as usize].clone();
-            let mut transitions = Vec::<(u8, u32)>::new();
-            let completed = self.for_each_determinization_subset_successor(
-                &subset,
-                closures.as_ref(),
-                &mut byte_targets,
-                |byte, closed| {
-                    transitions_built = transitions_built.saturating_add(1);
-                    if transitions_built > transition_limit {
-                        return false;
-                    }
-                    let target = if let Some(&existing) = state_by_subset.get(closed) {
-                        existing
-                    } else {
-                        if source_subsets.len() >= state_limit {
-                            return false;
-                        }
-                        let new_state = dfa.add_state();
-                        debug_assert_eq!(new_state as usize, source_subsets.len());
-                        let (finalizers, futures) = metadata(closed);
-                        dfa.overwrite_state_metadata(new_state, finalizers, futures);
-                        let closed = closed.to_vec().into_boxed_slice();
-                        state_by_subset.insert(closed.clone(), new_state);
-                        source_subsets.push(closed);
-                        worklist.push_back((new_state, depth + 1));
-                        new_state
-                    };
-                    transitions.push((byte, target));
-                    true
-                },
-            );
-            if !completed {
-                return None;
-            }
-            dfa.set_transitions_from_sorted_entries(determinized_state, transitions);
-        }
-
-        let mut tokenizer = Tokenizer {
-            dfa,
-            num_terminals: self.num_terminals,
-            packed_runtime_transition_segments: Arc::from([]),
-            compressed_transition_segments: Arc::from([]),
-            packed_runtime_metadata_segments: Arc::from([]),
-            packed_compressed_transition_segments: Arc::from([]),
-            virtual_unit_repeat: None,
-            virtual_repeat_intersections: Vec::new(),
-            virtual_residuals: Vec::new(),
-            exprs: self.exprs.clone(),
-            terminal_residual_coordinates: None,
-            singleton_epsilon_closures: OnceLock::new(),
-            matched_terminals_cache: OnceLock::new(),
-            initial_byte_frontiers: OnceLock::new(),
-            all_self_loop_bytes_cache: OnceLock::new(),
-            transition_count_cache: OnceLock::new(),
-            forced_minimized_state_count_cache: OnceLock::new(),
-            scalar_deterministic_dispatch_cache: OnceLock::new(),
-            sorted_dispatch_roots_cache: OnceLock::new(),
-            state_first_bytes_cache: OnceLock::new(),
-        };
-        tokenizer.invalidate_derived_caches();
         Some((
             FullTokenizerDeterminization {
                 tokenizer,

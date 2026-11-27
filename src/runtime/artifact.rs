@@ -3911,7 +3911,6 @@ impl DynamicMaskVocab {
     pub(crate) fn prepare_mask_execution(
         &mut self,
         source_tokenizer: &Tokenizer,
-        horizon: usize,
     ) -> bool {
         // Bound eager work by the same memory budget that decides whether the
         // result can use Flat32. This avoids introducing an independent
@@ -3931,18 +3930,8 @@ impl DynamicMaskVocab {
             return self.mask_tokenizer_fast_transitions.is_some();
         }
         let Some((built, source_to_determinized)) = source
-            .try_reusing_horizon_determinization_all_starts(
-                horizon,
-                state_limit,
-                transition_limit,
-            )
-            .or_else(|| {
-                source.try_horizon_determinization_all_starts(
-                    horizon,
-                    state_limit,
-                    transition_limit,
-                )
-            })
+            .try_reusing_full_determinization_all_starts(state_limit, transition_limit)
+            .or_else(|| source.try_full_determinization_all_starts(state_limit, transition_limit))
         else {
             return false;
         };

@@ -3282,7 +3282,7 @@ impl Constraint {
             && !mask_execution_source.has_any_virtual_runtime()
             && !scalar_dispatch
         {
-            let _ = vocab.prepare_mask_execution(&self.tokenizer, max_token_len);
+            let _ = vocab.prepare_mask_execution(&self.tokenizer);
         }
         let full_walk_started = profile_runtime_mask.then(std::time::Instant::now);
         vocab.prepare_full_walk_fast_transitions(&self.tokenizer);
