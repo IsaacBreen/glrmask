@@ -9823,6 +9823,10 @@ constraint_data_schema! {
     pub(crate) internal_token_dense_words: usize,
     @serde(skip)
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
+    /// Weak allocation guards for all address-keyed token-set caches.
+    /// They prevent address reuse without retaining the actual token ranges.
+    @serde(skip)
+    pub(crate) weight_token_cache_identities: Vec<std::sync::Weak<RangeSetBlaze<u32>>>,
     /// Dense masks for wide token sets retained in a current-format packed
     /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
     /// packed token-set id and can therefore be rebuilt directly from the

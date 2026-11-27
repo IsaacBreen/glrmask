@@ -9417,7 +9417,7 @@ impl Constraint {
             self.token_mask_caches_ready(),
             "parser runtime cache prebuild requires internal-token output masks",
         );
-        let (fast_transitions, (prebuilt_sparse, dense_words, dense_masks)) = rayon::join(
+        let (fast_transitions, (prebuilt_sparse, dense_words, dense_masks, identities)) = rayon::join(
             || self.compute_fast_transitions(),
             || {
                 let inventory = self.weight_token_set_inventory();
@@ -9425,16 +9425,17 @@ impl Constraint {
                     &inventory.final_sets,
                     &self.internal_token_buf_masks,
                 );
-                let (dense_words, dense_masks) =
+                let (dense_words, dense_masks, identities) =
                     self.compute_dense_token_masks_excluding_direct_final(
                         &prebuilt_sparse.eligible,
                         inventory,
                     );
-                (prebuilt_sparse, dense_words, dense_masks)
+                (prebuilt_sparse, dense_words, dense_masks, identities)
             },
         );
         self.internal_token_dense_words = dense_words;
         self.weight_token_dense_masks = dense_masks;
+        self.weight_token_cache_identities = identities;
         self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         self.dwa_fast_transitions = fast_transitions;
         let (weight_token_buf_masks, weight_token_sparse_buf_masks, direct_sparse_weight_token_sets) =
@@ -9613,6 +9614,7 @@ impl Constraint {
             (
                 self.internal_token_dense_words,
                 std::mem::take(&mut self.weight_token_dense_masks),
+                std::mem::take(&mut self.weight_token_cache_identities),
             )
         });
         let mut prebuilt_parser_fast_transitions = parser_runtime_caches_prebuilt
@@ -9633,7 +9635,7 @@ impl Constraint {
             internal_token_buf_masks_ms,
             tokenizer_fast_transitions,
             tokenizer_fast_transitions_ms,
-            (dense_mask_words, dense_masks),
+            (dense_mask_words, dense_masks, identities),
             dense_token_masks_ms,
             fast_transitions,
             dwa_fast_transitions_ms,
@@ -9718,7 +9720,7 @@ impl Constraint {
         } else {
             let (
                 ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms)),
-                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
+                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks, identities), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
             ) = rayon::join(
                 || {
                     let build_tokenizer_fast_transitions = || {
@@ -9802,7 +9804,7 @@ impl Constraint {
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions,
                 tokenizer_fast_transitions_ms,
-                (dense_mask_words, dense_masks),
+                (dense_mask_words, dense_masks, identities),
                 dense_token_masks_ms,
                 fast_transitions,
                 dwa_fast_transitions_ms,
@@ -9837,6 +9839,7 @@ impl Constraint {
 
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
+        self.weight_token_cache_identities = identities;
         if !preserve_packed_dwa_dense_masks {
             self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         }
@@ -11551,27 +11554,19 @@ impl Constraint {
         false
     }
 
-    fn compute_dense_token_masks(&self) -> (usize, DenseWeightMaskCache) {
-        let inventory = self.weight_token_set_inventory();
-        self.compute_dense_token_masks_excluding_direct_final(
-            &DirectSparseWeightTokenSetCache::default(),
-            inventory,
-        )
-    }
-
     fn compute_dense_token_masks_excluding_direct_final(
         &self,
         direct_final_sets: &DirectSparseWeightTokenSetCache,
         inventory: WeightTokenSetInventory,
-    ) -> (usize, DenseWeightMaskCache) {
+    ) -> (usize, DenseWeightMaskCache, Vec<std::sync::Weak<RangeSetBlaze<u32>>>) {
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let internal_token_dense_words = self.internal_token_count().div_ceil(64);
         if internal_token_dense_words == 0 {
-            return (0, DenseWeightMaskCache::default());
+            return (0, DenseWeightMaskCache::default(), Vec::new());
         }
         if inventory.final_sets.is_empty() && inventory.transition_sets.is_empty() {
-            return (internal_token_dense_words, DenseWeightMaskCache::default());
+            return (internal_token_dense_words, DenseWeightMaskCache::default(), Vec::new());
         }
 
         let classify_started = profile.then(std::time::Instant::now);
@@ -11581,8 +11576,11 @@ impl Constraint {
             transition_word_spans,
         } = inventory;
         let mut residual_final_sets: DirectSparseWeightTokenSetCache = Default::default();
+        let mut identities = Vec::with_capacity(direct_final_sets.len());
         for (key, token_set) in final_sets {
-            if !direct_final_sets.contains(&key) {
+            if direct_final_sets.contains(&key) {
+                identities.push(Arc::downgrade(&token_set));
+            } else {
                 // These sets may need the contained-output cache, which
                 // requires their dense form regardless of range width.
                 residual_final_sets.insert(key);
@@ -11612,6 +11610,9 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let build_started = profile.then(std::time::Instant::now);
         let dense_set_count = unique_sets.len();
+        identities.extend(unique_sets.iter().filter_map(|(key, tokens)| {
+            (!direct_final_sets.contains(key)).then(|| Arc::downgrade(tokens))
+        }));
         let build = |(key, token_set): (usize, Arc<RangeSetBlaze<u32>>)| {
             (
                 key,
@@ -11637,7 +11638,7 @@ impl Constraint {
             );
         }
 
-        (internal_token_dense_words, dense_masks)
+        (internal_token_dense_words, dense_masks, identities)
     }
 
     fn compute_packed_dwa_dense_token_masks(&self) -> PackedDwaDenseWeightMaskCache {
@@ -11746,12 +11747,6 @@ impl Constraint {
             self.compute_indexed_dag_dense_tables();
         self.indexed_dag_dense_transitions = indexed_dag_dense_transitions;
         self.indexed_dag_dense_finals = indexed_dag_dense_finals;
-    }
-
-    pub(crate) fn build_dense_token_masks(&mut self) {
-        let (internal_token_dense_words, dense_masks) = self.compute_dense_token_masks();
-        self.internal_token_dense_words = internal_token_dense_words;
-        self.weight_token_dense_masks = dense_masks;
     }
 
     /// Precompute dense bitmaps for the seed phase: one bitmap per (state, terminal)

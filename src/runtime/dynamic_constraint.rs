@@ -1043,6 +1043,7 @@ impl DynamicConstraint {
             all_tokens_buf_mask: Box::new([]),
             internal_token_dense_words: 0,
             weight_token_dense_masks: Default::default(),
+            weight_token_cache_identities: Vec::new(),
             packed_dwa_token_dense_masks: Default::default(),
             weight_token_buf_masks: Default::default(),
             weight_token_sparse_buf_masks: Default::default(),
