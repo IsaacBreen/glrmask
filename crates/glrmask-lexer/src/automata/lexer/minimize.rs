@@ -1,7 +1,4 @@
-//! Hopcroft-based DFA minimization for the lexer DFA.
-//!
-//! DFA minimization for byte-oriented lexer automata.
-//! Uses topology-aware pre-refinement before the final Hopcroft pass.
+//! Exact partial DFA minimization: bottom-up for DAGs, Hopcroft for cycles.
 
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -13,14 +10,14 @@ use crate::ds::char_transitions::CharTransitions;
 
 use super::dfa::DFA;
 
-/// Exact reverse-topological partition for finite, one-terminal components.
+/// Exact reverse-topological partition of byte-labelled finalizer observations.
 ///
 /// Every state is a root for this operation, including states disconnected from
 /// state zero: they can be reached through the symbolic-to-finite projection.
 /// A signature includes the finalizer and every byte-labelled successor class.
 /// Hash-map equality checks the complete signature; a hash collision is never
 /// an equivalence certificate. Cycles decline before any source mutation.
-struct AcyclicSingleGroupPartition {
+struct AcyclicPartition {
     // Canonical IDs are ordered by each class's smallest original state. This
     // is the same order as sorted Hopcroft blocks, with old state zero first.
     state_mapping: Vec<u32>,
@@ -38,7 +35,8 @@ fn acyclic_single_group_partition(dfa: &DFA) -> Option<(Vec<Vec<u32>>, Vec<bool>
 // per-class member vectors.
 #[cfg(test)]
 fn acyclic_single_group_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> Option<(Vec<Vec<u32>>, Vec<bool>)> {
-    let flat = acyclic_single_group_flat_partition_impl::<HASH_MASK>(dfa)?;
+    if dfa.num_groups() != 1 { return None; }
+    let flat = acyclic_flat_partition_impl::<HASH_MASK>(dfa)?;
     let mut blocks = vec![Vec::new(); flat.representatives.len()];
     for (state, &class) in flat.state_mapping.iter().enumerate() {
         blocks[class as usize].push(u32::try_from(state).ok()?);
@@ -48,8 +46,8 @@ fn acyclic_single_group_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> Optio
 
 // A zero hash mask in tests forces every distinct signature into one bucket;
 // production equality must still be exact even under total hash collision.
-fn acyclic_single_group_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> Option<AcyclicSingleGroupPartition> {
-    if dfa.num_groups() != 1 || dfa.has_epsilon_transitions() || dfa.has_self_loops() {
+fn acyclic_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> Option<AcyclicPartition> {
+    if dfa.has_epsilon_transitions() || dfa.has_self_loops() {
         return None;
     }
     let n = dfa.num_states();
@@ -90,7 +88,7 @@ fn acyclic_single_group_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> 
         let accepting = !dfa.finalizers(state as u32).is_empty();
         let transitions = &dfa.states()[state].transitions;
         let mut signature = rustc_hash::FxHasher::default();
-        accepting.hash(&mut signature);
+        dfa.finalizers(state as u32).hash(&mut signature);
         transitions.len().hash(&mut signature);
         let mut reaches_accepting = accepting;
         for (byte, &target) in transitions.iter() {
@@ -108,7 +106,7 @@ fn acyclic_single_group_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> 
             let other = &dfa.states()[representative as usize];
             // The immutable representative graph IS the exact signature. The
             // hash is never a certificate, even when every hash collides.
-            if accepting != other.finalizers.is_empty()
+            if *dfa.finalizers(state as u32) == other.finalizers
                 && transitions.len() == other.transitions.len()
                 && transitions.iter().zip(other.transitions.iter()).all(
                     |((byte, &target), (other_byte, &other_target))| {
@@ -140,7 +138,7 @@ fn acyclic_single_group_flat_partition_impl<const HASH_MASK: u64>(dfa: &DFA) -> 
         }
         *class = *canonical;
     }
-    Some(AcyclicSingleGroupPartition {
+    Some(AcyclicPartition {
         state_mapping: classes,
         representatives,
         can_reach_accepting,
@@ -207,15 +205,6 @@ fn acyclic_single_group_partition_reference(dfa: &DFA) -> Option<(Vec<Vec<u32>>,
     Some((blocks, can_reach_accepting))
 }
 
-enum TopologyPrerefine {
-    AlreadyMinimal(Vec<Vec<u32>>),
-    Refined {
-        partition: Vec<u32>,
-        blocks: Vec<Vec<u32>>,
-    },
-    Skip,
-}
-
 fn partition_by_finalizers(dfa: &DFA) -> (Vec<u32>, Vec<Vec<u32>>) {
     let num_states = dfa.states().len();
     let mut partition = vec![0u32; num_states];
@@ -253,203 +242,6 @@ fn dedup_adjacency(dfa: &DFA) -> Vec<Vec<usize>> {
             targets
         })
         .collect()
-}
-
-fn compute_post_order(adj: &[Vec<usize>]) -> Vec<usize> {
-    let num_states = adj.len();
-    let mut post_order = Vec::with_capacity(num_states);
-    let mut visited = vec![0u8; num_states];
-    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
-
-    for root in 0..num_states {
-        if visited[root] != 0 {
-            continue;
-        }
-        dfs_stack.push((root, 0));
-        visited[root] = 1;
-
-        while let Some((state, edge_index)) = dfs_stack.last_mut() {
-            let state = *state;
-            if *edge_index < adj[state].len() {
-                let target = adj[state][*edge_index];
-                *edge_index += 1;
-                if visited[target] == 0 {
-                    visited[target] = 1;
-                    dfs_stack.push((target, 0));
-                }
-            } else {
-                visited[state] = 2;
-                post_order.push(state);
-                dfs_stack.pop();
-            }
-        }
-    }
-
-    post_order
-}
-
-fn reverse_adjacency(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    let mut reverse_adj = vec![Vec::new(); adj.len()];
-    for (state, targets) in adj.iter().enumerate() {
-        for &target in targets {
-            reverse_adj[target].push(state);
-        }
-    }
-    reverse_adj
-}
-
-fn compute_kosaraju_scc_ids(adj: &[Vec<usize>], post_order: &[usize]) -> Vec<u32> {
-    let reverse_adj = reverse_adjacency(adj);
-    let mut scc_id = vec![u32::MAX; adj.len()];
-    let mut current_scc = 0u32;
-
-    for &state in post_order.iter().rev() {
-        if scc_id[state] != u32::MAX {
-            continue;
-        }
-
-        let mut scc_stack = vec![state];
-        scc_id[state] = current_scc;
-        while let Some(node) = scc_stack.pop() {
-            for &pred in &reverse_adj[node] {
-                if scc_id[pred] == u32::MAX {
-                    scc_id[pred] = current_scc;
-                    scc_stack.push(pred);
-                }
-            }
-        }
-
-        current_scc += 1;
-    }
-
-    scc_id
-}
-
-fn build_blocks_from_labels(labels: &[u32], num_labels: u32) -> (Vec<u32>, Vec<Vec<u32>>) {
-    let mut partition = vec![0u32; labels.len()];
-    let mut blocks = vec![Vec::new(); num_labels as usize];
-
-    for (state, &label) in labels.iter().enumerate() {
-        partition[state] = label;
-        blocks[label as usize].push(state as u32);
-    }
-
-    (partition, blocks)
-}
-
-/// Fast iterative partition refinement.
-///
-/// Starting from an initial partition (e.g. by finalizers), iteratively refine
-/// by computing a signature for each state = (block_id, [(byte, target_block_id)])
-/// and re-partitioning by signature. Converges in O(depth) iterations where
-/// depth is the DFA's longest shortest path. Each iteration is O(n * avg_degree).
-///
-/// This is semantically equivalent to Hopcroft but much faster when the DFA
-/// is large and the result has few equivalence classes (common after clearing
-/// many terminal groups).
-fn iterative_signature_refine(dfa: &DFA, initial_blocks: Vec<Vec<u32>>, max_iterations: u32) -> Option<Vec<Vec<u32>>> {
-    let n = dfa.states().len();
-    let mut partition = vec![0u32; n];
-    for (block_id, block) in initial_blocks.iter().enumerate() {
-        for &state in block {
-            partition[state as usize] = block_id as u32;
-        }
-    }
-    let mut num_blocks = initial_blocks.len() as u32;
-
-    let mut label_map: FxHashMap<u64, u32> = FxHashMap::default();
-    let mut iterations = 0u32;
-
-    loop {
-        if iterations >= max_iterations {
-            return None;
-        }
-
-        label_map.clear();
-        let mut next_label = 0u32;
-        let mut new_partition = vec![0u32; n];
-
-        for (state_idx, state) in dfa.states().iter().enumerate() {
-            // Build signature: (current_block, [(byte, target_block)])
-            // Use FxHash for speed instead of full signature comparison.
-            let mut hasher = rustc_hash::FxHasher::default();
-            partition[state_idx].hash(&mut hasher);
-            state.transitions.len().hash(&mut hasher);
-            for (byte, &target) in state.transitions.iter() {
-                byte.hash(&mut hasher);
-                partition[target as usize].hash(&mut hasher);
-            }
-            let sig_hash = hasher.finish();
-
-            let label = *label_map.entry(sig_hash).or_insert_with(|| {
-                let l = next_label;
-                next_label += 1;
-                l
-            });
-            new_partition[state_idx] = label;
-        }
-
-        if next_label == num_blocks {
-            break;
-        }
-        num_blocks = next_label;
-        partition = new_partition;
-        iterations += 1;
-    }
-
-    // Build final blocks
-    let mut blocks = vec![Vec::new(); num_blocks as usize];
-    for (state_idx, &block_id) in partition.iter().enumerate() {
-        blocks[block_id as usize].push(state_idx as u32);
-    }
-    Some(blocks)
-}
-
-fn topology_prerefine_partition(dfa: &DFA, partition: &[u32]) -> TopologyPrerefine {
-    let adj = dedup_adjacency(dfa);
-    let post_order = compute_post_order(&adj);
-    let scc_id = compute_kosaraju_scc_ids(&adj, &post_order);
-
-    let mut labels = vec![u32::MAX; dfa.states().len()];
-    let mut label_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
-    label_map.reserve(dfa.states().len().min(200_000));
-    let mut next_label = 0u32;
-    let mut signature = Vec::with_capacity(32);
-
-    for &state in &post_order {
-        signature.clear();
-        signature.push(partition[state]);
-
-        for (byte, &target) in dfa.states()[state].transitions.iter() {
-            let target = target as usize;
-            signature.push(byte as u32);
-            if scc_id[state] == scc_id[target] {
-                signature.push(partition[target]);
-            } else if labels[target] != u32::MAX {
-                signature.push(labels[target] | 0x8000_0000);
-            } else {
-                signature.push(partition[target]);
-            }
-        }
-
-        let label = *label_map.entry(signature.clone()).or_insert_with(|| {
-            let label = next_label;
-            next_label += 1;
-            label
-        });
-        labels[state] = label;
-    }
-
-    let (partition, blocks) = build_blocks_from_labels(&labels, next_label);
-    if next_label as usize == dfa.states().len() {
-        if dfa.has_self_loops() {
-            TopologyPrerefine::Skip
-        } else {
-            TopologyPrerefine::AlreadyMinimal(blocks)
-        }
-    } else {
-        TopologyPrerefine::Refined { partition, blocks }
-    }
 }
 
 enum InverseEdges {
@@ -948,201 +740,75 @@ fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
 }
 
 impl DFA {
-    /// Minimize this DFA using Hopcroft's algorithm.
-    /// Returns a new, minimized DFA.  State 0 remains the start state.
+    /// Minimize deterministic byte rows; epsilon components retain their
+    /// independently minimized representation.
     pub(super) fn minimize(&self) -> DFA {
-        // Hopcroft below assumes one deterministic byte target and no epsilon
-        // edges. Epsilon-NFAs are already assembled from independently
-        // minimized DFA components, so preserving them is both correct and
-        // avoids reintroducing the cross-terminal subset blow-up this mode is
-        // intended to prevent.
-        if self.has_epsilon_transitions() {
-            return self.clone();
-        }
-        self.minimize_impl(true, false).0
+        self.minimize_with_state_mapping().0
     }
 
-    /// Minimize a freshly constructed, fully reachable DFA in place.
-    ///
-    /// This avoids cloning the source and moves representative states out of
-    /// their partition blocks, rewriting transition targets in place. Callers
-    /// must guarantee that every state is reachable from state zero.
+    /// The caller has already established reachability from state zero.
     pub(super) fn minimize_owned_reachable(mut self) -> DFA {
-        if self.has_epsilon_transitions() || self.states().len() <= 1 {
+        if self.has_epsilon_transitions() {
             self.recompute_possible_futures();
             return self;
         }
-
-        clear_possible_futures_for_minimization(&mut self);
-        let (partition, blocks) = partition_by_finalizers(&self);
-        let blocks = if self.has_self_loops() {
-            hopcroft_refine_partition(&self, partition, blocks)
-        } else {
-            match topology_prerefine_partition(&self, &partition) {
-                TopologyPrerefine::AlreadyMinimal(blocks) => blocks,
-                TopologyPrerefine::Refined { blocks: refined, .. }
-                    if refined.iter().all(|block| block.len() <= 1) => refined,
-                TopologyPrerefine::Refined { .. } | TopologyPrerefine::Skip => {
-                    hopcroft_refine_partition(&self, partition, blocks)
-                }
-            }
-        };
-        self.rebuild_owned_from_blocks(blocks)
+        self.minimize_owned(false, false).0
     }
 
-    /// Minimize this DFA and return the mapping from original states to
-    /// minimized states.  `mapping[old_state] = new_state`.
-    /// Unreachable original states map to `u32::MAX`.
     pub(super) fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
-        if self.has_epsilon_transitions() {
-            return (self.clone(), (0..self.states().len() as u32).collect());
-        }
-        self.minimize_impl(true, false)
+        self.clone().minimize_owned(true, false)
     }
 
-    pub(super) fn minimize_with_state_mapping_preserve_unreachable(mut self) -> (DFA, Vec<u32>) {
-        let orig_n = self.states().len();
+    /// All original coordinates, including disconnected roots, remain mapped.
+    pub(super) fn minimize_with_state_mapping_preserve_unreachable(self) -> (DFA, Vec<u32>) {
+        self.minimize_owned(false, true)
+    }
+
+    fn minimize_owned(mut self, drop_unreachable: bool, canonical: bool) -> (DFA, Vec<u32>) {
+        let n = self.num_states();
+        let started = std::time::Instant::now();
         let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-        let total_started = std::time::Instant::now();
-        if self.has_epsilon_transitions() {
-            return (self, (0..orig_n as u32).collect());
+        if n == 0 || self.has_epsilon_transitions() {
+            return (self, (0..n as u32).collect());
         }
-        if orig_n == 0 {
-            return (self, Vec::new());
-        }
-
-        // This path is used by the finite vocabulary-mask component builder,
-        // which already owns the sparse DFA. Minimize that allocation in place
-        // rather than cloning every state/transition before refinement.
+        let old_to_working = drop_unreachable.then(|| self.remove_unreachable_states_with_mapping());
         clear_possible_futures_for_minimization(&mut self);
-        if orig_n <= 1 {
+        let (dfa, mapping) = if self.num_states() <= 1 {
             self.recompute_possible_futures();
-            return (self, (0..orig_n as u32).collect());
-        }
-
-        // Finite repeat projections are commonly DAGs. Their exact partition
-        // follows in one reverse-topological pass; avoid constructing inverse
-        // edges and running repeated Hopcroft splitters in that case. General
-        // cyclic or multi-terminal automata retain the established path.
-        let acyclic_started = std::time::Instant::now();
-        if std::env::var_os("GLRMASK_DISABLE_FINITE_MASK_ACYCLIC_MINIMIZE").is_none()
-            && let Some(partition) = acyclic_single_group_flat_partition_impl::<{ u64::MAX }>(&self)
+            let mapping = (0..self.num_states() as u32).collect();
+            (self, mapping)
+        } else if (!canonical || std::env::var_os("GLRMASK_DISABLE_FINITE_MASK_ACYCLIC_MINIMIZE").is_none())
+            && let Some(partition) = acyclic_flat_partition_impl::<{ u64::MAX }>(&self)
         {
-            let partition_ms = acyclic_started.elapsed().as_secs_f64() * 1000.0;
-            let result = self.rebuild_owned_from_flat_acyclic_partition(partition);
-            if profile {
-                eprintln!("[glrmask/profile][lexer_minimize_preserve_acyclic] states={} partition_ms={partition_ms:.3} total_ms={:.3}",
-                    orig_n, total_started.elapsed().as_secs_f64() * 1000.0);
+            self.rebuild_owned_from_flat_acyclic_partition(partition)
+        } else {
+            // A cyclic graph needs actual congruence refinement. A topology
+            // signature that distinguishes internal and external SCC edges
+            // is not a proof that all of its states are inequivalent.
+            let (partition, blocks) = partition_by_finalizers(&self);
+            let inverse = InverseTransitions::build(&self);
+            let mut blocks = if canonical {
+                hopcroft_refine_partition_impl::<true>(&self, partition, blocks, &inverse)
+            } else {
+                hopcroft_refine_partition_impl::<false>(&self, partition, blocks, &inverse)
+            };
+            if canonical {
+                canonicalize_partition_blocks(&mut blocks);
             }
-            return result;
-        }
-
-        let partition_started = std::time::Instant::now();
-        let (partition, blocks) = partition_by_finalizers(&self);
-        let partition_ms = partition_started.elapsed().as_secs_f64() * 1000.0;
-
-        let hopcroft_started = std::time::Instant::now();
-        let inverse = InverseTransitions::build(&self);
-        let mut blocks =
-            hopcroft_refine_partition_impl::<true>(&self, partition, blocks, &inverse);
-        let hopcroft_ms = hopcroft_started.elapsed().as_secs_f64() * 1000.0;
-        let canonicalize_started = std::time::Instant::now();
-        canonicalize_partition_blocks(&mut blocks);
-        let canonicalize_ms = canonicalize_started.elapsed().as_secs_f64() * 1000.0;
-        let future_started = std::time::Instant::now();
-        let single_group_reachability =
-            (self.num_groups() == 1).then(|| can_reach_accepting_from_inverse(&self, &inverse));
-        let future_ms = future_started.elapsed().as_secs_f64() * 1000.0;
-        let rebuild_started = std::time::Instant::now();
-        let result = self.rebuild_owned_from_blocks_with_mapping_impl(
-            blocks,
-            single_group_reachability.as_deref(),
-        );
-        let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1000.0;
+            let reach = (self.num_groups() == 1)
+                .then(|| can_reach_accepting_from_inverse(&self, &inverse));
+            self.rebuild_owned_from_blocks_with_mapping_impl(blocks, reach.as_deref())
+        };
+        let mapping = match old_to_working {
+            Some(old) => compose_mappings(&old, &mapping),
+            None => mapping,
+        };
         if profile {
-            eprintln!(
-                "[glrmask/profile][lexer_minimize_preserve] states={} partition_ms={partition_ms:.3} hopcroft_ms={hopcroft_ms:.3} canonicalize_ms={canonicalize_ms:.3} future_ms={future_ms:.3} rebuild_ms={rebuild_ms:.3} total_ms={:.3}",
-                orig_n,
-                total_started.elapsed().as_secs_f64() * 1000.0,
-            );
+            eprintln!("[glrmask/profile][lexer_minimize] states={n} quotient={} total_ms={:.3}",
+                dfa.num_states(), started.elapsed().as_secs_f64() * 1000.0);
         }
-        result
+        (dfa, mapping)
     }
-
-    fn minimize_impl(&self, drop_unreachable: bool, canonicalize_blocks: bool) -> (DFA, Vec<u32>) {
-        let orig_n = self.states().len();
-        if orig_n == 0 {
-            return (self.clone(), Vec::new());
-        }
-
-        let mut working = self.clone();
-        let old_to_working = if drop_unreachable {
-            working.remove_unreachable_states_with_mapping()
-        } else {
-            (0..orig_n as u32).collect()
-        };
-        clear_possible_futures_for_minimization(&mut working);
-        let n = working.states().len();
-
-        if n <= 1 {
-            working.recompute_possible_futures();
-            return (working, old_to_working);
-        }
-
-        let (partition, blocks) = partition_by_finalizers(&working);
-        let mut minimality_check_blocks = blocks.clone();
-
-        // Topology pre-refinement is only an early minimality certificate.
-        // Its classes are not fed to Hopcroft because the one-pass topology
-        // signature can over-split cyclic/product states. A DFA with a self-loop
-        // can never be certified by this pass, so scanning it is dead work.
-        let prerefine = if working.has_self_loops() {
-            TopologyPrerefine::Skip
-        } else {
-            topology_prerefine_partition(&working, &partition)
-        };
-        match prerefine {
-            TopologyPrerefine::AlreadyMinimal(blocks) => {
-                let mut blocks = blocks;
-                if canonicalize_blocks {
-                    canonicalize_partition_blocks(&mut blocks);
-                }
-                let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-                let composed = compose_mappings(&old_to_working, &block_map);
-                return (result, composed);
-            }
-            TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
-                // Previously bailed out when refined_blocks.len() > n*9/10,
-                // assuming the DFA was near-minimal. That heuristic was
-                // unsound: topology_prerefine uses a one-pass signature that
-                // over-splits when blocks depend on each other's refinement
-                // (product-DFA states whose active language is equal but
-                // whose one-pass signatures differ due to inactive-dimension
-                // coupling). Always fall through to Hopcroft.
-                minimality_check_blocks = refined_blocks;
-            }
-            TopologyPrerefine::Skip => {}
-        }
-
-        if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
-            if canonicalize_blocks {
-                canonicalize_partition_blocks(&mut minimality_check_blocks);
-            }
-            let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
-            let composed = compose_mappings(&old_to_working, &block_map);
-            return (result, composed);
-        }
-
-        let mut blocks = hopcroft_refine_partition(&working, partition, blocks);
-        if canonicalize_blocks {
-            canonicalize_partition_blocks(&mut blocks);
-        }
-
-        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-        let composed = compose_mappings(&old_to_working, &block_map);
-        (result, composed)
-    }
-
     /// Remove unreachable states, returning old→new mapping.
     /// Unreachable states map to `u32::MAX`.
     fn remove_unreachable_states_with_mapping(&mut self) -> Vec<u32> {
@@ -1448,12 +1114,12 @@ impl DFA {
 
     fn rebuild_owned_from_flat_acyclic_partition(
         mut self,
-        partition: AcyclicSingleGroupPartition,
+        partition: AcyclicPartition,
     ) -> (DFA, Vec<u32>) {
-        let AcyclicSingleGroupPartition {
+        let AcyclicPartition {
             state_mapping, representatives, can_reach_accepting,
         } = partition;
-        debug_assert_eq!(self.num_groups(), 1);
+        let single_group = self.num_groups() == 1;
         debug_assert_eq!(self.num_states(), state_mapping.len());
         let mut old_index = 0usize;
         let mut next_representative = 0usize;
@@ -1472,9 +1138,9 @@ impl DFA {
             // an accepting sink does not become its own future witness.
             let has_future = state.transitions.iter()
                 .any(|(_, &target)| can_reach_accepting[target as usize]);
-            state.possible_future_group_ids = BitSet::new(1);
-            if has_future {
-                state.possible_future_group_ids.set(0);
+            if single_group {
+                state.possible_future_group_ids = BitSet::new(1);
+                if has_future { state.possible_future_group_ids.set(0); }
             }
             for (_, target) in state.transitions.iter_mut() {
                 *target = state_mapping[*target as usize];
@@ -1483,18 +1149,8 @@ impl DFA {
             true
         });
         debug_assert_eq!(next_representative, representatives.len());
+        if !single_group { self.recompute_possible_futures(); }
         (self, state_mapping)
-    }
-
-    fn rebuild_owned_from_blocks(self, partition_blocks: Vec<Vec<u32>>) -> DFA {
-        self.rebuild_owned_from_blocks_with_mapping(partition_blocks).0
-    }
-
-    fn rebuild_owned_from_blocks_with_mapping(
-        self,
-        partition_blocks: Vec<Vec<u32>>,
-    ) -> (DFA, Vec<u32>) {
-        self.rebuild_owned_from_blocks_with_mapping_impl(partition_blocks, None)
     }
 
     fn rebuild_owned_from_blocks_with_mapping_impl(
@@ -1558,65 +1214,6 @@ impl DFA {
         (self, state_mapping)
     }
 
-    /// Rebuild DFA from partition blocks.
-    /// Ensures state 0 in the new DFA corresponds to the block
-    /// containing old state 0.
-    fn rebuild_from_blocks(&self, partition_blocks: Vec<Vec<u32>>) -> DFA {
-        self.rebuild_from_blocks_with_mapping(partition_blocks).0
-    }
-
-    /// Like `rebuild_from_blocks` but also returns old→new state mapping.
-    fn rebuild_from_blocks_with_mapping(&self, mut partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
-        let n = self.states().len();
-        let mut state_mapping = vec![0u32; n];
-
-        partition_blocks.retain(|block| !block.is_empty());
-
-        // Ensure the block containing start state (0) is first.
-        if let Some(start_part_idx) = partition_blocks
-            .iter()
-            .position(|block| block.contains(&0))
-        {
-            partition_blocks.swap(0, start_part_idx);
-        }
-
-        for (new_idx, block) in partition_blocks.iter().enumerate() {
-            for &old_idx in block {
-                state_mapping[old_idx as usize] = new_idx as u32;
-            }
-        }
-
-        let num_groups = self.num_groups();
-        let mut result = DFA::new(0);
-        result.ensure_group_capacity(num_groups);
-        for gid in 0..num_groups {
-            result.set_group_u8set(gid as u32, *self.group_id_to_u8set(gid as u32));
-        }
-
-        for block in &partition_blocks {
-            let representative = block[0] as usize;
-            let old_state = &self.states()[representative];
-
-            let new_id = result.add_state();
-            let new_state = &mut result.states_mut()[new_id as usize];
-            new_state.finalizers = old_state.finalizers.clone();
-            let entries: Vec<(u8, u32)> = old_state
-                .transitions
-                .iter()
-                .map(|(byte, &old_next)| (byte, state_mapping[old_next as usize]))
-                .collect();
-            new_state.transitions = CharTransitions::from_sorted_entries(entries);
-            new_state.epsilon_transitions = old_state
-                .epsilon_transitions
-                .iter()
-                .map(|&old_next| state_mapping[old_next as usize])
-                .collect();
-        }
-
-        result.recompute_possible_futures();
-        (result, state_mapping)
-    }
-
 }
 
 fn canonicalize_partition_blocks(blocks: &mut [Vec<u32>]) {
@@ -1671,7 +1268,7 @@ mod tests {
         let expected = original_preserve_hopcroft(source.clone());
         assert_eq!(actual.1, expected.1, "source-coordinate map changed");
         assert!(actual.0 == expected.0, "canonical DFA/strict future metadata changed");
-        let flat = acyclic_single_group_flat_partition_impl::<0>(&source).unwrap();
+        let flat = acyclic_flat_partition_impl::<0>(&source).unwrap();
         let flat_expected_representatives = expected_partition.0.iter()
             .map(|block| block[0]).collect::<Vec<_>>();
         assert_eq!(flat.representatives, flat_expected_representatives);
@@ -1758,7 +1355,7 @@ mod tests {
             dfa.overwrite_state_metadata(state, accepting.clone(), accepting.clone());
         }
         let expected = original_preserve_hopcroft(dfa.clone());
-        let flat = acyclic_single_group_flat_partition_impl::<{ u64::MAX }>(&dfa).unwrap();
+        let flat = acyclic_flat_partition_impl::<{ u64::MAX }>(&dfa).unwrap();
         assert!(flat.representatives.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(flat.representatives[0], 0);
         assert!(flat.representatives.len() < dfa.num_states());
