@@ -5,6 +5,7 @@ pub(crate) mod normalization;
 pub(crate) mod parser;
 pub(crate) mod table;
 pub(crate) mod terminal_ended;
+#[cfg(test)]
 pub(crate) mod normalization_reference;
 
 pub(crate) mod left_corner_closure;

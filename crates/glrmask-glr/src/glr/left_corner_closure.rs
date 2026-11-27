@@ -47,7 +47,7 @@ pub(super) fn repair(rules: &[Rule], components: &[BTreeSet<NonterminalID>],
         // Ordered head substitution assumes nonempty exits. The normalizer
         // already removes epsilon while retaining source nullability elsewhere;
         // newly introduced right-recursion helpers need the same operation.
-        let rewritten = super::normalization_reference::inline_null_productions(rules, next);
+        let rewritten = super::analysis::inline_null_productions_unbudgeted(rules, next);
         assert_ne!(rewritten, rules, "nullable left-corner repair must make progress");
         return Some(rewritten);
     }

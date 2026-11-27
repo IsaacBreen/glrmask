@@ -152,10 +152,6 @@ fn compare_language(input: &[Rule], start: u32, max_len: usize) {
     }
 }
 
-#[test]
-fn reference_validation_is_forced_for_unit_tests() {
-    assert!(reference_validation_enabled());
-}
 
 #[test]
 fn empty_reflexive_and_pure_unit_cycles_match_reference() {

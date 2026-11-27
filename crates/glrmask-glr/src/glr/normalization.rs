@@ -1,8 +1,7 @@
 //! Ordered grammar normalization with iteration-local immutable rule payloads.
 //!
-//! The original implementation in `analysis` remains the ordered compiler
-//! reference. This module changes storage and traversal work, not the rewrite
-//! schedule, publication order, fresh-ID order, or convergence semantics.
+//! Keep the rewrite schedule, publication order, fresh-ID order and
+//! convergence semantics deterministic. The test-only reference checks these.
 //!
 //! No arena handle escapes this module. Published rules retain the original
 //! public Rule representation and coordinate system.
@@ -18,6 +17,8 @@ use crate::grammar::flat::{NonterminalID, Rule, Symbol};
 
 use glrmask_invariant::__private::charge_template_build_budget;
 
+use super::analysis::inline_null_productions_unbudgeted;
+#[cfg(test)]
 use super::normalization_reference as reference;
 
 /// Charge one unit per created rule plus its right-hand-side length. A
@@ -43,22 +44,7 @@ const MAX_INDIRECT_RULE_GROWTH: usize = 4_096;
 const MAX_INDIRECT_SYMBOL_GROWTH: usize = 1_000_000;
 const MAX_FLATTENED_RHS_LEN: usize = 4096;
 
-fn env_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-}
 
-fn reference_validation_enabled() -> bool {
-    cfg!(test)
-        || env_enabled("GLRMASK_VALIDATE_COMPILER_TEMPLATES")
-        || env_enabled("GLRMASK_VALIDATE_COMPILER_NORMALIZATION")
-}
 
 fn profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -1474,7 +1460,7 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
         // Preserve the existing nullable-run tree and epsilon publication.
         if edit.arena.iter().any(|rule| rule.rhs.is_empty()) {
             let emitted =
-                reference::inline_null_productions(&edit.arena, next_nt.get());
+                inline_null_productions_unbudgeted(&edit.arena, next_nt.get());
             edit.replace_with_owned(emitted);
         }
         // Resynchronize BEFORE reflexive-unit removal, as d751 does.
@@ -1587,7 +1573,7 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
     if !nullable_eliminated_before_exit {
         let old = std::mem::take(rules);
         let mut replacement =
-            reference::inline_null_productions(&old, next_nt.get());
+            inline_null_productions_unbudgeted(&old, next_nt.get());
         next_nt.set(View::plain(&replacement).max_nt() + 1);
         replacement.retain(|rule| !is_reflexive_unit_rule(rule));
         post_inline_changed = replacement != old;
@@ -1601,25 +1587,22 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
     }
 }
 
-/// Full, ordered d751-compatible normalization.
-///
-/// Expensive ordered-reference execution is an explicit compiler validation
-/// operation. Structural transforms and nullable rescans are never gated.
+/// Full grammar normalization with deterministic rule and fresh-ID order.
 pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
-    let expected = reference_validation_enabled().then(|| {
+    #[cfg(test)]
+    let expected = {
         let mut expected = rules.clone();
         reference::normalize_grammar(&mut expected, start);
         expected
-    });
+    };
 
     normalize_impl(rules, start);
 
-    if let Some(expected) = expected {
-        assert_eq!(
-            *rules, expected,
-            "ordered normalization differs from the d751 compiler reference"
-        );
-    }
+    #[cfg(test)]
+    assert_eq!(
+        *rules, expected,
+        "ordered normalization differs from the independent rewrite reference"
+    );
 }
 
 #[cfg(test)]
