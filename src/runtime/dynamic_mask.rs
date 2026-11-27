@@ -8891,13 +8891,33 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
     fill_recursive_mask_using_vocab(state, buf, transitions, vocab)
 }
 
+/// Group lexer lanes that already share the exact same annotated parser object.
+/// Keep that identity through accumulator partitioning and projection.
+fn group_parser_lexer_lanes(
+    state: &ConstraintState,
+) -> SmallVec<[(&ParserGSS, SmallVec<[u32; 8]>); 8]> {
+    let mut groups = SmallVec::<[(&ParserGSS, SmallVec<[u32; 8]>); 8]>::new();
+    for (&lexer, gss) in &state.state {
+        if let Some((_, lanes)) = groups
+            .iter_mut()
+            .find(|(parser, _)| parser.ptr_key() == gss.ptr_key())
+        {
+            lanes.push(lexer);
+        } else {
+            groups.push((gss, SmallVec::from_slice(&[lexer])));
+        }
+    }
+    groups
+}
+
 fn prepare_recursive_mask_roots<T: FullWalkTransitionTable>(
     state: &ConstraintState, transitions: &mut T,
 ) -> Result<DynamicBranches, String> {
     let mut roots = DynamicBranches::new();
-    for (&lexer_state, gss) in state.state.iter() {
+    for (gss, lanes) in group_parser_lexer_lanes(state) {
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
-            roots.push(DynamicBranch {
+            for &lexer_state in &lanes {
+                roots.push(DynamicBranch {
                 // Scoped provider coordinates already own their parser/lexer
                 // coupling. Ordinary flattened-root optimizations must not
                 // infer a separate projection from the coordinator shell.
@@ -8909,12 +8929,13 @@ fn prepare_recursive_mask_roots<T: FullWalkTransitionTable>(
                 // tokenizer. Keeping this None also disables ordinary-only
                 // residual/slice proofs until provider-native proofs exist.
                 exact_tokenizer_state: None,
-                gss: stacks,
+                gss: stacks.clone(),
                 shared_root_admission: None,
                 initial_prune_guard: InitialPruneGuard::new_recursive(
                     &terminals_disallowed,
                 ),
             });
+            }
         }
     }
     Ok(roots)
@@ -9544,55 +9565,30 @@ fn fill_mask_dynamic_impl(
         }
     }
 
-    let mut seed_entries = SmallVec::<[(u32, u32, &ParserGSS); 16]>::new();
-    // The deterministic mask projection contains only subsets reachable from
-    // its own lexical start states. Parser filtering can later expose an exact
-    // union of projection states that was never reachable lexically on its own.
-    // In that case use the existing lazy config interner as an outer subset
-    // coordinate for this mask call. Its non-deterministic mode is also exact
-    // for an epsilon-free tokenizer: singleton states are tagged raw configs,
-    // arbitrary unions are flattened/canonicalized, and successor rows are
-    // memoized lazily per (subset, byte).
+    let mut seed_groups =
+        SmallVec::<[(&ParserGSS, SmallVec<[(u32, u32); 8]>); 8]>::new();
     let mut saw_missing_subset = false;
-    if vocab.has_mask_subset_provenance() {
-        let mut groups = SmallVec::<[(usize, &ParserGSS, SmallVec<[u32; 8]>); 8]>::new();
-        for (&tokenizer_state, gss) in &state.state {
-            let key = gss.ptr_key();
-            if let Some((_, _, states)) = groups.iter_mut().find(|(candidate, _, _)| *candidate == key) {
-                states.push(tokenizer_state);
-            } else {
-                groups.push((key, gss, SmallVec::from_slice(&[tokenizer_state])));
-            }
-        }
-        for (_, gss, mut states) in groups {
-            states.sort_unstable();
-            states.dedup();
-            if states.len() > 1 {
+    for (gss, mut lanes) in group_parser_lexer_lanes(state) {
+        let mut seeds = SmallVec::new();
+        if vocab.has_mask_subset_provenance() {
+            lanes.sort_unstable();
+            lanes.dedup();
+            if lanes.len() > 1 {
                 if let Some(projected) = vocab.mask_runtime_state_for_source_states(
                     &state.constraint.tokenizer,
-                    &states,
+                    &lanes,
                 ) {
-                    seed_entries.push((states[0], projected, gss));
+                    seeds.push((lanes[0], projected));
+                    seed_groups.push((gss, seeds));
                     continue;
                 }
-                // Same parser object, but the parser-filtered lexer subset was
-                // not materialized by compile-time determinization. The Flat16
-                // walker can represent this exact frontier as one runtime
-                // subset state.
+                // An exact same-parser union may not occur in the
+                // compile-time lexical subset table. Use runtime subsets.
                 saw_missing_subset = true;
             }
-            for raw_state in states {
-                seed_entries.push((raw_state, vocab.mask_runtime_state(raw_state), gss));
-            }
         }
-    } else {
-        for (&tokenizer_state, gss) in &state.state {
-            seed_entries.push((
-                tokenizer_state,
-                vocab.mask_runtime_state(tokenizer_state),
-                gss,
-            ));
-        }
+        seeds.extend(lanes.into_iter().map(|raw| (raw, vocab.mask_runtime_state(raw))));
+        seed_groups.push((gss, seeds));
     }
     let seed_profile_ms = prewalk_profile_start
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -9612,33 +9608,10 @@ fn fill_mask_dynamic_impl(
         }
     }
 
-    // Preserve exact parser identity across lexer-only fanout. `state.state`
-    // can contain several tokenizer states carrying the same ParserGSS object.
-    // Partitioning that object independently for every lexer state would create
-    // distinct transformed ParserStacks objects and erase that provenance.
-    // Partition once, then clone the resulting ParserStacks for each lexer
-    // seed; those clones retain pointer identity by construction.
-    let mut seed_groups =
-        SmallVec::<[(usize, &ParserGSS, SmallVec<[(u32, u32); 8]>); 8]>::new();
-    for (tokenizer_state, projected_tokenizer_state, gss) in seed_entries {
-        let key = gss.ptr_key();
-        if let Some((_, _, seeds)) = seed_groups
-            .iter_mut()
-            .find(|(candidate, _, _)| *candidate == key)
-        {
-            seeds.push((tokenizer_state, projected_tokenizer_state));
-        } else {
-            seed_groups.push((
-                key,
-                gss,
-                SmallVec::from_slice(&[(tokenizer_state, projected_tokenizer_state)]),
-            ));
-        }
-    }
     let mut partitioned_seed_entries =
         SmallVec::<[(u32, u32, ParserStacks, TerminalsDisallowed); 16]>::new();
     let partition_profile_start = profile_prewalk.then(std::time::Instant::now);
-    for (_, gss, seeds) in seed_groups {
+    for (gss, seeds) in seed_groups {
         deadline_poll.check()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             for &(tokenizer_state, projected_tokenizer_state) in &seeds {
