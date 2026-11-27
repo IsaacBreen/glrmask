@@ -3687,6 +3687,60 @@ fn suffix_effect(
     })
 }
 
+/// Apply nonrecursive consuming alternatives to an existing stack frame.
+/// Return the untouched frame for reduction/split/accept actions, whose
+/// traversal and acceptance policies differ between callers.
+fn consume_action_frames(
+    table: &GLRTable,
+    state: u32,
+    terminal: TerminalID,
+    action: &Action,
+    frame: StackEffectFrame,
+    skip_invalid_guards: bool,
+    mut emit: impl FnMut(StackEffectFrame),
+) -> Result<Option<StackEffectFrame>, ()> {
+    match action {
+        Action::Skip => emit(frame),
+        Action::Shift(target, replace) => {
+            let mut frame = frame;
+            let effective_replace =
+                *replace && !table.forwarded_shifts.contains(&(state, terminal));
+            push_transition_to_frame(&mut frame, *target, effective_replace);
+            emit(frame);
+        }
+        Action::ReplaceShifts(targets) => {
+            for &target in targets.iter() {
+                let mut next = frame.clone();
+                pop_frame(&mut next, 1);
+                next.pushes.push(target);
+                emit(next);
+            }
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                let mut next = frame.clone();
+                pop_frame(&mut next, shift.pop);
+                next.pushes.extend_from_slice(&shift.pushes);
+                emit(next);
+            }
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                match compose_guarded_shift_with_frame(frame.clone(), shift) {
+                    Some(Some(next)) => emit(next),
+                    Some(None) => {}
+                    None if skip_invalid_guards => {}
+                    None => return Err(()),
+                }
+            }
+        }
+        Action::Reduce(..) | Action::Split { .. } | Action::Accept => {
+            return Ok(Some(frame));
+        }
+    }
+    Ok(None)
+}
+
 // Compile one concrete action row of a synthetic suffix state into an
 // equivalent macro stack effect.
 //
@@ -3731,44 +3785,18 @@ fn collect_suffix_effects_from_frame(
     }
 
     let result = (|| {
+        let Some(frame) = consume_action_frames(
+            table,
+            state,
+            terminal,
+            action,
+            frame,
+            false,
+            |next| effects.push(frame_to_guarded_shift(next)),
+        )? else {
+            return Ok(());
+        };
         match action {
-            Action::Skip => {
-                effects.push(frame_to_guarded_shift(frame));
-                Ok(())
-            }
-            Action::Shift(target, replace) => {
-                let mut frame = frame;
-                let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, terminal));
-                push_transition_to_frame(&mut frame, *target, effective_replace);
-                effects.push(frame_to_guarded_shift(frame));
-                Ok(())
-            }
-            Action::ReplaceShifts(targets) => {
-                for &target in targets.iter() {
-                    let mut frame = frame.clone();
-                    pop_frame(&mut frame, 1);
-                    frame.pushes.push(target);
-                    effects.push(frame_to_guarded_shift(frame));
-                }
-                Ok(())
-            }
-            Action::StackShifts(shifts) => {
-                for shift in shifts {
-                    let mut frame = frame.clone();
-                    pop_frame(&mut frame, shift.pop);
-                    frame.pushes.extend_from_slice(&shift.pushes);
-                    effects.push(frame_to_guarded_shift(frame));
-                }
-                Ok(())
-            }
-            Action::GuardedStackShifts(shifts) => {
-                for shift in shifts {
-                    if let Some(frame) = compose_guarded_shift_with_frame(frame.clone(), shift).ok_or(())? {
-                        effects.push(frame_to_guarded_shift(frame));
-                    }
-                }
-                Ok(())
-            }
             Action::Reduce(nt, len) => {
                 for frame in reduce_suffix_frame(
                     table,
@@ -3835,6 +3863,7 @@ fn collect_suffix_effects_from_frame(
                 *accepts += 1;
                 Ok(())
             }
+            _ => unreachable!("consuming action already handled"),
         }
     })();
 
@@ -3858,71 +3887,41 @@ fn collect_context_share_effects_from_frame(
     effects: &mut Vec<GuardedStackShift>,
     accepts: &mut usize,
 ) -> Result<(), ()> {
-    match action {
-        Action::Skip => {
-            effects.push(frame_to_guarded_shift(frame));
-            Ok(())
-        }
-        Action::Shift(target, replace) => {
-            let mut frame = frame;
-            let effective_replace =
-                *replace && !table.forwarded_shifts.contains(&(state, terminal));
-            push_transition_to_frame(&mut frame, *target, effective_replace);
-            effects.push(frame_to_guarded_shift(frame));
-            Ok(())
-        }
-        Action::ReplaceShifts(targets) => {
-            for &target in targets.iter() {
-                let mut next = frame.clone();
-                pop_frame(&mut next, 1);
-                next.pushes.push(target);
-                effects.push(frame_to_guarded_shift(next));
-            }
-            Ok(())
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                let mut next = frame.clone();
-                pop_frame(&mut next, shift.pop);
-                next.pushes.extend_from_slice(&shift.pushes);
-                effects.push(frame_to_guarded_shift(next));
-            }
-            Ok(())
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                if let Some(next) =
-                    compose_guarded_shift_with_frame(frame.clone(), shift).ok_or(())?
-                {
-                    effects.push(frame_to_guarded_shift(next));
-                }
-            }
-            Ok(())
-        }
+    // A split containing only a shift has no recursive work here either.
+    let pure_shift;
+    let action = match action {
         Action::Split {
             shift: Some((target, replace)),
             reduces,
             accept: false,
         } if reduces.is_empty() => {
-            let mut frame = frame;
-            let effective_replace =
-                *replace && !table.forwarded_shifts.contains(&(state, terminal));
-            push_transition_to_frame(&mut frame, *target, effective_replace);
-            effects.push(frame_to_guarded_shift(frame));
-            Ok(())
+            pure_shift = Action::Shift(*target, *replace);
+            &pure_shift
         }
-        _ => collect_suffix_effects_from_frame(
-            table,
-            terminal,
-            state,
-            action,
-            frame,
-            Some(goto_sources_by_nonterminal),
-            &mut FxHashSet::default(),
-            effects,
-            accepts,
-        ),
-    }
+        _ => action,
+    };
+    let Some(frame) = consume_action_frames(
+        table,
+        state,
+        terminal,
+        action,
+        frame,
+        false,
+        |next| effects.push(frame_to_guarded_shift(next)),
+    )? else {
+        return Ok(());
+    };
+    collect_suffix_effects_from_frame(
+        table,
+        terminal,
+        state,
+        action,
+        frame,
+        Some(goto_sources_by_nonterminal),
+        &mut FxHashSet::default(),
+        effects,
+        accepts,
+    )
 }
 
 fn reduce_suffix_frame(
@@ -5754,29 +5753,23 @@ fn eof_accept_effects_for_action(
                 }
                 Ok(out)
             }
-            Action::Shift(target, replace) => {
-                let mut shifted = frame;
-                let effective_replace =
-                    *replace && !table.forwarded_shifts.contains(&(state, EOF));
-                push_transition_to_frame(&mut shifted, *target, effective_replace);
-                continue_eof_accept_from_frames(
+            _ => {
+                let capacity = match action {
+                    Action::ReplaceShifts(targets) => targets.len(),
+                    Action::StackShifts(shifts) => shifts.len(),
+                    _ => 1,
+                };
+                let mut frames = Vec::with_capacity(capacity);
+                let remaining = consume_action_frames(
                     table,
-                    predecessors,
-                    origin_state,
-                    vec![shifted],
-                    states_at_depth_cache,
-                    visiting,
-                    budget,
-                )
-            }
-            Action::ReplaceShifts(targets) => {
-                let mut frames = Vec::with_capacity(targets.len());
-                for &target in targets.iter() {
-                    let mut shifted = frame.clone();
-                    pop_frame(&mut shifted, 1);
-                    shifted.pushes.push(target);
-                    frames.push(shifted);
-                }
+                    state,
+                    EOF,
+                    action,
+                    frame,
+                    true,
+                    |next| frames.push(next),
+                ).expect("EOF ignores invalid guarded alternatives");
+                debug_assert!(remaining.is_none());
                 continue_eof_accept_from_frames(
                     table,
                     predecessors,
@@ -5787,54 +5780,6 @@ fn eof_accept_effects_for_action(
                     budget,
                 )
             }
-            Action::StackShifts(shifts) => {
-                let frames = shifts
-                    .iter()
-                    .map(|shift| {
-                        let mut shifted = frame.clone();
-                        pop_frame(&mut shifted, shift.pop);
-                        shifted.pushes.extend_from_slice(&shift.pushes);
-                        shifted
-                    })
-                    .collect();
-                continue_eof_accept_from_frames(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frames,
-                    states_at_depth_cache,
-                    visiting,
-                    budget,
-                )
-            }
-            Action::GuardedStackShifts(shifts) => {
-                let mut frames = Vec::new();
-                for shift in shifts {
-                    if let Some(Some(shifted)) =
-                        compose_guarded_shift_with_frame(frame.clone(), shift)
-                    {
-                        frames.push(shifted);
-                    }
-                }
-                continue_eof_accept_from_frames(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frames,
-                    states_at_depth_cache,
-                    visiting,
-                    budget,
-                )
-            }
-            Action::Skip => continue_eof_accept_from_frames(
-                table,
-                predecessors,
-                origin_state,
-                vec![frame],
-                states_at_depth_cache,
-                visiting,
-                budget,
-            ),
         }
     })();
 
@@ -6724,130 +6669,110 @@ fn stack_effects_for_action(
     let result = (|| {
         let mut out = Vec::new();
         let mut origin_dependent = false;
-        match action {
-            Action::Skip => out.push(frame_to_guarded_shift(frame)),
-            Action::Shift(target, replace) => {
-                let mut frame = frame;
-                let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, tid));
-                push_transition_to_frame(&mut frame, *target, effective_replace);
-                out.push(frame_to_guarded_shift(frame));
-            }
-            Action::ReplaceShifts(targets) => {
-                for &target in targets.iter() {
-                    let mut frame = frame.clone();
-                    pop_frame(&mut frame, 1);
-                    frame.pushes.push(target);
-                    out.push(frame_to_guarded_shift(frame));
-                }
-            }
-            Action::StackShifts(shifts) => {
-                for shift in shifts {
-                    let mut frame = frame.clone();
-                    pop_frame(&mut frame, shift.pop);
-                    frame.pushes.extend_from_slice(&shift.pushes);
-                    out.push(frame_to_guarded_shift(frame));
-                }
-            }
-            Action::GuardedStackShifts(shifts) => {
-                for shift in shifts {
-                    match compose_guarded_shift_with_frame(frame.clone(), shift)? {
-                        None => {}
-                        Some(frame) => out.push(frame_to_guarded_shift(frame)),
-                    }
-                }
-            }
-            Action::Reduce(nt, len) => {
-                let frames = match apply_reduce_to_frame(
-                    table,
-                    predecessors,
-                    origin_state,
-                    frame,
-                    *nt,
-                    *len,
-                    states_at_depth_cache,
-                    budget,
-                )? {
-                    ReduceFrameResult::Dead => {
-                        return Some(StackEffectResult {
-                            effects: Vec::new(),
-                            origin_dependent,
-                        })
-                    }
-                    ReduceFrameResult::Frames {
-                        frames,
-                        origin_dependent: reduce_origin_dependent,
-                    } => {
-                        origin_dependent |= reduce_origin_dependent;
-                        frames
-                    }
-                };
-                for frame in frames {
-                    let Some(&next_state) = frame.pushes.last() else {
-                        continue;
-                    };
-                    let Some(next) = table.action[next_state as usize].get(&tid) else {
-                        continue;
-                    };
-                    dependencies.push(((origin_state, tid), (next_state, tid)));
-                    let next_result = stack_effects_for_action(
+        if let Some(frame) = consume_action_frames(
+            table,
+            state,
+            tid,
+            action,
+            frame,
+            false,
+            |next| out.push(frame_to_guarded_shift(next)),
+        ).ok()? {
+            match action {
+                Action::Reduce(nt, len) => {
+                    let frames = match apply_reduce_to_frame(
                         table,
                         predecessors,
                         origin_state,
-                        tid,
-                        next_state,
-                        next,
                         frame,
+                        *nt,
+                        *len,
                         states_at_depth_cache,
-                        visiting,
-                        dependencies,
                         budget,
-                    )?;
-                    origin_dependent |= next_result.origin_dependent;
-                    out.extend(next_result.effects);
+                    )? {
+                        ReduceFrameResult::Dead => {
+                            return Some(StackEffectResult {
+                                effects: Vec::new(),
+                                origin_dependent,
+                            })
+                        }
+                        ReduceFrameResult::Frames {
+                            frames,
+                            origin_dependent: reduce_origin_dependent,
+                        } => {
+                            origin_dependent |= reduce_origin_dependent;
+                            frames
+                        }
+                    };
+                    for frame in frames {
+                        let Some(&next_state) = frame.pushes.last() else {
+                            continue;
+                        };
+                        let Some(next) = table.action[next_state as usize].get(&tid) else {
+                            continue;
+                        };
+                        dependencies.push(((origin_state, tid), (next_state, tid)));
+                        let next_result = stack_effects_for_action(
+                            table,
+                            predecessors,
+                            origin_state,
+                            tid,
+                            next_state,
+                            next,
+                            frame,
+                            states_at_depth_cache,
+                            visiting,
+                            dependencies,
+                            budget,
+                        )?;
+                        origin_dependent |= next_result.origin_dependent;
+                        out.extend(next_result.effects);
+                    }
                 }
+                Action::Split { shift, reduces, accept } => {
+                    if *accept {
+                        return None;
+                    }
+                    if let Some((target, replace)) = shift {
+                        let shift_action = Action::Shift(*target, *replace);
+                        let shift_result = stack_effects_for_action(
+                            table,
+                            predecessors,
+                            origin_state,
+                            tid,
+                            state,
+                            &shift_action,
+                            frame.clone(),
+                            states_at_depth_cache,
+                            visiting,
+                            dependencies,
+                            budget,
+                        )?;
+                        origin_dependent |= shift_result.origin_dependent;
+                        out.extend(shift_result.effects);
+                    }
+                    for &(nt, len) in reduces {
+                        let reduce_action = Action::Reduce(nt, len);
+                        let reduce_result = stack_effects_for_action(
+                            table,
+                            predecessors,
+                            origin_state,
+                            tid,
+                            state,
+                            &reduce_action,
+                            frame.clone(),
+                            states_at_depth_cache,
+                            visiting,
+                            dependencies,
+                            budget,
+                        )?;
+                        origin_dependent |= reduce_result.origin_dependent;
+                        out.extend(reduce_result.effects);
+                    }
+                }
+                Action::Accept => return None,
+                _ => unreachable!("consuming action already handled"),
             }
-            Action::Split { shift, reduces, accept } => {
-                if *accept {
-                    return None;
-                }
-                if let Some((target, replace)) = shift {
-                    let shift_action = Action::Shift(*target, *replace);
-                    let shift_result = stack_effects_for_action(
-                        table,
-                        predecessors,
-                        origin_state,
-                        tid,
-                        state,
-                        &shift_action,
-                        frame.clone(),
-                        states_at_depth_cache,
-                        visiting,
-                        dependencies,
-                        budget,
-                    )?;
-                    origin_dependent |= shift_result.origin_dependent;
-                    out.extend(shift_result.effects);
-                }
-                for &(nt, len) in reduces {
-                    let reduce_action = Action::Reduce(nt, len);
-                    let reduce_result = stack_effects_for_action(
-                        table,
-                        predecessors,
-                        origin_state,
-                        tid,
-                        state,
-                        &reduce_action,
-                        frame.clone(),
-                        states_at_depth_cache,
-                        visiting,
-                        dependencies,
-                        budget,
-                    )?;
-                    origin_dependent |= reduce_result.origin_dependent;
-                    out.extend(reduce_result.effects);
-                }
-            }
-            Action::Accept => return None,
         }
 
         out.sort();
