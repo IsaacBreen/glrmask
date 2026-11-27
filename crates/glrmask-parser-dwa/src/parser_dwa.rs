@@ -483,12 +483,6 @@ struct DeterminizedDwaWithSupports {
     supports: Vec<Vec<u32>>,
 }
 
-#[derive(Debug, Clone)]
-struct CachedClosure {
-    to_state: u32,
-    edge_weight: Weight,
-}
-
 struct ParserSingletonSubsetCache {
     primary: Option<Vec<Option<(usize, u32)>>>,
     overflow: FxHashMap<(u32, usize), u32>,
@@ -1996,6 +1990,28 @@ fn determinize_with_supports_mode(
         to_state: u32,
         edge_weight: DeferredEdgeWeight,
     }
+    fn publish(
+        dwa: &mut DWA, deferred: &mut Vec<DeferredTransition>,
+        defer: bool, transition: DeferredTransition,
+    ) {
+        if defer {
+            deferred.push(transition);
+        } else {
+            let DeferredEdgeWeight::Immediate(weight) = transition.edge_weight else {
+                unreachable!("eager support publication cannot reference deferred union")
+            };
+            dwa.add_transition(transition.from_state, transition.label, transition.to_state, weight);
+        }
+    }
+
+    // A raw Arc address is a canonical key only while the operand is alive.
+    // Keep one owner per distinct long-lived operand, not one per cache entry.
+    fn retain_keys(owners: &mut FxHashMap<usize, Weight>, entries: &[(u32, Weight)]) {
+        for (_, weight) in entries {
+            owners.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+        }
+    }
+
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -2004,67 +2020,6 @@ fn determinize_with_supports_mode(
     let mut closure_queue: VecDeque<u32> = VecDeque::new();
     // Reusable buffer for canonicalized entries.
     let mut canon_buf: Vec<(u32, Weight)> = Vec::new();
-
-    // Epsilon closure using flat arrays instead of FxHashMap.
-    let epsilon_closure = |weight_by_state: &mut Vec<Option<Weight>>,
-                           closure_queue: &mut VecDeque<u32>,
-                           seed: &mut FxHashMap<u32, Weight>| {
-        // Initialize flat array from seed.
-        let mut seed_states: Vec<u32> = Vec::new();
-        for (&state_id, weight) in seed.iter() {
-            weight_by_state[state_id as usize] = Some(weight.clone());
-            closure_queue.push_back(state_id);
-            seed_states.push(state_id);
-        }
-
-        // Fast path: single seed with no epsilons.
-        if seed.len() == 1 {
-            let state_id = seed_states[0];
-            if let Some(state) = nwa.states().get(state_id as usize)
-                && state.epsilons.is_empty() {
-                    // Clean up and return early — seed is already populated.
-                    closure_queue.clear();
-                    for &s in &seed_states {
-                        weight_by_state[s as usize] = None;
-                    }
-                    return;
-                }
-        }
-
-        while let Some(state_id) = closure_queue.pop_front() {
-            let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
-                continue;
-            };
-            let Some(state) = nwa.states().get(state_id as usize) else {
-                continue;
-            };
-            for (target, edge_weight) in &state.epsilons {
-                let contribution = current_weight.intersection(edge_weight);
-                if contribution.is_empty() {
-                    continue;
-                }
-                let target_idx = *target as usize;
-                if let Some(existing) = &weight_by_state[target_idx] {
-                    if !contribution.is_subset(existing) {
-                        weight_by_state[target_idx] = Some(existing.union(&contribution));
-                        closure_queue.push_back(*target);
-                    }
-                } else {
-                    weight_by_state[target_idx] = Some(contribution);
-                    closure_queue.push_back(*target);
-                    seed_states.push(*target);
-                }
-            }
-        }
-
-        // Write results back to seed map.
-        seed.clear();
-        for &s in &seed_states {
-            if let Some(w) = weight_by_state[s as usize].take() {
-                seed.insert(s, w);
-            }
-        }
-    };
 
     // Canonicalize from FxHashMap into reusable buffer.
     let canonicalize_into =
@@ -2086,7 +2041,7 @@ fn determinize_with_supports_mode(
         let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
-    epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut start_subset);
+    local_epsilon_closure(nwa, &mut weight_by_state, &mut closure_queue, &mut start_subset);
     if start_subset.is_empty() {
         return DeterminizedDwaWithSupports { dwa, supports };
     }
@@ -2116,6 +2071,8 @@ fn determinize_with_supports_mode(
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
     let mut singleton_subsets = ParserSingletonSubsetCache::new(nwa.states().len());
+    let mut key_owners = FxHashMap::<usize, Weight>::default();
+    retain_keys(&mut key_owners, &canon_buf);
     let start_key = subset_key(&canon_buf);
     subset_map.insert(start_key, dwa.start_state());
     if let [(state_id, weight)] = canon_buf.as_slice() {
@@ -2136,8 +2093,8 @@ fn determinize_with_supports_mode(
     let use_epsilon_closure_weight_cache =
         std::env::var_os("GLRMASK_DISABLE_PARSER_EPSILON_CLOSURE_WEIGHT_CACHE").is_none();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
-    let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
-    let mut singleton_closure_cache: FxHashMap<(u32, usize), CachedClosure> = FxHashMap::default();
+    let mut closure_cache: FxHashMap<Vec<(u32, usize)>, DeferredClosure> = FxHashMap::default();
+    let mut singleton_closure_cache: FxHashMap<(u32, usize), DeferredClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut closure_touched_states: Vec<u32> = Vec::new();
     let mut closure_canon: Vec<(u32, Weight)> = Vec::new();
@@ -2172,10 +2129,6 @@ fn determinize_with_supports_mode(
         .unwrap_or_else(|| parser_support_defer_edge_unions_enabled(nwa.states().len()));
     let mut deferred_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
     let mut deferred_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
-    let mut deferred_closure_cache =
-        FxHashMap::<Vec<(u32, usize)>, DeferredClosure>::default();
-    let mut deferred_singleton_closure_cache =
-        FxHashMap::<(u32, usize), DeferredClosure>::default();
     let mut deferred_transitions = Vec::<DeferredTransition>::new();
     let mut deferred_hits = 0usize;
     let mut deferred_misses = 0usize;
@@ -2338,8 +2291,8 @@ fn determinize_with_supports_mode(
             }
 
             let component_rows = &component_row_cache;
-            let closure_cache_ref = &deferred_closure_cache;
-            let singleton_closure_cache_ref = &deferred_singleton_closure_cache;
+            let closure_cache_ref = &closure_cache;
+            let singleton_closure_cache_ref = &singleton_closure_cache;
             let singleton_subsets_ref = &singleton_subsets;
             let aggregate_started = fast_support_profile.then(Instant::now);
             let scanned = wave
@@ -2600,7 +2553,9 @@ fn determinize_with_supports_mode(
             if fast_support_profile {
                 fast_labels += cached.len();
             }
-            deferred_transitions.extend(cached);
+            for transition in cached {
+                publish(&mut dwa, &mut deferred_transitions, defer_edge_unions, transition);
+            }
         }
 
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
@@ -2663,6 +2618,9 @@ fn determinize_with_supports_mode(
                             fast_subset_misses += 1;
                         }
                         let new_state = dwa.add_state();
+                        if !normalize_singletons {
+                            retain_keys(&mut key_owners, &contribs);
+                        }
                         subset_map.insert(vec![singleton_key], new_state);
                         singleton_subsets.insert(singleton_key.0, singleton_key.1, new_state);
                         worklist.push_back((
@@ -2684,21 +2642,13 @@ fn determinize_with_supports_mode(
                     {
                         detail.subset_map_lookup_ms += elapsed_ms(started_at);
                     }
-                    if defer_edge_unions {
-                        deferred_transitions.push(DeferredTransition {
-                            from_state,
-                            label,
-                            to_state,
-                            edge_weight: DeferredEdgeWeight::Immediate(only_weight.clone()),
-                        });
-                    } else {
-                        let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                        dwa.add_transition(from_state, label, to_state, only_weight.clone());
-                        if let (Some(detail), Some(started_at)) =
-                            (detail.as_mut(), add_transition_started)
-                        {
-                            detail.add_transition_ms += elapsed_ms(started_at);
-                        }
+                    let add_started = detail.as_ref().map(|_| Instant::now());
+                    publish(&mut dwa, &mut deferred_transitions, defer_edge_unions, DeferredTransition {
+                        from_state, label, to_state,
+                        edge_weight: DeferredEdgeWeight::Immediate(only_weight.clone()),
+                    });
+                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_started) {
+                        detail.add_transition_ms += elapsed_ms(started_at);
                     }
                     return;
                 }
@@ -2721,55 +2671,26 @@ fn determinize_with_supports_mode(
             }
 
             let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
-            if defer_edge_unions {
-                let cached = match singleton_closure_key {
-                    Some(key) => deferred_singleton_closure_cache.get(&key).cloned(),
-                    None => deferred_closure_cache.get(&pre_closure_key).cloned(),
-                };
-                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
-                    detail.closure_lookup_ms += elapsed_ms(started_at);
-                }
-                if let Some(cached) = cached {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.closure_cache_hits += 1;
-                    }
-                    if fast_support_profile {
-                        fast_closure_hits += 1;
-                    }
-                    deferred_transitions.push(DeferredTransition {
-                        from_state,
-                        label,
-                        to_state: cached.to_state,
-                        edge_weight: cached.edge_weight,
-                    });
-                    return;
-                }
-            } else {
-                let cached = match singleton_closure_key {
-                    Some(key) => singleton_closure_cache.get(&key).cloned(),
-                    None => closure_cache.get(&pre_closure_key).cloned(),
-                };
-                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
-                    detail.closure_lookup_ms += elapsed_ms(started_at);
-                }
-                if let Some(cached) = cached {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.closure_cache_hits += 1;
-                    }
-                    if fast_support_profile {
-                        fast_closure_hits += 1;
-                    }
-                    let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                    dwa.add_transition(from_state, label, cached.to_state, cached.edge_weight);
-                    if let (Some(detail), Some(started_at)) =
-                        (detail.as_mut(), add_transition_started)
-                    {
-                        detail.add_transition_ms += elapsed_ms(started_at);
-                    }
-                    return;
-                }
+            let cached = match singleton_closure_key {
+                Some(key) => singleton_closure_cache.get(&key).cloned(),
+                None => closure_cache.get(&pre_closure_key).cloned(),
+            };
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                detail.closure_lookup_ms += elapsed_ms(started_at);
             }
-
+            if let Some(cached) = cached {
+                if let Some(detail) = detail.as_mut() {
+                    detail.closure_cache_hits += 1;
+                }
+                if fast_support_profile {
+                    fast_closure_hits += 1;
+                }
+                publish(&mut dwa, &mut deferred_transitions, defer_edge_unions, DeferredTransition {
+                    from_state, label, to_state: cached.to_state, edge_weight: cached.edge_weight,
+                });
+                return;
+            }
+            retain_keys(&mut key_owners, &contribs);
             if let Some(detail) = detail.as_mut() {
                 detail.closure_cache_misses += 1;
             }
@@ -2861,6 +2782,7 @@ fn determinize_with_supports_mode(
                 raw_canon
             };
 
+            retain_keys(&mut key_owners, canon);
             let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
             let to_state = if let [(only_state, only_weight)] = canon {
                 let singleton_key = (
@@ -2943,47 +2865,23 @@ fn determinize_with_supports_mode(
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
                 detail.subset_map_lookup_ms += elapsed_ms(started_at);
             }
-            if defer_edge_unions {
-                let edge_weight = if let Some(weight) = normalized_closure_edge_weight.clone() {
-                    DeferredEdgeWeight::Immediate(weight)
-                } else {
-                    deferred_edge_weight
-                        .expect("deferred parser support edge must retain its union job")
-                };
-                let cached = DeferredClosure {
-                    to_state,
-                    edge_weight: edge_weight.clone(),
-                };
-                if let Some(key) = singleton_closure_key {
-                    deferred_singleton_closure_cache.insert(key, cached);
-                } else {
-                    deferred_closure_cache.insert(pre_closure_key.clone(), cached);
-                }
-                deferred_transitions.push(DeferredTransition {
-                    from_state,
-                    label,
-                    to_state,
-                    edge_weight,
-                });
+            let edge_weight = if let Some(weight) = normalized_closure_edge_weight.or(edge_weight) {
+                DeferredEdgeWeight::Immediate(weight)
             } else {
-                let edge_weight = normalized_closure_edge_weight
-                    .clone()
-                    .or(edge_weight)
-                    .expect("eager support edge union must exist");
-                let cached = CachedClosure {
-                    to_state,
-                    edge_weight: edge_weight.clone(),
-                };
-                if let Some(key) = singleton_closure_key {
-                    singleton_closure_cache.insert(key, cached);
-                } else {
-                    closure_cache.insert(pre_closure_key.clone(), cached);
-                }
-                let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                dwa.add_transition(from_state, label, to_state, edge_weight);
-                if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
-                    detail.add_transition_ms += elapsed_ms(started_at);
-                }
+                deferred_edge_weight.expect("support edge must retain its union job")
+            };
+            let cached = DeferredClosure { to_state, edge_weight: edge_weight.clone() };
+            if let Some(key) = singleton_closure_key {
+                singleton_closure_cache.insert(key, cached);
+            } else {
+                closure_cache.insert(pre_closure_key.clone(), cached);
+            }
+            let add_started = detail.as_ref().map(|_| Instant::now());
+            publish(&mut dwa, &mut deferred_transitions, defer_edge_unions, DeferredTransition {
+                from_state, label, to_state, edge_weight,
+            });
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_started) {
+                detail.add_transition_ms += elapsed_ms(started_at);
             }
         };
 
