@@ -956,7 +956,7 @@ mod clone_and_scratch_tests {
         let path = std::env::var_os("GLRMASK_FRONTIER_PROFILE_VOCAB").expect("token-hex path");
         let text = std::fs::read_to_string(path).unwrap();
         let entries: Vec<_> = text.lines().enumerate().map(|(id,line)| {
-            let bytes = line.as_bytes().chunks_exact(2)
+            let bytes = line.as_bytes().as_chunks::<2>().0.iter()
                 .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap())
                 .collect::<Vec<_>>();
             (id as u32, bytes)
