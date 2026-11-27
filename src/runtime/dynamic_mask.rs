@@ -375,40 +375,32 @@ trait FullWalkTransitionTable {
     }
 
     /// Advance a direct maximal-munch memory by one byte. Implementations only
-    /// receive coordinates previously returned by `direct_prune_coordinates`.
+    /// receive certified residual coordinates from guard or first-match projection.
     #[inline(always)]
     fn direct_prune_step(
         &self,
-        _coordinate: VirtualResidualDirectCoordinate,
+        _coordinate: ResidualCoordinate,
         _byte: u8,
     ) -> DirectPruneStep {
         DirectPruneStep::Dead
     }
 
-    #[inline(always)]
-    fn terminal_residual_prune_step(
-        &self,
-        _coordinate: TerminalResidualDirectCoordinate,
-        _byte: u8,
-    ) -> TerminalResidualPruneStep {
-        TerminalResidualPruneStep::Dead
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectPruneStep {
     Dead,
     Matched,
-    Live(VirtualResidualDirectCoordinate),
+    Live(ResidualCoordinate),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum FirstMatchDirectCoordinate {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ResidualCoordinate {
     Virtual(VirtualResidualDirectCoordinate),
     Physical(TerminalResidualDirectCoordinate),
 }
 
-impl FirstMatchDirectCoordinate {
+impl ResidualCoordinate {
     #[inline(always)]
     fn step(self, tokenizer: &Tokenizer, byte: u8) -> Option<Self> {
         match self {
@@ -441,13 +433,6 @@ impl FirstMatchDirectCoordinate {
     fn physical(self) -> Option<TerminalResidualDirectCoordinate> {
         match self { Self::Physical(c) => Some(c), Self::Virtual(_) => None }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TerminalResidualPruneStep {
-    Dead,
-    Matched,
-    Live(TerminalResidualDirectCoordinate),
 }
 
 #[derive(Clone, Copy)]
@@ -1996,45 +1981,19 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     #[inline(always)]
     fn direct_prune_step(
         &self,
-        coordinate: VirtualResidualDirectCoordinate,
+        coordinate: ResidualCoordinate,
         byte: u8,
     ) -> DirectPruneStep {
         let tokenizer = self.cache.tokenizer();
-        let Some(target) = tokenizer.virtual_residual_direct_coordinate_step(coordinate, byte)
-        else {
+        let Some(target) = coordinate.step(tokenizer, byte) else {
             return DirectPruneStep::Dead;
         };
-        if tokenizer
-            .virtual_residual_direct_coordinate_accepting(target)
-            .unwrap_or(false)
-        {
-            return DirectPruneStep::Matched;
-        }
-        if tokenizer
-            .virtual_residual_direct_coordinate_has_future(target)
-            .unwrap_or(false)
-        {
+        if target.accepting(tokenizer).unwrap_or(false) {
+            DirectPruneStep::Matched
+        } else if target.has_future(tokenizer).unwrap_or(false) {
             DirectPruneStep::Live(target)
         } else {
             DirectPruneStep::Dead
-        }
-    }
-
-    fn terminal_residual_prune_step(
-        &self,
-        coordinate: TerminalResidualDirectCoordinate,
-        byte: u8,
-    ) -> TerminalResidualPruneStep {
-        let tokenizer = self.cache.tokenizer();
-        let Some(target) = tokenizer.terminal_residual_direct_coordinate_step(coordinate, byte) else {
-            return TerminalResidualPruneStep::Dead;
-        };
-        if tokenizer.terminal_residual_direct_coordinate_accepting(target).unwrap_or(false) {
-            TerminalResidualPruneStep::Matched
-        } else if tokenizer.terminal_residual_direct_coordinate_has_future(target).unwrap_or(false) {
-            TerminalResidualPruneStep::Live(target)
-        } else {
-            TerminalResidualPruneStep::Dead
         }
     }
 }
@@ -2048,8 +2007,7 @@ enum FullWalkPruneGuard {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum FullWalkPruneMemory {
     Exact(u32, TerminalID),
-    Direct(VirtualResidualDirectCoordinate, TerminalID),
-    TerminalResidual(TerminalResidualDirectCoordinate, TerminalID),
+    Residual(ResidualCoordinate, TerminalID),
 }
 
 impl FullWalkPruneGuard {
@@ -2070,7 +2028,7 @@ impl FullWalkPruneGuard {
                     if let Some(coordinates) = transitions.direct_prune_coordinates(state, terminal)
                     {
                         for coordinate in coordinates {
-                            let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                            let memory = FullWalkPruneMemory::Residual(ResidualCoordinate::Virtual(coordinate), terminal);
                             if !projected.contains(&memory) {
                                 projected.push(memory);
                             }
@@ -2107,25 +2065,15 @@ impl FullWalkPruneGuard {
         let mut next = SmallVec::<[FullWalkPruneMemory; 2]>::new();
         for &memory in memories {
             match memory {
-                FullWalkPruneMemory::Direct(coordinate, terminal) => {
+                FullWalkPruneMemory::Residual(coordinate, terminal) => {
                     match transitions.direct_prune_step(coordinate, byte) {
                         DirectPruneStep::Dead => {}
                         DirectPruneStep::Matched => return None,
                         DirectPruneStep::Live(target) => {
-                            let memory = FullWalkPruneMemory::Direct(target, terminal);
+                            let memory = FullWalkPruneMemory::Residual(target, terminal);
                             if !next.contains(&memory) {
                                 next.push(memory);
                             }
-                        }
-                    }
-                }
-                FullWalkPruneMemory::TerminalResidual(coordinate, terminal) => {
-                    match transitions.terminal_residual_prune_step(coordinate, byte) {
-                        TerminalResidualPruneStep::Dead => {}
-                        TerminalResidualPruneStep::Matched => return None,
-                        TerminalResidualPruneStep::Live(target) => {
-                            let memory = FullWalkPruneMemory::TerminalResidual(target, terminal);
-                            if !next.contains(&memory) { next.push(memory); }
                         }
                     }
                 }
@@ -2140,7 +2088,7 @@ impl FullWalkPruneGuard {
                     if let Some(coordinates) = transitions.direct_prune_coordinates(target, terminal)
                     {
                         for coordinate in coordinates {
-                            let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                            let memory = FullWalkPruneMemory::Residual(ResidualCoordinate::Virtual(coordinate), terminal);
                             if !next.contains(&memory) {
                                 next.push(memory);
                             }
@@ -2176,7 +2124,7 @@ impl FullWalkPruneGuard {
                 Self::Pending(memories) => memories.clone(),
             };
             for coordinate in coordinates {
-                let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                let memory = FullWalkPruneMemory::Residual(ResidualCoordinate::Virtual(coordinate), terminal);
                 if !memories.contains(&memory) {
                     memories.push(memory);
                 }
@@ -4823,7 +4771,7 @@ fn try_full_walk_mask_with_table<
             .virtual_residual_direct_coordinate(source)
             .map(|coordinate| {
                 (
-                    FirstMatchDirectCoordinate::Virtual(coordinate),
+                    ResidualCoordinate::Virtual(coordinate),
                     root_parser_nodes[0],
                     terminal,
                 )
@@ -4867,7 +4815,7 @@ fn try_full_walk_mask_with_table<
             .tokenizer
             .terminal_residual_direct_coordinate(source, terminal)?;
         Some((
-            FirstMatchDirectCoordinate::Physical(coordinate),
+            ResidualCoordinate::Physical(coordinate),
             parser_node,
             terminal,
         ))
@@ -5249,7 +5197,7 @@ fn try_full_walk_mask_with_table<
         crate::env::var_os("GLRMASK_DISABLE_DIRECT_RESIDUAL_WORD_SLICE").is_none()
     }) {
         first_match_direct_root.and_then(|(coordinate, _, _)| {
-            let FirstMatchDirectCoordinate::Virtual(coordinate) = coordinate else {
+            let ResidualCoordinate::Virtual(coordinate) = coordinate else {
                 return None;
             };
             let slice = vocab.llg_slice_by_cache_id(OPTIONAL_SPACE_NONSPACE_SLICE)?;
@@ -5412,9 +5360,9 @@ fn try_full_walk_mask_with_table<
         heap_parser_transparent.resize(stack_len, false);
         heap_parser_transparent.as_mut_slice()
     };
-    let mut inline_first_match_direct: [Option<FirstMatchDirectCoordinate>; 256] = [None; 256];
-    let mut heap_first_match_direct = Vec::<Option<FirstMatchDirectCoordinate>>::new();
-    let stack_first_match_direct: &mut [Option<FirstMatchDirectCoordinate>] =
+    let mut inline_first_match_direct: [Option<ResidualCoordinate>; 256] = [None; 256];
+    let mut heap_first_match_direct = Vec::<Option<ResidualCoordinate>>::new();
+    let stack_first_match_direct: &mut [Option<ResidualCoordinate>] =
         if stack_len <= inline_first_match_direct.len() {
             &mut inline_first_match_direct[..stack_len]
         } else {
@@ -5542,13 +5490,13 @@ fn try_full_walk_mask_with_table<
     let mut token_marker_index = 0usize;
     let mut scalar_lexer = FULL_WALK_LEXER_DEAD;
     let mut scalar_parser = 0u32;
-    let mut first_match_direct = None::<FirstMatchDirectCoordinate>;
+    let mut first_match_direct = None::<ResidualCoordinate>;
     let mut parser_transparent = false;
     let mut first_match_direct_accepting = false;
     let mut first_match_side = None::<FullWalkManyState>;
     let first_match_terminal = first_match_direct_root.map(|(_, _, terminal)| terminal);
     let mut first_match_direct_future_cache =
-        FxHashMap::<FirstMatchDirectCoordinate, bool>::default();
+        FxHashMap::<ResidualCoordinate, bool>::default();
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
     let mut current_many_id = FullWalkManyTransitionCache::UNKNOWN;
@@ -5910,14 +5858,7 @@ fn try_full_walk_mask_with_table<
                                     .has_future(&state.constraint.tokenizer)
                                     .unwrap_or(false);
                                 let prune_guard = if future {
-                                    let memory = match target_coordinate {
-                                        FirstMatchDirectCoordinate::Virtual(coordinate) => {
-                                            FullWalkPruneMemory::Direct(coordinate, terminal)
-                                        }
-                                        FirstMatchDirectCoordinate::Physical(coordinate) => {
-                                            FullWalkPruneMemory::TerminalResidual(coordinate, terminal)
-                                        }
-                                    };
+                                    let memory = FullWalkPruneMemory::Residual(target_coordinate, terminal);
                                     FullWalkPruneGuard::Pending(smallvec::smallvec![memory])
                                 } else {
                                     FullWalkPruneGuard::Passed
