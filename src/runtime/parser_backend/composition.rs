@@ -6,6 +6,8 @@
 
 use crate::ErrorExt as _;
 use std::sync::Arc;
+use std::{cmp::Reverse, collections::{BTreeSet, BinaryHeap}, ops::Range};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::compiler::glr::analysis::EOF;
@@ -18,6 +20,103 @@ use super::{Constraint, ParserExecutable, TemplateParser,
 #[cfg(test)]
 use super::matches_gss;
 
+/// A control is a candidate exactly on its local alphabet minus rejecting
+/// exceptions (or on positive exceptions when its default is rejecting).
+/// Consecutive positions are represented as intervals, never expanded into
+/// individual stack symbols. Only the observed top matters here; suffix
+/// dependent candidates still consult the exact admission relation.
+fn active_control_ranges(view: &ScopedProgram) -> impl Iterator<Item = Range<u32>> + '_ {
+    let (default, mut exceptions) = view.domain.top_admission_partition();
+    let default_live = default != TopAdmission::Never;
+    let mut next = 0u32;
+    std::iter::from_fn(move || {
+        if default_live {
+            for (top, certificate) in exceptions.by_ref() {
+                if top >= view.symbols || certificate != TopAdmission::Never { continue; }
+                let start = next;
+                next = top + 1;
+                if start < top { return Some(view.offset + start..view.offset + top); }
+            }
+            let start = next;
+            next = view.symbols;
+            (start < next).then_some(view.offset + start..view.offset + next)
+        } else {
+            exceptions.by_ref().find_map(|(top, certificate)| {
+                (top < view.symbols && certificate != TopAdmission::Never)
+                    .then(|| view.offset + top..view.offset + top + 1)
+            })
+        }
+    })
+}
+
+/// Sparse interval quotient of the global control dispatch relation. One
+/// event per live control cursor is pending; equal sorted control sets share
+/// one immutable row, even across nonadjacent intervals.
+#[derive(Debug, Clone)]
+struct ControlRows {
+    state_count: u32,
+    starts: Box<[(u32, u32)]>,
+    rows: Box<[Arc<[u32]>]>,
+}
+
+impl ControlRows {
+    fn build(state_count: u32, control_start: u32, views: &[ScopedProgram]) -> Self {
+        let mut cursors = views[control_start as usize..].iter()
+            .map(|view| (active_control_ranges(view), 0u32)).collect::<Vec<_>>();
+        // False (end) sorts before true (start) for adjacent intervals of
+        // the same control; all events at one coordinate are applied together.
+        let mut pending = BinaryHeap::<Reverse<(u32, bool, usize)>>::new();
+        for (i, (ranges, end)) in cursors.iter_mut().enumerate() {
+            if let Some(range) = ranges.next() {
+                *end = range.end;
+                pending.push(Reverse((range.start, true, i)));
+            }
+        }
+        let mut active = BTreeSet::<u32>::new();
+        let empty: Arc<[u32]> = Arc::from([]);
+        let mut rows = vec![Arc::clone(&empty)];
+        let mut row_ids = FxHashMap::default();
+        row_ids.insert(empty, 0u32);
+        let mut starts = vec![(0, 0u32)];
+        while let Some(Reverse((position, _, _))) = pending.peek().copied() {
+            if position >= state_count { break; }
+            while pending.peek().is_some_and(|event| event.0.0 == position) {
+                let Reverse((_, start, cursor)) = pending.pop().unwrap();
+                let control = control_start + cursor as u32;
+                let (ranges, end) = &mut cursors[cursor];
+                if start {
+                    active.insert(control);
+                    pending.push(Reverse((*end, false, cursor)));
+                } else {
+                    active.remove(&control);
+                    if let Some(range) = ranges.next() {
+                        *end = range.end;
+                        pending.push(Reverse((range.start, true, cursor)));
+                    }
+                }
+            }
+            let previous = starts.last().unwrap().1 as usize;
+            if active.iter().eq(rows[previous].iter()) { continue; }
+            let key: Arc<[u32]> = active.iter().copied().collect::<Vec<_>>().into();
+            let id = *row_ids.entry(key).or_insert_with_key(|key| {
+                let id = rows.len() as u32;
+                rows.push(Arc::clone(key));
+                id
+            });
+            if position == 0 { starts[0].1 = id; }
+            else { starts.push((position, id)); }
+        }
+        Self { state_count, starts: starts.into_boxed_slice(), rows: rows.into_boxed_slice() }
+    }
+
+    #[inline]
+    fn get(&self, top: u32) -> Option<&[u32]> {
+        if top >= self.state_count { return None; }
+        let i = self.starts.partition_point(|&(start, _)| start <= top) - 1;
+        Some(self.rows[self.starts[i].1 as usize].as_ref())
+    }
+}
+
 /// The first `control_start` programs are exact leaf-local terminal aliases.
 /// The remainder are zero-width controls. IDs are relative to the outer
 /// terminal count, so outer aliases and exact leaf identities cannot collide.
@@ -27,7 +126,7 @@ pub(crate) struct TemplateComposition {
     pub(crate) views: Vec<ScopedProgram>,
     pub(crate) outer_views: Vec<ScopedProgram>,
     pub(crate) completion_view: ScopedProgram,
-    controls_by_top: Vec<SmallVec<[u32; 4]>>,
+    controls_by_top: ControlRows,
 }
 
 impl TemplateComposition {
@@ -70,11 +169,7 @@ impl TemplateComposition {
         for view in views.iter().chain(&outer_views).chain(std::iter::once(&completion_view)) {
             view.validate_coordinate(state_count)?;
         }
-        let controls_by_top = (0..state_count).map(|top| {
-            views.iter().enumerate().skip(control_start as usize)
-                .filter_map(|(index, view)| (view.classify_top(top) != TopAdmission::Never)
-                    .then_some(index as u32)).collect()
-        }).collect();
+        let controls_by_top = ControlRows::build(state_count, control_start, &views);
         Ok(Self { control_start, views, outer_views, completion_view, controls_by_top })
     }
 
@@ -133,7 +228,7 @@ impl ParserActionProvider for TemplateCompositionProvider<'_> {
     fn state_count_hint(&self) -> usize { self.parser.state_count as usize }
 
     fn control_symbols(&self, top: u32, out: &mut SmallVec<[u32; 4]>) {
-        if let Some(controls) = self.composition.controls_by_top.get(top as usize) {
+        if let Some(controls) = self.composition.controls_by_top.get(top) {
             out.extend(controls.iter().map(|index| self.parser.terminal_count + index));
         }
     }
@@ -313,6 +408,32 @@ mod prepared_relation_tests {
                 (vec![0, 6], TerminalsDisallowed::new().with_insert(0, 1)),
             ]),
         ]
+    }
+
+    #[test]
+    fn control_interval_sweep_matches_literal_scoped_classification() {
+        let mut default = rejecting();
+        let yes = default.pop.add_state();
+        let no = default.pop.add_state();
+        default.pop.set_accepting(yes, true);
+        default.pop.add_transition(0, crate::compiler::glr::labels::DEFAULT_LABEL, yes);
+        for label in [0, 2, 3, 7] { default.pop.add_transition(0, label, no); }
+        let scoped_default = ScopedProgram::prepare(Arc::new(default), 8).unwrap();
+        let scoped_shift = ScopedProgram::prepare(Arc::new(shift()), 8).unwrap();
+        let scoped_suffix = ScopedProgram::prepare(Arc::new(suffix_dependent()), 8).unwrap();
+        let views = vec![scoped_shift.clone(), scoped_default.relocated(11).unwrap(),
+            scoped_shift.relocated(11).unwrap(), scoped_suffix.relocated(13).unwrap(),
+            scoped_default.relocated(100_000).unwrap()];
+        let rows = ControlRows::build(1_000_000, 1, &views);
+        assert!(rows.starts.len() < 32);
+        assert!(rows.rows.len() < 16);
+        for top in (0..150).chain(99_990..100_030).chain([999_999]) {
+            let expected = views.iter().enumerate().skip(1)
+                .filter_map(|(id, view)| (view.classify_top(top) != TopAdmission::Never).then_some(id as u32))
+                .collect::<Vec<_>>();
+            assert_eq!(rows.get(top).unwrap(), expected.as_slice(), "top={top}");
+        }
+        assert!(rows.get(1_000_000).is_none());
     }
 
     #[test]
