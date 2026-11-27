@@ -21,6 +21,8 @@ use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::runtime::CommitTemplateDfas;
 
 const REJECT: u32 = u32::MAX;
+// A valid graph has fewer than REJECT states; this cannot name a row.
+const ACCEPT: u32 = REJECT - 1;
 
 /// Exact result after inspecting a possibly incomplete top-first stack prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +47,22 @@ pub enum TopAdmission {
 
 #[derive(Debug, Clone)]
 struct DomainState {
-    accepts_prefix: bool,
+    // ACCEPT marks unconditional acceptance, REJECT is the missing default.
+    // Explicit edges form one contiguous partition of the edge arena.
     default_target: u32,
     first_edge: usize,
-    edge_count: usize,
+}
+
+impl DomainState {
+    #[inline]
+    fn accepting(&self) -> bool { self.default_target == ACCEPT }
+
+    #[inline]
+    fn edges<'a>(states: &[Self], edges: &'a [(u32, u32)], id: usize) -> &'a [(u32, u32)] {
+        let start = states[id].first_edge;
+        let end = states.get(id + 1).map_or(edges.len(), |next| next.first_edge);
+        &edges[start..end]
+    }
 }
 
 /// Compact exact admissibility program derived entirely from template data.
@@ -301,7 +315,7 @@ impl TemplateDomain {
         // state. Every interned nonterminal row is productive; all children
         // precede parents, so the compiled graph itself cannot contain cycles.
         let mut states = vec![DomainState {
-            accepts_prefix: true, default_target: REJECT, first_edge: 0, edge_count: 0,
+            default_target: ACCEPT, first_edge: 0,
         }];
         let mut edges = Vec::new();
         let mut canonical = vec![REJECT; template.pop.states.len()];
@@ -333,8 +347,7 @@ impl TemplateDomain {
                     let id = u32::try_from(states.len()).map_err(|_| "template domain too large")?;
                     if id == REJECT { return Err("template domain too large".to_owned()); }
                     let (default, row) = entry.key();
-                    states.push(DomainState { accepts_prefix: false, default_target: *default,
-                        first_edge: edges.len(), edge_count: row.len() });
+                    states.push(DomainState { default_target: *default, first_edge: edges.len() });
                     edges.extend_from_slice(row);
                     entry.insert(id);
                     id
@@ -357,9 +370,9 @@ impl TemplateDomain {
         while let Some(id) = pending.pop() {
             let state = &states[id as usize];
             for target in std::iter::once(state.default_target)
-                .chain(edges[state.first_edge..state.first_edge + state.edge_count].iter().map(|edge| edge.1))
+                .chain(DomainState::edges(&states, &edges, id as usize).iter().map(|edge| edge.1))
             {
-                if target == REJECT || keep[target as usize] { continue; }
+                if target >= ACCEPT || keep[target as usize] { continue; }
                 // Mark at enqueue time so convergent rows do not repeatedly
                 // retain the same target in scratch before it is visited.
                 keep[target as usize] = true;
@@ -378,16 +391,15 @@ impl TemplateDomain {
         for (id, &kept) in keep.iter().enumerate() {
             if kept { remap[id] = count; count += 1; }
         }
-        let mapped = |id: u32| if id == REJECT { REJECT } else { remap[id as usize] };
+        let mapped = |id: u32| if id >= ACCEPT { id } else { remap[id as usize] };
         let mut final_states = Vec::with_capacity(count as usize);
         let mut final_edges = Vec::new();
         for (id, state) in states.iter().enumerate() {
             if !keep[id] { continue; }
             let first_edge = final_edges.len();
-            final_edges.extend(edges[state.first_edge..state.first_edge + state.edge_count].iter()
+            final_edges.extend(DomainState::edges(&states, &edges, id).iter()
                 .map(|&(label, target)| (label, mapped(target))));
-            final_states.push(DomainState { accepts_prefix: state.accepts_prefix,
-                default_target: mapped(state.default_target), first_edge, edge_count: state.edge_count });
+            final_states.push(DomainState { default_target: mapped(state.default_target), first_edge });
         }
         Self { start: mapped(start), states: final_states.into_boxed_slice(), edges: final_edges.into_boxed_slice() }
     }
@@ -401,7 +413,7 @@ impl TemplateDomain {
     fn at(&self, state: u32) -> DomainProbe {
         match self.states.get(state as usize) {
             None => DomainProbe::Reject,
-            Some(state) if state.accepts_prefix => DomainProbe::Accept,
+            Some(state) if state.accepting() => DomainProbe::Accept,
             Some(_) => DomainProbe::NeedMore(state),
         }
     }
@@ -411,8 +423,8 @@ impl TemplateDomain {
     #[inline]
     pub fn step(&self, cursor: u32, top: u32) -> DomainProbe {
         let Some(state) = self.states.get(cursor as usize) else { return DomainProbe::Reject; };
-        if state.accepts_prefix { return DomainProbe::Accept; }
-        let row = &self.edges[state.first_edge..state.first_edge + state.edge_count];
+        if state.accepting() { return DomainProbe::Accept; }
+        let row = DomainState::edges(&self.states, &self.edges, cursor as usize);
         let target = if row.len() <= 6 {
             row.iter().find(|&&(label, _)| label == top).map(|e| e.1)
         } else {
@@ -472,10 +484,10 @@ impl TemplateDomain {
         };
         let (default, edges): (_, &[(u32, u32)]) = match self.states.get(self.start as usize) {
             None => (TopAdmission::Never, &[]),
-            Some(state) if state.accepts_prefix => (TopAdmission::Always, &[]),
+            Some(state) if state.accepting() => (TopAdmission::Always, &[]),
             Some(state) => (
                 classify(self.at(state.default_target)),
-                &self.edges[state.first_edge..state.first_edge + state.edge_count],
+                DomainState::edges(&self.states, &self.edges, self.start as usize),
             ),
         };
         let exceptions = edges.iter().filter_map(move |&(label, target)| {
@@ -497,10 +509,12 @@ impl TemplateDomain {
         let mut wire = Vec::with_capacity(size);
         wire.extend_from_slice(b"GTD1");
         for value in [self.start, n, m] { wire.extend_from_slice(&value.to_le_bytes()); }
-        for state in &self.states {
-            for value in [u32::from(state.accepts_prefix), state.default_target,
+        for (id, state) in self.states.iter().enumerate() {
+            let row = DomainState::edges(&self.states, &self.edges, id);
+            let default = if state.accepting() { REJECT } else { state.default_target };
+            for value in [u32::from(state.accepting()), default,
                 u32::try_from(state.first_edge).map_err(|_| "domain edge offset overflow")?,
-                u32::try_from(state.edge_count).map_err(|_| "domain edge count overflow")?]
+                u32::try_from(row.len()).map_err(|_| "domain edge count overflow")?]
             { wire.extend_from_slice(&value.to_le_bytes()); }
         }
         for &(label, target) in &self.edges {
@@ -561,8 +575,7 @@ impl TemplateDomain {
                 last = Some(label); edges.push((label, target));
             }
             if !productive { return Err("unproductive template-domain row".to_owned()); }
-            states.push(DomainState { accepts_prefix: flags == 1, default_target: default,
-                first_edge: first, edge_count: count });
+            states.push(DomainState { default_target: if flags == 1 { ACCEPT } else { default }, first_edge: first });
             consumed = end;
         }
         if consumed != m { return Err("unreferenced template-domain edges".to_owned()); }
@@ -587,8 +600,8 @@ impl TemplateDomain {
         let target=|q:u32| if q==REJECT {dead} else {q};
         let mut states=vec![NWAState::default();self.states.len()+1];
         for (q,row) in self.states.iter().enumerate() {
-            if row.accepts_prefix {states[q].final_weight=Some(Weight::all());continue;}
-            let edges=&self.edges[row.first_edge..row.first_edge+row.edge_count];
+            if row.accepting() {states[q].final_weight=Some(Weight::all());continue;}
+            let edges=DomainState::edges(&self.states,&self.edges,q);
             for &(label,next) in edges {
                 if label>=symbols {return Err("admission literal outside its component".into());}
                 states[q].transitions.insert((offset+label) as i32,vec![(target(next),Weight::all())]);
@@ -628,9 +641,9 @@ mod tests {
     #[test]
     fn domain_reachability_identity_preserves_exact_rows_and_edges() {
         let states = vec![
-            DomainState { accepts_prefix: true, default_target: REJECT, first_edge: 0, edge_count: 0 },
-            DomainState { accepts_prefix: false, default_target: 0, first_edge: 0, edge_count: 1 },
-            DomainState { accepts_prefix: false, default_target: 1, first_edge: 1, edge_count: 2 },
+            DomainState { default_target: ACCEPT, first_edge: 0 },
+            DomainState { default_target: 0, first_edge: 0 },
+            DomainState { default_target: 1, first_edge: 1 },
         ];
         // Explicit rejection at row1 must continue to shadow its productive
         // DEFAULT; row2 has two paths to a shared suffix.
@@ -648,17 +661,17 @@ mod tests {
     #[test]
     fn domain_reachability_prunes_without_reordering_kept_ids() {
         let states = vec![
-            DomainState { accepts_prefix: true, default_target: REJECT, first_edge: 0, edge_count: 0 },
-            DomainState { accepts_prefix: false, default_target: REJECT, first_edge: 0, edge_count: 1 },
-            DomainState { accepts_prefix: false, default_target: REJECT, first_edge: 1, edge_count: 1 },
-            DomainState { accepts_prefix: false, default_target: 2, first_edge: 2, edge_count: 1 },
+            DomainState { default_target: ACCEPT, first_edge: 0 },
+            DomainState { default_target: REJECT, first_edge: 0 },
+            DomainState { default_target: REJECT, first_edge: 1 },
+            DomainState { default_target: 2, first_edge: 2 },
         ];
         let edges = vec![(1, 0), (2, 0), (3, 2)];
         let actual = TemplateDomain::retain_reachable(3, states.clone(), edges.clone());
         let expected = TemplateDomain { start: 2, states: vec![
             states[0].clone(),
-            DomainState { accepts_prefix: false, default_target: REJECT, first_edge: 0, edge_count: 1 },
-            DomainState { accepts_prefix: false, default_target: 1, first_edge: 1, edge_count: 1 },
+            DomainState { default_target: REJECT, first_edge: 0 },
+            DomainState { default_target: 1, first_edge: 1 },
         ].into_boxed_slice(), edges: vec![(2, 0), (3, 1)].into_boxed_slice() };
         assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
         let dead = TemplateDomain::retain_reachable(REJECT, states, edges);
