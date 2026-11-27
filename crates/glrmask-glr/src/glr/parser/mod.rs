@@ -5427,7 +5427,8 @@ pub fn find_admitted_symbol_with_provider<P: ParserActionProvider, K>(
     None
 }
 
-fn provider_closed_symbol_may_advance<P: ParserActionProvider>(
+#[doc(hidden)]
+pub fn provider_closed_symbol_may_advance<P: ParserActionProvider>(
     provider: &P,
     closed: &ParserGSS,
     tops: &[u32],

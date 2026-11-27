@@ -2,7 +2,7 @@ use crate::ErrorExt as _;
 mod boundary_reset_support;
 pub(crate) mod packed_final_masks;
 mod scoped_admission_support;
-pub(crate) use scoped_admission_support::ScopedAdmissionSupport;
+pub(crate) use scoped_admission_support::ScopedAdmissionMemo;
 
 use crate::automata::lexer::{
     tokenizer::{Tokenizer, TokenizerStateSet},

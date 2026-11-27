@@ -1,149 +1,103 @@
-//! Query-local native-terminal support for an already control-closed frontier.
-//! This is a rejection filter, not a replacement parser or admission oracle.
+//! Query-local exact admission of scoped terminals. Control closure belongs
+//! to the parser language, not a lexer state or leaf.
 use super::*;
-use crate::compiler::glr::parser::{ParserActionProvider, ProvidedAction};
+use crate::compiler::glr::parser::provider_closed_symbol_may_advance;
 
-const MAX_TERMINALS: usize = 4096;
-const MAX_TOPS: usize = 16;
-const MAX_ROW_KEYS: usize = 4096;
 const MAX_DEPTH: u32 = 256;
+const MAX_TOPS: usize = 16;
+const MAX_MEMO_TERMINALS: usize = 4096;
 
-pub(crate) struct ScopedAdmissionSupport<'a> {
+enum ClosedLanguage {
+    Native(LeveledGSS<u32, ()>),
+    Lr { stacks: ParserGSS, tops: SmallVec<[u32; 8]> },
+}
+
+pub(crate) struct ScopedAdmissionMemo<'a> {
     root: &'a Constraint,
     layout: &'a RecursiveParserLayout,
-    closed: ParserGSS,
-    leaf: u32,
-    offset: u32,
-    support: BitSet,
+    closed: ClosedLanguage,
+    exact: FxHashMap<u32, bool>,
 }
 
-// Only input control closure is suppressed. All visible actions, reductions,
-// guards, scopes and goto behavior are delegated unchanged. In particular we
-// never assume the bounded reference closure is mathematically idempotent.
-struct AlreadyClosed<'a, P>(&'a P);
-impl<P: ParserActionProvider> ParserActionProvider for AlreadyClosed<'_, P> {
-    type Symbol = P::Symbol;
-    fn action(&self, state: u32, symbol: Self::Symbol) -> Option<ProvidedAction<'_>> {
-        self.0.action(state, symbol)
-    }
-    fn scope_state(&self, scope: u32, state: u32) -> Option<u32> {
-        self.0.scope_state(scope, state)
-    }
-    fn goto_target(&self, scope: u32, from: u32, nonterminal: u32) -> Option<(u32, bool)> {
-        self.0.goto_target(scope, from, nonterminal)
-    }
-    fn state_count_hint(&self) -> usize { self.0.state_count_hint() }
-    fn advance_relation(&self, stack: &ParserGSS, symbol: Self::Symbol) -> Option<ParserGSS> {
-        self.0.advance_relation(stack, symbol)
-    }
-    fn relation_admits(&self, stack: &ParserGSS, symbol: Self::Symbol) -> Option<bool> {
-        self.0.relation_admits(stack, symbol)
-    }
-    fn relation_finished(&self, stack: &ParserGSS, symbol: Self::Symbol) -> Option<bool> {
-        self.0.relation_finished(stack, symbol)
-    }
-}
-
-impl ScopedAdmissionSupport<'_> {
-    pub(crate) fn retained_count(&self, candidates: &BitSet) -> usize {
-        self.support.iter_ones().filter(|&local| {
-            candidates.contains(self.offset as usize + local)
-        }).count()
-    }
-
-    /// Candidates come from exactly this immutable lexer's native leaf domain.
-    /// Iterating ascending support bits preserves the original candidate and
-    /// predicate order; removed candidates have no first provider action.
-    pub(crate) fn matches(
-        &self, candidates: &BitSet, mut lexical: impl FnMut(u32) -> bool,
+impl ScopedAdmissionMemo<'_> {
+    fn matches_candidates(
+        exact: &mut FxHashMap<u32, bool>,
+        base: u32,
+        candidates: impl IntoIterator<Item = u32>,
+        mut admits: impl FnMut(u32, u32) -> bool,
+        mut lexical: impl FnMut(u32) -> bool,
     ) -> bool {
-        if self.support.is_empty() { return false; }
-        if let Some(provider) = self.root.template_composition_provider() {
-            let symbols = self.support.iter_ones().filter_map(|local| {
-                let terminal = self.offset + local as u32;
-                candidates.contains(terminal as usize).then_some((terminal, terminal))
-            });
-            return find_admitted_symbol_with_provider(
-                &AlreadyClosed(&provider), &self.closed, symbols, |&terminal| lexical(terminal),
-            ).is_some();
+        // These are exact leaf-local terminals, not outer aliases. Retain
+        // their ascending order and invoke lexical only on parser witnesses.
+        for local in candidates {
+            let terminal = base + local;
+            let admitted = if let Some(&result) = exact.get(&terminal) {
+                result
+            } else {
+                let result = admits(local, terminal);
+                if exact.len() < MAX_MEMO_TERMINALS { exact.insert(terminal, result); }
+                result
+            };
+            if admitted && lexical(local) { return true; }
         }
-        let tables = RecursiveSegmentedParserTables { root: self.root, layout: self.layout };
-        let provider = DisjointComponentActionProvider::with_state_offsets(
-            &tables, &self.layout.links, &self.layout.leaf_state_offsets,
-        ).expect("validated scoped support layout");
-        let symbols = self.support.iter_ones().filter_map(|local| {
-            let terminal = self.offset + local as u32;
-            candidates.contains(terminal as usize).then_some((terminal, ScopedParserSymbol::Terminal {
-                component: self.leaf, terminal: local as u32,
-            }))
-        });
-        find_admitted_symbol_with_provider(
-            &AlreadyClosed(&provider), &self.closed, symbols, |&terminal| lexical(terminal),
-        ).is_some()
+        false
+    }
+
+    pub(crate) fn entry_count(&self) -> usize { self.exact.len() }
+
+    pub(crate) fn matches_leaf(
+        &mut self,
+        leaf: usize,
+        candidates: impl IntoIterator<Item = u32>,
+        lexical: impl FnMut(u32) -> bool,
+    ) -> bool {
+        let Some(&offset) = self.layout.leaf_terminal_offsets.get(leaf) else { return false; };
+        let base = self.layout.outer_terminal_count + offset;
+        match &self.closed {
+            ClosedLanguage::Native(stacks) => {
+                let provider = self.root.template_composition_provider().expect("native composition");
+                Self::matches_candidates(&mut self.exact, base, candidates,
+                    |_, terminal| provider.closed_admits_native(stacks, terminal), lexical)
+            }
+            ClosedLanguage::Lr { stacks, tops } => {
+                if stacks.is_empty() { return false; }
+                let tables = RecursiveSegmentedParserTables { root: self.root, layout: self.layout };
+                let provider = DisjointComponentActionProvider::with_state_offsets(
+                    &tables, &self.layout.links, &self.layout.leaf_state_offsets,
+                ).expect("validated scoped parser layout");
+                Self::matches_candidates(&mut self.exact, base, candidates,
+                    |local, _| provider_closed_symbol_may_advance(&provider, stacks, tops,
+                        ScopedParserSymbol::Terminal { component: leaf as u32, terminal: local }),
+                    lexical)
+            }
+        }
     }
 }
 
 impl Constraint {
-    pub(crate) fn prepare_scoped_admission_support(
-        &self, input: &ParserGSS, leaf: usize,
-    ) -> Option<ScopedAdmissionSupport<'_>> {
+    pub(crate) fn prepare_scoped_admission_memo(
+        &self, input: &LeveledGSS<u32, ()>,
+    ) -> Option<ScopedAdmissionMemo<'_>> {
         if input.max_depth() > MAX_DEPTH { return None; }
         let layout = self.recursive_parser_layout_ref()?;
-        let descriptor = layout.leaves.get(leaf)?;
-        let source = self.constraint_at_recursive_component_path(&descriptor.component_path)?;
-        let count = source.parser_terminal_count();
-        if count as usize > MAX_TERMINALS { return None; }
-        let offset = layout.outer_terminal_count.checked_add(*layout.leaf_terminal_offsets.get(leaf)?)?;
-        offset.checked_add(count)?;
-        if let Some(provider) = self.template_composition_provider() {
-            let closed = close_provider_control_stacks(&provider, input);
-            if closed.max_depth() > MAX_DEPTH { return None; }
-            let tops = closed.peek_values();
+        let closed = if let Some(provider) = self.template_composition_provider() {
+            let stacks = provider.close_native(input);
+            if stacks.max_depth() > MAX_DEPTH || stacks.top_value_count() > MAX_TOPS {
+                return None;
+            }
+            ClosedLanguage::Native(stacks)
+        } else {
+            let tables = RecursiveSegmentedParserTables { root: self, layout };
+            let provider = DisjointComponentActionProvider::with_state_offsets(
+                &tables, &layout.links, &layout.leaf_state_offsets,
+            ).ok()?;
+            let annotated = input.apply(|_| TerminalsDisallowed::new());
+            let stacks = close_provider_control_stacks(&provider, &annotated);
+            if stacks.max_depth() > MAX_DEPTH { return None; }
+            let tops = stacks.peek_values();
             if tops.len() > MAX_TOPS { return None; }
-            let mut support = BitSet::new(count as usize);
-            let mut remaining_keys = MAX_ROW_KEYS;
-            for top in tops {
-                let (owner, local) = self.recursive_parser_leaf_state(top)?;
-                if owner != leaf { continue; }
-                // Input-domain rows are conservative over lower stack suffixes.
-                // The whole-relation query in matches remains the exact oracle.
-                let row = source.parser_advance_row(local)?;
-                for terminal in row.iter_ones().take_while(|&t| t < count as usize) {
-                    remaining_keys = remaining_keys.checked_sub(1)?;
-                    support.set(terminal);
-                }
-                if let Some(ignore) = source.ignore_terminal { support.set(ignore as usize); }
-                for &skip in source.parser_skip_terminals() { support.set(skip as usize); }
-            }
-            return Some(ScopedAdmissionSupport {
-                root: self, layout, closed, leaf: leaf as u32, offset, support,
-            });
-        }
-        let tables = RecursiveSegmentedParserTables { root: self, layout };
-        let provider = DisjointComponentActionProvider::with_state_offsets(
-            &tables, &layout.links, &layout.leaf_state_offsets,
-        ).ok()?;
-        let closed = close_provider_control_stacks(&provider, input);
-        if closed.max_depth() > MAX_DEPTH { return None; }
-        let tops = closed.peek_values();
-        if tops.len() > MAX_TOPS { return None; }
-        let mut support = BitSet::new(count as usize);
-        let mut remaining_keys = MAX_ROW_KEYS;
-        for top in tops {
-            let (owner, local) = provider.decode_state(top)?;
-            if owner as usize != leaf { continue; }
-            let row = source.table.action.get(local as usize)?;
-            // Use CURRENT execution-row keys, not a row-presence approximation
-            // captured before guard-producing optimizations. Default rows'
-            // iterator enumerates their actual non-hole terminal cells.
-            for terminal in row.keys() {
-                remaining_keys = remaining_keys.checked_sub(1)?;
-                if terminal < count { support.set(terminal as usize); }
-            }
-            // Provider-owned ignores can supply Identity without a table cell.
-            if let Some(ignore) = tables.component_ignore_terminal(owner)
-                && ignore < count { support.set(ignore as usize); }
-        }
-        Some(ScopedAdmissionSupport { root: self, layout, closed, leaf: leaf as u32, offset, support })
+            ClosedLanguage::Lr { stacks, tops }
+        };
+        Some(ScopedAdmissionMemo { root: self, layout, closed, exact: FxHashMap::default() })
     }
 }

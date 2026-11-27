@@ -176,22 +176,19 @@ other explicit values disable it. The policy is read once per process.
 ## Control-closed admission support
 
 `GLRMASK_CLOSED_ADMISSION_SUPPORT` defaults to enabled. During one recursive mask
-invocation, a bounded summary retains the exact input control closure and the
-current first-action terminal support for a parser frontier and lexer leaf.
-Only candidates lacking any first action are removed. Surviving candidates
-still use the existing parser evaluator and exact lexical predicate, in their
-original order. The summary is never reused across masks or constraints.
+invocation, a bounded exact memo retains the input control closure once per
+parser language, independent of its lexer leaf. Each queried scoped terminal
+is classified exactly once until the memo is full. The lexical predicate is
+still evaluated only for parser-admissible candidates, in original order.
+The memo is never reused across masks or constraints.
 
-At most 32 summaries are retained per invocation. Summary eligibility is capped
-at 4,096 terminals, 16 visible tops, 4,096 inspected row keys, and stack depth
-256. Unsupported metadata or exceeded limits use the original query; limits
-never truncate the parser language. Summary construction and destruction are
-part of the measured boundary cost, not hidden preparation work.
-
-These are summary eligibility and retention limits, not a strict bound on
-control-closure CPU time or temporary memory. The full reference control
-closure is computed before some eligibility checks. A declined summary can
-therefore repeat that closure in the original fallback.
+At most 32 parser-language memos are retained, with up to 4,096 exact
+terminal decisions each. Eligibility is capped at 16 visible tops and stack
+depth 256. Unsupported metadata or exceeded eligibility limits use the
+original query; exhausted terminal capacity computes the exact answer
+without caching it. These limits never truncate the parser language.
+Control closure can precede some eligibility checks, so a declined memo may
+repeat the closure on fallback.
 
 Set `GLRMASK_CLOSED_ADMISSION_SUPPORT=0` to retain the previous unfiltered
 admission path for diagnosis. `GLRMASK_PROFILE_CLOSED_SUPPORT` accepts a

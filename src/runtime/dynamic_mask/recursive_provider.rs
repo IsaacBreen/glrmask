@@ -20,10 +20,9 @@ struct RecursiveConfigTransitions<'scan, 'constraint> {
     roots: FxHashMap<u32, u32>,
     resets: Vec<Option<u32>>,
     rows: Vec<Option<Box<[u64; 256]>>>,
-    candidate_futures: Vec<Option<BitSet>>,
     boundary: FxHashMap<(u32, u32), bool>,
     support_enabled: bool,
-    support_cache: FxHashMap<(u32, usize), Option<super::super::constraint::ScopedAdmissionSupport<'constraint>>>,
+    support_cache: FxHashMap<u32, Option<super::super::constraint::ScopedAdmissionMemo<'constraint>>>,
     support_profile: Option<ScopedSupportProfile>,
     projected_resets: FxHashMap<(usize, u32), u32>,
     project_resets: bool,
@@ -37,7 +36,7 @@ struct RecursiveConfigTransitions<'scan, 'constraint> {
 #[derive(Default, Debug)]
 struct ScopedSupportProfile {
     builds: usize, hits: usize, declined: usize, queries: usize,
-    input_candidates: usize, retained_candidates: usize,
+    input_candidates: usize, exact_entries: usize,
 }
 
 impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
@@ -49,7 +48,6 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         self.states.push(ScopedConfig { leaf, local });
         self.ids.insert((leaf, local), id);
         self.rows.push(None);
-        self.candidate_futures.push(None);
         Ok(id)
     }
 
@@ -125,36 +123,21 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         Ok(())
     }
 
-    /// Cheap support only. A virtual residual may not actually extend every
-    /// terminal listed here; consumers must still call exact future_contains.
-    fn candidate_scoped_future(&mut self, state: u32) -> &BitSet {
-        if self.candidate_futures[state as usize].is_none() {
-            let ScopedConfig { leaf, local } = self.states[state as usize];
-            let descriptor = self.routing.leaves[leaf];
-            let table = &mut self.tables[leaf];
-            let config = table.generic_config_for_state(local);
-            let mut candidates = BitSet::new(descriptor.terminal_count as usize);
-            if let Some(index) = table.cache.config_index(config).filter(|_| !table.cache.deterministic) {
-                // The ordinary config executor already maintains this union,
-                // including any admitted-output filter. Do not rebuild it by
-                // scanning every physical member at each scoped boundary.
-                candidates.union_with(&table.cache.config_futures[index]);
-            } else {
-                for index in 0..table.cache.config_len(config) {
-                    let raw = table.cache.config_state(config, index);
-                    candidates.union_with(table.cache.tokenizer().possible_future_terminals(raw));
-                }
-            }
-            let terminal_count = self.routing.leaves.last().map_or(0, |last| {
-                last.terminal_offset as usize + last.terminal_count as usize
-            });
-            let mut scoped_candidates = BitSet::new(terminal_count);
-            for terminal in candidates.iter_ones() {
-                scoped_candidates.set(descriptor.terminal_offset as usize + terminal);
-            }
-            self.candidate_futures[state as usize] = Some(scoped_candidates);
-        }
-        self.candidate_futures[state as usize].as_ref().expect("candidates initialized above")
+    /// The local executor already owns conservative future observations.
+    /// Borrow that set and carry only its terminal IDs into a mutable query;
+    /// no global-coordinate copy is retained for every scoped config.
+    fn candidate_local_terminals(&self, state: u32) -> SmallVec<[u32; 8]> {
+        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let table = &self.tables[leaf];
+        let config = table.generic_config_for_state(local);
+        let futures = if table.cache.deterministic || table.cache.raw_state_for_config(config).is_some() {
+            table.cache.tokenizer().possible_future_terminals(table.cache.config_state(config, 0))
+        } else {
+            &table.cache.config_futures[table.cache.config_index(config).expect("known config")]
+        };
+        let count = self.routing.leaves[leaf].terminal_count as usize;
+        futures.iter_ones().take_while(|&terminal| terminal < count)
+            .map(|terminal| terminal as u32).collect()
     }
 }
 
@@ -343,9 +326,12 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
     }
 
     fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        let candidates = self.candidate_scoped_future(state).clone();
-        candidates.iter_ones().any(|terminal| {
-            terminals.contains(terminal) && self.future_contains(state, terminal as u32)
+        let ScopedConfig { leaf, local } = self.states[state as usize];
+        let base = self.routing.leaves[leaf].terminal_offset;
+        let candidates = self.candidate_local_terminals(state);
+        candidates.into_iter().any(|terminal| {
+            terminals.contains((base + terminal) as usize)
+                && self.tables[leaf].future_contains(local, terminal)
         })
     }
 
@@ -429,50 +415,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         let ignored = self.routing.leaves[leaf].constraint.ignore_terminal
             .map(|terminal| self.routing.leaves[leaf].terminal_offset + terminal);
         let allowed = ignored.is_some_and(|terminal| self.future_contains(lexer_state, terminal)) || {
-            if self.support_enabled {
-                const MAX_SUPPORTS: usize = 32;
-                let key = (parser_node, leaf);
-                if !self.support_cache.contains_key(&key) && self.support_cache.len() < MAX_SUPPORTS {
-                    let gss = self.routing.parser_gss(parser_node, parser_cache);
-                    let summary = self.routing.constraint.prepare_scoped_admission_support(&gss, leaf);
-                    if let Some(profile) = &mut self.support_profile {
-                        profile.builds += 1;
-                        profile.declined += usize::from(summary.is_none());
-                    }
-                    self.support_cache.insert(key, summary);
-                } else if let Some(profile) = &mut self.support_profile {
-                    profile.hits += usize::from(self.support_cache.contains_key(&key));
-                }
-                if self.support_cache.get(&key).is_some_and(Option::is_some) {
-                    self.candidate_scoped_future(lexer_state);
-                    let summary = self.support_cache.get(&key).and_then(Option::as_ref)
-                        .expect("prepared support");
-                    let candidates = self.candidate_futures[lexer_state as usize].as_ref()
-                        .expect("initialized native candidates");
-                    if let Some(profile) = &mut self.support_profile {
-                        profile.queries += 1;
-                        profile.input_candidates += candidates.count_ones();
-                        profile.retained_candidates += summary.retained_count(candidates);
-                    }
-                    let descriptor = self.routing.leaves[leaf];
-                    let table = &mut self.tables[leaf];
-                    let result = summary.matches(candidates, |terminal| {
-                        terminal.checked_sub(descriptor.terminal_offset).is_some_and(|terminal| {
-                            terminal < descriptor.terminal_count && table.future_contains(local, terminal)
-                        })
-                    });
-                    self.boundary.insert((lexer_state, parser_node), result);
-                    return result;
-                }
-            }
-            let candidates = self.candidate_scoped_future(lexer_state).clone();
-            let gss = self.routing.parser_gss(parser_node, parser_cache);
-            constraint.compact_segmented_parser_may_advance_on_any_matching(
-                &gss,
-                candidates.iter_ones().map(|terminal| terminal as u32),
-                |terminal| self.future_contains(lexer_state, terminal),
-            ).unwrap_or(false)
-        };
++        };
         self.boundary.insert((lexer_state, parser_node), allowed);
         allowed
     }
@@ -546,7 +489,7 @@ fn with_provider_and_baseline(
         pre_admitted_original_mask: already,
         routing, tables, states: Vec::new(), ids: FxHashMap::default(),
         roots: FxHashMap::default(), resets: vec![None; reset_count], rows: Vec::new(),
-        candidate_futures: Vec::new(), boundary: FxHashMap::default(),
+        boundary: FxHashMap::default(),
         support_enabled: {
             static ENABLED: OnceLock<bool> = OnceLock::new();
             *ENABLED.get_or_init(|| env_flag("GLRMASK_CLOSED_ADMISSION_SUPPORT", true))
@@ -762,16 +705,15 @@ mod closed_admission_support_tests {
                                     |t| { old_seen.push(t); t%modulus==0 },
                                 );
                                 let mut new_seen = Vec::new();
-                                let prepared = constraint.prepare_scoped_admission_support(gss, leaf)
+                                let mut prepared = constraint.prepare_scoped_admission_memo(&gss.apply(|_| ()))
                                     .expect("bounded fixture support");
-                                let mut candidates = BitSet::new((base + child.parser_terminal_count()) as usize);
-                                for t in base..base+child.parser_terminal_count() { candidates.set(t as usize); }
-                                let new = Some(prepared.matches(&candidates,
-                                    |t| { new_seen.push(t); t%modulus==0 }));
+                                let new = Some(prepared.matches_leaf(leaf, 0..child.parser_terminal_count(),
+                                    |local| { let t = base + local; new_seen.push(t); t%modulus==0 }));
                                 assert_eq!(old,new);
                                 assert_eq!(old_seen,new_seen,"predicate order must not change");
                             }
-                            assert!(constraint.prepare_scoped_admission_support(gss, usize::MAX).is_none());
+                            let mut memo = constraint.prepare_scoped_admission_memo(&gss.apply(|_| ())).unwrap();
+                            assert!(!memo.matches_leaf(usize::MAX, [0], |_| panic!("invalid leaf")));
                         }
                     }
                 }
