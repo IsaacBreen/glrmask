@@ -217,13 +217,6 @@ impl<'a> RuntimeTokenSetRef<'a> {
         }
     }
 
-    #[inline]
-    pub(crate) fn packed_pool_id(self) -> Option<u32> {
-        match self {
-            Self::PackedPool(tokens) => Some(tokens.id()),
-            _ => None,
-        }
-    }
 
     #[inline]
     pub(crate) fn for_each_range(self, mut f: impl FnMut(u32, u32)) {

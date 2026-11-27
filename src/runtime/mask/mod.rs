@@ -517,9 +517,10 @@ fn assert_dynamic_mask_equivalence(state: &ConstraintState, static_mask: &[u32])
     );
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// The weak reference keeps the allocation identity reserved even if a
+/// temporary materialized weight is dropped during this mask evaluation.
 enum RuntimeTokenSetKey {
-    Materialized(usize),
+    Materialized(std::sync::Weak<RangeSetBlaze<u32>>),
     PackedDwa(u32),
     PackedPool(u32),
 }
@@ -527,16 +528,23 @@ enum RuntimeTokenSetKey {
 impl RuntimeTokenSetKey {
     #[inline]
     fn from_ref(token_set: RuntimeTokenSetRef<'_>) -> Self {
-        if let Some(key) = token_set.materialized_key() {
-            Self::Materialized(key)
-        } else if let Some(id) = token_set.packed_id() {
-            Self::PackedDwa(id)
-        } else {
-            Self::PackedPool(
-                token_set
-                    .packed_pool_id()
-                    .expect("runtime token set has identity"),
-            )
+        match token_set {
+            RuntimeTokenSetRef::Materialized(tokens) => Self::Materialized(Arc::downgrade(tokens)),
+            RuntimeTokenSetRef::PackedDwa(tokens) => Self::PackedDwa(tokens.id()),
+            RuntimeTokenSetRef::PackedPool(tokens) => Self::PackedPool(tokens.id()),
+        }
+    }
+
+    #[inline]
+    fn matches(&self, token_set: RuntimeTokenSetRef<'_>) -> bool {
+        match (self, token_set) {
+            (Self::Materialized(cached), RuntimeTokenSetRef::Materialized(tokens)) =>
+                cached.as_ptr() == Arc::as_ptr(tokens),
+            (Self::PackedDwa(cached), RuntimeTokenSetRef::PackedDwa(tokens)) =>
+                *cached == tokens.id(),
+            (Self::PackedPool(cached), RuntimeTokenSetRef::PackedPool(tokens)) =>
+                *cached == tokens.id(),
+            _ => false,
         }
     }
 }
@@ -766,15 +774,14 @@ impl DenseMaskAcc {
         precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Arc<[u64]>> {
-        let token_key = RuntimeTokenSetKey::from_ref(token_set);
         if let Some((_, _, result)) = cache.iter().find(|(cached_dense, cached_token_set, _)| {
-            Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_key
+            Arc::ptr_eq(cached_dense, dense) && cached_token_set.matches(token_set)
         }) {
             return result.clone();
         }
         let result = Self::intersect_dense_with_runtime_token_set(dense, token_set, precomputed);
         if cache.len() < cache.inline_size() {
-            cache.push((Arc::clone(dense), token_key, result.clone()));
+            cache.push((Arc::clone(dense), RuntimeTokenSetKey::from_ref(token_set), result.clone()));
         }
         result
     }
@@ -1750,6 +1757,31 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&intersected, &dense));
         assert_eq!(&*intersected, &[0b0011_u64, 0b0000]);
+    }
+
+    #[test]
+    fn small_intersection_cache_reserves_temporary_token_identity() {
+        let dense: Arc<[u64]> = Arc::from([0b11_u64]);
+        let tokens = Arc::new(RangeSetBlaze::from_iter([0_u32]));
+        let mut cache = DenseTokenSetIntersectionSmallCache::new();
+        let result = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
+            &dense,
+            RuntimeTokenSetRef::Materialized(&tokens),
+            &Default::default(),
+            &mut cache,
+        ).unwrap();
+        assert_eq!(&*result, &[1]);
+        assert_eq!(Arc::weak_count(&tokens), 1);
+        drop(tokens);
+        let other = Arc::new(RangeSetBlaze::from_iter([1_u32]));
+        let result = DenseMaskAcc::intersect_dense_with_runtime_token_set_cached(
+            &dense,
+            RuntimeTokenSetRef::Materialized(&other),
+            &Default::default(),
+            &mut cache,
+        ).unwrap();
+        assert_eq!(&*result, &[2]);
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
