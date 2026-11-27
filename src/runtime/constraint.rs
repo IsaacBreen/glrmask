@@ -9910,6 +9910,27 @@ impl Constraint {
         let Some(automaton) = self.direct_regular_automaton.as_ref() else {
             return false;
         };
+        let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+        if support.is_initialized() {
+            let mut found = false;
+            if support.for_each_small_state_terminal(parser_state, |terminal| {
+                if let Some(weight) = self.runtime_direct_regular_l1_complete(terminal) {
+                    found = true;
+                    visit(weight);
+                }
+            }) {
+                return found;
+            }
+            let mut terminals = BitSet::new(self.parser_terminal_count() as usize);
+            support.or_state_into(parser_state, terminals.words_mut());
+            for terminal in terminals.iter_ones() {
+                if let Some(weight) = self.runtime_direct_regular_l1_complete(terminal as TerminalID) {
+                    found = true;
+                    visit(weight);
+                }
+            }
+            return found;
+        }
         let mut stack = Vec::new();
         if parser_state == 0 {
             stack.extend(automaton.start_states.iter().copied());
@@ -9947,6 +9968,12 @@ impl Constraint {
             return None;
         }
         let automaton = self.direct_regular_automaton.as_ref()?;
+        let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+        if support.is_initialized() {
+            let mut complete = false;
+            gss.for_each_top_value(|state| complete |= support.is_complete(state));
+            return Some(complete);
+        }
         let mut stack = Vec::new();
         gss.for_each_top_value(|state| {
             if state == 0 {
@@ -10057,14 +10084,7 @@ impl Constraint {
                 if found {
                     return;
                 }
-                if state == 0 {
-                    found = automaton
-                        .start_states
-                        .iter()
-                        .any(|&raw| support.contains(raw, terminal));
-                } else if let Some(raw) = state.checked_sub(1) {
-                    found = support.contains(raw, terminal);
-                }
+                found = support.contains(state, terminal);
             });
             return Some(found);
         }
@@ -10123,11 +10143,7 @@ impl Constraint {
                         },
                     )
                 };
-                if state == 0 {
-                    found = automaton.start_states.iter().copied().any(state_supports);
-                } else if let Some(raw) = state.checked_sub(1) {
-                    found = state_supports(raw);
-                }
+                found = state_supports(state);
             });
             return Some(found);
         }
@@ -10179,7 +10195,6 @@ impl Constraint {
         if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
             return None;
         }
-        let automaton = self.direct_regular_automaton.as_ref()?;
         if let Some(summary) = self.direct_regular_dynamic_hot_frontier_for_gss(gss) {
             return Some(summary.actionable_terminals.clone());
         }
@@ -10193,19 +10208,10 @@ impl Constraint {
             let mut terminals =
                 crate::ds::bitset::BitSet::new(self.parser_terminal_count() as usize);
             gss.for_each_top_value(|state| {
-                let mut add_state = |raw| {
-                    if !support.for_each_small_state_terminal(raw, |terminal| {
-                        terminals.set(terminal as usize);
-                    }) {
-                        support.or_state_into(raw, terminals.words_mut());
-                    }
-                };
-                if state == 0 {
-                    for &raw in &automaton.start_states {
-                        add_state(raw);
-                    }
-                } else if let Some(raw) = state.checked_sub(1) {
-                    add_state(raw);
+                if !support.for_each_small_state_terminal(state, |terminal| {
+                    terminals.set(terminal as usize);
+                }) {
+                    support.or_state_into(state, terminals.words_mut());
                 }
             });
             return Some(terminals);
@@ -10285,10 +10291,10 @@ impl Constraint {
                                 .start_states
                                 .iter()
                                 .copied()
-                                .filter(|&raw| support.contains(raw, terminal)),
+                                .filter(|&raw| support.contains(raw + 1, terminal)),
                         );
                     } else if let Some(raw) = state.checked_sub(1)
-                        && support.contains(raw, terminal)
+                        && support.contains(state, terminal)
                     {
                         stack.push(raw);
                     }
@@ -10313,7 +10319,7 @@ impl Constraint {
                             .epsilons
                             .iter()
                             .copied()
-                            .filter(|&child| support.contains(child, terminal)),
+                            .filter(|&child| support.contains(child + 1, terminal)),
                     );
                 }
                 let target_count = target_bits.count_ones();

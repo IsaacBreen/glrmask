@@ -2721,6 +2721,7 @@ const SMALL_SUPPORT_TAG: u32 = 1 << 31;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DirectRegularTerminalSupport {
     roots: Vec<u32>,
+    completing: Vec<u64>,
     nodes: Vec<u64>,
     small_sets: Vec<[TerminalID; 4]>,
     dense_roots: FxHashMap<u32, Arc<[u64]>>,
@@ -2845,10 +2846,10 @@ fn visit_support_words(nodes: &[u64], node: u32, level: usize, base: usize, visi
 
 impl DirectRegularTerminalSupport {
     pub(crate) fn build(automaton: &DirectRegularAutomaton, num_terminals: usize) -> Self {
-        if automaton.states.is_empty() || num_terminals == 0 {
+        if automaton.states.len() >= u32::MAX as usize {
             return Self::default();
         }
-        let levels = num_terminals.div_ceil(64).next_power_of_two().trailing_zeros() as usize;
+        let levels = num_terminals.div_ceil(64).max(1).next_power_of_two().trailing_zeros() as usize;
         let mut builder = SupportBuilder::new();
         let singletons = (0..num_terminals)
             .map(|terminal| builder.singleton(levels, terminal))
@@ -2871,7 +2872,9 @@ impl DirectRegularTerminalSupport {
         let mut transition_work = (automaton.states.len() >= 16_384)
             .then(|| vec![0u64; automaton.states.len()]);
         let mut hot_primary = None::<(u32, u64, u16)>;
-        let mut roots = vec![0; automaton.states.len()];
+        // Match the parser coordinate: synthetic initial state 0, raw states + 1.
+        let mut roots = vec![0; automaton.states.len() + 1];
+        let mut completing = BitSet::new(roots.len());
         let mut processed = 0usize;
         while let Some(raw) = queue.pop_front() {
             let state = &automaton.states[raw as usize];
@@ -2882,9 +2885,13 @@ impl DirectRegularTerminalSupport {
                 }
             }
             for &child in &state.epsilons {
-                root = builder.union(levels, root, roots[child as usize]);
+                root = builder.union(levels, root, roots[child as usize + 1]);
             }
-            roots[raw as usize] = root;
+            let parser_state = raw as usize + 1;
+            roots[parser_state] = root;
+            if state.is_accepting || state.epsilons.iter().any(|&child| completing.get(child as usize + 1)) {
+                completing.set(parser_state);
+            }
             if let Some(work) = &mut transition_work {
                 let own = state.transitions.values().map(|targets| targets.len() as u64).sum::<u64>();
                 let count = state.epsilons.iter().fold(own, |sum, &child| sum.saturating_add(work[child as usize]));
@@ -2903,14 +2910,20 @@ impl DirectRegularTerminalSupport {
                 if *remaining == 0 { queue.push_back(parent); }
             }
         }
-        if processed != automaton.states.len() || builder.nodes.len() >= SMALL_SUPPORT_TAG as usize {
-            return Self::default();
+        if processed != automaton.states.len() { return Self::default(); }
+        for &raw in &automaton.start_states {
+            let parser_state = raw as usize + 1;
+            let Some(&root) = roots.get(parser_state) else { return Self::default(); };
+            roots[0] = builder.union(levels, roots[0], root);
+            if completing.get(parser_state) { completing.set(0); }
         }
+        if builder.nodes.len() >= SMALL_SUPPORT_TAG as usize { return Self::default(); }
         // Small roots need no DAG traversal in the hot admission path.
         // Repack only nodes reachable from large roots; discard all builder
         // union temporaries, counts, and singleton-only interior nodes.
         let mut support = Self {
             roots,
+            completing: completing.words().to_vec(),
             nodes: vec![0],
             small_sets: Vec::new(),
             dense_roots: FxHashMap::default(),
@@ -2942,11 +2955,11 @@ impl DirectRegularTerminalSupport {
                 *root = builder.copy_reachable(levels, old, &mut remap, &mut support.nodes);
             }
         }
-        for &raw in &automaton.start_states {
-            let Some(&root) = support.roots.get(raw as usize) else { continue; };
+        for parser_state in std::iter::once(0).chain(automaton.start_states.iter().map(|&raw| raw + 1)) {
+            let Some(&root) = support.roots.get(parser_state as usize) else { continue; };
             if root & SMALL_SUPPORT_TAG != 0 || support.dense_roots.contains_key(&root) { continue; }
             let mut words = vec![0u64; num_terminals.div_ceil(64)];
-            support.or_state_into(raw, &mut words);
+            support.or_state_into(parser_state, &mut words);
             support.dense_roots.insert(root, Arc::from(words));
         }
         support
@@ -2954,6 +2967,11 @@ impl DirectRegularTerminalSupport {
 
     pub(crate) fn is_initialized(&self) -> bool {
         !self.roots.is_empty()
+    }
+
+    pub(crate) fn is_complete(&self, parser_state: u32) -> bool {
+        self.completing.get(parser_state as usize / 64)
+            .is_some_and(|word| *word & (1u64 << (parser_state % 64)) != 0)
     }
 
     pub(crate) fn hot_primary(&self) -> Option<(u32, u64, u16)> {
@@ -2968,8 +2986,8 @@ impl DirectRegularTerminalSupport {
         Some(&row[..len])
     }
 
-    pub(crate) fn for_each_small_state_terminal(&self, raw: u32, mut visit: impl FnMut(TerminalID)) -> bool {
-        let Some(terminals) = self.roots.get(raw as usize).and_then(|&root| self.small_set(root)) else {
+    pub(crate) fn for_each_small_state_terminal(&self, parser_state: u32, mut visit: impl FnMut(TerminalID)) -> bool {
+        let Some(terminals) = self.roots.get(parser_state as usize).and_then(|&root| self.small_set(root)) else {
             return false;
         };
         for &terminal in terminals { visit(terminal); }
@@ -2977,9 +2995,9 @@ impl DirectRegularTerminalSupport {
     }
 
     #[inline]
-    pub(crate) fn contains(&self, raw: u32, terminal: TerminalID) -> bool {
+    pub(crate) fn contains(&self, parser_state: u32, terminal: TerminalID) -> bool {
         if terminal as usize >= self.num_terminals { return false; }
-        let Some(&root) = self.roots.get(raw as usize) else { return false; };
+        let Some(&root) = self.roots.get(parser_state as usize) else { return false; };
         if let Some(terminals) = self.small_set(root) { return terminals.contains(&terminal); }
         let mut node = root;
         let mut level = self.levels as usize;
@@ -2992,8 +3010,8 @@ impl DirectRegularTerminalSupport {
         node != 0 && self.nodes[node as usize] & (1u64 << (terminal % 64)) != 0
     }
 
-    pub(crate) fn or_state_into(&self, raw: u32, output: &mut [u64]) {
-        let Some(&root) = self.roots.get(raw as usize) else { return; };
+    pub(crate) fn or_state_into(&self, parser_state: u32, output: &mut [u64]) {
+        let Some(&root) = self.roots.get(parser_state as usize) else { return; };
         if let Some(terminals) = self.small_set(root) {
             for &terminal in terminals {
                 if let Some(word) = output.get_mut(terminal as usize / 64) {
@@ -3020,8 +3038,8 @@ impl DirectRegularTerminalSupport {
             || self.intersects_node(right, level - 1, base + (1 << (level - 1)), terminals)
     }
 
-    pub(crate) fn intersects(&self, raw: u32, terminals: &[u64]) -> bool {
-        let Some(&root) = self.roots.get(raw as usize) else { return false; };
+    pub(crate) fn intersects(&self, parser_state: u32, terminals: &[u64]) -> bool {
+        let Some(&root) = self.roots.get(parser_state as usize) else { return false; };
         if let Some(small) = self.small_set(root) {
             small.iter().any(|&terminal| terminals.get(terminal as usize / 64)
                 .is_some_and(|word| *word & (1u64 << (terminal % 64)) != 0))
