@@ -33,12 +33,13 @@ impl From<SlotKind> for ExternKind {
 struct Span { start: usize, end: usize, line: usize, column: usize }
 impl From<glrmask_grammar::SourceSpan> for Span {
     fn from(span: glrmask_grammar::SourceSpan) -> Self {
-        Self { start: span.start(), end: span.end(), line: span.line(), column: span.column() }
+        let (line, column) = glrmask_vocab::__private::source_span_line_column(&span);
+        Self { start: span.start(), end: span.end(), line, column }
     }
 }
 impl From<Span> for glrmask_grammar::SourceSpan {
     fn from(span: Span) -> Self {
-        Self::new(span.start, span.end, span.line, span.column)
+        glrmask_vocab::__private::new_source_span(span.start, span.end, span.line, span.column)
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]

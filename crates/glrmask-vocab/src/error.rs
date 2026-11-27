@@ -2,7 +2,7 @@
 //! return it; the `glrmask` crate re-exports it as `glrmask::Error`.
 use std::fmt;
 
-/// A location in grammar source.
+/// A half-open byte range in the grammar source (empty for a point error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceSpan {
     start: usize,
@@ -12,26 +12,15 @@ pub struct SourceSpan {
 }
 
 impl SourceSpan {
-    /// Zero-based byte offset of the start in the grammar source.
+    /// Zero-based inclusive start byte offset in the grammar source.
     #[must_use]
     pub const fn start(&self) -> usize { self.start }
 
-    /// Zero-based exclusive end byte offset in the grammar source.
+    /// Zero-based exclusive end byte offset in the grammar source; may equal the start.
     #[must_use]
     pub const fn end(&self) -> usize { self.end }
 
-    /// One-based line number of the start in the grammar source.
-    #[must_use]
-    pub const fn line(&self) -> usize { self.line }
 
-    /// One-based column of the start, counting Unicode scalar values, not bytes.
-    #[must_use]
-    pub const fn column(&self) -> usize { self.column }
-
-    #[doc(hidden)]
-    pub const fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
-        Self { start, end, line, column }
-    }
 }
 
 impl fmt::Display for SourceSpan {
@@ -110,6 +99,14 @@ impl std::error::Error for Error {}
 /// Constructors and accessors for the rest of the workspace; not a stable API.
 pub(crate) mod internal {
     use super::*;
+
+    pub const fn new_source_span(start: usize, end: usize, line: usize, column: usize) -> SourceSpan {
+        SourceSpan { start, end, line, column }
+    }
+
+    pub const fn source_span_line_column(span: &SourceSpan) -> (usize, usize) {
+        (span.line, span.column)
+    }
 
     /// A new error of `kind` with `message`.
     pub fn new_error(kind: ErrorKind, message: String) -> Error {

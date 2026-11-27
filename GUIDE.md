@@ -349,7 +349,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 ## Errors
 
 Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
-Each error message says what went wrong, with the line and column in the grammar source when that's the cause. Both are one-based, and columns count Unicode scalar values, not bytes.
+Each error message says what went wrong. It may also include a location in the grammar source.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`. `source_span()` gives its place in the source.
 Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 

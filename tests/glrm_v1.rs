@@ -901,7 +901,6 @@ fn extern_without_a_kind_is_rejected_at_the_declaration() {
     let declaration = source.find("extern child;").unwrap();
     assert!(span.start() >= declaration, "span {span:?}");
     assert!(span.end() <= declaration + "extern child;".len(), "span {span:?}");
-    assert_eq!(span.line(), 3);
 }
 
 #[test]
@@ -934,7 +933,6 @@ fn glrm_definition_with_coloncolon_equals_is_rejected_with_message_and_span() {
     );
     let span = error.source_span().expect("the rejection points at the '::='");
     assert_eq!(&source[span.start()..span.end()], "::=");
-    assert_eq!((span.line(), span.column()), (2, 10));
 }
 
 #[test]
