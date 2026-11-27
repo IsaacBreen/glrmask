@@ -2417,49 +2417,27 @@ impl FullWalkParserCache {
         root_branches: &DynamicBranches,
         dense_lexer_state_count: Option<usize>,
     ) -> (Self, SmallVec<[u32; 4]>) {
-        let mut nodes = Vec::<FullWalkParserNode>::new();
-        let mut sparse_token_boundary_allowed = Vec::<FxHashMap<u32, u8>>::new();
-        let mut hot_token_boundary_allowed = Vec::<[u8; FULL_WALK_HOT_CAPACITY]>::new();
-        let mut root_nodes = SmallVec::<[u32; 4]>::new();
+        let mut cache = Self {
+            nodes: Vec::new(),
+            dense_lexer_state_count,
+            sparse_token_boundary_allowed: Vec::new(),
+            hot_token_boundary_allowed: Vec::new(),
+            profile: crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
+            profile_boundary_calls: 0,
+            profile_boundary_hits: 0,
+            profile_boundary_misses: 0,
+            profile_admitted_builds: 0,
+        };
+        let mut root_nodes = SmallVec::new();
         for branch in root_branches {
-            if let Some((index, _)) = nodes
-                .iter()
-                .enumerate()
-                .find(|(_, node)| node.gss.ptr_eq(&branch.gss))
-            {
-                root_nodes.push(index as u32);
-                continue;
+            let id = cache.intern_stacks(branch.gss.clone());
+            let node = &mut cache.nodes[id as usize];
+            if node.shared_root_admission.is_none() {
+                node.shared_root_admission = branch.shared_root_admission.clone();
             }
-            let id = nodes.len() as u32;
-            nodes.push(FullWalkParserNode {
-                gss: branch.gss.clone(),
-                admitted: None,
-                shared_root_admission: branch.shared_root_admission.clone(),
-                reset_lexer: None,
-                token_boundary_allowed: dense_lexer_state_count
-                    .map_or_else(Vec::new, |count| vec![0; count]),
-                children: SmallVec::new(),
-                last_child_terminal: TerminalID::MAX,
-                last_child_target: Self::DEAD,
-            });
-            sparse_token_boundary_allowed.push(FxHashMap::default());
-            hot_token_boundary_allowed.push([0; FULL_WALK_HOT_CAPACITY]);
             root_nodes.push(id);
         }
-        (
-            Self {
-                nodes,
-                dense_lexer_state_count,
-                sparse_token_boundary_allowed,
-                hot_token_boundary_allowed,
-                profile: crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
-                profile_boundary_calls: 0,
-                profile_boundary_hits: 0,
-                profile_boundary_misses: 0,
-                profile_admitted_builds: 0,
-            },
-            root_nodes,
-        )
+        (cache, root_nodes)
     }
 
     fn intern_stacks(&mut self, stacks: ParserStacks) -> u32 {
@@ -2681,6 +2659,26 @@ impl FullWalkParserCache {
             )
     }
 
+    /// Both tagged-hot and generic configuration rows cache this same
+    /// existential continuation query. Their coordinate layouts differ.
+    fn config_boundary_allowed_uncached<T: FullWalkTransitionTable>(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut T,
+        lexer_state: u32,
+        parser_node: u32,
+    ) -> bool {
+        self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
+            .unwrap_or_else(|| {
+                constraint.ignore_terminal.is_some_and(|terminal| {
+                    transitions.future_contains(lexer_state, terminal)
+                }) || transitions.future_intersects(
+                    lexer_state,
+                    self.admitted(constraint, parser_node),
+                )
+            })
+    }
+
     #[inline(always)]
     fn token_boundary_allowed_hot<T: FullWalkTransitionTable>(
         &mut self,
@@ -2709,13 +2707,7 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
-            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
-            transitions.future_contains(lexer_state, terminal)
-        }) || transitions.future_intersects(
-            lexer_state,
-            self.admitted(constraint, parser_node),
-        ));
+        let allowed = self.config_boundary_allowed_uncached(constraint, transitions, lexer_state, parser_node);
         unsafe {
             *self
                 .hot_token_boundary_allowed
@@ -2750,13 +2742,7 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
-            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
-            transitions.future_contains(lexer_state, terminal)
-        }) || transitions.future_intersects(
-            lexer_state,
-            self.admitted(constraint, parser_node),
-        ));
+        let allowed = self.config_boundary_allowed_uncached(constraint, transitions, lexer_state, parser_node);
         unsafe { self.sparse_token_boundary_allowed.get_unchecked_mut(node) }
             .insert(lexer_state, if allowed { 2 } else { 1 });
         allowed
