@@ -3974,27 +3974,75 @@ fn step_fixed_bytes(dfa: &DFA, mut state: u32, bytes: &[u8]) -> Option<u32> {
     Some(state)
 }
 
+/// A single identity for each runtime state. Restored projections retain the
+/// derivative cross-check: their oracle was decoded rather than constructed
+/// from the expression in this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RuntimeStateKey {
+    Residual(ResidualId),
+    Coordinate(BoundedCodeOracleCoordinate),
+    Checked(ResidualId, BoundedCodeOracleCoordinate),
+}
+
+impl RuntimeStateKey {
+    fn residual(self) -> Option<ResidualId> {
+        match self {
+            Self::Residual(id) | Self::Checked(id, _) => Some(id),
+            Self::Coordinate(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeStateRecord {
+    key: RuntimeStateKey,
+    hint: BoundedCodeOracleSlot,
+    future: Option<bool>,
+}
+
+impl RuntimeStateRecord {
+    fn coordinate(self) -> Option<BoundedCodeOracleCoordinate> {
+        match self.key {
+            RuntimeStateKey::Coordinate(c) | RuntimeStateKey::Checked(_, c) => Some(c),
+            RuntimeStateKey::Residual(_) => match self.hint {
+                BoundedCodeOracleSlot::Exact(c) => Some(c),
+                _ => None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeRepresentation {
+    Derivative,
+    DynamicCoordinate,
+    StaticCoordinate,
+    RestoredProjection,
+}
+
+impl RuntimeRepresentation {
+    fn coordinate_only(self) -> bool {
+        matches!(self, Self::DynamicCoordinate | Self::StaticCoordinate)
+    }
+
+    fn supports_projection(self) -> bool {
+        matches!(self, Self::StaticCoordinate | Self::RestoredProjection)
+    }
+}
+
 #[derive(Debug)]
 struct ResidualRuntimeStore {
-    arena: ResidualArena,
-    root: ResidualId,
-    state_by_residual: Vec<u32>,
-    residual_by_state: FxHashMap<u32, ResidualId>,
-    state_by_oracle_coordinate: FxHashMap<BoundedCodeOracleCoordinate, u32>,
-    state_by_residual_coordinate:
-        FxHashMap<(ResidualId, BoundedCodeOracleCoordinate), u32>,
-    coordinate_by_state: FxHashMap<u32, BoundedCodeOracleCoordinate>,
-    oracle_future_by_state: FxHashMap<u32, bool>,
+    // Only derivative-authoritative states need to retain the arena.
+    arena: Option<ResidualArena>,
+    state_ids: FxHashMap<RuntimeStateKey, u32>,
+    states: FxHashMap<u32, RuntimeStateRecord>,
     liveness_oracle: Option<BoundedCodeIntersectionOracle>,
     oracle_byte_to_class: Option<Box<[u8; 256]>>,
     oracle_language_finite: Option<bool>,
-    oracle_coordinates: Vec<BoundedCodeOracleSlot>,
-    oracle_futures: Vec<Option<bool>>,
     parser_transparent_byte_family_cache: FxHashSet<(u32, U8Set, u32)>,
     slice_atom_body_exact_cache: FxHashMap<u64, bool>,
     slice_atom_pattern_targets_cache: FxHashMap<(u64, u32), Option<BitSet>>,
     body_boundary_future_by_completed: Option<Arc<Vec<BitSet>>>,
-    transition_rows_by_state: FxHashMap<u32, Box<[u32; 256]>>,
 }
 
 /// Immutable byte-step view of a certified bounded-code residual. This is the
@@ -4077,8 +4125,7 @@ pub(super) struct VirtualResidualRuntime {
     physical_state_count: u32,
     root_state: u32,
     root_has_future: bool,
-    preserve_oracle_coordinate: bool,
-    coordinate_runtime: bool,
+    representation: RuntimeRepresentation,
     direct_coordinate_stepper: Option<DirectCoordinateStepper>,
     state_allocator: Arc<VirtualStateAllocator>,
     state_owners: Arc<VirtualRuntimeStateOwners>,
@@ -4105,13 +4152,13 @@ pub(super) struct FiniteMaskProjectionLanguageKey {
 }
 
 impl VirtualResidualRuntime {
-    fn intern_oracle_coordinate_locked(
+    fn intern_state_locked(
         &self,
         store: &mut ResidualRuntimeStore,
-        coordinate: BoundedCodeOracleCoordinate,
-    ) -> Option<u32> {
-        if let Some(&state) = store.state_by_oracle_coordinate.get(&coordinate) {
-            return Some(state);
+        key: RuntimeStateKey,
+    ) -> u32 {
+        if let Some(&state) = store.state_ids.get(&key) {
+            return state;
         }
         let state = self.state_allocator.allocate().expect(
             "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
@@ -4119,9 +4166,19 @@ impl VirtualResidualRuntime {
         self.state_owners
             .register_virtual(state, self.runtime_index)
             .expect("residual virtual state owner index must follow shared allocator");
-        store.state_by_oracle_coordinate.insert(coordinate, state);
-        store.coordinate_by_state.insert(state, coordinate);
-        Some(state)
+        store.state_ids.insert(key, state);
+        store.states.insert(state, RuntimeStateRecord {
+            key, hint: BoundedCodeOracleSlot::Unknown, future: None,
+        });
+        state
+    }
+
+    fn intern_oracle_coordinate_locked(
+        &self,
+        store: &mut ResidualRuntimeStore,
+        coordinate: BoundedCodeOracleCoordinate,
+    ) -> Option<u32> {
+        Some(self.intern_state_locked(store, RuntimeStateKey::Coordinate(coordinate)))
     }
 
     fn coordinate_future_locked(
@@ -4129,7 +4186,7 @@ impl VirtualResidualRuntime {
         state: u32,
         coordinate: BoundedCodeOracleCoordinate,
     ) -> Option<bool> {
-        if let Some(&future) = store.oracle_future_by_state.get(&state) {
+        if let Some(future) = store.states.get(&state)?.future {
             return Some(future);
         }
         let boundary_future = store
@@ -4141,7 +4198,7 @@ impl VirtualResidualRuntime {
             .as_deref()
             .and_then(|rows| oracle.has_future_with_boundary_table(coordinate, rows))
             .unwrap_or_else(|| oracle.has_future(coordinate));
-        store.oracle_future_by_state.insert(state, future);
+        store.states.get_mut(&state)?.future = Some(future);
         Some(future)
     }
 
@@ -4543,7 +4600,8 @@ impl VirtualResidualRuntime {
                 .ok()
                 .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
         let oracle_started = profile.then(std::time::Instant::now);
-        let liveness_oracle = if prebuilt_liveness_oracle.is_some() {
+        let restored = prebuilt_liveness_oracle.is_some();
+        let liveness_oracle = if restored {
             prebuilt_liveness_oracle
         } else if preserve_oracle_coordinate || build_dynamic_liveness_oracle {
             if preserve_oracle_coordinate {
@@ -4570,10 +4628,18 @@ impl VirtualResidualRuntime {
         let root_oracle_coordinate = liveness_oracle
             .as_ref()
             .map(BoundedCodeIntersectionOracle::root_coordinate);
-        let coordinate_runtime = coordinate_runtime
-            && !preserve_oracle_coordinate
-            && liveness_oracle.is_some();
-        let direct_coordinate_stepper = coordinate_runtime
+        let representation = if preserve_oracle_coordinate {
+            if restored {
+                RuntimeRepresentation::RestoredProjection
+            } else {
+                RuntimeRepresentation::StaticCoordinate
+            }
+        } else if coordinate_runtime && liveness_oracle.is_some() {
+            RuntimeRepresentation::DynamicCoordinate
+        } else {
+            RuntimeRepresentation::Derivative
+        };
+        let direct_coordinate_stepper = (representation == RuntimeRepresentation::DynamicCoordinate)
             .then(|| liveness_oracle.as_ref().and_then(DirectCoordinateStepper::new))
             .flatten();
         // Keep the physical proxy root's serialized future bit conservative.
@@ -4586,25 +4652,21 @@ impl VirtualResidualRuntime {
         // not run the generic potentially expensive emptiness solver merely to
         // populate serialized proxy metadata.
         let root_live = arena.conservative_has_future(root);
-        let mut state_by_residual = vec![u32::MAX; root as usize + 1];
-        state_by_residual[root as usize] = root_state;
-        let mut oracle_coordinates = vec![BoundedCodeOracleSlot::Unknown; arena.state_count()];
-        let oracle_futures = vec![None; arena.state_count()];
-        if let Some(coordinate) = root_oracle_coordinate {
-            oracle_coordinates[root as usize] = BoundedCodeOracleSlot::Exact(coordinate);
-        }
-        let mut state_by_residual_coordinate = FxHashMap::default();
-        let mut coordinate_by_state = FxHashMap::default();
-        let mut state_by_oracle_coordinate = FxHashMap::default();
-        if preserve_oracle_coordinate {
-            let coordinate = root_oracle_coordinate?;
-            state_by_residual_coordinate.insert((root, coordinate), root_state);
-            coordinate_by_state.insert(root_state, coordinate);
-        } else if coordinate_runtime {
-            let coordinate = root_oracle_coordinate?;
-            state_by_oracle_coordinate.insert(coordinate, root_state);
-            coordinate_by_state.insert(root_state, coordinate);
-        }
+        let key = match representation {
+            RuntimeRepresentation::Derivative => RuntimeStateKey::Residual(root),
+            RuntimeRepresentation::RestoredProjection =>
+                RuntimeStateKey::Checked(root, root_oracle_coordinate?),
+            _ => RuntimeStateKey::Coordinate(root_oracle_coordinate?),
+        };
+        let record = RuntimeStateRecord {
+            key,
+            hint: root_oracle_coordinate.map_or(BoundedCodeOracleSlot::Unknown, BoundedCodeOracleSlot::Exact),
+            future: None,
+        };
+        let mut state_ids = FxHashMap::default();
+        state_ids.insert(key, root_state);
+        let mut states = FxHashMap::default();
+        states.insert(root_state, record);
         let mut accepting = BitSet::new(num_terminals as usize);
         accepting.set(terminal as usize);
         let live = accepting.clone();
@@ -4620,8 +4682,7 @@ impl VirtualResidualRuntime {
             physical_state_count,
             root_state,
             root_has_future: root_live,
-            preserve_oracle_coordinate,
-            coordinate_runtime,
+            representation,
             direct_coordinate_stepper,
             state_allocator,
             state_owners,
@@ -4630,24 +4691,16 @@ impl VirtualResidualRuntime {
             dead: BitSet::new(num_terminals as usize),
             accepting_list: vec![terminal].into_boxed_slice(),
             store: Mutex::new(ResidualRuntimeStore {
-                arena,
-                root,
-                state_by_residual,
-                residual_by_state: FxHashMap::default(),
-                state_by_oracle_coordinate,
-                state_by_residual_coordinate,
-                coordinate_by_state,
-                oracle_future_by_state: FxHashMap::default(),
+                arena: (!representation.coordinate_only()).then_some(arena),
+                state_ids,
+                states,
                 liveness_oracle,
                 oracle_byte_to_class,
                 oracle_language_finite,
-                oracle_coordinates,
-                oracle_futures,
                 parser_transparent_byte_family_cache: FxHashSet::default(),
                 slice_atom_body_exact_cache: FxHashMap::default(),
                 slice_atom_pattern_targets_cache: FxHashMap::default(),
                 body_boundary_future_by_completed: None,
-                transition_rows_by_state: FxHashMap::default(),
             }),
         })
     }
@@ -4664,12 +4717,8 @@ impl VirtualResidualRuntime {
         self.physical_state_count
     }
 
-    fn residual_for_state(store: &ResidualRuntimeStore, root_state: u32, state: u32) -> Option<ResidualId> {
-        if state == root_state {
-            Some(store.root)
-        } else {
-            store.residual_by_state.get(&state).copied()
-        }
+    fn residual_for_state(store: &ResidualRuntimeStore, state: u32) -> Option<ResidualId> {
+        store.states.get(&state)?.key.residual()
     }
 
     #[inline]
@@ -4678,61 +4727,7 @@ impl VirtualResidualRuntime {
         store: &ResidualRuntimeStore,
         state: u32,
     ) -> Option<BoundedCodeOracleCoordinate> {
-        if self.coordinate_runtime || self.preserve_oracle_coordinate {
-            return store.coordinate_by_state.get(&state).copied();
-        }
-        let residual = Self::residual_for_state(store, self.root_state, state)?;
-        match store.oracle_coordinates.get(residual as usize).copied()? {
-            BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
-            BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => None,
-        }
-    }
-
-    fn intern_locked(
-        &self,
-        store: &mut ResidualRuntimeStore,
-        residual: ResidualId,
-        coordinate: Option<BoundedCodeOracleCoordinate>,
-    ) -> Option<u32> {
-        if self.preserve_oracle_coordinate {
-            let coordinate = coordinate?;
-            if let Some(&state) = store
-                .state_by_residual_coordinate
-                .get(&(residual, coordinate))
-            {
-                return Some(state);
-            }
-            let state = self.state_allocator.allocate().expect(
-                "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
-            );
-            self.state_owners
-                .register_virtual(state, self.runtime_index)
-                .expect("residual virtual state owner index must follow shared allocator");
-            store
-                .state_by_residual_coordinate
-                .insert((residual, coordinate), state);
-            store.coordinate_by_state.insert(state, coordinate);
-            store.residual_by_state.insert(state, residual);
-            return Some(state);
-        }
-
-        let residual_index = residual as usize;
-        if store.state_by_residual.len() <= residual_index {
-            store.state_by_residual.resize(residual_index + 1, u32::MAX);
-        }
-        let state = store.state_by_residual[residual_index];
-        if state != u32::MAX {
-            return Some(state);
-        }
-        let state = self.state_allocator.allocate().expect(
-            "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
-        );
-        self.state_owners
-            .register_virtual(state, self.runtime_index)
-            .expect("residual virtual state owner index must follow shared allocator");
-        store.state_by_residual[residual_index] = state;
-        store.residual_by_state.insert(state, residual);
-        Some(state)
+        store.states.get(&state)?.coordinate()
     }
 
     pub(super) fn handles_state(&self, state: u32) -> bool {
@@ -4750,143 +4745,67 @@ impl VirtualResidualRuntime {
         residual: ResidualId,
         byte: u8,
     ) -> Option<u32> {
-        let source_coordinate = if self.preserve_oracle_coordinate {
-            store
-                .coordinate_by_state
-                .get(&state)
-                .copied()
-                .map(BoundedCodeOracleSlot::Exact)
-                .unwrap_or(BoundedCodeOracleSlot::Unknown)
-        } else {
-            store
-                .oracle_coordinates
-                .get(residual as usize)
-                .copied()
-                .unwrap_or(BoundedCodeOracleSlot::Unknown)
-        };
-        let target = store.arena.step(residual, byte)?;
-        if store.arena.is_empty(target) {
+        let source_coordinate = store.states.get(&state)?.coordinate();
+        let arena = store.arena.as_mut()?;
+        let target = arena.step(residual, byte)?;
+        if arena.is_empty(target) {
             return None;
         }
-        if store.oracle_coordinates.len() < store.arena.state_count() {
-            store.oracle_coordinates.resize(
-                store.arena.state_count(),
-                BoundedCodeOracleSlot::Unknown,
+        let target_coordinate = source_coordinate.and_then(|source| {
+            store.liveness_oracle.as_ref()?.step_coordinate(source, byte)
+        });
+        if self.representation == RuntimeRepresentation::RestoredProjection {
+            let coordinate = target_coordinate.expect(
+                "restored coordinate-preserving runtime lost its exact coordinate",
             );
-            store.oracle_futures.resize(store.arena.state_count(), None);
+            return Some(self.intern_state_locked(store, RuntimeStateKey::Checked(target, coordinate)));
         }
-        if let Some(oracle) = store.liveness_oracle.as_ref() {
-            let target_slot = match source_coordinate {
-                BoundedCodeOracleSlot::Exact(source_coordinate) => {
-                    if let Some(target_coordinate) =
-                        oracle.step_coordinate(source_coordinate, byte)
-                    {
-                        BoundedCodeOracleSlot::Exact(target_coordinate)
-                    } else {
-                        // A structurally non-empty residual can still denote
-                        // the empty language. The generic dynamic lane falls
-                        // back to the exact residual solver; the Static
-                        // coordinate-preserving lane treats this as a violated
-                        // construction invariant because it cannot project an
-                        // unmodelled state into a precompiled TSID coordinate.
-                        if self.preserve_oracle_coordinate {
-                            panic!(
-                                "coordinate-preserving bounded-code runtime lost its exact coordinate on byte {byte}"
-                            );
-                        }
-                        BoundedCodeOracleSlot::Ambiguous
-                    }
-                }
-                BoundedCodeOracleSlot::Ambiguous | BoundedCodeOracleSlot::Unknown => {
-                    if self.preserve_oracle_coordinate {
-                        panic!(
-                            "coordinate-preserving bounded-code runtime reached a state without an exact source coordinate"
-                        );
-                    }
-                    BoundedCodeOracleSlot::Ambiguous
-                }
-            };
 
-            if self.preserve_oracle_coordinate {
-                let BoundedCodeOracleSlot::Exact(target_coordinate) = target_slot else {
-                    unreachable!("coordinate-preserving target is exact or panics above");
-                };
-                return self.intern_locked(store, target, Some(target_coordinate));
-            }
-
-            let target_index = target as usize;
-            let slot = &mut store.oracle_coordinates[target_index];
-            let previous = *slot;
-            *slot = match (previous, target_slot) {
+        let state = self.intern_state_locked(store, RuntimeStateKey::Residual(target));
+        if store.liveness_oracle.is_some() {
+            let next = target_coordinate.map_or(
+                BoundedCodeOracleSlot::Ambiguous, BoundedCodeOracleSlot::Exact,
+            );
+            let record = store.states.get_mut(&state)?;
+            let previous = record.hint;
+            record.hint = match (previous, next) {
                 (BoundedCodeOracleSlot::Unknown, next) => next,
-                (BoundedCodeOracleSlot::Exact(existing), BoundedCodeOracleSlot::Exact(next))
-                    if existing == next =>
-                {
-                    BoundedCodeOracleSlot::Exact(existing)
-                }
-                (BoundedCodeOracleSlot::Ambiguous, _)
-                | (_, BoundedCodeOracleSlot::Ambiguous)
-                | (BoundedCodeOracleSlot::Exact(_), BoundedCodeOracleSlot::Exact(_)) => {
-                    BoundedCodeOracleSlot::Ambiguous
-                }
-                (existing, BoundedCodeOracleSlot::Unknown) => existing,
+                (BoundedCodeOracleSlot::Exact(a), BoundedCodeOracleSlot::Exact(b)) if a == b => previous,
+                _ => BoundedCodeOracleSlot::Ambiguous,
             };
-            if *slot != previous {
-                store.oracle_futures[target_index] = None;
+            if record.hint != previous {
+                record.future = None;
             }
         }
-        self.intern_locked(store, target, None)
+        Some(state)
+    }
+
+    fn step_locked(&self, store: &mut ResidualRuntimeStore, state: u32, byte: u8) -> Option<u32> {
+        if self.representation.coordinate_only() {
+            let source = store.states.get(&state)?.coordinate()?;
+            let target = store.liveness_oracle.as_ref()?.step_coordinate(source, byte)?;
+            return self.intern_oracle_coordinate_locked(store, target);
+        }
+        let residual = Self::residual_for_state(store, state)?;
+        self.step_residual_locked(store, state, residual, byte)
     }
 
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
         if state == self.root_state && !self.root_has_future {
             return None;
         }
-        let mut store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            let source_coordinate = store.coordinate_by_state.get(&state).copied()?;
-            let target_coordinate = store
-                .liveness_oracle
-                .as_ref()?
-                .step_coordinate(source_coordinate, byte)?;
-            return self.intern_oracle_coordinate_locked(&mut store, target_coordinate);
-        }
-        static PERSIST_TRANSITIONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let persist_transitions = *PERSIST_TRANSITIONS.get_or_init(|| {
-            std::env::var_os("GLRMASK_EXPERIMENT_PERSIST_VIRTUAL_RESIDUAL_TRANSITIONS")
-                .is_some()
-        });
-        const TRANSITION_UNKNOWN: u32 = u32::MAX;
-        const TRANSITION_DEAD: u32 = u32::MAX - 1;
-        if persist_transitions
-            && let Some(row) = store.transition_rows_by_state.get(&state)
-        {
-            let cached = row[byte as usize];
-            if cached != TRANSITION_UNKNOWN {
-                return (cached != TRANSITION_DEAD).then_some(cached);
-            }
-        }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let target = self.step_residual_locked(&mut store, state, residual, byte);
-        if persist_transitions {
-            let row = store
-                .transition_rows_by_state
-                .entry(state)
-                .or_insert_with(|| Box::new([TRANSITION_UNKNOWN; 256]));
-            row[byte as usize] = target.unwrap_or(TRANSITION_DEAD);
-        }
-        target
+        self.step_locked(&mut self.store.lock().unwrap(), state, byte)
     }
 
     pub(super) fn direct_coordinate_for_state(
         &self,
         state: u32,
     ) -> Option<VirtualResidualDirectCoordinate> {
-        if !self.coordinate_runtime || self.direct_coordinate_stepper.is_none() {
+        if self.direct_coordinate_stepper.is_none() {
             return None;
         }
         let store = self.store.lock().ok()?;
-        let coordinate = store.coordinate_by_state.get(&state).copied()?;
+        let coordinate = store.states.get(&state)?.coordinate()?;
         Some(VirtualResidualDirectCoordinate {
             runtime_index: self.runtime_index,
             coordinate,
@@ -5156,66 +5075,25 @@ impl VirtualResidualRuntime {
         &self,
         source: VirtualResidualDirectCoordinate,
     ) -> Option<u32> {
-        if source.runtime_index != self.runtime_index || !self.coordinate_runtime {
+        if source.runtime_index != self.runtime_index || self.representation != RuntimeRepresentation::DynamicCoordinate {
             return None;
         }
         let mut store = self.store.lock().ok()?;
         self.intern_oracle_coordinate_locked(&mut store, source.coordinate)
     }
 
-    fn certified_oracle_future(
-        store: &mut ResidualRuntimeStore,
-        residual: ResidualId,
-    ) -> Option<bool> {
-        let index = residual as usize;
-        let BoundedCodeOracleSlot::Exact(coordinate) = store
-            .oracle_coordinates
-            .get(index)
-            .copied()
-            .unwrap_or(BoundedCodeOracleSlot::Unknown)
-        else {
-            return None;
-        };
-        if let Some(cached) = store.oracle_futures.get(index).copied().flatten() {
-            return Some(cached);
-        }
-        let boundary_future = store.body_boundary_future_by_completed.as_ref().map(Arc::clone);
-        let oracle = store.liveness_oracle.as_mut()?;
-        let future = boundary_future
-            .as_deref()
-            .and_then(|rows| oracle.has_future_with_boundary_table(coordinate, rows))
-            .unwrap_or_else(|| oracle.has_future(coordinate));
-        store.oracle_futures[index] = Some(future);
-        Some(future)
-    }
-
     fn certified_oracle_future_for_state(
-        &self,
         store: &mut ResidualRuntimeStore,
         state: u32,
-        residual: ResidualId,
     ) -> Option<bool> {
-        if !self.preserve_oracle_coordinate {
-            return Self::certified_oracle_future(store, residual);
-        }
-        if let Some(&future) = store.oracle_future_by_state.get(&state) {
-            return Some(future);
-        }
-        let coordinate = *store.coordinate_by_state.get(&state)?;
-        let boundary_future = store.body_boundary_future_by_completed.as_ref().map(Arc::clone);
-        let oracle = store.liveness_oracle.as_mut()?;
-        let future = boundary_future
-            .as_deref()
-            .and_then(|rows| oracle.has_future_with_boundary_table(coordinate, rows))
-            .unwrap_or_else(|| oracle.has_future(coordinate));
-        store.oracle_future_by_state.insert(state, future);
-        Some(future)
+        let coordinate = store.states.get(&state)?.coordinate()?;
+        Self::coordinate_future_locked(store, state, coordinate)
     }
 
     fn observation(&self, state: u32) -> Option<(bool, bool)> {
         let mut store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            let coordinate = *store.coordinate_by_state.get(&state)?;
+        if self.representation.coordinate_only() {
+            let coordinate = store.states.get(&state)?.coordinate()?;
             let accepting = state != self.root_state
                 && store
                     .liveness_oracle
@@ -5224,11 +5102,11 @@ impl VirtualResidualRuntime {
             let future = Self::coordinate_future_locked(&mut store, state, coordinate)?;
             return Some((accepting, future));
         }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
+        let residual = Self::residual_for_state(&store, state)?;
         // Match the existing virtual-runtime convention: the physical proxy
         // root is the drained zero-byte configuration and must not emit a
         // terminal match before any input is consumed.
-        let accepting = state != self.root_state && store.arena.is_nullable(residual);
+        let accepting = state != self.root_state && store.arena.as_ref()?.is_nullable(residual);
         // A certified bounded-code coordinate has an infallible exact future
         // query once its oracle has been constructed. Surface that answer
         // through the ordinary tokenizer metadata path as well as through
@@ -5240,13 +5118,13 @@ impl VirtualResidualRuntime {
         // conservative contract. Their exact query remains fallible and is
         // resolved only at the explicit dynamic residual boundary.
         let future = if let Some(future) =
-            self.certified_oracle_future_for_state(&mut store, state, residual)
+            Self::certified_oracle_future_for_state(&mut store, state)
         {
             future
         } else if state == self.root_state {
             self.root_has_future
         } else {
-            store.arena.conservative_has_future(residual)
+            store.arena.as_mut()?.conservative_has_future(residual)
         };
         Some((accepting, future))
     }
@@ -5260,8 +5138,8 @@ impl VirtualResidualRuntime {
     #[inline]
     fn accepting_now(&self, state: u32) -> Option<bool> {
         let store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            let coordinate = *store.coordinate_by_state.get(&state)?;
+        if self.representation.coordinate_only() {
+            let coordinate = store.states.get(&state)?.coordinate()?;
             return Some(
                 state != self.root_state
                     && store
@@ -5270,8 +5148,8 @@ impl VirtualResidualRuntime {
                         .coordinate_accepting(coordinate),
             );
         }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        Some(state != self.root_state && store.arena.is_nullable(residual))
+        let residual = Self::residual_for_state(&store, state)?;
+        Some(state != self.root_state && store.arena.as_ref()?.is_nullable(residual))
     }
 
     pub(super) fn vocabulary_repeat_boundary_horizon(
@@ -5383,21 +5261,21 @@ impl VirtualResidualRuntime {
     /// being collapsed into a dead transition.
     pub(super) fn exact_has_future(&self, state: u32) -> Result<Option<bool>, String> {
         let mut store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            let Some(&coordinate) = store.coordinate_by_state.get(&state) else {
+        if self.representation.coordinate_only() {
+            let Some(coordinate) = store.states.get(&state).and_then(|record| record.coordinate()) else {
                 return Ok(None);
             };
             return Ok(Self::coordinate_future_locked(&mut store, state, coordinate));
         }
-        let Some(residual) = Self::residual_for_state(&store, self.root_state, state) else {
+        let Some(residual) = Self::residual_for_state(&store, state) else {
             return Ok(None);
         };
         if let Some(future) =
-            self.certified_oracle_future_for_state(&mut store, state, residual)
+            Self::certified_oracle_future_for_state(&mut store, state)
         {
             return Ok(Some(future));
         }
-        store.arena.has_future(residual).map(Some)
+        store.arena.as_mut().expect("derivative state has arena").has_future(residual).map(Some)
     }
 
     pub(super) fn has_bounded_code_liveness_oracle(&self) -> bool {
@@ -6217,8 +6095,8 @@ impl VirtualResidualRuntime {
             return Some(Vec::new());
         }
         let mut store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            let coordinate = *store.coordinate_by_state.get(&state)?;
+        if self.representation.coordinate_only() {
+            let coordinate = store.states.get(&state)?.coordinate()?;
             let mut out = Vec::new();
             for byte in 0u16..=255 {
                 let Some(target_coordinate) = store
@@ -6233,8 +6111,8 @@ impl VirtualResidualRuntime {
             }
             return Some(out);
         }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let bytes = store.arena.first_bytes(residual)?;
+        let residual = Self::residual_for_state(&store, state)?;
+        let bytes = store.arena.as_mut()?.first_bytes(residual)?;
         let mut out = Vec::new();
         for byte in bytes.iter() {
             if let Some(target) = self.step_residual_locked(&mut store, state, residual, byte) {
@@ -6260,7 +6138,7 @@ impl VirtualResidualRuntime {
                 artifact.terminal, self.terminal,
             ));
         }
-        if !self.preserve_oracle_coordinate {
+        if !self.representation.supports_projection() {
             return Err("compiled virtual residual projection requires coordinate-preserving runtime".to_owned());
         }
         let mut store = self.store.lock().map_err(|_| "virtual residual runtime lock poisoned".to_owned())?;
@@ -6329,7 +6207,7 @@ impl VirtualResidualRuntime {
                 artifact.terminal, self.terminal,
             ));
         }
-        if !self.preserve_oracle_coordinate {
+        if !self.representation.supports_projection() {
             return Err(
                 "virtual residual projection requires coordinate-preserving residual runtime"
                     .to_owned(),
@@ -6510,7 +6388,7 @@ impl VirtualResidualRuntime {
     }
 
     pub(super) fn interned_state_count(&self) -> usize {
-        self.store.lock().unwrap().residual_by_state.len()
+        self.store.lock().unwrap().states.len().saturating_sub(1)
     }
 }
 
@@ -6982,7 +6860,7 @@ mod tests {
 
         let store = runtime.store.lock().unwrap();
         assert_eq!(
-            store.arena.nonempty_cache[store.root as usize],
+            store.arena.as_ref().unwrap().nonempty_cache[VirtualResidualRuntime::residual_for_state(&store, runtime.root_state).unwrap() as usize],
             None,
             "constructing the runtime must not eagerly solve a hard Boolean liveness problem",
         );
@@ -8400,39 +8278,17 @@ mod tests {
 
         {
             let mut store = runtime.store.lock().unwrap();
-            let source = VirtualResidualRuntime::residual_for_state(
-                &store,
-                runtime.root_state,
-                body_boundary,
-            )
-            .unwrap() as usize;
-            let target = VirtualResidualRuntime::residual_for_state(
-                &store,
-                runtime.root_state,
-                after_one,
-            )
-            .unwrap() as usize;
             assert!(matches!(
-                store.oracle_coordinates[target],
+                store.states[&after_one].hint,
                 BoundedCodeOracleSlot::Exact(_)
             ));
-            assert_eq!(store.oracle_futures[target], Some(true));
-            store.oracle_coordinates[source] = BoundedCodeOracleSlot::Ambiguous;
+            assert_eq!(store.states[&after_one].future, Some(true));
+            store.states.get_mut(&body_boundary).unwrap().hint = BoundedCodeOracleSlot::Ambiguous;
         }
-
         assert_eq!(runtime.step(body_boundary, b'a'), Some(after_one));
         let store = runtime.store.lock().unwrap();
-        let target = VirtualResidualRuntime::residual_for_state(
-            &store,
-            runtime.root_state,
-            after_one,
-        )
-        .unwrap() as usize;
-        assert_eq!(
-            store.oracle_coordinates[target],
-            BoundedCodeOracleSlot::Ambiguous
-        );
-        assert_eq!(store.oracle_futures[target], None);
+        assert_eq!(store.states[&after_one].hint, BoundedCodeOracleSlot::Ambiguous);
+        assert_eq!(store.states[&after_one].future, None);
     }
 
     #[test]
@@ -8456,7 +8312,7 @@ mod tests {
         );
         let store = runtime.store.lock().unwrap();
         assert_eq!(
-            store.arena.nonempty_cache[store.root as usize],
+            store.arena.as_ref().unwrap().nonempty_cache[VirtualResidualRuntime::residual_for_state(&store, runtime.root_state).unwrap() as usize],
             None,
             "certified bounded-code liveness must not invoke generic Boolean reachability",
         );
