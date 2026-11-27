@@ -3537,27 +3537,13 @@ impl Constraint {
         )))
     }
 
-    /// Whether this live, source-built composition can use the compact parser
-    /// coordinate directly in the ordinary `ParserGSS<u32>`. Serialized legacy
-    /// overlays intentionally omit links/offsets and therefore stay on the old
-    /// composed-table coordinate until the wire format is versioned.
+    /// Whether the recursive composition provider has been installed.
     #[inline]
     pub(crate) fn uses_compact_segmented_parser_runtime(&self) -> bool {
         self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
-            let boundary_is_provider_native = overlay.segmented_parser_components.iter().all(|component| {
-                match component.boundary.as_ref().map(|shard| &shard.backend) {
-                    Some(super::artifact::SegmentedBoundaryShardBackend::DynamicDirect) => true,
-                    Some(super::artifact::SegmentedBoundaryShardBackend::StaticParser(boundary)) => {
-                        boundary.recursive_parser_dwa.is_some()
-                    }
-                    None => true,
-                    _ => false,
-                }
-            });
             overlay.segmented_mask_authoritative
                 && !overlay.segmented_parser_components.is_empty()
                 && !overlay.segmented_parser_links.is_empty()
-                && boundary_is_provider_native
         })
     }
 

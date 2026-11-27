@@ -2282,8 +2282,7 @@ fn finish_walk_shard_publication(
             start_component,
             candidate_tokens,
             boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
-                parser_dwa: DWA::new(0, 0),
-                recursive_parser_dwa: Some(parser_dwa),
+                parser_dwa,
                 coordinate,
                 internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
             }),
@@ -14746,12 +14745,8 @@ table: &child_table,
                 right_parser.internal_token_to_originals,
                 "component {component}: internal_token_to_originals differs; incomparable weights",
             );
-            let (Some(left_dwa), Some(right_dwa)) = (
-                left_parser.recursive_parser_dwa.as_ref(),
-                right_parser.recursive_parser_dwa.as_ref(),
-            ) else {
-                panic!("component {component}: both sides must carry recursive_parser_dwa");
-            };
+            let left_dwa = &left_parser.parser_dwa;
+            let right_dwa = &right_parser.parser_dwa;
             assert!(left_dwa.is_acyclic(), "component {component}: LEFT DWA must be acyclic");
             assert!(right_dwa.is_acyclic(), "component {component}: RIGHT DWA must be acyclic");
             match crate::automata::weighted_u32::equivalence::find_difference(left_dwa, right_dwa) {

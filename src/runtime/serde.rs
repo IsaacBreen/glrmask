@@ -2429,9 +2429,7 @@ fn segmented_runtime_artifact_ref(
         .map(|shard| {
             let backend = match &shard.backend {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
-                    let parser_dwa = boundary.recursive_parser_dwa.as_ref().expect(
-                        "recursive static boundary must carry its recursive parser-coordinate DWA",
-                    );
+                    let parser_dwa = &boundary.parser_dwa;
                     RecursiveSegmentedBoundaryShardBackendV27Ref::StaticParser(
                         RecursiveSegmentedBoundaryParserV27Ref {
                             parser_dwa,
@@ -2566,8 +2564,7 @@ fn restore_recursive_boundary_parser_v27(
         ));
     }
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
-        parser_dwa: crate::automata::weighted_u32::dwa::DWA::new(0, 0),
-        recursive_parser_dwa: Some(boundary.parser_dwa),
+        parser_dwa: boundary.parser_dwa,
         coordinate: if boundary.uses_composed_tsid_coordinate {
             crate::runtime::BoundaryTsidCoordinate::Composed
         } else {

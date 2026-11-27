@@ -7256,7 +7256,7 @@ mod tests {
     ///
     /// Reads the artifact path from `PARSER_ALIVE_BIN` (no recomposition),
     /// walks each retained component's boundary shard, and for
-    /// every `StaticParser` backend with a `recursive_parser_dwa` runs the
+    /// every `StaticParser` backend runs the
     /// exact forward-support traversal of `accepted_original_tokens` over the
     /// FINAL parser DWA with that shard's OWN `internal_token_to_originals`
     /// map (never the host constraint map). Prints one JSON line per shard to
@@ -7389,7 +7389,7 @@ mod tests {
                 let (backend, parser, ito) = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(b) => (
                         "StaticParser",
-                        b.recursive_parser_dwa.as_ref().or(Some(&b.parser_dwa)),
+                        Some(&b.parser_dwa),
                         Some(b.internal_token_to_originals.as_slice()),
                     ),
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {

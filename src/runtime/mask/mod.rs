@@ -3974,22 +3974,14 @@ impl ConstraintState {
                 delta &= delta - 1;
             }
         }
-        let compact = self.constraint.uses_compact_segmented_parser_runtime();
         let mut contexts = Vec::new();
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let _ = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
                 match top_first.first().copied() {
                     Some(top) => {
-                        let owner = if compact {
-                            self.constraint
-                                .compact_segmented_parser_component(top)
-                                .map(|(component, _)| component as u32)
-                        } else {
-                            shard
-                                .start_parser_states
-                                .contains(top as usize)
-                                .then_some(shard.start_component)
-                        };
+                        let owner = self.constraint
+                            .compact_segmented_parser_component(top)
+                            .map(|(component, _)| component as u32);
                         contexts.push(format!(
                             "gts={global_tokenizer_state} top={top} owner={owner:?} active={}",
                             owner == Some(shard.start_component),
@@ -4061,8 +4053,7 @@ impl ConstraintState {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
                             boundary,
-                            Some(&shard.start_parser_states),
-                            Some(shard.start_component),
+                            shard.start_component,
                             shard.accepts_empty_stack,
                             buf,
                         )
@@ -4316,10 +4307,8 @@ impl ConstraintState {
         for gss in self.state.values() {
             if shard.accepts_empty_stack && !gss.isolate(None).is_empty() { return true; }
             for top in gss.peek_values() {
-                let belongs = if self.constraint.uses_compact_segmented_parser_runtime() {
-                    self.constraint.compact_segmented_parser_component(top)
-                        .is_some_and(|(owner, _)| owner == shard.start_component as usize)
-                } else { shard.start_parser_states.contains(top as usize) };
+                let belongs = self.constraint.compact_segmented_parser_component(top)
+                    .is_some_and(|(owner, _)| owner == shard.start_component as usize);
                 if belongs { return true; }
             }
         }
@@ -4333,7 +4322,6 @@ impl ConstraintState {
         &self,
         shard: &crate::runtime::SegmentedBoundaryShard,
     ) -> Option<ParserStateMap> {
-        if !self.constraint.uses_compact_segmented_parser_runtime() { return None; }
         let mut selected = ParserStateMap::default();
         for (&lexer, gss) in self.state.iter() {
             if gss.is_empty() { continue; }
@@ -4464,8 +4452,7 @@ impl ConstraintState {
     fn or_segmented_boundary_parser_mask(
         &self,
         boundary: &crate::runtime::SegmentedBoundaryParser,
-        start_parser_states: Option<&crate::ds::bitset::BitSet>,
-        start_component: Option<u32>,
+        start_component: u32,
         accepts_empty_stack: bool,
         buf: &mut [u32],
     ) -> bool {
@@ -4596,28 +4583,19 @@ impl ConstraintState {
             })
         }
 
-        let recursive_parser = self.constraint.uses_compact_segmented_parser_runtime();
-        let parser_dwa = if recursive_parser {
-            boundary
-                .recursive_parser_dwa
-                .as_ref()
-                .unwrap_or(&boundary.parser_dwa)
-        } else {
-            &boundary.parser_dwa
+        let parser_dwa = &boundary.parser_dwa;
+        let top_live = |top: Option<u32>| match top {
+            Some(value) => self.constraint
+                .compact_segmented_parser_component(value)
+                .is_some_and(|(owner, _)| owner == start_component as usize),
+            None => accepts_empty_stack,
         };
         let debug_boundary = crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let boundary_tsids = match &boundary.coordinate {
-                crate::runtime::BoundaryTsidCoordinate::Composed if recursive_parser => self.constraint
+                crate::runtime::BoundaryTsidCoordinate::Composed => self.constraint
                     .runtime_internal_tsids_for_tokenizer_state(global_tokenizer_state)
                     .unwrap_or_default(),
-                crate::runtime::BoundaryTsidCoordinate::Composed => self.constraint
-                    .tokenizer_tsids.primary()
-                    .get(global_tokenizer_state as usize)
-                    .copied()
-                    .filter(|&tsid| tsid != u32::MAX)
-                    .into_iter()
-                    .collect::<SmallVec<[u32; 4]>>(),
                 crate::runtime::BoundaryTsidCoordinate::ShardLocal(map) => map
                     .get(global_tokenizer_state as usize)
                     .copied()
@@ -4659,26 +4637,8 @@ impl ConstraintState {
                 let complete_single = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
                     single_paths += 1;
                     single_depth = single_depth.max(top_first.len());
-                if recursive_parser {
-                    if let Some(start_component) = start_component {
-                        match top_first.first().copied() {
-                            Some(top)
-                                if self
-                                    .constraint
-                                    .compact_segmented_parser_component(top).is_none_or(|(owner, _)| owner != start_component as usize) =>
-                            {
-                                return;
-                            }
-                            None if !accepts_empty_stack => return,
-                            _ => {}
-                        }
-                    }
-                } else if let Some(start_parser_states) = start_parser_states {
-                    match top_first.first().copied() {
-                        Some(top) if !start_parser_states.contains(top as usize) => return,
-                        None if !accepts_empty_stack => return,
-                        _ => {}
-                    }
+                if !top_live(top_first.first().copied()) {
+                    return;
                 }
                 let phase_mark = single_started.is_some().then(Instant::now);
                 let Some(allowed) =
@@ -4765,28 +4725,6 @@ impl ConstraintState {
                 // union over groups of (accepted(group) intersect
                 // eligible(group)), never union-accepts independently of
                 // union-eligibility.
-                let top_live = |top: Option<u32>| -> bool {
-                    if recursive_parser {
-                        if let Some(start_component) = start_component {
-                            match top {
-                                Some(value) => self
-                                    .constraint
-                                    .compact_segmented_parser_component(value)
-                                    .is_some_and(|(owner, _)| owner == start_component as usize),
-                                None => accepts_empty_stack,
-                            }
-                        } else {
-                            true
-                        }
-                    } else if let Some(start_parser_states) = start_parser_states {
-                        match top {
-                            Some(value) => start_parser_states.contains(value as usize),
-                            None => accepts_empty_stack,
-                        }
-                    } else {
-                        true
-                    }
-                };
                 #[cfg(test)]
                 let mut reference_mask = buf.to_vec();
                 let shared_complete = self.or_boundary_dag_via_shared_queue(

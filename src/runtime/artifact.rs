@@ -9720,11 +9720,8 @@ impl BoundaryTsidCoordinate {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
-    /// Exact deterministic boundary parser in the generic weight algebra.
+    /// Exact deterministic boundary parser in the recursive leaf parser-state coordinate.
     pub(crate) parser_dwa: DWA,
-    /// Provider-native parser in the recursive leaf parser-state coordinate.
-    #[serde(skip, default)]
-    pub(crate) recursive_parser_dwa: Option<DWA>,
     pub(crate) coordinate: BoundaryTsidCoordinate,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
