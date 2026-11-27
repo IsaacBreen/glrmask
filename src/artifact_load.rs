@@ -18,8 +18,14 @@ impl LoadBudget {
     }
 
     pub(crate) fn charge(&self, bytes: usize) -> Result<(), String> {
-        self.remaining.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(bytes))
-            .map(|_| ()).map_err(|_| "artifact decoded-size/work budget exceeded".to_owned())
+        let mut left = self.remaining.load(Ordering::Relaxed);
+        loop {
+            let next = left.checked_sub(bytes).ok_or_else(|| "artifact decoded-size/work budget exceeded".to_owned())?;
+            match self.remaining.compare_exchange_weak(left, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Ok(()),
+                Err(actual) => left = actual,
+            }
+        }
     }
 
     pub(crate) fn child(&self) -> crate::Result<Self> {
