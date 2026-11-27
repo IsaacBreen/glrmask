@@ -76,31 +76,58 @@ impl Action {
         }
     }
 
+    /// Observe consuming stack effects without allocating expanded shifts.
+    /// Guards are explicit here; callers choose how to interpret them.
     #[inline]
-    pub fn for_each_stack_shift(&self, mut f: impl FnMut(u32, &[u32])) {
+    pub(crate) fn for_each_stack_effect(
+        &self,
+        mut visit: impl FnMut(&[StackShiftGuard], u32, &[u32]),
+    ) {
         match self {
-            Action::Shift(target, false) => f(0, std::slice::from_ref(target)),
-            Action::Shift(target, true) => f(1, std::slice::from_ref(target)),
+            Action::Shift(target, replace) | Action::Split { shift: Some((target, replace)), .. } => {
+                visit(&[], u32::from(*replace), std::slice::from_ref(target));
+            }
             Action::StackShifts(shifts) => {
                 for shift in shifts {
-                    f(shift.pop, &shift.pushes);
+                    visit(&[], shift.pop, &shift.pushes);
                 }
             }
             Action::ReplaceShifts(targets) => {
                 for target in targets.iter() {
-                    f(1, std::slice::from_ref(target));
+                    visit(&[], 1, std::slice::from_ref(target));
                 }
             }
-            Action::GuardedStackShifts(_) => {}
-            Action::Skip => f(0, &[]),
-            Action::Split { shift: Some((target, false)), .. } => {
-                f(0, std::slice::from_ref(target));
+            Action::GuardedStackShifts(shifts) => {
+                for shift in shifts {
+                    visit(&shift.guards, shift.pop, &shift.pushes);
+                }
             }
-            Action::Split { shift: Some((target, true)), .. } => {
-                f(1, std::slice::from_ref(target));
-            }
+            Action::Skip => visit(&[], 0, &[]),
             _ => {}
         }
+    }
+
+    #[inline]
+    pub fn for_each_stack_shift(&self, mut f: impl FnMut(u32, &[u32])) {
+        // The public unguarded observer historically excludes the guarded
+        // representation, even if a particular alternative has no guards.
+        if !matches!(self, Action::GuardedStackShifts(_)) {
+            self.for_each_stack_effect(|_, pop, pushes| f(pop, pushes));
+        }
+    }
+
+    #[inline]
+    pub(crate) fn for_each_state_reference(&self, mut visit: impl FnMut(u32)) {
+        self.for_each_stack_effect(|guards, _, pushes| {
+            for guard in guards {
+                for &state in &guard.states {
+                    visit(state);
+                }
+            }
+            for &state in pushes {
+                visit(state);
+            }
+        });
     }
 
     #[inline]

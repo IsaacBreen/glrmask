@@ -4225,65 +4225,11 @@ fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>
 }
 
 fn collect_action_targets(action: &Action, out: &mut Vec<u32>) {
-    match action {
-        Action::Shift(target, _) => out.push(*target),
-        Action::ReplaceShifts(targets) => out.extend(targets.iter().copied()),
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                out.extend(shift.pushes.iter().copied());
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                for guard in &shift.guards {
-                    out.extend(guard.states.iter().copied());
-                }
-                out.extend(shift.pushes.iter().copied());
-            }
-        }
-        Action::Split { shift, .. } => {
-            if let Some((target, _)) = shift {
-                out.push(*target);
-            }
-        }
-        Action::Reduce(_, _) | Action::Accept | Action::Skip => {}
-    }
+    action.for_each_state_reference(|state| out.push(state));
 }
 
 fn push_action_targets(action: &Action, reachable: &mut [bool], stack: &mut Vec<u32>) {
-    match action {
-        Action::Shift(target, _) => push_reachable_state(*target, reachable, stack),
-        Action::ReplaceShifts(targets) => {
-            for &state in targets.iter() {
-                push_reachable_state(state, reachable, stack);
-            }
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                for &state in &shift.pushes {
-                    push_reachable_state(state, reachable, stack);
-                }
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                for guard in &shift.guards {
-                    for &state in &guard.states {
-                        push_reachable_state(state, reachable, stack);
-                    }
-                }
-                for &state in &shift.pushes {
-                    push_reachable_state(state, reachable, stack);
-                }
-            }
-        }
-        Action::Reduce(_, _) | Action::Accept | Action::Skip => {}
-        Action::Split { shift, .. } => {
-            if let Some((target, _)) = shift {
-                push_reachable_state(*target, reachable, stack);
-            }
-        }
-    }
+    action.for_each_state_reference(|state| push_reachable_state(state, reachable, stack));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4717,35 +4663,11 @@ pub fn control_elimination_budget_exhausted(error: &str) -> bool {
     error.contains("reason=stack_effect_visits") || error.contains("reason=elapsed_ms")
 }
 
-fn for_each_action_stack_rewrite(
-    action: &Action,
-    mut visit: impl FnMut(u32, &[u32]),
-) {
-    match action {
-        Action::Shift(target, replace) => {
-            visit(u32::from(*replace), std::slice::from_ref(target));
-        }
-        Action::ReplaceShifts(targets) => {
-            for target in targets.iter() {
-                visit(1, std::slice::from_ref(target));
-            }
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                visit(shift.pop, &shift.pushes);
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                visit(shift.pop, &shift.pushes);
-            }
-        }
-        Action::Split { shift, .. } => {
-            if let Some((target, replace)) = shift {
-                visit(u32::from(*replace), std::slice::from_ref(target));
-            }
-        }
-        Action::Skip | Action::Reduce(..) | Action::Accept => {}
+fn for_each_action_stack_rewrite(action: &Action, mut visit: impl FnMut(u32, &[u32])) {
+    // Predecessor construction observes potential stack rewrites, including
+    // guarded alternatives, but a Skip contributes no predecessor edge.
+    if !matches!(action, Action::Skip) {
+        action.for_each_stack_effect(|_, pop, pushes| visit(pop, pushes));
     }
 }
 
