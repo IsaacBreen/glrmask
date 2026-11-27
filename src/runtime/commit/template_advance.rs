@@ -694,20 +694,38 @@ pub(crate) fn advance_with_template_coordinate(
     advance_relation(template, stack, None, scope)
 }
 
+#[inline]
+pub(super) fn local_symbol(scope: Option<(u32, u32)>, top: u32) -> Option<u32> {
+    match scope {
+        Some((offset, count)) => top.checked_sub(offset).filter(|&symbol| symbol < count),
+        None => Some(top),
+    }
+}
+
+#[inline]
+pub(super) fn global_symbol(scope: Option<(u32, u32)>, local: u32) -> u32 {
+    scope.map_or(local, |(offset, _)| offset + local)
+}
+
+pub(crate) fn advance_with_prepared_coordinate(
+    template: &CommitTemplateDfas, stack: ParserGSS,
+    prepared: Option<&FastCommitTemplateDfas>, scope: (u32, u32),
+) -> ParserGSS {
+    advance_relation(template, stack, prepared, Some(scope))
+}
+
 fn advance_relation(
     template: &CommitTemplateDfas, stack: ParserGSS,
     prepared: Option<&FastCommitTemplateDfas>, scope: Option<(u32, u32)>,
 ) -> ParserGSS {
-    let global = |local: u32| scope.map_or(local, |(offset, _)| offset + local);
-    let local = |top: u32| match scope {
-        Some((offset, count)) => top.checked_sub(offset).filter(|&symbol| symbol < count),
-        None => Some(top),
-    };
-    // Preserve the established scoped/correlated traversal order. The
-    // prepared cursor and bulk accelerators here still use local symbols.
-    let sparse_input = scope.is_none() && stack.single_interface_lower_id().is_some();
+    let global = |symbol| global_symbol(scope, symbol);
+    let local = |top| local_symbol(scope, top);
+    // Uniform inputs permit exact union reassociation in either coordinate.
+    // The unprepared scoped reference retains its ordered traversal.
+    let sparse_input = (scope.is_none() || prepared.is_some())
+        && stack.single_interface_lower_id().is_some();
     let seeded = prepared.and_then(|index| index.phase_dag.as_ref())
-        .and_then(|cursor| cursor.apply_input_cursor(template, &stack));
+        .and_then(|cursor| cursor.apply_input_cursor(template, &stack, scope));
     let (mut output, mut worklist) = match seeded {
         Some(result) => {
             let mut worklist = SmallVec::<[(Phase, u32, ParserGSS); 8]>::new();
@@ -742,7 +760,7 @@ fn advance_relation(
             && let Some(plan) = prepared.and_then(|p| p.phase_dag.as_ref())
         {
             worklist.push((phase, state_id, gss));
-            return plan.apply(template, worklist.drain(..), output);
+            return plan.apply(template, worklist.drain(..), output, scope);
         }
         let visit_key = (phase, state_id, gss.ptr_key());
         if let Some(source) = visited.get(&visit_key) {
@@ -768,14 +786,16 @@ fn advance_relation(
                     // lower priority than *every* explicit edge, including a
                     // rejecting edge retained as a wildcard exception.
                     if let Some(top) = gss.single_exclusive_top_value() {
-                        if let Some(&target) = dfa_state.transitions.get(&(top as i32))
+                        if let Some(symbol) = local(top)
+                            && let Some(&target) = dfa_state.transitions.get(&(symbol as i32))
                             .or_else(|| dfa_state.transitions.get(&DEFAULT_LABEL))
                         {
                             worklist.push((Phase::Pop, target, gss.popn(1)));
                         }
                     } else {
                         for top in gss.peek_values() {
-                            if let Some(&target) = dfa_state.transitions.get(&(top as i32))
+                            if let Some(symbol) = local(top)
+                            && let Some(&target) = dfa_state.transitions.get(&(symbol as i32))
                                 .or_else(|| dfa_state.transitions.get(&DEFAULT_LABEL))
                             {
                                 let branch = gss.pop_top_value(&top);
@@ -835,12 +855,14 @@ fn advance_relation(
 
                 if sparse_input {
                     if let Some(top) = gss.single_exclusive_top_value() {
-                        if let Some(&target) = dfa_state.transitions.get(&(top as i32)) {
+                        if let Some(symbol) = local(top)
+                            && let Some(&target) = dfa_state.transitions.get(&(symbol as i32)) {
                             worklist.push((Phase::Read, target, gss.clone()));
                         }
                     } else {
                         for top in gss.peek_values() {
-                            if let Some(&target) = dfa_state.transitions.get(&(top as i32)) {
+                            if let Some(symbol) = local(top)
+                            && let Some(&target) = dfa_state.transitions.get(&(symbol as i32)) {
                                 let branch = gss.isolate(Some(top));
                                 if !branch.is_empty() {
                                     worklist.push((Phase::Read, target, branch));
@@ -872,14 +894,14 @@ fn advance_relation(
                 if sparse_input
                     && let Some(plan) = prepared.and_then(|p| p.push_suffixes.get(state_id as usize))
                     .and_then(Option::as_ref)
-                    && let Some(outputs) = plan.apply(&gss)
+                    && let Some(outputs) = plan.apply(&gss, scope.map_or(0, |(offset, _)| offset))
                 {
                     output = output.merge(&outputs);
                     continue;
                 }
                 if sparse_input
                     && let Some(plan) = prepared.and_then(|p| p.phase_dag.as_ref())
-                    && let Some(outputs) = plan.apply_large_push(template, state_id, &gss)
+                    && let Some(outputs) = plan.apply_large_push(template, state_id, &gss, scope)
                 {
                     output = output.merge(&outputs);
                     continue;

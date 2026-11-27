@@ -111,8 +111,8 @@ impl ScopedProgram {
             }
             owned
         } else { stack.clone() };
-        let output = crate::runtime::commit::template_advance::advance_with_template_coordinate(
-            &self.source, input, Some((self.offset, self.symbols)));
+        let output = crate::runtime::commit::template_advance::advance_with_prepared_coordinate(
+            &self.source, input, self.fast.as_deref(), (self.offset, self.symbols));
         self.append_push.map_or(output.clone(), |symbol| output.push(symbol))
     }
 }

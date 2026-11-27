@@ -28,7 +28,7 @@ impl PreparedPushSuffixes {
             .chain(self.suffixes.iter().map(|word| word.as_ref()))
     }
 
-    pub(crate) fn apply(&self, base: &ParserGSS) -> Option<ParserGSS> {
+    pub(crate) fn apply(&self, base: &ParserGSS, offset: u32) -> Option<ParserGSS> {
         // Reordering output construction is valid only for one shared path
         // annotation. Correlated inputs retain the authoritative DAG walk.
         if base.is_empty() { return Some(ParserGSS::empty()); }
@@ -37,10 +37,22 @@ impl PreparedPushSuffixes {
         // returned by the GSS helper for an empty branch iterator.
         let nonempty = if self.suffixes.is_empty() {
             ParserGSS::empty()
+        } else if offset == 0 {
+            if self.single_symbols {
+                base.apply_shared_pop_push_single_branches(0, self.suffixes.iter().map(|s| &s[0]))?
+            } else {
+                base.apply_shared_pop_push_branches(0, self.suffixes.iter().map(|s| s.as_ref()))?
+            }
         } else if self.single_symbols {
-            base.apply_shared_pop_push_single_branches(0, self.suffixes.iter().map(|s| &s[0]))?
+            let targets = self.suffixes.iter().map(|s| offset + s[0]).collect::<Vec<_>>();
+            base.apply_shared_pop_push_single_branches(0, &targets)?
         } else {
-            base.apply_shared_pop_push_branches(0, self.suffixes.iter().map(|s| s.as_ref()))?
+            // Only the small bounded suffix lane needs temporary relocated
+            // words; large PUSH languages stay in shared phase dataflow.
+            let words = self.suffixes.iter().map(|s|
+                s.iter().map(|&symbol| offset + symbol).collect::<smallvec::SmallVec<[u32; 8]>>())
+                .collect::<Vec<_>>();
+            base.apply_shared_pop_push_branches(0, words.iter().map(|s| s.as_slice()))?
         };
         Some(if self.accepts_empty { base.merge(&nonempty) } else { nonempty })
     }
@@ -159,7 +171,7 @@ mod tests {
                 ParserGSS::from_stacks(&[(vec![0,1],TerminalsDisallowed::new()),(vec![0,2,3],TerminalsDisallowed::new())]),
             ] {
                 let expected=literal(&t.push,0,&input);
-                match plan.apply(&input) {
+                match plan.apply(&input, 0) {
                     Some(actual) => assert_eq!(actual.semantically_eq(&expected,16_384),Some(true)),
                     None => assert!(input.try_virtual_stack().is_none(),
                         "only an unsupported storage shape may decline this exact shortcut"),
@@ -201,7 +213,7 @@ mod tests {
             (vec![0,1],TerminalsDisallowed::new()),
             (vec![0,2],TerminalsDisallowed::new().with_insert(0,3)),
         ]);
-        assert!(plans[0].as_ref().unwrap().apply(&input).is_none());
+        assert!(plans[0].as_ref().unwrap().apply(&input, 0).is_none());
         t.push.states[0].transitions.insert(0,end);
         assert!(prepare(&t).iter().all(Option::is_none));
         t.push.states[0].transitions.remove(&0);

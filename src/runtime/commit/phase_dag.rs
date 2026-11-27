@@ -23,7 +23,7 @@ use crate::automata::unweighted_u32::dfa::DFA;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, negative_to_positive_label};
 use crate::compiler::glr::parser::ParserGSS;
 use crate::runtime::CommitTemplateDfas;
-use super::template_advance::Phase;
+use super::template_advance::{Phase, global_symbol, local_symbol};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedPhaseDag {
@@ -61,12 +61,12 @@ impl PreparedPhaseDag {
     }
 
     pub(super) fn apply_large_push(
-        &self, template: &CommitTemplateDfas, entry: u32, base: &ParserGSS,
+        &self, template: &CommitTemplateDfas, entry: u32, base: &ParserGSS, scope: Option<(u32, u32)>,
     ) -> Option<ParserGSS> {
         if *self.push_paths.get(entry as usize)? <= PUSH_PATH_LIMIT { return None; }
         if base.is_empty() { return Some(ParserGSS::empty()); }
         base.single_interface_lower_id()?;
-        Some(self.apply(template, [(Phase::Push, entry, base.clone())], ParserGSS::empty()))
+        Some(self.apply(template, [(Phase::Push, entry, base.clone())], ParserGSS::empty(), scope))
     }
     fn phase_number(phase: Phase) -> u8 {
         match phase { Phase::Pop => 0, Phase::Read => 1, Phase::Push => 2 }
@@ -80,6 +80,7 @@ impl PreparedPhaseDag {
         template: &CommitTemplateDfas,
         work: impl IntoIterator<Item = (Phase, u32, ParserGSS)>,
         mut output: ParserGSS,
+        scope: Option<(u32, u32)>,
     ) -> ParserGSS {
         let mut incoming = FxHashMap::<(u8, u32), ParserGSS>::default();
         let mut queue = BinaryHeap::<Reverse<(u8, u32, u32)>>::new();
@@ -114,7 +115,7 @@ impl PreparedPhaseDag {
                 let mut edges = smallvec::SmallVec::<[(u32, u32); 8]>::new();
                 edges.extend(state.transitions.iter()
                     .filter(|(_, target)| self.push_paths[**target as usize] != 0)
-                    .map(|(&label, &target)| (target, negative_to_positive_label(label) as u32)));
+                    .map(|(&label, &target)| (target, global_symbol(scope, negative_to_positive_label(label) as u32))));
                 edges.sort_unstable();
                 let mut first = 0;
                 while first < edges.len() {
@@ -140,7 +141,8 @@ impl PreparedPhaseDag {
                 for top in stacks.peek_values() {
                     // Every explicit POP edge, including a dead blocker,
                     // takes priority over DEFAULT. READ never uses DEFAULT.
-                    let target = state.transitions.get(&(top as i32)).or_else(||
+                    let Some(symbol) = local_symbol(scope, top) else { continue; };
+                    let target = state.transitions.get(&(symbol as i32)).or_else(||
                         if phase == 0 { state.transitions.get(&DEFAULT_LABEL) } else { None });
                     if let Some(&target) = target {
                         let advanced = if phase == 0 { stacks.pop_top_value(&top) }
@@ -242,7 +244,7 @@ mod tests {
                         (Phase::Read,1,input.clone()),(Phase::Pop,2,input.clone()),(Phase::Read,1,input.clone())];
                     let emitted=ParserGSS::from_single_stack(vec![0,2],acc.clone());
                     let expected=literal(&t,&work,&emitted);
-                    let actual=plan.apply(&t,work,emitted);
+                    let actual=plan.apply(&t,work,emitted,None);
                     assert_eq!(actual.semantically_eq(&expected,65_536),Some(true),"case={case}");
                     for (_,annotation) in actual.to_stacks(65_536).unwrap(){assert_eq!(annotation,acc,"case={case}");}
                 }
@@ -304,7 +306,7 @@ mod push_tests {
             let t = template(graph, 0);
             let plan = PreparedPhaseDag::prepare(&t).unwrap();
             let input = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
-            let actual = plan.apply_large_push(&t, 0, &input).unwrap();
+            let actual = plan.apply_large_push(&t, 0, &input, None).unwrap();
             let expected = literal(&t.push, 0, &input);
             assert_eq!(actual.semantically_eq(&expected, 65_536), Some(true));
             assert_eq!(actual.top_value_count(), count as usize);
@@ -335,7 +337,7 @@ mod push_tests {
                     ParserGSS::from_stacks(&[(vec![0,1],acc.clone()),(vec![0,2,3],acc.clone())]),
                 ] {
                     let expected=literal(&t.push,entry,&input);
-                    let actual=plan.apply(&t, [(Phase::Push, entry, input)], ParserGSS::empty());
+                    let actual=plan.apply(&t, [(Phase::Push, entry, input)], ParserGSS::empty(), None);
                     covered+=1;
                     assert_eq!(actual.semantically_eq(&expected,65_536),Some(true));
                 }
@@ -352,7 +354,7 @@ mod push_tests {
             graph.set_accepting(depth,true);let t=template(graph,0);
             let plan=PreparedPhaseDag::prepare(&t).unwrap();
             let input=ParserGSS::from_single_stack(vec![0],TerminalsDisallowed::new());
-            let actual=plan.apply_large_push(&t,0,&input).unwrap();
+            let actual=plan.apply_large_push(&t,0,&input,None).unwrap();
             assert_eq!(actual.max_depth(),depth+1);
             assert!(actual.node_count_at_most(1024)<=depth as usize+5,
                 "2^depth output words must share each DFA layer, not be enumerated: {:?}",actual.summary());
@@ -369,7 +371,7 @@ mod push_tests {
         let plan=PreparedPhaseDag::prepare(&t).unwrap();
         let input=ParserGSS::from_stacks(&[(vec![0,1],TerminalsDisallowed::new()),
             (vec![0,2],TerminalsDisallowed::new().with_insert(0,3))]);
-        assert!(plan.apply_large_push(&t,0,&input).is_none());
+        assert!(plan.apply_large_push(&t,0,&input,None).is_none());
         t.push.add_transition(end,encode_negative_label(1),0);assert!(PreparedPhaseDag::prepare(&t).is_none());
         t.push.states[end as usize].transitions.clear();
         t.push.states[0].transitions.insert(1,end);assert!(PreparedPhaseDag::prepare(&t).is_none());

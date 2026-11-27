@@ -27,7 +27,7 @@ pub(super) struct InputCursorResult {
 }
 
 impl PreparedPhaseDag {
-    pub(super) fn apply_input_cursor(&self, template: &CommitTemplateDfas, input: &ParserGSS) -> Option<InputCursorResult> {
+    pub(super) fn apply_input_cursor(&self, template: &CommitTemplateDfas, input: &ParserGSS, scope: Option<(u32, u32)>) -> Option<InputCursorResult> {
         if !self.productive(0, template.pop.start_state)? {
             return Some(InputCursorResult { output: ParserGSS::empty(), residual: SmallVec::new() });
         }
@@ -75,7 +75,7 @@ impl PreparedPhaseDag {
                         if let Some(target) = template.read_to_push.get(read_id as usize).copied().flatten()
                             && self.productive(2, target)? { residual.push((2, target, base())); }
                         // READ edges inspect the SAME top at every state.
-                        let Some(&top) = stack.top() else { break; };
+                        let Some(top) = stack.top().and_then(|&top| super::template_advance::local_symbol(scope, top)) else { break; };
                         let Some(&next) = read.transitions.get(&(top as i32)) else { break; };
                         if !self.productive(1, next)? { break; }
                         read_id = next;
@@ -83,7 +83,7 @@ impl PreparedPhaseDag {
                 }
             // Select explicit edges before testing productivity; an explicit
             // rejecting edge still shadows a productive DEFAULT alternative.
-            let Some(&top) = stack.top() else { break; };
+            let Some(top) = stack.top().and_then(|&top| super::template_advance::local_symbol(scope, top)) else { break; };
             let Some(&next) = state.transitions.get(&(top as i32)).or_else(|| state.transitions.get(&DEFAULT_LABEL)) else { break; };
             if !self.productive(0, next)? { break; }
             // A known visible top guarantees one available POP. No later
@@ -136,7 +136,7 @@ mod tests {
     fn check(template:&CommitTemplateDfas,input:&ParserGSS)->bool {
         let plan=PreparedPhaseDag::prepare(template).unwrap();
         let original=input.to_stacks(8192).unwrap();
-        let Some(result)=plan.apply_input_cursor(template,input) else {assert_eq!(original,input.to_stacks(8192).unwrap());return false;};
+        let Some(result)=plan.apply_input_cursor(template,input,None) else {assert_eq!(original,input.to_stacks(8192).unwrap());return false;};
         let mut actual = result.output;
         for (phase, state, input) in result.residual {
             actual = actual.merge(&literal(template, phase, state, &input));
