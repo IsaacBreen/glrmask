@@ -39,11 +39,11 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 52;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 55;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 53;
-const EXTERNAL_LINKED_LR_CONSTRAINT_VERSION: u16 = 54;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 56;
+const EXTERNAL_LINKED_LR_CONSTRAINT_VERSION: u16 = 57;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -86,7 +86,7 @@ impl NativeSection {
                 let entries_offset = 12usize.saturating_add(group_count.saturating_add(1).saturating_mul(4));
                 (align - ((absolute_start % align + entries_offset % align) % align)) % align
             }
-            Self::MaskCache if bytes.starts_with(b"TMC6") || bytes.starts_with(b"TMC7") => {
+            Self::MaskCache if bytes.starts_with(b"TMC8") => {
                 (4 - (absolute_start & 3)) & 3
             }
             _ => 0,
@@ -832,84 +832,6 @@ struct DecodedConstraintCore {
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
 }
 
-#[derive(Serialize)]
-struct TokenMaskCacheTailRef<'a> {
-    guarded_shift_index: &'a [rustc_hash::FxHashMap<
-        crate::grammar::flat::TerminalID,
-        crate::compiler::glr::table::GuardedShiftCellIndex,
-    >],
-    seed_terminal_dense: &'a crate::runtime::artifact::SeedTerminalDenseMasks,
-    seed_universe_dense: &'a [u64],
-    word_group_sparse_masks: &'a [InternalTokenBufMasks],
-    word_group_sparse_prefix_entries: &'a [usize],
-    quad_group_sparse_masks: &'a [InternalTokenBufMasks],
-    quad_group_dense_masks: &'a [Option<Box<[u32]>>],
-    byte_group_sparse_masks: &'a [InternalTokenBufMasks],
-    byte_group_dense_masks: &'a [Option<Box<[u32]>>],
-    word_group_sparse_total_entries: usize,
-    word_group_sparse_max_entries: usize,
-    all_tokens_buf_mask: &'a [u32],
-    total_internal_buf_cost: usize,
-    heavy_token_indices: &'a [usize],
-    heavy_total_cost: usize,
-    light_avg_cost_x256: usize,
-    internal_token_buf_op_costs: &'a [usize],
-    word_group_buf_op_costs: &'a [usize],
-}
-
-#[derive(Deserialize)]
-struct TokenMaskCacheTail {
-    guarded_shift_index: Vec<rustc_hash::FxHashMap<
-        crate::grammar::flat::TerminalID,
-        crate::compiler::glr::table::GuardedShiftCellIndex,
-    >>,
-    seed_terminal_dense: crate::runtime::artifact::SeedTerminalDenseMasks,
-    seed_universe_dense: Vec<u64>,
-    word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    word_group_sparse_prefix_entries: Vec<usize>,
-    quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    word_group_sparse_total_entries: usize,
-    word_group_sparse_max_entries: usize,
-    all_tokens_buf_mask: Box<[u32]>,
-    total_internal_buf_cost: usize,
-    heavy_token_indices: Vec<usize>,
-    heavy_total_cost: usize,
-    light_avg_cost_x256: usize,
-    internal_token_buf_op_costs: Vec<usize>,
-    word_group_buf_op_costs: Vec<usize>,
-}
-
-#[derive(Serialize)]
-struct TokenMaskCacheIrregularRef<'a> {
-    guarded_shift_index: &'a [rustc_hash::FxHashMap<
-        crate::grammar::flat::TerminalID,
-        crate::compiler::glr::table::GuardedShiftCellIndex,
-    >],
-    seed_terminal_dense: &'a crate::runtime::artifact::SeedTerminalDenseMasks,
-    seed_universe_dense: &'a [u64],
-    quad_group_sparse_masks: &'a [InternalTokenBufMasks],
-    quad_group_dense_masks: &'a [Option<Box<[u32]>>],
-    byte_group_sparse_masks: &'a [InternalTokenBufMasks],
-    byte_group_dense_masks: &'a [Option<Box<[u32]>>],
-}
-
-#[derive(Deserialize)]
-struct TokenMaskCacheIrregular {
-    guarded_shift_index: Vec<rustc_hash::FxHashMap<
-        crate::grammar::flat::TerminalID,
-        crate::compiler::glr::table::GuardedShiftCellIndex,
-    >>,
-    seed_terminal_dense: crate::runtime::artifact::SeedTerminalDenseMasks,
-    seed_universe_dense: Vec<u64>,
-    quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
-}
-
 #[derive(Serialize, Deserialize)]
 struct SeedTerminalDenseCompact {
     masks: Vec<crate::runtime::artifact::DenseWords>,
@@ -961,60 +883,33 @@ impl SeedTerminalDenseCompact {
 }
 
 #[derive(Serialize)]
-struct TokenMaskCacheIrregularV5Ref<'a> {
+struct TokenMaskCacheRef<'a> {
     guarded_shift_index: &'a [rustc_hash::FxHashMap<
         crate::grammar::flat::TerminalID,
         crate::compiler::glr::table::GuardedShiftCellIndex,
     >],
-    seed_terminal_dense: &'a SeedTerminalDenseCompact,
+    seed_terminal_dense: SeedTerminalDenseCompact,
     seed_universe_dense: &'a [u64],
-    quad_group_sparse_masks: &'a [InternalTokenBufMasks],
-    quad_group_dense_masks: &'a [Option<Box<[u32]>>],
-    byte_group_sparse_masks: &'a [InternalTokenBufMasks],
-    byte_group_dense_masks: &'a [Option<Box<[u32]>>],
 }
 
 #[derive(Deserialize)]
-struct TokenMaskCacheIrregularV5 {
+struct TokenMaskCacheTail {
     guarded_shift_index: Vec<rustc_hash::FxHashMap<
         crate::grammar::flat::TerminalID,
         crate::compiler::glr::table::GuardedShiftCellIndex,
     >>,
     seed_terminal_dense: SeedTerminalDenseCompact,
     seed_universe_dense: Vec<u64>,
-    quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
-}
-
-impl TokenMaskCacheIrregularV5 {
-    fn into_irregular(self) -> Result<TokenMaskCacheIrregular, String> {
-        Ok(TokenMaskCacheIrregular {
-            guarded_shift_index: self.guarded_shift_index,
-            seed_terminal_dense: self.seed_terminal_dense.into_map()?,
-            seed_universe_dense: self.seed_universe_dense,
-            quad_group_sparse_masks: self.quad_group_sparse_masks,
-            quad_group_dense_masks: self.quad_group_dense_masks,
-            byte_group_sparse_masks: self.byte_group_sparse_masks,
-            byte_group_dense_masks: self.byte_group_dense_masks,
-        })
-    }
 }
 
 enum TokenMaskCacheArtifact {
-    Full {
-        tail: TokenMaskCacheTail,
-        word_group_prefix_buf_masks: DenseBufMaskRows,
-    },
     Fast {
-        irregular: TokenMaskCacheIrregular,
+        tail: TokenMaskCacheTail,
         word_group_sparse_masks: Vec<InternalTokenBufMasks>,
         word_group_prefix_buf_masks: DenseBufMaskRows,
     },
     WordSparse(Vec<InternalTokenBufMasks>),
 }
-
 fn encode_word_sparse_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     const MAGIC: &[u8; 4] = b"TWS1";
     const MAX_BYTES: usize = 512 * 1024;
@@ -1219,41 +1114,14 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
     let tail_started = profile.then(std::time::Instant::now);
     let mut tail = Vec::with_capacity(32 * 1024);
-    // Deduplicating tiny seed maps costs more bookkeeping than it saves. Large
-    // seed tables, however, commonly repeat the same dense token mask across
-    // hundreds of tokenizer-state/terminal keys; TMC5 pools those immutable
-    // masks once and shares the Arc again after load.
-    let compact_seed = constraint.seed_terminal_dense.len() >= 64;
-    if compact_seed {
-        let seed_terminal_dense = SeedTerminalDenseCompact::from_map(&constraint.seed_terminal_dense);
-        bincode::serialize_into(
-            &mut tail,
-            &TokenMaskCacheIrregularV5Ref {
-                guarded_shift_index: constraint.table.as_lr().map_or(&[], |table| table.guarded_shift_index.as_slice()),
-                seed_terminal_dense: &seed_terminal_dense,
-                seed_universe_dense: &constraint.seed_universe_dense,
-                quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
-                quad_group_dense_masks: &constraint.quad_group_dense_masks,
-                byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
-                byte_group_dense_masks: &constraint.byte_group_dense_masks,
-            },
-        )
-        .expect("token-mask cache serialization should succeed");
-    } else {
-        bincode::serialize_into(
-            &mut tail,
-            &TokenMaskCacheIrregularRef {
-                guarded_shift_index: constraint.table.as_lr().map_or(&[], |table| table.guarded_shift_index.as_slice()),
-                seed_terminal_dense: &constraint.seed_terminal_dense,
-                seed_universe_dense: &constraint.seed_universe_dense,
-                quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
-                quad_group_dense_masks: &constraint.quad_group_dense_masks,
-                byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
-                byte_group_dense_masks: &constraint.byte_group_dense_masks,
-            },
-        )
-        .expect("token-mask cache serialization should succeed");
-    }
+    bincode::serialize_into(
+        &mut tail,
+        &TokenMaskCacheRef {
+            guarded_shift_index: constraint.table.as_lr().map_or(&[], |table| table.guarded_shift_index.as_slice()),
+            seed_terminal_dense: SeedTerminalDenseCompact::from_map(&constraint.seed_terminal_dense),
+            seed_universe_dense: &constraint.seed_universe_dense,
+        },
+    ).expect("token-mask cache serialization should succeed");
     let tail_ms = tail_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
@@ -1276,7 +1144,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     }
     let prefix_started = profile.then(std::time::Instant::now);
     let mut out = Vec::with_capacity(total_len);
-    out.extend_from_slice(if compact_seed { b"TMC7" } else { b"TMC6" });
+    out.extend_from_slice(b"TMC8");
     for value in [tail.len(), mask_words, word_groups, word_entries, prefix_rows] {
         out.extend_from_slice(
             &u32::try_from(value)
@@ -1335,18 +1203,7 @@ fn decode_token_mask_cache_impl(
     input: &[u8],
     backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
 ) -> Result<TokenMaskCacheArtifact, String> {
-    // Current S20 artifacts may prefix TMC6/7 with up to three zero bytes so
-    // the cache's aligned dense matrix also lands at a u32-aligned offset in
-    // the whole artifact. Older S20 artifacts had no section-local prefix, so
-    // continue to accept both layouts.
-    let has_known_magic = |bytes: &[u8]| {
-        bytes.starts_with(b"TWS1")
-            || bytes.starts_with(b"TMC3")
-            || bytes.starts_with(b"TMC4")
-            || bytes.starts_with(b"TMC5")
-            || bytes.starts_with(b"TMC6")
-            || bytes.starts_with(b"TMC7")
-    };
+    let has_known_magic = |bytes: &[u8]| bytes.starts_with(b"TWS1") || bytes.starts_with(b"TMC8");
     let leading_padding = if has_known_magic(input) {
         0
     } else {
@@ -1368,18 +1225,11 @@ fn decode_token_mask_cache_impl(
                 .expect("token-mask cache section offset cannot overflow"),
         )
     });
-    const MAGIC: &[u8; 4] = b"TMC3";
-    const HEADER_LEN: usize = 16;
     if input.starts_with(b"TWS1") {
         return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
     }
-    if input.starts_with(b"TMC7")
-        || input.starts_with(b"TMC6")
-        || input.starts_with(b"TMC5")
-        || input.starts_with(b"TMC4")
-    {
-        let compact_seed = input.starts_with(b"TMC7") || input.starts_with(b"TMC5");
-        let aligned_prefix = input.starts_with(b"TMC7") || input.starts_with(b"TMC6");
+    if input.starts_with(b"TMC8") {
+        let aligned_prefix = true;
         const FAST_HEADER_LEN: usize = 24;
         if input.len() < FAST_HEADER_LEN {
             return Err("invalid fast token-mask cache header".to_owned());
@@ -1440,14 +1290,7 @@ fn decode_token_mask_cache_impl(
         let tail_bytes = input
             .get(FAST_HEADER_LEN..tail_end)
             .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?;
-        let irregular = if compact_seed {
-            bincode::deserialize::<TokenMaskCacheIrregularV5>(tail_bytes)
-                .map_err(|err| err.to_string())?
-                .into_irregular()?
-        } else {
-            bincode::deserialize::<TokenMaskCacheIrregular>(tail_bytes)
-                .map_err(|err| err.to_string())?
-        };
+        let tail = bincode::deserialize::<TokenMaskCacheTail>(tail_bytes).map_err(|err| err.to_string())?;
         let tail_ms = tail_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let body_started = profile.then(std::time::Instant::now);
@@ -1544,52 +1387,12 @@ fn decode_token_mask_cache_impl(
             );
         }
         return Ok(TokenMaskCacheArtifact::Fast {
-            irregular,
+            tail,
             word_group_sparse_masks,
             word_group_prefix_buf_masks,
         });
     }
-    if input.len() < HEADER_LEN || !input.starts_with(MAGIC) {
-        return Err("invalid token-mask cache header".to_owned());
-    }
-    let read = |offset: usize| {
-        u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap()) as usize
-    };
-    let tail_len = read(4);
-    let mask_words = read(8);
-    let prefix_rows = read(12);
-    let tail_end = HEADER_LEN
-        .checked_add(tail_len)
-        .ok_or_else(|| "token-mask cache tail overflow".to_owned())?;
-    let profile = crate::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
-    let tail_started = profile.then(std::time::Instant::now);
-    let tail = bincode::deserialize::<TokenMaskCacheTail>(
-        input
-            .get(HEADER_LEN..tail_end)
-            .ok_or_else(|| "truncated token-mask cache tail".to_owned())?,
-    )
-    .map_err(|err| err.to_string())?;
-    let tail_ms = tail_started
-        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    let prefix_started = profile.then(std::time::Instant::now);
-    let mut pos = tail_end;
-    let word_group_prefix_buf_masks =
-        decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?;
-    if pos != input.len() {
-        return Err("trailing bytes in token-mask cache".to_owned());
-    }
-    if let Some(started) = prefix_started {
-        eprintln!(
-            "[glrmask/profile][token_mask_cache_decode] tail_ms={tail_ms:.3} prefix_ms={:.3} tail_bytes={} prefix_bytes={}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            tail_len,
-            input.len().saturating_sub(tail_end),
-        );
-    }
-    Ok(TokenMaskCacheArtifact::Full {
-        tail,
-        word_group_prefix_buf_masks,
-    })
+    Err("unknown token-mask cache format".to_owned())
 }
 
 fn install_token_mask_cache(
@@ -1601,73 +1404,18 @@ fn install_token_mask_cache(
             constraint.word_group_sparse_masks = groups;
             Ok(())
         }
-        TokenMaskCacheArtifact::Fast {
-            irregular,
-            word_group_sparse_masks,
-            word_group_prefix_buf_masks,
-        } => {
-            if constraint.has_template_parser() {
-                if !irregular.guarded_shift_index.is_empty() {
-                    return Err("table-free artifact contains an LR guarded-shift cache".into());
-                }
-            } else {
-                constraint.table.guarded_shift_index = irregular.guarded_shift_index;
+        TokenMaskCacheArtifact::Fast { tail, word_group_sparse_masks, word_group_prefix_buf_masks } => {
+            if let Some(table) = constraint.table.as_lr_mut() {
+                table.guarded_shift_index = tail.guarded_shift_index;
+            } else if !tail.guarded_shift_index.is_empty() {
+                return Err("table-free artifact contains an LR guarded-shift cache".into());
             }
-            constraint.seed_terminal_dense = irregular.seed_terminal_dense;
-            constraint.seed_universe_dense = irregular.seed_universe_dense.into();
+            constraint.seed_terminal_dense = tail.seed_terminal_dense.into_map()?;
+            constraint.seed_universe_dense = tail.seed_universe_dense.into();
             constraint.word_group_sparse_masks = word_group_sparse_masks;
             constraint.word_group_prefix_buf_masks = word_group_prefix_buf_masks;
-            constraint.quad_group_sparse_masks = irregular.quad_group_sparse_masks;
-            constraint.quad_group_dense_masks = irregular.quad_group_dense_masks;
-            constraint.byte_group_sparse_masks = irregular.byte_group_sparse_masks;
-            constraint.byte_group_dense_masks = irregular.byte_group_dense_masks;
-            constraint.rebuild_heavy_and_sliding_token_mask_caches();
+            constraint.rebuild_heavy_token_dense_masks();
             constraint.rebuild_token_mask_cache_stats();
-            if constraint.token_mask_caches_ready() {
-                Ok(())
-            } else {
-                Err("fast token-mask cache section does not match constraint dimensions".to_owned())
-            }
-        }
-        TokenMaskCacheArtifact::Full {
-            tail: cache,
-            word_group_prefix_buf_masks,
-        } => {
-            if constraint.has_template_parser() {
-                if !cache.guarded_shift_index.is_empty() {
-                    return Err("table-free artifact contains an LR guarded-shift cache".into());
-                }
-            } else {
-                constraint.table.guarded_shift_index = cache.guarded_shift_index;
-            }
-            constraint.seed_terminal_dense = cache.seed_terminal_dense;
-            constraint.seed_universe_dense = cache.seed_universe_dense.into();
-            constraint.word_group_sparse_masks = cache.word_group_sparse_masks;
-            constraint.word_group_prefix_buf_masks = word_group_prefix_buf_masks;
-            constraint.word_group_sparse_prefix_entries = cache.word_group_sparse_prefix_entries;
-            constraint.quad_group_sparse_masks = cache.quad_group_sparse_masks;
-            constraint.quad_group_dense_masks = cache.quad_group_dense_masks;
-            constraint.byte_group_sparse_masks = cache.byte_group_sparse_masks;
-            constraint.byte_group_dense_masks = cache.byte_group_dense_masks;
-            constraint.word_group_sparse_total_entries = cache.word_group_sparse_total_entries;
-            constraint.word_group_sparse_max_entries = cache.word_group_sparse_max_entries;
-            constraint.all_tokens_buf_mask = cache.all_tokens_buf_mask;
-            constraint.total_internal_buf_cost = cache.total_internal_buf_cost;
-            constraint.heavy_token_indices = cache.heavy_token_indices;
-            constraint.heavy_total_cost = cache.heavy_total_cost;
-            constraint.light_avg_cost_x256 = cache.light_avg_cost_x256;
-            constraint.internal_token_buf_op_costs = cache.internal_token_buf_op_costs;
-            constraint.word_group_buf_op_costs = cache.word_group_buf_op_costs;
-            constraint.rebuild_heavy_and_sliding_token_mask_caches();
-            let rebuilt_heavy_indices = constraint
-                .heavy_token_dense_masks
-                .iter()
-                .enumerate()
-                .filter_map(|(index, mask)| mask.is_some().then_some(index))
-                .collect::<Vec<_>>();
-            if rebuilt_heavy_indices != constraint.heavy_token_indices {
-                return Err("token-mask cache heavy-token index mismatch".to_owned());
-            }
             if constraint.token_mask_caches_ready() {
                 Ok(())
             } else {
@@ -1676,7 +1424,6 @@ fn install_token_mask_cache(
         }
     }
 }
-
 fn encode_internal_token_buf_masks(constraint: &Constraint) -> Vec<u8> {
     const MAGIC: &[u8; 4] = b"IBM2";
     const ENTRY_BYTES: usize = std::mem::size_of::<PackedInternalTokenBufMask>();
@@ -3181,7 +2928,6 @@ impl Constraint {
                 ("word_sparse", bincode::serialized_size(&self.word_group_sparse_masks).unwrap_or(0)),
                 ("word_prefix", bincode::serialized_size(&self.word_group_prefix_buf_masks).unwrap_or(0)),
                 ("word_sparse_prefix", bincode::serialized_size(&self.word_group_sparse_prefix_entries).unwrap_or(0)),
-                ("sliding", bincode::serialized_size(&self.sliding_word_group_buf_masks).unwrap_or(0)),
                 ("all", bincode::serialized_size(&self.all_tokens_buf_mask).unwrap_or(0)),
                 ("heavy", bincode::serialized_size(&self.heavy_token_dense_masks).unwrap_or(0)),
                 ("flat", bincode::serialized_size(&self.internal_token_buf_flat).unwrap_or(0)),
@@ -3201,7 +2947,6 @@ impl Constraint {
                 &self.word_group_sparse_masks,
                 &self.word_group_prefix_buf_masks,
                 &self.word_group_sparse_prefix_entries,
-                &self.sliding_word_group_buf_masks,
                 &self.all_tokens_buf_mask,
             ))
             .expect("runtime mask cache profiling serialization should succeed");

@@ -95,6 +95,10 @@ impl ParserExecutable {
             _ => None,
         }
     }
+    pub(crate) fn as_lr_mut(&mut self) -> Option<&mut GLRTable> {
+        match self { Self::ExplicitLr(table) => Some(table), _ => None }
+    }
+
     pub(crate) fn as_lr(&self) -> Option<&GLRTable> {
         match self { Self::ExplicitLr(table) => Some(table), _ => None }
     }

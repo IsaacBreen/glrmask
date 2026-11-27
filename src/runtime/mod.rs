@@ -48,7 +48,7 @@ pub(crate) use constraint::Constraint;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use artifact::ConstraintInner;
-pub(crate) use constraint::{InternalTokenMaskPrebuild, TokenMaskCachePrebuild};
+pub(crate) use constraint::{TokenMaskCachePrebuild};
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;
 pub use state::ConstraintState;

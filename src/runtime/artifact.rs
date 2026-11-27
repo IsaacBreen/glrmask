@@ -9815,9 +9815,6 @@ constraint_data_schema! {
     /// for all original tokens that map to internal token `i`.
     @serde(skip)
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    /// Dense sliding windows of 2, 4, 8, 16 and 32 consecutive 64-token groups.
-    @serde(skip)
-    pub(crate) sliding_word_group_buf_masks: [DenseBufMaskRows; 5],
     /// Sparse OR-union for each 64-token internal word group.
     @serde(skip)
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -9832,18 +9829,6 @@ constraint_data_schema! {
     /// Prefix sums of `word_group_sparse_masks[i].len()`.
     @serde(skip)
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
-    @serde(skip)
-    pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense output masks for quad groups whose sparse replay is more
-    /// expensive than a sequential output-buffer scan.
-    @serde(skip)
-    pub(crate) quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
-    @serde(skip)
-    pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense output masks for byte groups whose sparse replay is more
-    /// expensive than a sequential output-buffer scan.
-    @serde(skip)
-    pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
     pub(crate) word_group_sparse_total_entries: usize,
     @serde(skip)
     pub(crate) word_group_sparse_max_entries: usize,
