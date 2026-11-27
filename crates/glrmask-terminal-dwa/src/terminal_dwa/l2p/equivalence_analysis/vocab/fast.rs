@@ -2557,117 +2557,78 @@ fn run_suffix(
     (end_state, edges)
 }
 
-/// Compute a token's full signature over a batch of initial states.
-/// Also cleans up match_positions for dirty groups (maintaining the NONE invariant).
-fn finish_token_signature(
-    dfa: &Dfa,
-    chunk_states: &[usize],
-    scratch: &mut Scratch,
-) -> u64 {
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag_nodes;
-    let single_target_hash_pos = scratch.single_target_hash_pos;
-    let single_target_hash = scratch.single_target_hash;
-    let mut sig: u64 = HASH_SEED3;
-    for i in 0..chunk_states.len() {
-        let completion = dfa.completion(scratch.current_states[i]);
-        let base = i * num_groups;
-        let mask_base = i * dirty_words;
-
-        let state_sig = if scratch.dirty_state_flags[i] != 0 {
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for w in 0..dirty_words {
-                let mut dirty_mask = scratch.dirty_group_masks[mask_base + w];
-                while dirty_mask != 0 {
-                    let bit = dirty_mask.trailing_zeros() as usize;
-                    dirty_mask &= dirty_mask - 1;
-                    let gid = w * 64 + bit;
-                    if gid >= num_groups {
-                        break;
-                    }
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(target)
-                                .and_then(|node| node.as_ref())
-                                .map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
-                    scratch.match_positions[base + gid] = NONE;
-                }
-                scratch.dirty_group_masks[mask_base + w] = 0;
-            }
-            scratch.dirty_state_flags[i] = 0;
-            h.finish()
-        } else {
-            completion
-        };
-
-        sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
+/// Canonical observation of a single scanner start. Prefix sharing changes
+/// how match positions are maintained, never how their observations are
+/// interpreted. The same fold is used for both dense and sparse signatures.
+#[inline]
+fn state_observation(dfa: &Dfa, scratch: &Scratch, i: usize) -> u64 {
+    let completion = dfa.completion(scratch.current_states[i]);
+    if scratch.dirty_state_flags[i] == 0 {
+        return completion;
     }
-    sig
+    let mut h = new_hasher();
+    h.write_u64(completion);
+    let base = i * scratch.num_groups;
+    let mask_base = i * scratch.dirty_words;
+    for w in 0..scratch.dirty_words {
+        let mut mask = scratch.dirty_group_masks[mask_base + w];
+        while mask != 0 {
+            let bit = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let gid = w * 64 + bit;
+            if gid >= scratch.num_groups { break; }
+            let position = scratch.match_positions[base + gid];
+            if position == NONE || position == 0 { continue; }
+            let target = position as usize;
+            let hash = if scratch.single_target_hash_pos == target {
+                scratch.single_target_hash
+            } else {
+                scratch.dag_nodes.get(target).and_then(Option::as_ref)
+                    .map_or(0, |node| node.hash)
+            };
+            h.write_u64(gid as u64);
+            h.write_u64(hash);
+        }
+    }
+    h.finish()
+}
+
+#[inline]
+fn clear_state_observation(scratch: &mut Scratch, i: usize) {
+    if scratch.dirty_state_flags[i] == 0 { return; }
+    let base = i * scratch.num_groups;
+    let mask_base = i * scratch.dirty_words;
+    for w in 0..scratch.dirty_words {
+        let mut mask = std::mem::take(&mut scratch.dirty_group_masks[mask_base + w]);
+        while mask != 0 {
+            let bit = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let gid = w * 64 + bit;
+            if gid >= scratch.num_groups { break; }
+            scratch.match_positions[base + gid] = NONE;
+        }
+    }
+    scratch.dirty_state_flags[i] = 0;
+}
+
+#[inline]
+fn consume_state_observation(dfa: &Dfa, scratch: &mut Scratch, i: usize) -> u64 {
+    let word = state_observation(dfa, scratch, i);
+    clear_state_observation(scratch, i);
+    word
+}
+
+fn finish_token_signature(dfa: &Dfa, chunk_states: &[usize], scratch: &mut Scratch) -> u64 {
+    (0..chunk_states.len()).fold(HASH_SEED3, |sig, i| {
+        sig.wrapping_mul(HASH_SEED1).wrapping_add(consume_state_observation(dfa, scratch, i))
+    })
 }
 
 fn fill_state_observation_words_and_cleanup(
-    dfa: &Dfa,
-    batch_len: usize,
-    scratch: &mut Scratch,
-    out: &mut [u64],
+    dfa: &Dfa, batch_len: usize, scratch: &mut Scratch, out: &mut [u64],
 ) {
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag_nodes;
-    let single_target_hash_pos = scratch.single_target_hash_pos;
-    let single_target_hash = scratch.single_target_hash;
-
-    for i in 0..batch_len {
-        let completion = dfa.completion(scratch.current_states[i]);
-        let base = i * num_groups;
-        let mask_base = i * dirty_words;
-
-        let state_sig = if scratch.dirty_state_flags[i] != 0 {
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for w in 0..dirty_words {
-                let mut dirty_mask = scratch.dirty_group_masks[mask_base + w];
-                while dirty_mask != 0 {
-                    let bit = dirty_mask.trailing_zeros() as usize;
-                    dirty_mask &= dirty_mask - 1;
-                    let gid = w * 64 + bit;
-                    if gid >= num_groups {
-                        break;
-                    }
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(target)
-                                .and_then(|node| node.as_ref())
-                                .map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
-                    scratch.match_positions[base + gid] = NONE;
-                }
-                scratch.dirty_group_masks[mask_base + w] = 0;
-            }
-            scratch.dirty_state_flags[i] = 0;
-            h.finish()
-        } else {
-            completion
-        };
-
-        out[i] = state_sig;
+    for (i, word) in out[..batch_len].iter_mut().enumerate() {
+        *word = consume_state_observation(dfa, scratch, i);
     }
 }
 
@@ -3094,94 +3055,7 @@ struct DfsStepStats {
 
 /// Walk one byte forward at the given depth, recording all state changes
 /// to the change log for later backtracking.
-fn dfs_step(
-    dfa: &Dfa,
-    scratch: &mut Scratch,
-    trie: &mut TrieWalkState,
-    byte: u8,
-    depth: usize,
-    position_offset: usize,
-    batch_len: usize,
-) {
-    trie.ensure_depth(depth);
-    let TrieWalkState {
-        root_active_indices,
-        depth_logs,
-    } = trie;
-    let (source_indices, log) = if depth == 0 {
-        (root_active_indices.as_slice(), &mut depth_logs[0])
-    } else {
-        let (previous, current) = depth_logs.split_at_mut(depth);
-        (
-            previous[depth - 1].active_indices.as_slice(),
-            &mut current[0],
-        )
-    };
-    log.clear();
-
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let position = (position_offset + depth + 1) as u32;
-    let class = dfa.byte_to_class[byte as usize] as usize;
-    let class_base = class * dfa.num_states;
-
-    debug_assert!(source_indices.iter().all(|&i| i < batch_len));
-    for &i in source_indices {
-        let old_state = scratch.current_states[i];
-        debug_assert_ne!(old_state, STATE_NONE);
-        if dfa.finalizers[old_state].is_empty()
-            && dfa.self_loop_bytes[old_state].contains(byte)
-        {
-            log.active_indices.push(i);
-            continue;
-        }
-
-        let next_state_raw =
-            unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
-        if next_state_raw == NONE {
-            log.state_changes.push((i, old_state));
-            scratch.current_states[i] = STATE_NONE;
-            continue;
-        }
-
-        let ns = next_state_raw as usize;
-        log.state_changes.push((i, old_state));
-        scratch.current_states[i] = ns;
-
-        let base = i * num_groups;
-        for &gid in &dfa.finalizers[ns] {
-            if gid < num_groups {
-                let ix = base + gid;
-                let old_mp = scratch.match_positions[ix];
-                if old_mp == NONE {
-                    let word_idx = gid / 64;
-                    let bit = gid % 64;
-                    let flat_idx = i * dirty_words + word_idx;
-                    log.dirty_changes
-                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
-                    if scratch.dirty_state_flags[i] == 0 {
-                        log.dirty_state_flag_changes
-                            .push((i, scratch.dirty_state_flags[i]));
-                        scratch.dirty_state_flags[i] = 1;
-                        set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
-                    }
-                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
-                }
-                log.match_changes.push((ix, old_mp));
-                update_trie_target_aggregate(scratch, gid, old_mp, position);
-                scratch.match_positions[ix] = position;
-            }
-        }
-
-        if dfa.is_dead_end[ns] {
-            scratch.current_states[i] = STATE_NONE;
-        } else {
-            log.active_indices.push(i);
-        }
-    }
-}
-
-fn dfs_step_profiled(
+fn dfs_step<const PROFILE: bool>(
     dfa: &Dfa,
     scratch: &mut Scratch,
     trie: &mut TrieWalkState,
@@ -3218,12 +3092,12 @@ fn dfs_step_profiled(
     for &i in source_indices {
         let old_state = scratch.current_states[i];
         debug_assert_ne!(old_state, STATE_NONE);
-        step_stats.states_visited += 1;
+        if PROFILE { step_stats.states_visited += 1; }
         if dfa.finalizers[old_state].is_empty()
             && dfa.self_loop_bytes[old_state].contains(byte)
         {
             log.active_indices.push(i);
-            step_stats.noop_self_loops += 1;
+            if PROFILE { step_stats.noop_self_loops += 1; }
             continue;
         }
 
@@ -3234,8 +3108,8 @@ fn dfs_step_profiled(
         if next_state_raw == NONE {
             log.state_changes.push((i, old_state));
             scratch.current_states[i] = STATE_NONE;
-            step_stats.dead_transitions += 1;
-            step_stats.dead_without_new_dirty += 1;
+            if PROFILE { step_stats.dead_transitions += 1; }
+            if PROFILE { step_stats.dead_without_new_dirty += 1; }
             continue;
         }
 
@@ -3259,11 +3133,11 @@ fn dfs_step_profiled(
                             .push((i, scratch.dirty_state_flags[i]));
                         scratch.dirty_state_flags[i] = 1;
                         set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
-                        step_stats.new_dirty_states += 1;
+                        if PROFILE { step_stats.new_dirty_states += 1; }
                     }
                     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
-                    step_stats.new_dirty_groups += 1;
-                    state_new_dirty_groups += 1;
+                    if PROFILE { step_stats.new_dirty_groups += 1; }
+                    if PROFILE { state_new_dirty_groups += 1; }
                 }
                 log.match_changes.push((ix, old_mp));
                 update_trie_target_aggregate(scratch, gid, old_mp, position);
@@ -3273,9 +3147,9 @@ fn dfs_step_profiled(
 
         if dfa.is_dead_end[ns] {
             scratch.current_states[i] = STATE_NONE;
-            step_stats.dead_transitions += 1;
-            if state_new_dirty_groups == 0 {
-                step_stats.dead_without_new_dirty += 1;
+            if PROFILE { step_stats.dead_transitions += 1; }
+            if PROFILE && state_new_dirty_groups == 0 {
+                if PROFILE { step_stats.dead_without_new_dirty += 1; }
             }
         } else {
             log.active_indices.push(i);
@@ -3392,55 +3266,11 @@ fn finish_token_signature_sparse_live_clean(
 /// Compute token signature without modifying scratch state (no cleanup).
 /// Uses multi-word bitmask dirty tracking for any number of groups.
 fn finish_token_signature_no_cleanup(
-    dfa: &Dfa,
-    num_initial_states: usize,
-    scratch: &Scratch,
+    dfa: &Dfa, num_initial_states: usize, scratch: &Scratch,
 ) -> u64 {
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag_nodes;
-    let single_target_hash_pos = scratch.single_target_hash_pos;
-    let single_target_hash = scratch.single_target_hash;
-    let mut sig: u64 = HASH_SEED3;
-    for i in 0..num_initial_states {
-        let completion = dfa.completion(scratch.current_states[i]);
-        let base = i * num_groups;
-        let mask_base = i * dirty_words;
-
-        let state_sig = if scratch.dirty_state_flags[i] != 0 {
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for w in 0..dirty_words {
-                let mut dm = scratch.dirty_group_masks[mask_base + w];
-                while dm != 0 {
-                    let bit = dm.trailing_zeros() as usize;
-                    dm &= dm - 1;
-                    let gid = w * 64 + bit;
-                    if gid >= num_groups {
-                        break;
-                    }
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(target)
-                                .and_then(|node| node.as_ref())
-                                .map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
-                }
-            }
-            h.finish()
-        } else {
-            completion
-        };
-        sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
-    }
-    sig
+    (0..num_initial_states).fold(HASH_SEED3, |sig, i| {
+        sig.wrapping_mul(HASH_SEED1).wrapping_add(state_observation(dfa, scratch, i))
+    })
 }
 
 /// Compute the clean completion fold with the 4-way fast path, then correct only
@@ -3454,11 +3284,6 @@ fn finish_token_signature_sparse_dirty(
     scratch: &Scratch,
     all_none_signature: u64,
 ) -> u64 {
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag_nodes;
-    let single_target_hash_pos = scratch.single_target_hash_pos;
-    let single_target_hash = scratch.single_target_hash;
     // The clean component of a dirty token is the same polynomial fold as for
     // a clean token.  Every state omitted from `live_indices` is exactly
     // STATE_NONE, so start from the all-dead fold and correct only live states.
@@ -3486,35 +3311,7 @@ fn finish_token_signature_sparse_dirty(
             }
 
             let completion = dfa.completion(scratch.current_states[i]);
-            let base = i * num_groups;
-            let mask_base = i * dirty_words;
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for w in 0..dirty_words {
-                let mut dm = scratch.dirty_group_masks[mask_base + w];
-                while dm != 0 {
-                    let group_bit = dm.trailing_zeros() as usize;
-                    dm &= dm - 1;
-                    let gid = w * 64 + group_bit;
-                    if gid >= num_groups {
-                        break;
-                    }
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(target)
-                                .and_then(|node| node.as_ref())
-                                .map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
-                }
-            }
-            let state_sig = h.finish();
+            let state_sig = state_observation(dfa, scratch, i);
             let correction = state_sig.wrapping_sub(completion);
             sig = sig.wrapping_add(correction.wrapping_mul(scratch.completion_weights[i]));
         }
@@ -3693,7 +3490,7 @@ fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
 
         for depth in lcp..suffix_len {
             if profile {
-                let step_stats = dfs_step_profiled(
+                let step_stats = dfs_step::<true>(
                     dfa,
                     scratch,
                     trie,
@@ -3714,7 +3511,7 @@ fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
                 stats.dfs_new_dirty_states += step_stats.new_dirty_states;
                 stats.dfs_noop_self_loops += step_stats.noop_self_loops;
             } else {
-                dfs_step(
+                dfs_step::<false>(
                     dfa,
                     scratch,
                     trie,
