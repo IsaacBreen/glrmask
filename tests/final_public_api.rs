@@ -50,10 +50,10 @@ fn precompile_vocab_lock_survives_end_token_delegation_and_roundtrip() {
             for requested in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
                 let opts = CompileOptions::default().mask_strategy(requested);
                 let error = module.precompile_with(&wrong, opts.clone()).unwrap_err();
-                assert_eq!(error.kind(), glrmask::ErrorKind::InvalidInput);
+                assert_eq!(error.kind(), glrmask::ErrorKind::VocabMismatch);
                 assert!(error.to_string().contains("vocabular"));
                 let error = module.compile_with(&wrong, opts).unwrap_err();
-                assert_eq!(error.kind(), glrmask::ErrorKind::InvalidInput);
+                assert_eq!(error.kind(), glrmask::ErrorKind::VocabMismatch);
                 assert!(error.to_string().contains("vocabular"));
                 assert_eq!(module.save(), before);
             }

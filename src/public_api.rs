@@ -216,10 +216,19 @@ impl Extern {
 }
 
 /// An owned, shallow snapshot of extern declarations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Externs {
     entries: Vec<Extern>,
     unbound: Vec<Extern>,
+}
+
+impl std::fmt::Debug for Externs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Externs")
+            .field("entries", &self.entries)
+            .field("unbound", &self.unbound.iter().map(Extern::name).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

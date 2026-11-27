@@ -135,9 +135,9 @@ int main(void) {
         const uint8_t z[]={'z'}; const glrmask_vocab_entry wrong_entries[]={{0,z,1}};
         glrmask_vocab* wrong=NULL; glrmask_constraint* bad=NULL;
         CHECK(glrmask_vocab_new(wrong_entries,1,&wrong)==GLRMASK_OK);
-        CHECK(glrmask_module_precompile(module,wrong,&module_options)!=GLRMASK_OK);
+        CHECK(glrmask_module_precompile(module,wrong,&module_options)==GLRMASK_VOCAB_MISMATCH);
         CHECK(strstr(glrmask_error_message(),"vocabular")!=NULL);
-        CHECK(glrmask_module_compile(module,wrong,&module_options,&bad)!=GLRMASK_OK && bad==NULL);
+        CHECK(glrmask_module_compile(module,wrong,&module_options,&bad)==GLRMASK_VOCAB_MISMATCH && bad==NULL);
         CHECK(strstr(glrmask_error_message(),"vocabular")!=NULL);
         glrmask_vocab_free(wrong);
     }

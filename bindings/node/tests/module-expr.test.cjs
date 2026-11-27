@@ -221,7 +221,7 @@ test('Expr: choice, sequence, literal and plain string errors',()=>{
 test('Module: asynchronous precompile rejects a stale completion atomically',async()=>{
   const v=vocab(),parent=new Module(host());const pending=parent.precompile(v);
   parent.bind('child',source());
-  await assert.rejects(pending,/changed during precompile/);accept(parent,v,[4]);
+  await assert.rejects(pending,e=>e.code==="GLRMASK_PRECOMPILE_RACE" && /changed during precompile/.test(e.message));accept(parent,v,[4]);
 });
 
 test('Grammar.clone and Module.clone return independent copies', () => {
