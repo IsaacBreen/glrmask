@@ -19097,6 +19097,7 @@ fn build_composed_constraint_unfinalized(
     let token_bytes = vocab.entries_arc();
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint::from_data(crate::runtime::ConstraintData {
+        cached_mask_bit_len: std::sync::OnceLock::new(),
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
         runtime_backend: ConstraintRuntimeBackend::Static,

@@ -6225,6 +6225,7 @@ fn compile_prepared_with_profile_and_table_construction(
         ).expect("source compiler must produce a finite template parser before Constraint materialization");
         drop(table);
         let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
+            cached_mask_bit_len: std::sync::OnceLock::new(),
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,

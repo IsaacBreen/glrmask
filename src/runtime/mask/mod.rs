@@ -22,14 +22,14 @@ use crate::runtime::constraint::{
     Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
 };
 use crate::runtime::state::{
-    ConstraintState, MaskCacheData, ParserStateMap, mask_scratch,
+    ConstraintState, ParserStateMap, StateMaskCache, mask_scratch,
 };
 #[cfg(test)]
 use crate::runtime::state::CommitBuffers;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use self::profile::{
@@ -4672,7 +4672,7 @@ impl ConstraintState {
                 constraint: component.constraint.as_ref().clone(),
                 state,
                 generation: self.generation,
-                mask_cache: Mutex::new(None),
+                mask_cache: StateMaskCache::new(),
             };
             // Dispatch through the retained component itself. Static source
             // constraints therefore keep their parser DWA and precomputed mask
@@ -4874,7 +4874,7 @@ impl ConstraintState {
                 constraint: component.constraint.as_ref().clone(),
                 state,
                 generation: self.generation,
-                mask_cache: Mutex::new(None),
+                mask_cache: StateMaskCache::new(),
             };
             // Preserve the supplied component's runtime backend. A static
             // component reuses its compiled parser-DWA/mask machinery; a
@@ -5084,7 +5084,7 @@ impl ConstraintState {
                                     constraint: self.constraint.clone(),
                                     state: frontier,
                                     generation: self.generation,
-                                    mask_cache: Mutex::new(None),
+                                    mask_cache: StateMaskCache::new(),
                                 };
                                 vocab.or_mask(&view, buf).expect("exact vocabulary mask failed")
                             })
@@ -7194,26 +7194,7 @@ impl ConstraintState {
     }
 
     fn store_mask_cache(&self, buf: &[u32], merged_dense: &[u64]) {
-        let mut cache = self.mask_cache.lock().unwrap();
-
-        match cache.as_mut() {
-            Some(cache_data) => {
-                cache_data.generation = self.generation;
-
-                cache_data.mask.clear();
-                cache_data.mask.extend_from_slice(buf);
-
-                cache_data.merged_dense.clear();
-                cache_data.merged_dense.extend_from_slice(merged_dense);
-            }
-            None => {
-                *cache = Some(MaskCacheData {
-                    generation: self.generation,
-                    mask: buf.to_vec(),
-                    merged_dense: merged_dense.to_vec(),
-                });
-            }
-        }
+        self.mask_cache.store(self.generation, buf, merged_dense);
     }
 
     fn fill_single_path_seed_dense(
@@ -8005,23 +7986,7 @@ impl ConstraintState {
     }
 
     fn store_mask_cache_reuse_dense(&self, buf: &[u32]) {
-        let mut cache = self.mask_cache.lock().unwrap();
-
-        match cache.as_mut() {
-            Some(cache_data) => {
-                cache_data.generation = self.generation;
-                cache_data.mask.clear();
-                cache_data.mask.extend_from_slice(buf);
-                cache_data.merged_dense.clear();
-            }
-            None => {
-                *cache = Some(MaskCacheData {
-                    generation: self.generation,
-                    mask: buf.to_vec(),
-                    merged_dense: Vec::new(),
-                });
-            }
-        }
+        self.mask_cache.store(self.generation, buf, &[]);
     }
 
     fn touch_mask_cache_generation(&self) {
@@ -8716,7 +8681,7 @@ impl ConstraintState {
             constraint: self.constraint.clone(),
             state: self.state.clone(),
             generation: self.generation,
-            mask_cache: Mutex::new(None),
+            mask_cache: StateMaskCache::new(),
         });
         for (tokenizer_state, factored) in additions {
             shadow

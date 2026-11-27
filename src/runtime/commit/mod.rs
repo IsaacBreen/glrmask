@@ -8574,7 +8574,7 @@ impl ConstraintState {
         self.terminated = false;
         if let Some(markers) = self.markers.as_mut() { markers.begin(); }
         self.generation = self.generation.wrapping_add(1);
-        *self.mask_cache.get_mut().unwrap_or_else(|error| error.into_inner()) = None;
+        self.mask_cache.clear();
     }
 
     #[inline]
@@ -8673,7 +8673,7 @@ impl ConstraintState {
         }
 
         let cache = self.mask_cache.get_mut().unwrap();
-        if let Some(cache_data) = cache.as_mut()
+        if let Some(cache_data) = cache
             && cache_data.generation == previous_generation
         {
             cache_data.generation = self.generation;
@@ -9169,7 +9169,7 @@ impl ConstraintState {
         if let Some(markers) = self.markers.as_mut() { markers.begin(); }
         self.terminated = true;
         self.generation = self.generation.wrapping_add(1);
-        *self.mask_cache.get_mut().unwrap_or_else(|error| error.into_inner()) = None;
+        self.mask_cache.clear();
         Some(Ok(()))
     }
 
@@ -9188,7 +9188,7 @@ impl ConstraintState {
         self.reject_after_failed_commit();
         // An unwind may have crossed a diagnostic mask guard. Do not retain
         // a poisoned mutex or a cached mask that was computed mid-unwind.
-        self.mask_cache = std::sync::Mutex::new(None);
+        self.mask_cache.clear();
         // Unwinding scratch leases discard their temporary storage.
     }
 

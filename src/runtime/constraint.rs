@@ -11,7 +11,7 @@ use crate::automata::lexer::{
 use crate::automata::regex::Expr;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -69,7 +69,7 @@ use super::artifact::{
 pub(crate) use super::artifact::Constraint;
 pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
 use super::mask_mapping::FinalMaskMapping;
-use super::state::ConstraintState;
+use super::state::{ConstraintState, StateMaskCache};
 
 struct RecursiveSegmentedParserTables<'a> {
     root: &'a Constraint,
@@ -12590,7 +12590,7 @@ impl Constraint {
             constraint: self.clone(),
             state,
             generation: 0,
-            mask_cache: Mutex::new(None),
+            mask_cache: StateMaskCache::new(),
         };
         state.reserve_linear_stack_hot_path();
         state.initialize_markers();
@@ -12606,7 +12606,7 @@ impl Constraint {
             constraint: self.clone(),
             state: self.initial_state_map(),
             generation: 0,
-            mask_cache: Mutex::new(None),
+            mask_cache: StateMaskCache::new(),
         };
         state.reserve_linear_stack_hot_path();
         state.initialize_markers();

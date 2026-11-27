@@ -991,6 +991,7 @@ impl DynamicConstraint {
         };
         
         Constraint::from_data(crate::runtime::ConstraintData {
+            cached_mask_bit_len: std::sync::OnceLock::new(),
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,

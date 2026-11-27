@@ -10384,14 +10384,13 @@ pub(crate) struct LateGrammarSlot {
 #[derive(Debug, Clone)]
 pub struct ConstraintInner {
     pub(crate) data: Arc<ConstraintData>,
-    pub(crate) cached_mask_bit_len: OnceLock<usize>,
 }
 
 pub(crate) type Constraint = ConstraintInner;
 
 impl Constraint {
     pub(crate) fn from_data(data: ConstraintData) -> Self {
-        Self { data: Arc::new(data), cached_mask_bit_len: OnceLock::new() }
+        Self { data: Arc::new(data) }
     }
 
     pub(crate) fn as_data(&self) -> &ConstraintData {
@@ -10411,9 +10410,10 @@ impl std::ops::DerefMut for Constraint {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Internal compilation, linking and loading may change the token domain.
-        // Invalidate this handle only; other handles retain their immutable data.
-        self.cached_mask_bit_len.take();
-        Arc::make_mut(&mut self.data)
+        // Detach before invalidating; sibling handles retain their original domain.
+        let data = Arc::make_mut(&mut self.data);
+        data.cached_mask_bit_len.take();
+        data
     }
 }
 
@@ -10422,6 +10422,8 @@ impl std::ops::DerefMut for Constraint {
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ConstraintData {
+    /// Runtime-only memo of the immutable public token domain.
+    pub(crate) cached_mask_bit_len: OnceLock<usize>,
     /// Final generation policy, not part of the embeddable compiled body.
     /// The outer root artifact stores these separately from compiler data.
     pub(crate) end_tokens: Arc<[u32]>,
@@ -10813,6 +10815,8 @@ pub struct ConstraintData {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(remote = "ConstraintData")]
 pub(crate) struct ConstraintSerde {
+    #[serde(skip, default)]
+    pub(crate) cached_mask_bit_len: OnceLock<usize>,
     #[serde(skip, default)]
     pub(crate) end_tokens: Arc<[u32]>,
     #[serde(skip, default)]

@@ -355,6 +355,92 @@ pub(crate) struct MaskCacheData {
     pub merged_dense: Vec<u64>,
 }
 
+/// A pointer-sized lazy per-sequence cache. The pointee is installed at most
+/// once through a shared reference; clearing and reclamation require &mut self.
+/// A populated cache uses the same Mutex as before, now beside its payload.
+pub(crate) struct StateMaskCache {
+    ptr: std::sync::atomic::AtomicPtr<Mutex<MaskCacheData>>,
+}
+
+impl StateMaskCache {
+    pub(crate) const fn new() -> Self {
+        Self { ptr: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }
+    }
+
+    #[inline]
+    fn cell(&self) -> Option<&Mutex<MaskCacheData>> {
+        // SAFETY: only a fully initialized Box is published (Release CAS).
+        // Through &self it cannot be removed, replaced, or freed. The returned
+        // borrow prevents obtaining the &mut self required to clear/drop it.
+        unsafe { self.ptr.load(std::sync::atomic::Ordering::Acquire).as_ref() }
+    }
+
+    #[inline]
+    pub(crate) fn lock(&self) -> std::sync::LockResult<Option<std::sync::MutexGuard<'_, MaskCacheData>>> {
+        match self.cell() {
+            None => Ok(None),
+            Some(cell) => cell.lock().map(Some)
+                .map_err(|e| std::sync::PoisonError::new(Some(e.into_inner()))),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get_mut(&mut self) -> std::sync::LockResult<Option<&mut MaskCacheData>> {
+        // SAFETY: the unique borrow excludes concurrent shared access; the
+        // pointer, if non-null, owns a live boxed Mutex.
+        match unsafe { self.ptr.get_mut().as_mut() } {
+            None => Ok(None),
+            Some(cell) => cell.get_mut().map(Some)
+                .map_err(|e| std::sync::PoisonError::new(Some(e.into_inner()))),
+        }
+    }
+
+    pub(crate) fn store(&self, generation: u64, mask: &[u32], dense: &[u64]) {
+        use std::sync::atomic::Ordering::{Acquire, AcqRel};
+        let cell = match self.cell() {
+            Some(cell) => cell,
+            None => {
+                let candidate = Box::into_raw(Box::new(Mutex::new(MaskCacheData {
+                    generation, mask: mask.to_vec(), merged_dense: dense.to_vec(),
+                })));
+                match self.ptr.compare_exchange(std::ptr::null_mut(), candidate, AcqRel, Acquire) {
+                    Ok(_) => return,
+                    Err(existing) => {
+                        // SAFETY: the failed CAS did not publish candidate; we
+                        // retain sole ownership. The winner is fully initialized
+                        // and cannot be freed while this shared borrow is live.
+                        unsafe {
+                            drop(Box::from_raw(candidate));
+                            &*existing
+                        }
+                    }
+                }
+            }
+        };
+        let mut data = cell.lock().unwrap();
+        data.generation = generation;
+        data.mask.clear();
+        data.mask.extend_from_slice(mask);
+        data.merged_dense.clear();
+        data.merged_dense.extend_from_slice(dense);
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        let ptr = std::mem::replace(self.ptr.get_mut(), std::ptr::null_mut());
+        if !ptr.is_null() {
+            // SAFETY: &mut self excludes all outstanding borrows/guards.
+            // The pointer was produced by Box::into_raw and has one owner.
+            unsafe { drop(Box::from_raw(ptr)); }
+        }
+    }
+}
+
+impl Drop for StateMaskCache {
+    fn drop(&mut self) { self.clear(); }
+}
+
+
 #[derive(Default)]
 pub(crate) struct MaskScratch {
     pub merged_dense: Vec<u64>,
@@ -604,7 +690,7 @@ pub struct ConstraintState {
     pub(crate) generation: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
     /// Not cloned — clone starts with empty cache.
-    pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
+    pub(crate) mask_cache: StateMaskCache,
 }
 
 impl Clone for ConstraintState {
@@ -616,7 +702,7 @@ impl Clone for ConstraintState {
             constraint: self.constraint.clone(),
             state: self.state.clone(),
             generation: self.generation,
-            mask_cache: Mutex::new(None),
+            mask_cache: StateMaskCache::new(),
         }
     }
 }
@@ -638,7 +724,7 @@ impl ConstraintState {
         self.markers = source.markers.clone();
         self.state = source.state.clone();
         self.generation = source.generation;
-        self.mask_cache = Mutex::new(None);
+        self.mask_cache.clear();
     }
 
     pub(crate) fn reserve_linear_stack_hot_path(&mut self) {
@@ -813,8 +899,103 @@ mod clone_and_scratch_tests {
             std::mem::size_of::<ConstraintState>(), std::mem::size_of::<ParserStateMap>(),
             std::mem::size_of::<(u32, ParserGSS)>(), std::mem::size_of::<Constraint>(),
             std::mem::size_of::<Option<crate::runtime::markers::MarkerState>>(),
-            std::mem::size_of::<Mutex<Option<MaskCacheData>>>());
+            std::mem::size_of::<StateMaskCache>());
     }
+
+    #[test]
+    fn compact_mask_cache_is_lazy_and_concurrent() {
+        let mut cache = StateMaskCache::new();
+        assert_eq!(std::mem::size_of::<StateMaskCache>(), std::mem::size_of::<*const ()>());
+        assert!(cache.lock().unwrap().is_none());
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let (cache, start) = (&cache, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    cache.store(7, &[1, 2], &[3, 4]);
+                    let guard = cache.lock().unwrap().unwrap();
+                    assert_eq!((guard.generation, guard.mask.as_slice(), guard.merged_dense.as_slice()),
+                        (7, &[1, 2][..], &[3, 4][..]));
+                });
+            }
+        });
+        cache.get_mut().unwrap().unwrap().generation = 8;
+        cache.store(9, &[5], &[]);
+        let guard = cache.lock().unwrap().unwrap();
+        assert_eq!(guard.generation, 9);
+        assert_eq!(guard.mask, [5]);
+        assert!(guard.merged_dense.is_empty());
+        drop(guard);
+        cache.clear();
+        assert!(cache.lock().unwrap().is_none());
+        cache.store(10, &[6], &[]);
+        assert_eq!(cache.lock().unwrap().unwrap().generation, 10);
+    }
+
+    #[test]
+    fn constraint_mask_length_cache_is_shared_and_cow_invalidated() {
+        let original = constraint("start root; nt root = 'a'+;");
+        assert_eq!(std::mem::size_of::<Constraint>(), std::mem::size_of::<*const ()>());
+        let old_len = original.mask_bit_len();
+        let mut changed = original.clone();
+        assert_eq!(changed.cached_mask_bit_len.get(), Some(&old_len));
+        changed.end_tokens = Arc::from([99u32]);
+        assert_eq!(changed.cached_mask_bit_len.get(), None);
+        assert_eq!(changed.mask_bit_len(), 100);
+        assert_eq!(original.mask_bit_len(), old_len);
+        assert!(!Arc::ptr_eq(&original.data, &changed.data));
+    }
+
+
+    // Deliberately opt-in: use the same cached GPT-2 + padding vocabulary as
+    // the clone investigation; no full corpus or timing matrix.
+    #[test]
+    #[ignore = "developer profile; set GLRMASK_FRONTIER_PROFILE_VOCAB to a token-hex file"]
+    fn frontier_width_profile() {
+        let path = std::env::var_os("GLRMASK_FRONTIER_PROFILE_VOCAB").expect("token-hex path");
+        let text = std::fs::read_to_string(path).unwrap();
+        let entries: Vec<_> = text.lines().enumerate().map(|(id,line)| {
+            let bytes = line.as_bytes().chunks_exact(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap())
+                .collect::<Vec<_>>();
+            (id as u32, bytes)
+        }).collect();
+        let mut byte_ids = [u32::MAX;256];
+        for (id,bytes) in &entries {
+            if let [b] = bytes.as_slice() {
+                let slot = &mut byte_ids[*b as usize];
+                if *slot == u32::MAX { *slot = *id; }
+            }
+        }
+        assert!(byte_ids.iter().all(|&id| id != u32::MAX));
+        let vocab = Vocab::new(entries).unwrap();
+        let opts = crate::CompileOptions::default().mask_strategy(crate::MaskStrategy::FAST_COMPILE);
+        let profile = |name: &str, compiled: &crate::Constraint, bytes: &[u8]| {
+            let mut s = compiled.start();
+            let mut histogram = std::collections::BTreeMap::new();
+            *histogram.entry(s.state.len()).or_insert(0usize) += 1;
+            for (i,b) in bytes.iter().enumerate().take(512) {
+                assert!(s.commit_token(byte_ids[*b as usize]), "{name}: byte {i}");
+                *histogram.entry(s.state.len()).or_insert(0) += 1;
+            }
+            eprintln!("FRONTIER {name} {histogram:?}");
+        };
+        let js = Grammar::from_glrm(include_str!("../programmatic_js/javascript.glrm")).unwrap()
+            .compile_with(&vocab,opts.clone()).unwrap();
+        for (name,bytes) in [
+            ("js-dangling",include_bytes!("../../tests/data/javascript/16_dangling_else_and_nested_prefixes.js").as_slice()),
+            ("js-deep",include_bytes!("../../tests/data/javascript/19_deep_nesting.js").as_slice()),
+            ("js-comprehensive",include_bytes!("../../tests/data/javascript/22_comprehensive_integration.js").as_slice()),
+        ] { profile(name,&js,bytes); }
+        let nested = Grammar::from_json_schema(r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}},"required":["id","name","tags"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false}"#).unwrap()
+            .compile_with(&vocab,opts.clone()).unwrap();
+        profile("json-nested",&nested,br#"{"items":[{"id":123,"name":"alpha","tags":["x","y"]},{"id":456,"name":"beta","tags":["z"]}]}"#);
+        let union = Grammar::from_json_schema(r#"{"type":"array","items":{"anyOf":[{"type":"string","pattern":"^ab[0-9]+$"},{"type":"string","pattern":"^abc.*$"},{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"integer"}},"required":["key","value"],"additionalProperties":false},{"type":"integer"}]}}"#).unwrap()
+            .compile_with(&vocab,opts).unwrap();
+        profile("json-union",&union,br#"["ab123","abcxyz",{"key":"word","value":-12},42,"ab456"]"#);
+    }
+
 
     #[test]
     fn scratch_checkout_is_reentrant_constraint_scoped_and_reusable() {

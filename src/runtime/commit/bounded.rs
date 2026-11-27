@@ -8,11 +8,10 @@ use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use super::*;
-use crate::runtime::state::{MaskCacheData,frontier_is_accepting};
+use crate::runtime::state::{StateMaskCache,frontier_is_accepting};
 use crate::compiler::constraint_possible_matches::PreparedOrderedTokens;
 use smallvec::SmallVec;
 use rustc_hash::FxHashSet;
-use std::sync::Mutex;
 
 const REJECTION:&str="commit rejected: no valid parser states remain";
 const MAX_FORCED:usize=10_000;
@@ -29,7 +28,7 @@ struct View<'a> {
     constraint:&'a Constraint,
     state:&'a ParserStateMap,
     terminated:bool,
-    cache:Option<&'a Mutex<Option<MaskCacheData>>>,
+    cache:Option<&'a StateMaskCache>,
     generation:u64,
 }
 impl<'a> View<'a> {
