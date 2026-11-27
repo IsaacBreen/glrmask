@@ -3832,30 +3832,7 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     build_bounded_repeat_with_suffix_dfa_with_cache(parts, None)
 }
 
-/// TODO: replace this compact product with an exact subset construction if we
-/// need to support ambiguous body/suffix boundaries or nullable suffixes in the
-/// fast path. Until then, this function must return None for any case requiring
-/// multiple simultaneous boundary choices.
-///
-/// Builds a DFA for `Seq([Repeat{body, min, max}, suffix_exprs...])` using a
-/// product construction of body_DFA × suffix_DFA × completion_counter.
-///
-/// Handles cases where the suffix is a regex (not just bytes) and/or the body
-/// is not prefix-free, which `build_bounded_repeat_with_suffix_dfa` cannot handle.
-/// Avoids the exponential NFA→DFA blowup that occurs with unrolled bounded repeats.
-///
-/// The product state is `(body_state, suffix_state, counter)`:
-///   - body tracks progress through the repeat body expression
-///   - suffix tracks the suffix match (started at body boundaries when counter >= min)
-///   - counter tracks completed body repetitions (0..max)
-///
-/// This is a fast path, not a general NFA subset construction. It must return
-/// `None` whenever the compact state would need to represent multiple live
-/// body/suffix boundary choices.
-///
-/// At body completion, the counter increments and the suffix may start. If two
-/// live paths cannot be represented by one `(body_state, suffix_state, counter)`
-/// tuple, this function falls back to the general compiler.
+/// Dense historical zero-minimum coordinate used by repeat transport proofs.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ZeroMinRepeatSuffixState {
     /// Minimum completed-copy count reaching each body DFA residual. A smaller
@@ -3865,6 +3842,116 @@ struct ZeroMinRepeatSuffixState {
     suffix_states: Box<[u32]>,
 }
 
+/// Exact residual of a bounded repeat followed by a suffix. A body path
+/// carries the number of copies finished BEFORE its current body word.
+/// Counts below the lower bound remain distinct; above it, the smallest
+/// count at each body residual subsumes all larger counts.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RepeatSuffixFrontier {
+    body: SmallVec<[(u32, u32); 4]>,
+    suffix: SmallVec<[u32; 4]>,
+}
+
+struct RepeatSuffixLanguage<'a> {
+    body: &'a DFA,
+    suffix: &'a DFA,
+    min: u32,
+    max: u32,
+}
+
+impl RepeatSuffixLanguage<'_> {
+    fn close(&self, frontier: &mut RepeatSuffixFrontier) {
+        let mut boundary = SmallVec::<[u32; 4]>::new();
+        for &(state, completed) in &frontier.body {
+            if completed < self.max && self.body.finalizers(state).contains(0) {
+                let count = completed + 1;
+                if count >= self.min {
+                    frontier.suffix.push(0);
+                }
+                if count < self.max {
+                    boundary.push(count);
+                }
+            }
+        }
+        frontier.body.extend(boundary.into_iter().map(|count| (0, count)));
+        frontier.body.retain(|&(state, count)| {
+            count < self.max && self.body.possible_future_group_ids(state).contains(0)
+        });
+        frontier.body.sort_unstable();
+        frontier.body.dedup();
+        let mut dominated = None;
+        frontier.body.retain(|&(state, count)| {
+            if count < self.min {
+                return true;
+            }
+            if dominated == Some(state) {
+                false
+            } else {
+                dominated = Some(state);
+                true
+            }
+        });
+        frontier.suffix.retain(|&state| {
+            self.suffix.finalizers(state).contains(0)
+                || self.suffix.possible_future_group_ids(state).contains(0)
+        });
+        frontier.suffix.sort_unstable();
+        frontier.suffix.dedup();
+    }
+
+    fn start(&self) -> RepeatSuffixFrontier {
+        let mut result = RepeatSuffixFrontier {
+            body: SmallVec::new(),
+            suffix: SmallVec::new(),
+        };
+        if self.max != 0 { result.body.push((0, 0)); }
+        if self.min == 0 { result.suffix.push(0); }
+        self.close(&mut result);
+        result
+    }
+
+    fn step(
+        &self, body: impl IntoIterator<Item = (u32, u32)>,
+        suffix: impl IntoIterator<Item = u32>, byte: u8,
+    ) -> Option<RepeatSuffixFrontier> {
+        let mut next = RepeatSuffixFrontier {
+            body: body.into_iter().filter_map(|(state, count)| {
+                (count < self.max).then(|| self.body.step(state, byte))
+                    .flatten().map(|target| (target, count))
+            }).collect(),
+            suffix: suffix.into_iter().filter_map(|state| self.suffix.step(state, byte)).collect(),
+        };
+        self.close(&mut next);
+        (!next.body.is_empty() || !next.suffix.is_empty()).then_some(next)
+    }
+
+    fn observations(&self, frontier: &RepeatSuffixFrontier) -> (bool, bool) {
+        let accepting = frontier.suffix.iter().any(|&state| self.suffix.finalizers(state).contains(0));
+        let future = !frontier.body.is_empty() || frontier.suffix.iter()
+            .any(|&state| self.suffix.possible_future_group_ids(state).contains(0));
+        (accepting, future)
+    }
+}
+
+impl ZeroMinRepeatSuffixState {
+    fn live_body(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.body_min_counts.iter().enumerate().filter_map(|(state, &count)| {
+            (count != u32::MAX).then_some((state as u32, count))
+        })
+    }
+
+    fn from_frontier(frontier: RepeatSuffixFrontier, body_states: usize) -> Self {
+        let mut counts = vec![u32::MAX; body_states];
+        for (state, count) in frontier.body {
+            counts[state as usize] = counts[state as usize].min(count);
+        }
+        Self {
+            body_min_counts: counts.into_boxed_slice(),
+            suffix_states: frontier.suffix.into_vec().into_boxed_slice(),
+        }
+    }
+}
+
 fn close_zero_min_repeat_suffix_state(
     body_min_counts: &mut [u32],
     suffix_states: &mut Vec<u32>,
@@ -3872,44 +3959,18 @@ fn close_zero_min_repeat_suffix_state(
     suffix_dfa: &DFA,
     max: usize,
 ) {
-    let mut completed_boundary = u32::MAX;
-    for (body_state, &completed) in body_min_counts.iter().enumerate() {
-        if completed == u32::MAX {
-            continue;
-        }
-        if body_dfa.finalizers(body_state as u32).contains(0) {
-            completed_boundary = completed_boundary.min(completed.saturating_add(1));
-        }
-    }
-
-    if completed_boundary != u32::MAX {
-        suffix_states.push(0);
-        if completed_boundary < max as u32 {
-            body_min_counts[0] = body_min_counts[0].min(completed_boundary);
-        }
-    }
-
-    // Keep only residuals that can consume at least one more byte toward a
-    // body match. Acceptance at the current body state has already spawned the
-    // repeat/suffix boundary above.
-    for (body_state, completed) in body_min_counts.iter_mut().enumerate() {
-        if *completed != u32::MAX
-            && !body_dfa
-                .possible_future_group_ids(body_state as u32)
-                .contains(0)
-        {
-            *completed = u32::MAX;
-        }
-    }
-
-    suffix_states.retain(|&state| {
-        suffix_dfa.finalizers(state).contains(0)
-            || suffix_dfa.possible_future_group_ids(state).contains(0)
-    });
-    suffix_states.sort_unstable();
-    suffix_states.dedup();
+    let language = RepeatSuffixLanguage { body: body_dfa, suffix: suffix_dfa, min: 0, max: max as u32 };
+    let mut frontier = RepeatSuffixFrontier {
+        body: body_min_counts.iter().enumerate().filter_map(|(state, &count)| {
+            (count != u32::MAX).then_some((state as u32, count))
+        }).collect(),
+        suffix: suffix_states.iter().copied().collect(),
+    };
+    language.close(&mut frontier);
+    body_min_counts.fill(u32::MAX);
+    for (state, count) in frontier.body { body_min_counts[state as usize] = count; }
+    *suffix_states = frontier.suffix.into_vec();
 }
-
 fn set_zero_min_repeat_suffix_metadata(
     dfa: &mut DFA,
     state_id: u32,
@@ -4125,39 +4186,14 @@ impl LazyZeroMinRepeatSuffixComponent {
         }
 
         let tail_index = state - self.prefix.len();
-        let next = {
-            let current = self.tail_states.get(tail_index)?;
-            let mut next_body = vec![u32::MAX; self.body_dfa.num_states()];
-            for (body_state, &completed) in current.body_min_counts.iter().enumerate() {
-                if completed == u32::MAX {
-                    continue;
-                }
-                if let Some(target) = self.body_dfa.step(body_state as u32, byte) {
-                    let target_count = &mut next_body[target as usize];
-                    *target_count = (*target_count).min(completed);
-                }
-            }
-            let mut next_suffix = Vec::with_capacity(current.suffix_states.len());
-            for &suffix_state in current.suffix_states.iter() {
-                if let Some(target) = self.suffix_dfa.step(suffix_state, byte) {
-                    next_suffix.push(target);
-                }
-            }
-            close_zero_min_repeat_suffix_state(
-                &mut next_body,
-                &mut next_suffix,
-                &self.body_dfa,
-                &self.suffix_dfa,
-                self.max,
-            );
-            if next_body.iter().all(|&count| count == u32::MAX) && next_suffix.is_empty() {
-                return None;
-            }
-            ZeroMinRepeatSuffixState {
-                body_min_counts: next_body.into_boxed_slice(),
-                suffix_states: next_suffix.into_boxed_slice(),
-            }
+        let current = self.tail_states.get(tail_index)?;
+        let language = RepeatSuffixLanguage {
+            body: &self.body_dfa, suffix: &self.suffix_dfa, min: 0, max: self.max as u32,
         };
+        let next = ZeroMinRepeatSuffixState::from_frontier(
+            language.step(current.live_body(), current.suffix_states.iter().copied(), byte)?,
+            self.body_dfa.num_states(),
+        );
         let local = if let Some(&local) = self.tail_state_by_key.get(&next) {
             local
         } else {
@@ -4291,6 +4327,7 @@ fn build_zero_min_repeat_suffix_dominance_dfa_internal(
     preserve_coordinates: bool,
 ) -> Option<ZeroMinRepeatSuffixBuild> {
     if max == 0
+        || max >= u32::MAX as usize
         || body_dfa.num_states() == 0
         || suffix_dfa.num_states() == 0
         || body_dfa.finalizers(0).contains(0)
@@ -4323,102 +4360,17 @@ fn build_zero_min_repeat_suffix_dominance_dfa_internal(
     let mut worklist = VecDeque::from([(0u32, start)]);
     let (byte_to_class, class_members) =
         compute_dfa_byte_equivalence_classes(&[body_dfa, suffix_dfa]);
-    // Dominance states are dense only as an externally visible coordinate.
-    // In practice their live body frontier is tiny (typically one or two
-    // residuals), while the body DFA can have dozens or hundreds of states.
-    // Reuse one dense scratch row and touch only live residuals while stepping;
-    // materialize a boxed dense row only for a live class edge that must be
-    // interned. This preserves the historical state key exactly while avoiding
-    // one allocation + full body scan for every state/class attempt.
-    let mut next_body_scratch = vec![u32::MAX; body_dfa.num_states()];
-
+    let language = RepeatSuffixLanguage {
+        body: body_dfa, suffix: suffix_dfa, min: 0, max: u32::try_from(max).ok()?,
+    };
     while let Some((state_id, state)) = worklist.pop_front() {
-        let live_body = state
-            .body_min_counts
-            .iter()
-            .enumerate()
-            .filter_map(|(body_state, &completed)| {
-                (completed != u32::MAX).then_some((body_state, completed))
-            })
-            .collect::<SmallVec<[(usize, u32); 8]>>();
+        let live_body = state.live_body().collect::<SmallVec<[(u32, u32); 8]>>();
         let mut target_by_class = vec![u32::MAX; class_members.len()];
         for (class, members) in class_members.iter().enumerate() {
-            let byte = members[0];
-            let mut touched_body = SmallVec::<[usize; 8]>::new();
-            for &(body_state, completed) in &live_body {
-                if let Some(target) = body_dfa.step(body_state as u32, byte) {
-                    let target = target as usize;
-                    let target_count = &mut next_body_scratch[target];
-                    if *target_count == u32::MAX {
-                        *target_count = completed;
-                        touched_body.push(target);
-                    } else {
-                        *target_count = (*target_count).min(completed);
-                    }
-                }
-            }
-
-            let mut next_suffix = SmallVec::<[u32; 4]>::new();
-            for &suffix_state in state.suffix_states.iter() {
-                if let Some(target) = suffix_dfa.step(suffix_state, byte) {
-                    next_suffix.push(target);
-                }
-            }
-
-            let mut completed_boundary = u32::MAX;
-            for &body_state in &touched_body {
-                if body_dfa.finalizers(body_state as u32).contains(0) {
-                    completed_boundary = completed_boundary.min(
-                        next_body_scratch[body_state].saturating_add(1),
-                    );
-                }
-            }
-            if completed_boundary != u32::MAX {
-                next_suffix.push(0);
-                if completed_boundary < max as u32 {
-                    if next_body_scratch[0] == u32::MAX {
-                        next_body_scratch[0] = completed_boundary;
-                        touched_body.push(0);
-                    } else {
-                        next_body_scratch[0] =
-                            next_body_scratch[0].min(completed_boundary);
-                    }
-                }
-            }
-
-            touched_body.retain(|body_state| {
-                let body_state = *body_state;
-                if body_dfa
-                    .possible_future_group_ids(body_state as u32)
-                    .contains(0)
-                {
-                    true
-                } else {
-                    next_body_scratch[body_state] = u32::MAX;
-                    false
-                }
-            });
-            next_suffix.retain(|suffix_state| {
-                let suffix_state = *suffix_state;
-                suffix_dfa.finalizers(suffix_state).contains(0)
-                    || suffix_dfa
-                        .possible_future_group_ids(suffix_state)
-                        .contains(0)
-            });
-            next_suffix.sort_unstable();
-            next_suffix.dedup();
-
-            if touched_body.is_empty() && next_suffix.is_empty() {
+            let Some(frontier) = language.step(live_body.iter().copied(), state.suffix_states.iter().copied(), members[0]) else {
                 continue;
-            }
-
-            let next = ZeroMinRepeatSuffixState {
-                body_min_counts: next_body_scratch.clone().into_boxed_slice(),
-                suffix_states: next_suffix.into_vec().into_boxed_slice(),
             };
-            for &body_state in &touched_body {
-                next_body_scratch[body_state] = u32::MAX;
-            }
+            let next = ZeroMinRepeatSuffixState::from_frontier(frontier, body_dfa.num_states());
             let target = if let Some(&target) = state_map.get(&next) {
                 target
             } else {
@@ -4597,172 +4549,63 @@ fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
         return Some((dfa, false));
     }
 
-    let max_product =
-        (body_dfa.num_states() + 1) * (suffix_dfa.num_states() + 1) * (max + 1);
-    if max_product > 500_000 {
+    if min > max || max >= u32::MAX as usize {
         return None;
     }
-
-    let body_dead = body_dfa.num_states() as u32;
-    let suffix_dead = suffix_dfa.num_states() as u32;
-
-    let mut state_map: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(u32, (u32, u32, u32))> = VecDeque::new();
+    let language = RepeatSuffixLanguage {
+        body: &body_dfa, suffix: &suffix_dfa, min: min as u32, max: max as u32,
+    };
+    let start = language.start();
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
-
-    let start_suffix = if min == 0 { 0u32 } else { suffix_dead };
-    let start_key = (0u32, start_suffix, 0u32);
-    state_map.insert(start_key, 0);
-    worklist.push_back((0, start_key));
-
-    {
-        let is_accept = start_suffix < suffix_dead
-            && !suffix_dfa.finalizers(start_suffix).is_empty();
-        let mut finalizers = BitSet::new(1);
-        let mut future = BitSet::new(1);
-        if is_accept {
-            finalizers.set(0);
-        }
-        future.set(0);
-        dfa.overwrite_state_metadata(0, finalizers, future);
-    }
-
-    let construct_started_at = profile_timing.then(Instant::now);
-    while let Some((dfa_state, (b, s, c))) = worklist.pop_front() {
-        let body_is_accept = b < body_dead && !body_dfa.finalizers(b).is_empty();
-
-        let mut transitions = Vec::new();
-        for byte_val in 0u16..=255 {
-            let x = byte_val as u8;
-
-            let b_next = if b < body_dead {
-                body_dfa.step(b, x).unwrap_or(body_dead)
-            } else {
-                body_dead
-            };
-
-            // If the body is accepting before this byte, there is an implicit
-            // boundary here: either continue the repeated body with `x`, or
-            // finish the body and let the suffix consume `x`.
-            //
-            // This product state tracks only one body state and one suffix
-            // state. If both paths are live, keeping only the body path is a
-            // lossy greedy approximation.
-            //
-            // Minimal counterexample:
-            //
-            //   ("a"+)? "a"
-            //
-            // on input "aa". At the second "a", the body can continue, but the
-            // suffix can also start. Dropping the suffix path falsely rejects.
-            if body_is_accept && b_next != body_dead {
-                let new_c = c + 1;
-                if new_c >= min as u32 && new_c <= max as u32 {
-                    let fresh_s = suffix_dfa
-                        .step(0, x)
-                        .unwrap_or(suffix_dead);
-                    if fresh_s != suffix_dead {
-                        return None;
-                    }
-                }
-            }
-
-            let (final_b, final_s, final_c) =
-                if body_is_accept && b_next == body_dead {
-                    let new_c = c + 1;
-                    let new_b = if new_c < max as u32 {
-                        body_dfa.step(0, x).unwrap_or(body_dead)
-                    } else {
-                        body_dead
-                    };
-                    let old_s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).unwrap_or(suffix_dead)
-                    } else {
-                        suffix_dead
-                    };
-                    let fresh_s = if new_c >= min as u32 {
-                        suffix_dfa.step(0, x).unwrap_or(suffix_dead)
-                    } else {
-                        suffix_dead
-                    };
-                    let new_s = match (old_s_next < suffix_dead, fresh_s < suffix_dead) {
-                        (true, true) if old_s_next != fresh_s => return None,
-                        (true, _) => old_s_next,
-                        (_, true) => fresh_s,
-                        _ => suffix_dead,
-                    };
-                    (new_b, new_s, new_c)
-                } else {
-                    let s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).unwrap_or(suffix_dead)
-                    } else {
-                        suffix_dead
-                    };
-                    (b_next, s_next, c)
-                };
-
-            if final_b == body_dead && final_s == suffix_dead {
+    let mut ids = FxHashMap::default();
+    let mut states = vec![start.clone()];
+    ids.insert(start, 0u32);
+    let (byte_to_class, class_members) =
+        compute_dfa_byte_equivalence_classes(&[&body_dfa, &suffix_dfa]);
+    // The bounded accelerator is transactional: large actual frontiers
+    // decline to the general compiler rather than retaining a lossy path.
+    const STATE_LIMIT: usize = 500_000;
+    const CELL_LIMIT: usize = 4_000_000;
+    const WORK_LIMIT: usize = 64_000_000;
+    let mut cells = states[0].body.len() + states[0].suffix.len();
+    let mut work = 0usize;
+    let mut state = 0;
+    while state < states.len() {
+        let current = states[state].clone();
+        let (accepting, future) = language.observations(&current);
+        let mut finals = BitSet::new(1);
+        let mut futures = BitSet::new(1);
+        if accepting { finals.set(0); }
+        if future { futures.set(0); }
+        dfa.overwrite_state_metadata(state as u32, finals, futures);
+        let mut targets = vec![u32::MAX; class_members.len()];
+        for (class, bytes) in class_members.iter().enumerate() {
+            work = work.checked_add(current.body.len() + current.suffix.len() + 1)?;
+            if work > WORK_LIMIT { return None; }
+            let Some(next) = language.step(current.body.iter().copied(), current.suffix.iter().copied(), bytes[0]) else {
                 continue;
-            }
-
-            let target_key = (final_b, final_s, final_c);
-            let target_dfa_state =
-                if let Some(&existing) = state_map.get(&target_key) {
-                    existing
-                } else {
-                    let new_state = dfa.add_state();
-                    let accept = final_s < suffix_dead
-                        && !suffix_dfa.finalizers(final_s).is_empty()
-                        && final_c >= min as u32;
-                    let has_future = final_b < body_dead || final_s < suffix_dead;
-                    let mut finalizers = BitSet::new(1);
-                    let mut future = BitSet::new(1);
-                    if accept {
-                        finalizers.set(0);
-                    }
-                    if has_future {
-                        future.set(0);
-                    }
-                    dfa.overwrite_state_metadata(new_state, finalizers, future);
-                    state_map.insert(target_key, new_state);
-                    worklist.push_back((new_state, target_key));
-                    new_state
-                };
-
-            transitions.push((x, target_dfa_state));
+            };
+            let target = if let Some(&target) = ids.get(&next) {
+                target
+            } else {
+                cells = cells.checked_add(next.body.len() + next.suffix.len())?;
+                if cells > CELL_LIMIT || states.len() >= STATE_LIMIT { return None; }
+                let target = dfa.add_state();
+                ids.insert(next.clone(), target);
+                states.push(next);
+                target
+            };
+            targets[class] = target;
         }
-
-        if transitions.len() > 1 {
-            transitions.sort_unstable_by_key(|e| e.0);
-        }
-        dfa.set_transitions_from_sorted_entries(dfa_state, transitions);
+        dfa.set_transitions_from_sorted_entries(state as u32, byte_to_class.iter().enumerate()
+            .filter_map(|(byte, &class)| {
+                let target = targets[class as usize];
+                (target != u32::MAX).then_some((byte as u8, target))
+            }).collect());
+        state += 1;
     }
-
-    let construct_ms = construct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    let pre_minimize_states = dfa.num_states();
-    let pre_minimize_transitions = dfa_transition_count(&dfa);
-    let minimize_started_at = profile_timing.then(Instant::now);
-    let dfa = dfa.minimize();
-    let minimize_ms = minimize_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][tokenizer] bounded_repeat_regex_suffix body_states={} suffix_states={} max={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} body_ms={:.3} suffix_ms={:.3} construct_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-            body_dfa.num_states(),
-            suffix_dfa.num_states(),
-            max,
-            pre_minimize_states,
-            pre_minimize_transitions,
-            dfa.num_states(),
-            dfa_transition_count(&dfa),
-            body_ms,
-            suffix_ms,
-            construct_ms,
-            minimize_ms,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    Some((dfa, false))
+    Some((dfa.minimize_owned_reachable(), false))
 }
 
 fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
@@ -13640,50 +13483,15 @@ fn compact_zero_min_repeat_step(
         CompactZeroMinRepeatState::Tail(tail) => tail,
     };
 
-    let mut body_candidates = SmallVec::<[(u32, u32); 2]>::new();
-    let mut suffix_candidates = SmallVec::<[u32; 2]>::new();
-
-    if let Some((body_state, completed)) = tail.body
-        && let Some(target) = lazy.body_dfa.step(body_state, byte)
-    {
-        if lazy.body_dfa.finalizers(target).contains(0) {
-            let completed = completed.saturating_add(1);
-            suffix_candidates.push(0);
-            if completed < lazy.max as u32 {
-                body_candidates.push((0, completed));
-            }
-        }
-        if lazy.body_dfa.possible_future_group_ids(target).contains(0) {
-            body_candidates.push((target, completed));
-        }
-    }
-    if let Some(suffix_state) = tail.suffix_state
-        && let Some(target) = lazy.suffix_dfa.step(suffix_state, byte)
-        && (lazy.suffix_dfa.finalizers(target).contains(0)
-            || lazy
-                .suffix_dfa
-                .possible_future_group_ids(target)
-                .contains(0))
-        {
-            suffix_candidates.push(target);
-        }
-
-    body_candidates.sort_unstable();
-    body_candidates.dedup();
-    suffix_candidates.sort_unstable();
-    suffix_candidates.dedup();
-    if body_candidates.is_empty() && suffix_candidates.is_empty() {
-        return Ok(None);
-    }
-    if body_candidates.len() > 1 || suffix_candidates.len() > 1 {
-        return Err(());
-    }
-    Ok(Some(CompactZeroMinRepeatState::Tail(
-        CompactZeroMinRepeatTailState {
-            body: body_candidates.first().copied(),
-            suffix_state: suffix_candidates.first().copied(),
-        },
-    )))
+    let language = RepeatSuffixLanguage {
+        body: &lazy.body_dfa, suffix: &lazy.suffix_dfa, min: 0, max: lazy.max as u32,
+    };
+    let Some(next) = language.step(tail.body, tail.suffix_state, byte) else { return Ok(None); };
+    if next.body.len() > 1 || next.suffix.len() > 1 { return Err(()); }
+    Ok(Some(CompactZeroMinRepeatState::Tail(CompactZeroMinRepeatTailState {
+        body: next.body.first().copied(),
+        suffix_state: next.suffix.first().copied(),
+    })))
 }
 
 fn compact_zero_min_repeat_is_accepting(
