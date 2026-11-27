@@ -4218,17 +4218,9 @@ mod tests {
                 .as_ref()
                 .expect("round-tripped segmented runtime must retain A/B metadata");
             assert!(
-                !overlay.segmented_static_baseline,
-                "new segmented saves must not synthesize a flattened static parser baseline",
-            );
-            assert!(
                 overlay.segmented_parser_components.len() == 2,
                 "new segmented saves must retain the parent and child A components exactly",
             );
-            assert!(overlay
-                .segmented_parser_components
-                .iter()
-                .all(|component| component.root_disallowed_terminal.is_none()));
             assert_eq!(
                 loaded.start().mask(),
                 live_mask,
@@ -5051,65 +5043,11 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        assert!(
-            bound
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_component_union_root_dispatch
-                .is_empty(),
-            "recursive runtime must not retain materialized-state component dispatch",
-        );
-        assert!(
-            bound
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_parser_state_offsets
-                .is_empty(),
-            "recursive runtime must derive state intervals from its component tree",
-        );
-        let bound_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
-        assert!(bound_overlay.boundary_shards().all(|shard| {
-            shard.start_parser_states.is_empty()
-        }));
-        assert!(bound_overlay.segmented_parser_components.iter().all(|component| {
-            component
-                .boundary
-                .as_ref()
-                .is_none_or(|shard| shard.start_parser_states.is_empty())
-        }));
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
         let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
-        assert!(
-            loaded
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_component_union_root_dispatch
-                .is_empty(),
-        );
-        assert!(
-            loaded
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_parser_state_offsets
-                .is_empty(),
-        );
-        let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
-        assert!(loaded_overlay.boundary_shards().all(|shard| {
-            shard.start_parser_states.is_empty()
-        }));
-        assert!(loaded_overlay.segmented_parser_components.iter().all(|component| {
-            component
-                .boundary
-                .as_ref()
-                .is_none_or(|shard| shard.start_parser_states.is_empty())
-        }));
         assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
 
         let monolithic = RuntimeConstraint::compile(
@@ -5667,10 +5605,6 @@ mod tests {
             "test fixture must actually contain more than one tokenizer leaf",
         );
         assert_recursive_compiler_views_detached(&half);
-        assert!(half_overlay
-            .segmented_parser_components
-            .iter()
-            .all(|component| component.global_to_local_parser_state.is_empty()));
 
         let loaded_half = RuntimeConstraint::load_body_external_artifact(half.save(), &vocab).unwrap();
         let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
@@ -5685,10 +5619,6 @@ mod tests {
         );
         assert!(loaded_half.tokenizer.num_states() < loaded_half_layout.total_tokenizer_states);
         assert_recursive_compiler_views_detached(&loaded_half);
-        assert!(loaded_half_overlay
-            .segmented_parser_components
-            .iter()
-            .all(|component| component.global_to_local_parser_state.is_empty()));
 
         let fresh_full = half
             .bind_grammar_dynamic_boundary("right", &right)
@@ -5726,11 +5656,6 @@ mod tests {
             );
         }
         for constraint in [&fresh_full, &loaded_full] {
-            let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
-            assert!(overlay
-                .segmented_parser_components
-                .iter()
-                .all(|component| component.global_to_local_parser_state.is_empty()));
             let mut split = constraint.start();
             for token in [0, 1, 2, 3] {
                 assert_ne!(split.mask()[0] & (1 << token), 0);
@@ -5984,15 +5909,10 @@ mod tests {
             .static_dynamic_overlay
             .as_ref()
             .expect("authoritative A+B metadata");
-        assert!(overlay.segmented_mask_authoritative);
-        assert!(!overlay.segmented_static_baseline);
+        assert!(bound.uses_compact_segmented_parser_runtime());
         assert_eq!(overlay.segmented_parser_components.len(), 2);
         assert_eq!(overlay.segmented_parser_components[0].constraint.parser_dwa, parent_dwa);
         assert_eq!(overlay.segmented_parser_components[1].constraint.parser_dwa, child_dwa);
-        assert!(overlay
-            .segmented_parser_components
-            .iter()
-            .all(|component| component.root_disallowed_terminal.is_none()));
 
         let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());

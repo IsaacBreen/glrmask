@@ -52,7 +52,7 @@ const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
 const V30_SECTION_MAGIC: [u8; 4] = *b"S30\0";
 const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
-const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R37\0";
+const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
 const CURRENT_CORE_MAGIC: [u8; 4] = *b"C25\0";
@@ -1876,7 +1876,6 @@ struct RecursiveSegmentedParserComponentV27Ref<'a> {
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
     local_tsid_to_global_tsids: &'a [Vec<u32>],
-    root_disallowed_terminal: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1887,7 +1886,6 @@ struct RecursiveSegmentedParserComponentV27 {
     terminal_offset: u32,
     global_terminal_aliases: Vec<(u32, u32)>,
     local_tsid_to_global_tsids: Vec<Vec<u32>>,
-    root_disallowed_terminal: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1940,7 +1938,6 @@ struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
     recursive_compiler_table: &'a [u8],
     recursive_tokenizer_internal_tsids: Option<&'a [Vec<u32>]>,
-    segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
 
@@ -1950,7 +1947,6 @@ struct RecursiveSegmentedRuntimeArtifactV27 {
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
     recursive_compiler_table: Vec<u8>,
     recursive_tokenizer_internal_tsids: Option<Vec<Vec<u32>>>,
-    segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27>,
 }
 
@@ -2409,7 +2405,6 @@ fn segmented_runtime_artifact_ref(
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
             local_tsid_to_global_tsids: &component.local_tsid_to_global_tsids,
-            root_disallowed_terminal: component.root_disallowed_terminal,
         })
         .collect();
     let segmented_parser_links = overlay
@@ -2456,7 +2451,6 @@ fn segmented_runtime_artifact_ref(
             segmented_parser_links,
             recursive_compiler_table,
             recursive_tokenizer_internal_tsids,
-            segmented_mask_authoritative: overlay.segmented_mask_authoritative,
             boundary_shards,
         };
     Some(match overlay.recursive_static_observation.as_deref() {
@@ -2579,11 +2573,6 @@ fn restore_recursive_segmented_runtime_v27(
     runtime: RecursiveSegmentedRuntimeArtifactV27,
     vocab: &crate::Vocab,
 ) -> crate::Result<()> {
-    if !runtime.segmented_mask_authoritative {
-        return Err(crate::Error::Serialization(
-            "recursive v27 segmented runtime must be mask-authoritative".to_owned(),
-        ));
-    }
     let template_backend = constraint.has_template_parser();
     let recursive_compiler_table = runtime.recursive_compiler_table;
     if template_backend && !recursive_compiler_table.is_empty() {
@@ -2635,14 +2624,6 @@ fn restore_recursive_segmented_runtime_v27(
                     "recursive v27 tokenizer-state coordinate overflow".to_owned(),
                 )
             })?;
-        if component
-            .root_disallowed_terminal
-            .is_some_and(|terminal| terminal >= child.parser_terminal_count())
-        {
-            return Err(crate::Error::Serialization(format!(
-                "recursive v27 component {index} root-disallowed terminal lies outside the component"
-            )));
-        }
         if component.global_terminal_aliases.iter().any(|&(global, local)| {
             global >= constraint.parser_terminal_count() || local >= child.parser_terminal_count()
         }) {
@@ -2657,8 +2638,6 @@ fn restore_recursive_segmented_runtime_v27(
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: component.global_terminal_aliases,
             local_tsid_to_global_tsids: component.local_tsid_to_global_tsids,
-            root_disallowed_terminal: component.root_disallowed_terminal,
-            global_to_local_parser_state: Vec::new(),
         });
     }
     if let Some(relation) = recursive_tokenizer_internal_tsids.as_ref() {
@@ -2701,10 +2680,6 @@ fn restore_recursive_segmented_runtime_v27(
             .get_or_insert_with(Default::default);
         overlay.segmented_parser_components = components;
         overlay.segmented_parser_links = links;
-        overlay.segmented_parser_state_offsets.clear();
-        overlay.segmented_mask_authoritative = true;
-        overlay.segmented_static_baseline = false;
-        overlay.segmented_component_union_root_dispatch.clear();
         if !template_backend {
             overlay.recursive_compiler_table
                 .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
@@ -2776,7 +2751,6 @@ fn restore_recursive_segmented_runtime_v27(
         restored_shards.push(crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
             start_component: shard.start_component,
-            start_parser_states: crate::ds::bitset::BitSet::new(0),
             accepts_empty_stack: shard.accepts_empty_stack,
             candidate_tokens,
             backend,
@@ -6063,7 +6037,6 @@ mod tests {
         assert_eq!(actual.non_parent_only_parser_states, expected.non_parent_only_parser_states);
         assert_eq!(actual.segmented_parser_components.len(), 2);
         assert_eq!(actual.segmented_parser_links.len(), 1);
-        assert!(actual.segmented_component_union_root_dispatch.is_empty());
         for tokens in [vec![0,1],vec![2]] {
             let mut reference = constraint.start();
             let mut restored = loaded.start();

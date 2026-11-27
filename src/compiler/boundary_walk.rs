@@ -1906,7 +1906,7 @@ fn expand_recorded_subtree_leaves<'a>(
     constraint: &'a Constraint,
     recorder: &mut NestedExpansionRecorder<'a>,
 ) -> Result<ExpansionSubtree, String> {
-    if !constraint.has_recursive_segmented_parser_tree() {
+    if !constraint.uses_compact_segmented_parser_runtime() {
         let index = recorder.leaves.len();
         recorder.leaves.push(constraint);
         return Ok(ExpansionSubtree {

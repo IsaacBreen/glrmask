@@ -243,18 +243,18 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
                 token_id: special.token_id, token_id_end: special.token_id_end });
         }
         let shard = SegmentedBoundaryShard { start_component: index as u32,
-            start_parser_states: crate::ds::bitset::BitSet::new(0), accepts_empty_stack: index == 0,
+            accepts_empty_stack: index == 0,
             candidate_tokens: candidate_tokens[index].clone(), mask_vocabulary: Default::default(), backend: SegmentedBoundaryShardBackend::DynamicDirect };
         wrappers.push(SegmentedParserComponent { constraint: component, boundary: Some(shard),
             tokenizer_state_offset: tokenizer_offsets[index], terminal_offset: terminal_offsets[index],
             global_terminal_aliases: vec![], local_tsid_to_global_tsids: vec![],
-            root_disallowed_terminal: None, global_to_local_parser_state: vec![] });
+            });
     }
     specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     specials.dedup(); constraint.special_token_terminals = specials;
     constraint.static_dynamic_overlay = Some(StaticDynamicOverlayMetadata {
         terminal_offsets, tokenizer_state_offsets: tokenizer_offsets, segmented_parser_components: wrappers,
-        segmented_parser_links: links, segmented_mask_authoritative: true,
+        segmented_parser_links: links,
         ..Default::default()
     });
     constraint.sanitize_late_grammar_placeholder_token_domain();

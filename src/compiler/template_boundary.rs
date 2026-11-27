@@ -441,7 +441,6 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         let shard = SegmentedBoundaryShard {
             start_component: published.start_component,
             accepts_empty_stack: published.start_component == 0,
-            start_parser_states: BitSet::new(0),
             candidate_tokens: Some(published.candidate_tokens),
             mask_vocabulary: Default::default(),
             backend: SegmentedBoundaryShardBackend::StaticParser(published.boundary),

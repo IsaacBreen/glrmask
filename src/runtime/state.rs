@@ -299,8 +299,7 @@ impl MaskScratch {
         let mut segmented_component_initial_states = Vec::new();
         let mut segmented_component_initial_masks = Vec::new();
         if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
-            let authoritative_dynamic_direct = overlay.segmented_mask_authoritative
-                && !overlay.segmented_parser_components.is_empty()
+            let authoritative_dynamic_direct = constraint.uses_compact_segmented_parser_runtime()
                 && overlay.segmented_parser_components.iter().all(|component| {
                     component.boundary.as_ref().is_some_and(|shard| {
                         matches!(

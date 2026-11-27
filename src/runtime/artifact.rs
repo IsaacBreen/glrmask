@@ -9533,8 +9533,7 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     pub(crate) non_parent_only_parser_states: Vec<bool>,
     /// Exact segmented parser backend. Each retained source constraint keeps
     /// its own parser/token coordinate and is projected from the composed
-    /// tokenizer/LR coordinates at mask time. Current artifacts flatten static
-    /// components into one parser DWA but retain dynamic/hybrid components.
+    /// tokenizer/parser coordinates at mask time.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
     /// Explicit local-coordinate calls between the wrappers above. This is the
@@ -9542,12 +9541,6 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// intentionally scoped to this composition level only.
     #[serde(skip, default)]
     pub(crate) segmented_parser_links: Vec<SegmentedParserLink>,
-    /// Legacy v24 prefix offsets for the old immediate-component compact parser
-    /// coordinate. New recursive runtimes derive wrapper/leaf intervals from
-    /// `segmented_parser_components` and leave this empty; retained only for
-    /// loading older current-version artifacts and legacy experiment paths.
-    #[serde(skip, default)]
-    pub(crate) segmented_parser_state_offsets: Vec<u32>,
     /// Runtime-derived endpoint parser view. The semantic component tree stays
     /// literal; this cache contains only the flat leaf coordinate required by
     /// the existing `LeveledGSS<u32, ...>` action provider.
@@ -9574,25 +9567,6 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// IDs; only actually reached virtual states enter this runtime-only map.
     #[serde(skip, default)]
     pub(crate) recursive_virtual_tokenizer_states: Arc<RecursiveVirtualTokenizerStates>,
-    /// The segmented A/B factorization is the masking implementation for this
-    /// constraint, rather than an optional validation view of a flattened
-    /// parser DWA. Current serialization preserves this split explicitly.
-    #[serde(skip, default)]
-    pub(crate) segmented_mask_authoritative: bool,
-    /// A serialized hybrid may flatten only its static component contribution
-    /// into `Constraint::parser_dwa` while retaining dynamic components below.
-    /// When set, segmented masking starts from that static parser-DWA mask and
-    /// ORs the retained dynamic components plus boundary B.
-    #[serde(skip, default)]
-    pub(crate) segmented_static_baseline: bool,
-    /// Compressed deterministic union root for `segmented_parser_components`.
-    /// Entry `g` is the unique component selected by composed LR state `g`, or
-    /// `u32::MAX` when no component has a root transition on that state. When
-    /// non-empty, the component collection is one deterministic parser DWA in
-    /// segmented storage: a synthetic root followed by one cached component
-    /// body. No runtime parser-NWA branching is involved.
-    #[serde(skip, default)]
-    pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
 }
 
 impl StaticDynamicOverlayMetadata {
@@ -9605,11 +9579,6 @@ impl StaticDynamicOverlayMetadata {
 pub(crate) struct SegmentedBoundaryShard {
     /// Component in which the model token starts.
     pub(crate) start_component: u32,
-    /// Exact composed LR top states that can represent this starting
-    /// component. A state may intentionally occur in more than one shard when
-    /// the composed relation is non-functional; evaluating both shards is then
-    /// conservative and exact under OR.
-    pub(crate) start_parser_states: BitSet,
     /// Whether an empty composed parser stack belongs to this shard. Only the
     /// outer/root component normally owns that coordinate.
     pub(crate) accepts_empty_stack: bool,
@@ -9627,12 +9596,8 @@ pub(crate) struct SegmentedBoundaryShard {
 #[derive(Debug, Clone)]
 pub(crate) enum SegmentedBoundaryShardBackend {
     StaticParser(Arc<SegmentedBoundaryParser>),
-    /// Preserved terminal-language/NWA crossing accelerator used by historical
-    /// artifacts and the explicit experimental runtime path. Normal current
-    /// dynamic composition publishes `DynamicDirect` instead.
     /// Exact dynamic crossing with no required composition-specific B artifact.
-    /// Materialized runtimes use the strict dynamic full-vocabulary walker;
-    /// recursive runtimes use the scoped shared-prefix vocabulary walker.
+    /// Uses the scoped shared-prefix vocabulary walker.
     DynamicDirect,
 }
 
@@ -9653,11 +9618,6 @@ pub(crate) struct SegmentedParserComponent {
     /// Component-local Static TSID -> composed Static TSID relation retained
     /// for lazy exact tokenizer states that are allocated after link time.
     pub(crate) local_tsid_to_global_tsids: Vec<Vec<u32>>,
-    /// Legacy v22 compatibility metadata. New authoritative A+B compositions
-    /// leave this `None`: component parser DWAs keep their standalone semantics
-    /// unchanged, and scope/link behavior lives in the composed parser view/B.
-    pub(crate) root_disallowed_terminal: Option<u32>,
-    pub(crate) global_to_local_parser_state: Vec<u32>,
 }
 
 

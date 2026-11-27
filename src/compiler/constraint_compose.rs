@@ -459,269 +459,6 @@ struct DirectComponentStateCoordinates {
 
 
 
-fn invert_functional_parser_state_relation(
-    relation: &[Vec<u32>],
-    global_state_count: usize,
-    excluded_local_state: Option<u32>,
-) -> Option<Vec<u32>> {
-    let mut inverse = vec![u32::MAX; global_state_count];
-    for (local_state, targets) in relation.iter().enumerate() {
-        if excluded_local_state == Some(local_state as u32) {
-            continue;
-        }
-        for &global_state in targets {
-            let slot = inverse.get_mut(global_state as usize)?;
-            if *slot != u32::MAX && *slot != local_state as u32 {
-                return None;
-            }
-            *slot = local_state as u32;
-        }
-    }
-    Some(inverse)
-}
-
-fn standalone_eof_accept_state(constraint: &Constraint) -> Option<u32> {
-    let mut states = constraint
-        .table
-        .action
-        .iter()
-        .enumerate()
-        .filter_map(|(state, row)| {
-            matches!(row.get(&EOF), Some(Action::Accept)).then_some(state as u32)
-        });
-    let state = states.next()?;
-    states.next().is_none().then_some(state)
-}
-
-#[inline]
-fn runtime_weight_survives_component_coordinate_maps(
-    weight: crate::runtime::RuntimeWeightRef<'_>,
-    maps: &DirectComponentCoordinateMaps,
-) -> bool {
-    if weight.is_empty() {
-        return false;
-    }
-    if weight.is_full() {
-        return maps.local_to_global_tsids.iter().any(|targets| !targets.is_empty())
-            && maps.local_to_global_tokens.iter().any(|targets| !targets.is_empty());
-    }
-    let mut survives = false;
-    weight.for_each_entry(|start_tsid, end_tsid, tokens| {
-        if survives {
-            return;
-        }
-        let has_tsid = (start_tsid..=end_tsid).any(|tsid| {
-            maps.local_to_global_tsids
-                .get(tsid as usize)
-                .is_some_and(|targets| !targets.is_empty())
-        });
-        if !has_tsid {
-            return;
-        }
-        tokens.for_each_range(|start, end| {
-            if !survives
-                && (start..=end).any(|token| {
-                    maps.local_to_global_tokens
-                        .get(token as usize)
-                        .is_some_and(|targets| !targets.is_empty())
-                })
-            {
-                survives = true;
-            }
-        });
-    });
-    survives
-}
-
-#[inline]
-fn weight_survives_component_coordinate_maps(
-    weight: &Weight,
-    maps: &DirectComponentCoordinateMaps,
-) -> bool {
-    runtime_weight_survives_component_coordinate_maps(weight.into(), maps)
-}
-
-fn deterministic_component_union_root_dispatch_direct(
-    components: &[crate::runtime::SegmentedParserComponent],
-    component_maps: &[DirectComponentCoordinateMaps],
-    global_state_count: usize,
-) -> Option<Vec<u32>> {
-    let started_at = Instant::now();
-    if components.len() != component_maps.len()
-        || components
-            .iter()
-            .any(|component| component.global_to_local_parser_state.len() < global_state_count)
-    {
-        return None;
-    }
-    let mut dispatch = vec![u32::MAX; global_state_count];
-    let mut selected_counts = vec![0usize; components.len()];
-    let mut dead = 0usize;
-    let mut syntactic_overlaps = 0usize;
-    for global_state in 0..global_state_count {
-        let mut candidates = SmallVec::<[(u32, crate::runtime::RuntimeWeightRef<'_>); 4]>::new();
-        for (component_index, component) in components.iter().enumerate() {
-            let local_state = component.global_to_local_parser_state[global_state];
-            if local_state == u32::MAX {
-                continue;
-            }
-            let source = component.constraint.as_ref();
-            let root = source.runtime_parser_dwa_start_state();
-            let Some((_, weight)) = source.runtime_parser_dwa_transition(root, local_state) else {
-                continue;
-            };
-            if !weight.is_empty() {
-                candidates.push((component_index as u32, weight));
-            }
-        }
-        let selected = match candidates.len() {
-            0 => None,
-            1 => Some(candidates[0].0),
-            _ => {
-                syntactic_overlaps += 1;
-                let mut live = SmallVec::<[u32; 4]>::new();
-                for (component_index, weight) in candidates {
-                    if runtime_weight_survives_component_coordinate_maps(
-                        weight,
-                        &component_maps[component_index as usize],
-                    ) {
-                        live.push(component_index);
-                    }
-                }
-                match live.as_slice() {
-                    [] => None,
-                    [component] => Some(*component),
-                    _ => return None,
-                }
-            }
-        };
-        if let Some(component) = selected {
-            dispatch[global_state] = component;
-            selected_counts[component as usize] += 1;
-        } else {
-            dead += 1;
-        }
-    }
-    if compose_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][constraint_component_union_root_dispatch_direct] deterministic=true global_states={} dead={} selected_counts={selected_counts:?} syntactic_overlaps={syntactic_overlaps} total_ms={:.3}",
-            global_state_count,
-            dead,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    Some(dispatch)
-}
-
-/// Certify the compressed deterministic union of cached component parser DWAs.
-///
-/// The materialized selected10 component union has exactly one synthetic state:
-/// its start subset.  The equivalent zero-copy representation is therefore a
-/// synthetic deterministic root whose first parser-state read selects one
-/// cached component DWA body.  This helper proves the required property rather
-/// than assuming it: for every composed LR state, at most one component start
-/// row may have a live transition after projection to that component's local LR
-/// coordinate.  Any overlap declines the fast representation and lets the
-/// ordinary materialized deterministic union remain the fallback.
-fn build_segmented_runtime_metadata(
-    source_constraints: Vec<(Arc<Constraint>, Option<u32>)>,
-    parser_state_relations: &[Vec<Vec<u32>>],
-    tokenizer_state_offsets: &[u32],
-    terminal_offsets: &[u32],
-    automata_maps: &[DirectComponentCoordinateMaps],
-    global_state_count: usize,
-    two_dwa_runtime_requested: bool,
-    parser_default_domains: &ParserDefaultDomainPlan,
-    id_num_tsids: u32,
-    canonical_terminal: Option<u32>,
-    terminal_aliases: &[u32],
-) -> Result<(Vec<crate::runtime::SegmentedParserComponent>, Option<Vec<u32>>, f64), String> {
-    let started_at = Instant::now();
-    let global_terminal_count = source_constraints
-        .iter()
-        .enumerate()
-        .map(|(component_index, (source, _))| {
-            terminal_offsets[component_index] as usize + source.table.num_terminals as usize
-        })
-        .max()
-        .unwrap_or(0);
-    let mut segmented_components = Vec::with_capacity(source_constraints.len());
-    for (component_index, (source, root_disallowed_terminal)) in source_constraints.into_iter().enumerate() {
-        let excluded_local_state = if component_index == 0 {
-            None
-        } else {
-            Some(standalone_eof_accept_state(source.as_ref()).ok_or_else(|| {
-                format!(
-                    "segmented parser child component {component_index} has no unique EOF accept state"
-                )
-            })?)
-        };
-        let global_to_local_parser_state = invert_functional_parser_state_relation(
-            &parser_state_relations[component_index],
-            global_state_count,
-            excluded_local_state,
-        ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
-        let terminal_offset = terminal_offsets[component_index];
-        let mut global_terminal_aliases = Vec::new();
-        if let Some(canonical) = canonical_terminal {
-            let component_end = terminal_offset + source.table.num_terminals;
-            for &alias in terminal_aliases {
-                if alias >= terminal_offset && alias < component_end {
-                    global_terminal_aliases.push((canonical, alias - terminal_offset));
-                }
-            }
-        }
-        segmented_components.push(crate::runtime::SegmentedParserComponent {
-            constraint: source,
-            boundary: None,
-            tokenizer_state_offset: tokenizer_state_offsets[component_index],
-            terminal_offset,
-            global_terminal_aliases,
-            local_tsid_to_global_tsids: automata_maps[component_index]
-                .local_to_global_tsids
-                .clone(),
-            root_disallowed_terminal,
-            global_to_local_parser_state,
-        });
-    }
-    let deterministic_root_dispatch = if two_dwa_runtime_requested {
-        Some({
-            let direct = deterministic_component_union_root_dispatch_direct(
-                &segmented_components, automata_maps, global_state_count,
-            ).ok_or_else(|| "two-DWA runtime requires a deterministic root-only component parser union".to_string())?;
-            if crate::env::var_os("GLRMASK_VALIDATE_DIRECT_COMPONENT_ROOT_DISPATCH").is_some() {
-                let reference = deterministic_component_union_root_dispatch(
-                    &segmented_components, parser_state_relations,
-                    &parser_default_domains.component_domains,
-                    &parser_default_domains.parser_state_labels,
-                    automata_maps, id_num_tsids as usize, global_state_count,
-                ).ok_or_else(|| "reference component root dispatch failed during direct validation".to_string())?;
-                assert_eq!(direct, reference, "direct component root dispatch differs from transported-root reference");
-                eprintln!("[glrmask/validate][direct_component_root_dispatch] exact=true states={global_state_count}");
-            }
-            direct
-        })
-    } else { None };
-    Ok((segmented_components, deterministic_root_dispatch, started_at.elapsed().as_secs_f64() * 1000.0))
-}
-
-fn segmented_boundary_start_parser_states(
-    component: &crate::runtime::SegmentedParserComponent,
-) -> BitSet {
-    let mut start_parser_states = BitSet::new(component.global_to_local_parser_state.len());
-    for (global_state, &local_state) in component
-        .global_to_local_parser_state
-        .iter()
-        .enumerate()
-    {
-        if local_state != u32::MAX {
-            start_parser_states.set(global_state);
-        }
-    }
-    start_parser_states
-}
-
-
 pub(crate) fn install_published_static_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     shards: Vec<PublishedStaticBoundaryShard>,
@@ -733,7 +470,7 @@ pub(crate) fn install_published_static_boundary_shards(
         let component_index = shard.start_component as usize;
         let component = overlay
             .segmented_parser_components
-            .get(component_index)
+            .get_mut(component_index)
             .ok_or_else(|| {
                 format!(
                     "static boundary shard references unknown start component {}",
@@ -743,12 +480,11 @@ pub(crate) fn install_published_static_boundary_shards(
         let runtime_shard = crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
             start_component: shard.start_component,
-            start_parser_states: segmented_boundary_start_parser_states(component),
             accepts_empty_stack: component_index == 0,
             candidate_tokens: Some(shard.candidate_tokens),
             backend: crate::runtime::SegmentedBoundaryShardBackend::StaticParser(shard.boundary),
         };
-        overlay.segmented_parser_components[component_index].boundary = Some(runtime_shard);
+        component.boundary = Some(runtime_shard);
     }
     Ok(())
 }
@@ -764,9 +500,6 @@ fn install_dynamic_direct_boundary_shards(
         let shard = crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
             start_component: component_index as u32,
-            start_parser_states: segmented_boundary_start_parser_states(
-                &overlay.segmented_parser_components[component_index],
-            ),
             accepts_empty_stack: component_index == 0,
             candidate_tokens: boundary_tokens_by_start_component
                 .and_then(|rows| rows.get(component_index))
@@ -777,147 +510,6 @@ fn install_dynamic_direct_boundary_shards(
     }
 }
 
-
-fn deterministic_component_union_root_dispatch(
-    components: &[crate::runtime::SegmentedParserComponent],
-    parser_state_relations: &[Vec<Vec<u32>>],
-    default_domains: &[Option<ParserDefaultDomain>],
-    global_domain_labels: &[i32],
-    component_maps: &[DirectComponentCoordinateMaps],
-    global_tsid_count: usize,
-    global_state_count: usize,
-) -> Option<Vec<u32>> {
-    let total_started_at = Instant::now();
-    if components.len() != parser_state_relations.len()
-        || components.len() != default_domains.len()
-        || components.len() != component_maps.len()
-        || (!global_domain_labels.is_empty() && global_domain_labels.len() < global_state_count)
-    {
-        return None;
-    }
-    // Transport only each component's start row using the exact same linker
-    // semantics as `component_parser_nwa`. Targets may refer to body state IDs
-    // not present in this one-state scratch NWA; they are opaque here because
-    // certification needs only the root label relation.
-    let transport_started_at = Instant::now();
-    let mut transported_roots = Vec::with_capacity(components.len());
-    for (component_index, component) in components.iter().enumerate() {
-        let source = component.constraint.as_ref();
-        let source_root = source
-            .parser_dwa
-            .states()
-            .get(source.parser_dwa.start_state() as usize)?;
-        let mut transported = NWA::new(0, 0);
-        transported.add_state();
-        add_component_parser_state_transitions(
-            &mut transported,
-            0,
-            source_root,
-            &parser_state_relations[component_index],
-            &source.parser_state_domain_labels,
-            source.table.num_states,
-            default_domains[component_index].as_ref(),
-        )
-        .ok()?;
-        transported_roots.push(transported);
-    }
-    let transport_ms = transport_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let mut dispatch = vec![u32::MAX; global_state_count];
-    let mut selected_counts = vec![0usize; components.len()];
-    let mut dead = 0usize;
-    let mut syntactic_overlaps = 0usize;
-    let mut overlap_weight_remap_ms = 0.0f64;
-    for global_state in 0..global_state_count {
-        let mut candidates = SmallVec::<[(u32, Weight); 4]>::new();
-        for (component_index, root) in transported_roots.iter().enumerate() {
-            let row = &root.states().first()?.transitions;
-            let positive = encode_positive_label(global_state as u32);
-            let targets = row
-                .get(&positive)
-                .or_else(|| {
-                    let domain = global_domain_labels
-                        .get(global_state)
-                        .copied()
-                        .unwrap_or(NO_PARSER_DOMAIN_LABEL);
-                    (domain != NO_PARSER_DOMAIN_LABEL)
-                        .then(|| row.get(&domain))
-                        .flatten()
-                })
-                .or_else(|| row.get(&DEFAULT_LABEL));
-            let Some(targets) = targets else {
-                continue;
-            };
-            let live_targets = targets
-                .iter()
-                .filter(|(_, weight)| !weight.is_empty())
-                .count();
-            if live_targets == 0 {
-                continue;
-            }
-            if live_targets != 1 {
-                if compose_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=false component={} global_state={} component_targets={live_targets}",
-                        component_index,
-                        global_state,
-                    );
-                }
-                return None;
-            }
-            let weight = targets
-                .iter()
-                .find_map(|(_, weight)| (!weight.is_empty()).then(|| weight.clone()))?;
-            candidates.push((component_index as u32, weight));
-        }
-        let selected = match candidates.len() {
-            0 => None,
-            1 => Some(candidates[0].0),
-            _ => {
-                syntactic_overlaps += 1;
-                // Only syntactically overlapping root labels need common
-                // weight coordinates. Unique labels are deterministic already;
-                // remapping all ~8k root edges was pure certification overhead.
-                let started_at = Instant::now();
-                let mut live = SmallVec::<[u32; 4]>::new();
-                for (component_index, weight) in candidates {
-                    let maps = &component_maps[component_index as usize];
-                    if weight_survives_component_coordinate_maps(&weight, maps) {
-                        live.push(component_index);
-                    }
-                }
-                overlap_weight_remap_ms += started_at.elapsed().as_secs_f64() * 1000.0;
-                match live.as_slice() {
-                    [] => None,
-                    [component] => Some(*component),
-                    _ => {
-                        if compose_profile_enabled() {
-                            eprintln!(
-                                "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=false overlap_global_state={global_state} live_components={live:?}"
-                            );
-                        }
-                        return None;
-                    }
-                }
-            }
-        };
-        if let Some(component) = selected {
-            dispatch[global_state] = component;
-            selected_counts[component as usize] += 1;
-        } else {
-            dead += 1;
-        }
-    }
-    if compose_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=true global_states={} dead={} selected_counts={selected_counts:?} syntactic_overlaps={syntactic_overlaps} transport_ms={transport_ms:.3} overlap_weight_remap_ms={overlap_weight_remap_ms:.3} total_ms={:.3}",
-            global_state_count,
-            dead,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    Some(dispatch)
-}
 
 #[inline]
 fn tokenizer_tsid_relation_is_singleton(constraint: &Constraint) -> bool {
@@ -8903,8 +8495,6 @@ fn compose_dynamic_recursive_shared_fast(
         terminal_offset: terminal_offsets[0],
         global_terminal_aliases: Vec::new(),
         local_tsid_to_global_tsids: Vec::new(),
-        root_disallowed_terminal: None,
-        global_to_local_parser_state: Vec::new(),
     });
     for (child_index, child) in shared_children.iter().enumerate() {
         let component_index = child_index + 1;
@@ -8915,8 +8505,6 @@ fn compose_dynamic_recursive_shared_fast(
             terminal_offset: terminal_offsets[component_index],
             global_terminal_aliases: Vec::new(),
             local_tsid_to_global_tsids: Vec::new(),
-            root_disallowed_terminal: None,
-            global_to_local_parser_state: Vec::new(),
         });
     }
     let overlay = result
@@ -8927,10 +8515,6 @@ fn compose_dynamic_recursive_shared_fast(
     overlay.tokenizer_state_offsets = tokenizer_state_offsets;
     overlay.segmented_parser_components = segmented_components;
     overlay.segmented_parser_links = segmented_parser_links;
-    overlay.segmented_parser_state_offsets.clear();
-    overlay.segmented_mask_authoritative = true;
-    overlay.segmented_static_baseline = false;
-    overlay.segmented_component_union_root_dispatch.clear();
     install_dynamic_direct_boundary_shards(overlay, None);
     for (component, ids) in overlay.segmented_parser_components.iter_mut().zip(dynamic_candidate_ids) {
         if let Some(shard) = component.boundary.as_mut() {
@@ -8957,8 +8541,6 @@ fn compose_dynamic_recursive_shared_fast(
     // TSID quotient. Leave it entirely absent in the live coordinator; the
     // serializer emits legacy compatibility rows only if/when save() is called.
     let relation_ms = relation_started_at.elapsed().as_secs_f64() * 1000.0;
-    result.constraint.clear_recursive_legacy_boundary_start_states();
-    result.constraint.clear_recursive_legacy_parser_state_projections();
     result.constraint.serialized_artifact_cache = None;
 
     if compose_profile_enabled() {
@@ -9483,10 +9065,6 @@ mod tests {
                 }.unwrap().constraint;
                 assert!(bound.uses_compact_segmented_parser_runtime());
                 assert!(!bound.table.is_present(), "binding must publish a table-free coordinator");
-                let overlay = bound.static_dynamic_overlay.as_ref().unwrap();
-                assert!(overlay.segmented_parser_components.iter().all(|component| {
-                    component.global_to_local_parser_state.is_empty()
-                }), "binding must not construct flattened parser projections");
                 assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
                     &bound, &reference, &vocab, 6, "unprepared dynamic link vs monolithic",
                 );
@@ -9555,13 +9133,6 @@ mod tests {
                 .get()
                 .is_none(),
             "all-DynamicDirect fast coordinator should omit the redundant recursive TSID relation",
-        );
-        assert!(
-            overlay
-                .segmented_parser_components
-                .iter()
-                .all(|component| component.global_to_local_parser_state.is_empty()),
-            "fast coordinator should not retain materialized composed-state projections",
         );
 
         assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
@@ -14824,7 +14395,7 @@ table: &child_table,
         .expect("first dynamic compose")
         .constraint;
         assert!(
-            composed_parent.has_recursive_segmented_parser_tree(),
+            composed_parent.uses_compact_segmented_parser_runtime(),
             "first composition must leave a segmented parent",
         );
         // Coverage boundary: this shape carries no terminal aliases, so slot
@@ -15479,7 +15050,7 @@ table: &child_table,
             assert!(
                 overlay.segmented_parser_components[0]
                     .constraint
-                    .has_recursive_segmented_parser_tree(),
+                    .uses_compact_segmented_parser_runtime(),
                 "bind1b component 0 must stay a segmented subtree",
             );
         }
@@ -17000,7 +16571,7 @@ table: &child_table,
         let bytes = stage1.save();
         let loaded = Constraint::load(bytes.as_slice(), &vocab).expect("load composed parent");
         assert!(
-            loaded.has_recursive_segmented_parser_tree(),
+            loaded.uses_compact_segmented_parser_runtime(),
             "loaded parent must retain its segmented tree",
         );
         // The loaded overlay must carry bind1's link intact (slot, child, and

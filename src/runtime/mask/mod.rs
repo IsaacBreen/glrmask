@@ -7132,14 +7132,9 @@ impl ConstraintState {
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
         let overlay = self.constraint.static_dynamic_overlay.as_ref();
-        let authoritative_segmented = overlay.is_some_and(|overlay| {
-            overlay.segmented_mask_authoritative
-                && (!overlay.segmented_parser_components.is_empty()
-                    || overlay.segmented_static_baseline)
-        });
+        let authoritative_segmented = self.constraint.uses_compact_segmented_parser_runtime();
         let authoritative_dynamic_direct = overlay.is_some_and(|overlay| {
-            overlay.segmented_mask_authoritative
-                && !overlay.segmented_parser_components.is_empty()
+            authoritative_segmented
                 && overlay.segmented_parser_components.iter().all(|component| {
                     component.boundary.as_ref().is_some_and(|shard| {
                         matches!(
@@ -7332,16 +7327,7 @@ impl ConstraintState {
                 ..MaskProfile::default()
             };
         }
-        if self
-            .constraint
-            .static_dynamic_overlay
-            .as_ref()
-            .is_some_and(|overlay| {
-                overlay.segmented_mask_authoritative
-                    && (!overlay.segmented_parser_components.is_empty()
-                        || overlay.segmented_static_baseline)
-            })
-        {
+        if self.constraint.uses_compact_segmented_parser_runtime() {
             // The recursive provider-native mask has different profiling
             // phases from the historical flattened/static evaluator. Preserve
             // exact semantics first; detailed segmented profiling can be added

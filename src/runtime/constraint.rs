@@ -2469,7 +2469,7 @@ impl Constraint {
     }
 
     #[inline]
-    pub(crate) fn has_recursive_segmented_parser_tree(&self) -> bool {
+    pub(crate) fn uses_compact_segmented_parser_runtime(&self) -> bool {
         self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
             !overlay.segmented_parser_components.is_empty()
                 && !overlay.segmented_parser_links.is_empty()
@@ -2820,7 +2820,7 @@ impl Constraint {
     pub(crate) fn recursive_parser_layout_for_pending_root(
         &self,
     ) -> Result<Option<Arc<RecursiveParserLayout>>, String> {
-        if !self.has_recursive_segmented_parser_tree() {
+        if !self.uses_compact_segmented_parser_runtime() {
             return Ok(None);
         }
         self.build_recursive_parser_layout_root_expanded().map(Some)
@@ -3347,39 +3347,6 @@ impl Constraint {
         Ok(Some(Arc::new(table)))
     }
 
-    /// Drop the materialized-table start-state ownership sets once recursive
-    /// wrapper ownership is authoritative. v23 requires those bitsets on the
-    /// wire; v24 recursive runtimes do not need them after load/build.
-    pub(crate) fn clear_recursive_legacy_boundary_start_states(&mut self) {
-        if !self.uses_compact_segmented_parser_runtime() {
-            return;
-        }
-        let Some(overlay) = self.static_dynamic_overlay.as_mut() else {
-            return;
-        };
-        for component in &mut overlay.segmented_parser_components {
-            if let Some(shard) = component.boundary.as_mut() {
-                shard.start_parser_states = BitSet::new(0);
-            }
-        }
-    }
-
-    /// Drop the materialized composed-table -> immediate-component parser
-    /// projections after every runtime consumer has moved to recursive wrapper
-    /// ownership. v25 stores recursive B directly; v24 legacy static B remains
-    /// on the materialized runtime and therefore retains these projections.
-    pub(crate) fn clear_recursive_legacy_parser_state_projections(&mut self) {
-        if !self.uses_compact_segmented_parser_runtime() {
-            return;
-        }
-        let Some(overlay) = self.static_dynamic_overlay.as_mut() else {
-            return;
-        };
-        for component in &mut overlay.segmented_parser_components {
-            component.global_to_local_parser_state.clear();
-        }
-    }
-
     fn recursive_parser_symbols_for_global_terminal(
         &self,
         layout: &RecursiveParserLayout,
@@ -3535,16 +3502,6 @@ impl Constraint {
                 terminal: crate::compiler::glr::analysis::EOF,
             },
         )))
-    }
-
-    /// Whether the recursive composition provider has been installed.
-    #[inline]
-    pub(crate) fn uses_compact_segmented_parser_runtime(&self) -> bool {
-        self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
-            overlay.segmented_mask_authoritative
-                && !overlay.segmented_parser_components.is_empty()
-                && !overlay.segmented_parser_links.is_empty()
-        })
     }
 
     pub(crate) fn close_compact_segmented_parser(
@@ -12383,7 +12340,7 @@ impl Constraint {
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn has_child_components(&self) -> bool {
-        self.has_recursive_segmented_parser_tree() || !self.late_grammar_slots.is_empty()
+        self.uses_compact_segmented_parser_runtime() || !self.late_grammar_slots.is_empty()
     }
 
     pub(crate) fn body_mask_len(&self) -> usize {
