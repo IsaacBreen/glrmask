@@ -1109,8 +1109,12 @@ pub(crate) fn expression_supports_bounded_code_liveness_oracle(expr: &Expr) -> b
     build_bounded_code_liveness_oracle(expr).is_some()
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(super) struct BoundedCodeIntersectionOracle {
+/// The immutable recognition authority is shared by the oracle, lock-free
+/// byte stepper, and finite projection keys. Bincode encodes struct fields
+/// consecutively and Arc transparently, so the legacy ordered field sequence
+/// remains unchanged. The BCO2 sparse wire below retains its explicit fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(super) struct BoundedCodeLanguage {
     pattern: Arc<DFA>,
     body: Arc<DFA>,
     body_productive: Box<[bool]>,
@@ -1118,6 +1122,11 @@ pub(super) struct BoundedCodeIntersectionOracle {
     suffix: Arc<[u8]>,
     min: usize,
     max: usize,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(super) struct BoundedCodeIntersectionOracle {
+    language: Arc<BoundedCodeLanguage>,
     suffix_accepting: BitSet,
     completion_relations: Vec<Option<BoolRelation>>,
     /// Runtime-only memo for singleton completion rows. Exact liveness queries
@@ -1135,6 +1144,11 @@ pub(super) struct BoundedCodeIntersectionOracle {
     compact_finite_mask_future_headroom: Option<usize>,
     exact_powers: Vec<BoolRelation>,
     prefix_sums: Vec<BoolRelation>,
+}
+
+impl std::ops::Deref for BoundedCodeIntersectionOracle {
+    type Target = BoundedCodeLanguage;
+    fn deref(&self) -> &Self::Target { &self.language }
 }
 
 pub(super) fn build_bounded_code_liveness_oracle(
@@ -1213,13 +1227,15 @@ impl SparseBoundedCodeOracleWire {
             .map(|relation| relation.into_relation(pattern_states))
             .collect::<Option<Vec<_>>>()?;
         Some(BoundedCodeIntersectionOracle {
-            pattern: self.pattern,
-            body: self.body,
-            body_productive: self.body_productive,
-            prefix: self.prefix,
-            suffix: self.suffix,
-            min: self.min,
-            max: self.max,
+            language: Arc::new(BoundedCodeLanguage {
+                pattern: self.pattern,
+                body: self.body,
+                body_productive: self.body_productive,
+                prefix: self.prefix,
+                suffix: self.suffix,
+                min: self.min,
+                max: self.max,
+            }),
             suffix_accepting: self.suffix_accepting,
             completion_relations,
             completion_row_cache: FxHashMap::default(),
@@ -1708,13 +1724,15 @@ impl BoundedCodeIntersectionOracle {
         }
 
         let mut oracle = Self {
-            pattern,
-            body,
-            body_productive: body_productive.into_boxed_slice(),
-            prefix: Arc::from(prefix.into_boxed_slice()),
-            suffix: Arc::from(suffix.into_boxed_slice()),
-            min,
-            max,
+            language: Arc::new(BoundedCodeLanguage {
+                pattern,
+                body,
+                body_productive: body_productive.into_boxed_slice(),
+                prefix: Arc::from(prefix.into_boxed_slice()),
+                suffix: Arc::from(suffix.into_boxed_slice()),
+                min,
+                max,
+            }),
             suffix_accepting,
             completion_relations: vec![None; body_states],
             completion_row_cache: FxHashMap::default(),
@@ -4036,7 +4054,7 @@ struct ResidualRuntimeStore {
     language: RuntimeLanguage,
     state_ids: FxHashMap<RuntimeStateKey, u32>,
     states: FxHashMap<u32, RuntimeStateRecord>,
-    oracle_byte_to_class: Option<Box<[u8; 256]>>,
+    oracle_byte_to_class: Option<Arc<[u8; 256]>>,
     oracle_language_finite: Option<bool>,
     parser_transparent_byte_family_cache: FxHashSet<(u32, U8Set, u32)>,
     slice_atom_body_exact_cache: FxHashMap<u64, bool>,
@@ -4051,15 +4069,9 @@ struct ResidualRuntimeStore {
 /// interning virtual state ids.
 #[derive(Debug, Clone)]
 struct DirectCoordinateStepper {
-    pattern: Arc<DFA>,
-    body: Arc<DFA>,
-    byte_to_class: Box<[u8; 256]>,
+    language: Arc<BoundedCodeLanguage>,
+    byte_to_class: Arc<[u8; 256]>,
     class_transitions: FiniteMaskClassTransitions,
-    body_productive: Arc<[bool]>,
-    prefix: Arc<[u8]>,
-    suffix: Arc<[u8]>,
-    min: usize,
-    max: usize,
 }
 
 impl DirectCoordinateStepper {
@@ -4079,15 +4091,9 @@ impl DirectCoordinateStepper {
         }
         let class_transitions = FiniteMaskClassTransitions::new(oracle, &byte_classes)?;
         Some(Self {
-            pattern: Arc::clone(&oracle.pattern),
-            body: Arc::clone(&oracle.body),
-            byte_to_class,
+            language: Arc::clone(&oracle.language),
+            byte_to_class: Arc::from(byte_to_class),
             class_transitions,
-            body_productive: Arc::from(oracle.body_productive.clone()),
-            prefix: Arc::clone(&oracle.prefix),
-            suffix: Arc::clone(&oracle.suffix),
-            min: oracle.min,
-            max: oracle.max,
         })
     }
 
@@ -4100,17 +4106,17 @@ impl DirectCoordinateStepper {
         let class = self.byte_to_class[byte as usize] as usize;
         let pattern_state = self.class_transitions.pattern_step(coordinate.pattern_state, class)?;
         let envelope = EnvelopeStepper {
-            prefix: &self.prefix, suffix: &self.suffix, body: &self.body,
-            productive: &self.body_productive, min: self.min, max: self.max,
+            prefix: &self.language.prefix, suffix: &self.language.suffix, body: &self.language.body,
+            productive: &self.language.body_productive, min: self.language.min, max: self.language.max,
         }.step(coordinate.envelope, byte, |state| {
-            self.class_transitions.body_step(&self.body, state, byte, class)
+            self.class_transitions.body_step(&self.language.body, state, byte, class)
         })?;
         Some(BoundedCodeOracleCoordinate { pattern_state, envelope })
     }
     #[inline(always)]
     fn accepting(&self, coordinate: BoundedCodeOracleCoordinate) -> bool {
         matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
-            && !self.pattern.finalizers(coordinate.pattern_state).is_empty()
+            && !self.language.pattern.finalizers(coordinate.pattern_state).is_empty()
     }
 }
 
@@ -4140,14 +4146,7 @@ pub(super) struct VirtualResidualRuntime {
 /// to share one finite DFA between residual runtimes that differ only in their
 /// outer terminal identity/runtime coordinate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct FiniteMaskProjectionLanguageKey {
-    pattern: Arc<DFA>,
-    body: Arc<DFA>,
-    prefix: Arc<[u8]>,
-    suffix: Arc<[u8]>,
-    min: usize,
-    max: usize,
-}
+pub(super) struct FiniteMaskProjectionLanguageKey(Arc<BoundedCodeLanguage>);
 
 impl VirtualResidualRuntime {
     fn intern_state_locked(
@@ -4322,13 +4321,15 @@ impl VirtualResidualRuntime {
         let pattern = Arc::new(artifact.pattern.clone().into_dfa()?);
         let body = Arc::new(artifact.body.clone().into_dfa()?);
         Some(BoundedCodeIntersectionOracle {
-            pattern,
-            body,
-            body_productive: artifact.body_productive.clone().into_boxed_slice(),
-            prefix: Arc::from(artifact.prefix.clone().into_boxed_slice()),
-            suffix: Arc::from(artifact.suffix.clone().into_boxed_slice()),
-            min: artifact.min,
-            max: artifact.max,
+            language: Arc::new(BoundedCodeLanguage {
+                pattern,
+                body,
+                body_productive: artifact.body_productive.clone().into_boxed_slice(),
+                prefix: Arc::from(artifact.prefix.clone().into_boxed_slice()),
+                suffix: Arc::from(artifact.suffix.clone().into_boxed_slice()),
+                min: artifact.min,
+                max: artifact.max,
+            }),
             suffix_accepting: artifact.suffix_accepting.clone(),
             completion_relations: vec![None; body_states],
             completion_row_cache: FxHashMap::default(),
@@ -4347,14 +4348,7 @@ impl VirtualResidualRuntime {
     ) -> Option<FiniteMaskProjectionLanguageKey> {
         let store = self.store.lock().unwrap();
         let oracle = store.language.oracle()?;
-        Some(FiniteMaskProjectionLanguageKey {
-            pattern: Arc::clone(&oracle.pattern),
-            body: Arc::clone(&oracle.body),
-            prefix: Arc::clone(&oracle.prefix),
-            suffix: Arc::clone(&oracle.suffix),
-            min: oracle.min,
-            max: oracle.max,
-        })
+        Some(FiniteMaskProjectionLanguageKey(Arc::clone(&oracle.language)))
     }
     pub(super) fn finite_mask_projection_dense_state_count(
         &self,
@@ -4662,8 +4656,9 @@ impl VirtualResidualRuntime {
         let mut accepting = BitSet::new(num_terminals as usize);
         accepting.set(terminal as usize);
         let live = accepting.clone();
-        let oracle_byte_to_class = language.oracle()
-            .map(BoundedCodeIntersectionOracle::byte_to_class_map);
+        let oracle_byte_to_class = direct_coordinate_stepper.as_ref()
+            .map(|stepper| Arc::clone(&stepper.byte_to_class))
+            .or_else(|| language.oracle().map(|oracle| Arc::from(oracle.byte_to_class_map())));
         let oracle_language_finite = language.oracle()
             .map(|oracle| dfa_language_is_finite(&oracle.body));
         Some(Self {
@@ -6846,7 +6841,7 @@ mod tests {
             // and a body transition exist. This mutated test-only oracle does
             // not claim the frontend would certify such a language skeleton.
             for overlapping_suffix in [false, true] {
-                if overlapping_suffix { oracle.suffix = Arc::from(b"a".as_slice()); }
+                if overlapping_suffix { Arc::make_mut(&mut oracle.language).suffix = Arc::from(b"a".as_slice()); }
                 let classes = bounded_code_byte_classes(&oracle.pattern, &oracle.body, &oracle.prefix, &oracle.suffix);
                 let transitions = FiniteMaskClassTransitions::new(&oracle, &classes).unwrap();
                 for p in 0..oracle.pattern.num_states() as u32 {
