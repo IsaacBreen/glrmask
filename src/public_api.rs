@@ -887,7 +887,6 @@ impl Grammar {
             module::GrammarBindingKind::Expr(expr) => {
                 GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&expr)?))
             }
-            module::GrammarBindingKind::TokenSet(_) => return Err(Error::InvalidInput("token IDs depend on the model; bind them on a Module: Module(grammar).bind(...)".into())),
         };
         let next = self.bind_value(name, value)?;
         *self = next;

@@ -47,7 +47,7 @@ impl PreparedParserGrammar {
         let program = ParserProgram::new(definition)?;
         if let Some(ignore) = self.grammar.ignore_terminal()
             && !program.identity_terminals.contains(&ignore) {
-            return Err(fail("the resolved ignore terminal requires StackTemplate::identity()"));
+            return Err(fail("the resolved ignore terminal requires an identity stack template"));
         }
         Ok(GrammarParserProgram { grammar: self.grammar.clone(), lexical: Arc::clone(&self.lexical), program })
     }

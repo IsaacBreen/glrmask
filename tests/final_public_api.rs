@@ -20,6 +20,21 @@ const TOKEN_HOST: &str = "glrm 1; start start; extern token MARK; nt start = \"x
 const OPEN: &str = "glrm 1; start start; extern grammar item; nt start = item;";
 
 #[test]
+fn precompile_requires_same_vocab() {
+    let v = vocab();
+    let wrong = Vocab::new::<Vec<u8>>(vec![(0, b"z".to_vec())]).unwrap();
+    for strategy in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        let options = CompileOptions::default().mask_strategy(strategy);
+        let mut m = Module::new(&Grammar::from_glrm(HOST).unwrap());
+        m.precompile_with(&v, options.clone()).unwrap();
+        assert!(m.precompile_with(&wrong, options.clone()).unwrap_err().to_string().contains("vocabular"));
+        m.bind("child", Grammar::from_ebnf(r#"start ::= "a""#).unwrap()).unwrap();
+        assert!(m.compile_with(&wrong, options.clone()).err().unwrap().to_string().contains("vocabular"));
+        assert!(m.compile_with(&v, options).is_ok());
+    }
+}
+
+#[test]
 fn immutable_source_and_compiled_bindings_cross_token_boundaries() {
     let v = vocab();
     let parent = Grammar::from_glrm(HOST).unwrap();
@@ -566,7 +581,7 @@ fn grammar_expressions_reject_modules_at_any_depth_but_module_bind_accepts_them(
         for expr in [Expr::from(&m), Expr::sequence([Expr::choice([Expr::from(&m)]), Expr::literal("")])] {
             let err = Grammar::from_expr(&expr).unwrap_err();
             assert_eq!(err.kind(), glrmask::ErrorKind::InvalidInput);
-            assert_eq!(err.to_string(), "an expression containing a Module can't become a Grammar; bind it into a Module instead");
+            assert_eq!(err.to_string(), "a Module can't be part of a Grammar; bind it to a Module instead");
             let mut grammar = host.clone();
             assert_eq!(grammar.bind("item", &expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
             assert_eq!(grammar.externs().unbound().len(), 1);
@@ -594,12 +609,10 @@ fn grammar_rejects_token_sets_transitively_but_module_accepts() {
     let sequence = Expr::sequence([Expr::literal(""), expression.clone()]);
     let nested = Expr::sequence([choice.clone(), Expr::literal("")]);
     let host = Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE").unwrap();
-    let mut g = host.clone();
-    assert_eq!(g.bind("VALUE", &token).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
     assert_eq!(Grammar::from_expr(token).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
     for expr in [expression, choice, sequence, nested] {
         let mut g = host.clone();
-        assert_eq!(g.bind("VALUE", &expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
+        assert_eq!(g.bind("VALUE", &expr).unwrap_err().to_string(), "token sets can only be bound to a Module");
         assert_eq!(Grammar::from_expr(&expr).unwrap_err().kind(), glrmask::ErrorKind::InvalidInput);
         assert_eq!(g.externs().unbound().len(), 1);
         let v = Vocab::new([(0, b"x".as_slice())]).unwrap();

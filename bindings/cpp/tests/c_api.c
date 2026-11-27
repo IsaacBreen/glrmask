@@ -111,6 +111,16 @@ int main(void) {
     glrmask_compile_options module_options; CHECK(glrmask_compile_options_init(&module_options,sizeof(module_options))==GLRMASK_OK);
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_FAST_MASKS;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
+    {
+        const uint8_t z[]={'z'}; const glrmask_vocab_entry wrong_entries[]={{0,z,1}};
+        glrmask_vocab* wrong=NULL; glrmask_constraint* bad=NULL;
+        CHECK(glrmask_vocab_new(wrong_entries,1,&wrong)==GLRMASK_OK);
+        CHECK(glrmask_module_precompile(module,wrong,&module_options)!=GLRMASK_OK);
+        CHECK(strstr(glrmask_error_message(),"vocabular")!=NULL);
+        CHECK(glrmask_module_compile(module,wrong,&module_options,&bad)!=GLRMASK_OK && bad==NULL);
+        CHECK(strstr(glrmask_error_message(),"vocabular")!=NULL);
+        glrmask_vocab_free(wrong);
+    }
     CHECK(glrmask_module_bind_tokens(module,"missing",7,NULL)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);
@@ -127,7 +137,7 @@ int main(void) {
         for (size_t i=0;i<2;i++) {
             glrmask_grammar* bad=(glrmask_grammar*)(uintptr_t)1;
             CHECK(glrmask_grammar_from_expr(cases[i],&bad)==GLRMASK_INVALID_INPUT && bad==NULL);
-            CHECK(strcmp(glrmask_error_message(),"an expression containing a Module can't become a Grammar; bind it into a Module instead")==0);
+            CHECK(strcmp(glrmask_error_message(),"a Module can't be part of a Grammar; bind it to a Module instead")==0);
             CHECK(glrmask_grammar_bind_expr(parent,"item",4,cases[i])==GLRMASK_INVALID_INPUT);
             CHECK(glrmask_module_new(parent,&outer)==GLRMASK_OK);
             CHECK(glrmask_module_bind_expr(outer,"item",4,cases[i])==GLRMASK_OK);

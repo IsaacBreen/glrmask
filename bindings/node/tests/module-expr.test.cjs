@@ -30,6 +30,20 @@ test('Module: copy and root-only final options',()=>{
   assert.throws(()=>configured.compileSync(v,{bogus:true}),TypeError);
 });
 
+test('Module: precompile requires the same vocabulary in sync and async calls', async()=>{
+  const v=vocab(),wrong=vocab(true);
+  for (const maskStrategy of Object.values(MaskStrategy)) {
+    const m=new Module(host()), options={maskStrategy};
+    await m.precompile(v,options);
+    assert.throws(()=>m.precompileSync(wrong,options),/vocabular/);
+    await assert.rejects(m.precompile(wrong,options),/vocabular/);
+    m.bind('child',source());
+    assert.throws(()=>m.compileSync(wrong,options),/vocabular/);
+    await assert.rejects(m.compile(wrong,options),/vocabular/);
+    accept(m,v,[4]);
+  }
+});
+
 test('Module: precompile retains work',async()=>{
   const v=vocab();
   const child=source();
@@ -184,8 +198,8 @@ test('Expr: choice, sequence, literal and plain string errors',()=>{
   // Plain string error pointing to Expr.literal
   assert.throws(()=>Expr.choice(5), TypeError);
   assert.throws(()=>Expr.sequence(5), TypeError);
-  assert.throws(()=>Expr.choice('plain string'),/Plain strings are not supported/);
-  assert.throws(()=>Expr.sequence('plain string'),/Plain strings are not supported/);
+  assert.throws(()=>Expr.choice('plain string'),/plain strings are not Expr operands/);
+  assert.throws(()=>Expr.sequence('plain string'),/plain strings are not Expr operands/);
 
   // Literal
   const lit=Expr.literal('xay');
@@ -239,7 +253,7 @@ test('Externs snapshots survive bind and owner disposal',()=>{
 test('Grammar rejects direct and nested module expressions; Module.bind still accepts',()=>{
   const v=vocab(), parent=()=>Grammar.fromGlrm('start s extern grammar item nt s = item');
   const prepared=new Module(source());prepared.precompileSync(v);
-  const error=e=>e.code==='GLRMASK_INVALID_INPUT' && e.message==="an expression containing a Module can't become a Grammar; bind it into a Module instead";
+  const error=e=>e.code==='GLRMASK_INVALID_INPUT' && e.message==="a Module can't be part of a Grammar; bind it to a Module instead";
   for(const m of [new Module(source()),prepared]){
     assert.throws(()=>Grammar.fromExpr(m),error);
     for(const expr of [Expr.sequence(m),Expr.sequence(Expr.choice(m),Expr.literal(''))]){
@@ -258,14 +272,14 @@ test('Grammar: reject direct and nested TokenSet; Module accepts',()=>{
   const token=new TokenSet([5]);
   for(const value of [token,Expr.choice(token,Expr.literal('x')),Expr.sequence(Expr.literal(''),token),Expr.sequence(Expr.choice(token,Expr.literal('x')),Expr.literal(''))]){
     for(const call of [()=>g.bind('VALUE',value),()=>Grammar.fromExpr(value)]){
-      assert.throws(call, e=>e.code==='GLRMASK_INVALID_INPUT' && /token IDs depend on the model/.test(e.message));
+      assert.throws(call, e=>e.code==='GLRMASK_INVALID_INPUT' && /token sets can only be bound to a Module/.test(e.message));
     }
     assert.equal(g.externs.unbound.size,1);
     const m=new Module(g);m.bind('VALUE',value);
     const state=m.compileSync(v).start();assert.ok(state.commitToken(5));assert.ok(state.isAccepting());
   }
   const t=Grammar.fromGlrm('extern token T start root nt root=T');
-  assert.throws(()=>t.bind('T',token),/token IDs depend on the model/);
+  assert.throws(()=>t.bind('T',token),/token sets can only be bound to a Module/);
   const m=new Module(t);m.bind('T',token);assert.ok(m.compileSync(v).start().commitToken(5));
 });
 

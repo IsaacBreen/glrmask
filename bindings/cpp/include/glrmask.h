@@ -171,7 +171,7 @@ GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module* module,con
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module* module,const char* name,size_t name_len,const glrmask_expr* value);
 /// Fails if the extern is undeclared, already bound or the wrong kind.
 GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module* module,const char* name,size_t name_len,const glrmask_token_set* value);
-/// Compiles what it can for `vocab` now, even with externs unbound.
+/// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
 GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options);
 /// Finishes compiling the module into a constraint.
 GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module* module,const glrmask_vocab* vocab,const glrmask_compile_options* options,glrmask_constraint** out);

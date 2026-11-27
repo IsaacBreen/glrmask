@@ -186,7 +186,7 @@ const module = await Module.load(moduleBytes);
 
 Saved bytes are the same in every binding, so a constraint saved from Python loads in Node. A saved constraint doesn't
 include its vocabulary: pass the same vocabulary to `load`, which checks that it matches exactly. A saved module records
-the vocabulary its precompiled parts were built for, and `compile` checks it. Saved bytes are only guaranteed to load in
+the vocabulary its precompiled parts were built for; `compile` and `precompile` check it. Saved bytes are only guaranteed to load in
 the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
 load saved bytes from untrusted sources.
 

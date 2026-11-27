@@ -25,6 +25,12 @@ for(const {label:maskStrategy,options} of strategies) {
     const backing=new Uint32Array(7).fill(123),view=backing.subarray(1,6);
     assert.equal(s.fillMask(view),undefined);assert.deepEqual(view.slice(0,3),initial);
     assert.deepEqual(Array.from(backing),[123,...initial,0,0,123]);
+    const signed = new Int32Array(5).fill(123);
+    s.fillMask(signed);
+    assert.deepEqual(new Uint32Array(signed.buffer), new Uint32Array([...initial,0,0]));
+    assert.ok(signed[0] < 0);
+    assert.equal(require("node:util").inspect(c), "<glrmask.Constraint mask_bit_len=66>");
+    assert.equal(require("node:util").inspect(s), "<glrmask.ConstraintState accepting=false terminated=false>");
     const short=new Uint32Array([123]);
     assert.throws(()=>s.fillMask(short),e=>e.code==='GLRMASK_BUFFER_TOO_SMALL');assert.equal(short[0],123);
     const copy=s.clone();c.dispose();g.dispose();v.dispose();closed(()=>c.start());
@@ -147,7 +153,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
     state.fillMask(words); assert.deepEqual(words,state.mask());
   }
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
-  assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
+  assert.throws(()=>s.fillMask(new Float32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
   assert.throws(()=>Grammar.fromLark('this is not a grammar'),GLRMaskError);
 });
@@ -166,6 +172,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   assert.deepEqual(s.mask(),initial);
   const sharedWords=new Uint32Array(new SharedArrayBuffer(16));
   assert.throws(()=>s.fillMask(sharedWords),/SharedArrayBuffer/);
+  assert.throws(()=>s.fillMask(new Int32Array(new SharedArrayBuffer(16))),/SharedArrayBuffer/);
   const sharedBytes=new Uint8Array(new SharedArrayBuffer(4));
   assert.throws(()=>s.commitBytes(sharedBytes),/SharedArrayBuffer/);
   assert.throws(()=>raw.NativeVocab.fromEntries([0],[sharedBytes],[]),/SharedArrayBuffer/);

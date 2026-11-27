@@ -177,7 +177,7 @@ impl NativeGrammar {
     }
     #[napi]
     pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
-        call(|| { live(&self.inner)?.bind(&name, live(&value.inner)?.clone())?; Ok(()) })
+        call(|| { live(&self.inner)?.bind(&name, g::Expr::from(live(&value.inner)?.clone()))?; Ok(()) })
     }
     #[napi]
     pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {

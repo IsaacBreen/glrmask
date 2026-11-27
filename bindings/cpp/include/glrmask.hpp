@@ -332,7 +332,7 @@ public:
         detail::check(glrmask_module_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
 
-    /// Compiles what it can for `vocab` now, even with externs unbound.
+    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
     void precompile(const Vocab& vocab, const CompileOptions& options = {}) {
         const glrmask_compile_options native = options.native();
         detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle(), &native));

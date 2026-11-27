@@ -182,7 +182,7 @@ impl Drop for PyExpr {
 pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Expr> {
     if value.is_instance_of::<pyo3::types::PyString>() {
         return Err(PyTypeError::new_err(
-            "plain strings are not accepted as Expr parts; use Expr.literal(...)",
+            "plain strings are not Expr operands; wrap them in a literal expression",
         ));
     }
     if let Ok(m) = value.extract::<PyRef<'_, PyModule>>() {
@@ -338,7 +338,6 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
 pub(super) enum GrammarBinding {
     Grammar(glrmask::Grammar),
     Expr(glrmask::Expr),
-    TokenSet(glrmask::TokenSet),
 }
 
 impl GrammarBinding {
@@ -350,7 +349,6 @@ impl GrammarBinding {
         match self {
             Self::Grammar(value) => grammar.bind(name, value),
             Self::Expr(value) => grammar.bind(name, value),
-            Self::TokenSet(value) => grammar.bind(name, value),
         }
     }
 }
@@ -362,8 +360,8 @@ pub(super) fn extract_grammar_binding(value: &Bound<'_, PyAny>) -> PyResult<Gram
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
         return Ok(GrammarBinding::Expr(e.inner.clone()));
     }
-    if let Ok(t) = value.extract::<PyRef<'_, PyTokenSet>>() {
-        return Ok(GrammarBinding::TokenSet(t.inner.clone()));
+    if value.extract::<PyRef<'_, PyTokenSet>>().is_ok() {
+        return Err(crate::glrmask_error("invalid_input", "token sets can only be bound to a Module"));
     }
     Err(PyTypeError::new_err(
         "Grammar.bind accepts a Grammar or Expr",
@@ -472,7 +470,7 @@ impl PyModule {
         Ok(())
     }
 
-    /// Compiles what it can for `vocab` now, even with externs unbound.
+    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
     #[pyo3(signature = (vocab, *, mask_strategy = None))]
     fn precompile(
         slf: &Bound<'_, Self>,

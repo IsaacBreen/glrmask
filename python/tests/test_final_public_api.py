@@ -258,7 +258,7 @@ def token_extern_grammar():
 def test_bind_requires_a_token_set_for_a_token_extern():
     v = vocab()
     grammar = token_extern_grammar()
-    with pytest.raises(glrmask.GLRMaskError, match="token IDs depend on the model"):
+    with pytest.raises(glrmask.GLRMaskError, match="token sets can only be bound to a Module"):
         grammar.bind("T", glrmask.TokenSet([0]))
     assert len(grammar.externs.unbound) == 1
 
@@ -329,13 +329,49 @@ def test_fill_mask_dtype_and_layout():
     words = np.zeros(4, dtype=np.uint32)
     state.fill_mask(words)
     signed = np.zeros(4, dtype=np.int32)
-    state.fill_mask(signed.view(np.uint32))  # int32 buffers (e.g. torch bitmasks) go through a zero-copy view
+    state.fill_mask(signed)
     assert np.array_equal(words, signed.view(np.uint32))
     readonly = words.copy()
     readonly.flags.writeable = False
-    for array in (signed, np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.uint32), words[::2], readonly):
-        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D uint32 NumPy array"):
+    for array in (np.zeros(4, dtype=np.int64), np.zeros((2, 2), dtype=np.uint32), words[::2], readonly):
+        with pytest.raises(TypeError, match="fill_mask needs a contiguous, writable 1-D uint32 or int32 NumPy array"):
             state.fill_mask(array)
+
+
+@pytest.mark.parametrize("strategy", [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_COMPILE, glrmask.MaskStrategy.FAST_MASKS])
+def test_precompile_requires_same_vocab(strategy):
+    v = vocab()
+    wrong = glrmask.Vocab({0: b"z"})
+    module = glrmask.Module(glrmask.Grammar.from_glrm('start s extern grammar item nt s = item'))
+    module.precompile(v, mask_strategy=strategy)
+    with pytest.raises(glrmask.GLRMaskError, match="vocabular"):
+        module.precompile(wrong, mask_strategy=strategy)
+    module.bind("item", glrmask.Grammar.from_lark('start: "a"'))
+    with pytest.raises(glrmask.GLRMaskError, match="vocabular"):
+        module.compile(wrong, mask_strategy=strategy)
+    module.compile(v, mask_strategy=strategy)
+
+
+def test_signed_mask_sign_bit_and_repr():
+    v = glrmask.Vocab({31: b"a", 63: b"a", 255: b"b"})
+    constraint = glrmask.Grammar.from_lark('start: "a"').compile(v)
+    state = constraint.start()
+    assert repr(constraint) == "<glrmask.Constraint mask_bit_len=256>"
+    assert repr(state) == "<glrmask.ConstraintState accepting=False terminated=False>"
+    expected = state.mask()
+    signed = np.zeros((2, len(expected)), dtype=np.int32)
+    state.fill_mask(signed[1])
+    assert np.array_equal(signed[1].view(np.uint32), expected)
+    assert signed[1, 0] < 0 and signed[1, 1] < 0
+    assert not signed[0].any()
+    import importlib.util
+    if importlib.util.find_spec("torch") is not None:
+        import torch
+        tensor = torch.zeros(len(expected), dtype=torch.int32, device="cpu")
+        state.fill_mask(tensor.numpy())
+        assert np.array_equal(tensor.numpy().view(np.uint32), expected)
+    assert state.commit_token(31)
+    assert repr(state) == f"<glrmask.ConstraintState accepting={state.is_accepting()} terminated={state.is_terminated()}>"
 
 
 def test_hashable_public_values_and_token_set_expr_parts():
@@ -372,7 +408,7 @@ def test_grammar_rejects_modules_in_expressions_but_module_bind_accepts():
             with pytest.raises(glrmask.GLRMaskError) as exc:
                 glrmask.Grammar.from_expr(expr)
             assert exc.value.kind == "invalid_input"
-            assert str(exc.value) == "an expression containing a Module can't become a Grammar; bind it into a Module instead"
+            assert str(exc.value) == "a Module can't be part of a Grammar; bind it to a Module instead"
             g = parent()
             with pytest.raises(glrmask.GLRMaskError) as exc:
                 g.bind("item", expr)
@@ -397,7 +433,7 @@ def test_grammar_rejects_tokens_transitively_and_module_accepts_them():
                   glrmask.Expr.sequence(glrmask.Expr.choice(glrmask.Expr.literal("x"), token), glrmask.Expr.literal(""))):
         grammar = glrmask.Grammar.from_glrm("extern grammar VALUE start root nt root = VALUE")
         for attempt in (lambda: grammar.bind("VALUE", value), lambda: glrmask.Grammar.from_expr(value)):
-            with pytest.raises(glrmask.GLRMaskError, match="token IDs depend on the model") as exc:
+            with pytest.raises(glrmask.GLRMaskError, match="token sets can only be bound to a Module") as exc:
                 attempt()
             assert exc.value.kind == "invalid_input"
         assert len(grammar.externs.unbound) == 1

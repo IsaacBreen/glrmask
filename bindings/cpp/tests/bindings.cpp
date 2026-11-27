@@ -33,7 +33,12 @@ void basic() {
         auto v = vocabulary();
         auto g = simple();
         auto m = Module(g);
-        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
+        const auto options = strategy_options(i==0?0:i==1?3:4);
+        m.precompile(v, options);
+        auto wrong = Vocab({{0,"z"}});
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        auto c = m.compile(v, options);
         auto s = c.start();
         const auto initial = s.mask();
         CHECK(allowed(initial,0)); CHECK(allowed(initial,31)); CHECK(allowed(initial,32));
@@ -60,7 +65,12 @@ void exact_and_unicode() {
     for (unsigned i=0; i<3; ++i) {
         auto g = Grammar::from_lark(source);
         auto m = Module(g);
-        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
+        const auto options = strategy_options(i==0?0:i==1?3:4);
+        m.precompile(v, options);
+        auto wrong = Vocab({{0,"z"}});
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        auto c = m.compile(v, options);
         auto s = c.start();
         CHECK(allowed(s.mask(),0)); CHECK(allowed(s.mask(),31));
         CHECK(s.commit_bytes(first)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
@@ -324,7 +334,12 @@ void artifacts(const std::filesystem::path& directory, bool check) {
     std::filesystem::create_directories(directory); auto v = vocabulary();
     for (unsigned i=0; i<3; ++i) {
         auto m = Module(simple());
-        auto c = m.compile(v, strategy_options(i==0?0:i==1?3:4));
+        const auto options = strategy_options(i==0?0:i==1?3:4);
+        m.precompile(v, options);
+        auto wrong = Vocab({{0,"z"}});
+        throws([&]{ m.precompile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        throws([&]{ m.compile(wrong, options); }, GLRMASK_INVALID_INPUT);
+        auto c = m.compile(v, options);
         const auto path = directory/((check?"node-mode-":"cpp-mode-")+std::to_string(i)+".glr");
         if (check) {
             auto loaded = Constraint::load(read_bytes(path), v);

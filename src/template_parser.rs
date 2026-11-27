@@ -315,7 +315,7 @@ impl ParserProgram {
         options: TemplateBuildOptions) -> Result<Constraint> {
         if lexer.terminals.len() != self.templates.len() { return Err(fail("lexer and parser terminal counts must agree exactly")); }
         if let Some(ignore) = lexer.ignore_terminal
-            && !self.identity_terminals.contains(&ignore) { return Err(fail("ignored terminal must exist and use StackTemplate::identity()")); }
+            && !self.identity_terminals.contains(&ignore) { return Err(fail("ignored terminal must exist and have an identity stack template")); }
         let mut expressions = Vec::with_capacity(lexer.terminals.len());
         for (i, pattern) in lexer.terminals.iter().enumerate() {
             let expr = match pattern {

@@ -110,7 +110,7 @@ export declare class Module implements Disposable {
   /** If one fails, none are bound. */
   bind(bindings: Record<string, ExprPart>): void;
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
-  /** Compiles what it can for `vocab` now, even with externs unbound. */
+  /** Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
   /** Finishes compiling the module into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
@@ -157,7 +157,7 @@ export declare class ConstraintState implements Disposable {
   /** Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`. */
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Extra words are set to 0. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
-  fillMask(output: Uint32Array): void;
+  fillMask(output: Uint32Array | Int32Array): void;
   /** The mask's length in bits (the largest token ID plus one). */
   readonly maskBitLength: number;
   /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */

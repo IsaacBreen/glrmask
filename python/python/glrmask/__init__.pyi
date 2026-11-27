@@ -183,7 +183,7 @@ class Module:
         *,
         mask_strategy: MaskStrategy | None = None,
     ) -> None:
-        """Compiles what it can for `vocab` now, even with externs unbound."""
+        """Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`."""
         ...
     def compile(
         self,
@@ -208,6 +208,8 @@ class Module:
 
 @final
 class Constraint:
+    def __repr__(self) -> str:
+        ...
     def start(self) -> ConstraintState:
         """Starts a new sequence."""
         ...
@@ -224,10 +226,12 @@ class Constraint:
 
 @final
 class ConstraintState:
+    def __repr__(self) -> str:
+        ...
     def mask(self, *, dtype: type[np.uint32] | type[bool] = np.uint32) -> NDArray[np.uint32] | NDArray[np.bool_]:
         """Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead."""
         ...
-    def fill_mask(self, bitmask: NDArray[np.uint32], /) -> None:
+    def fill_mask(self, bitmask: NDArray[np.uint32] | NDArray[np.int32], /) -> None:
         """Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL."""
         ...
     @property

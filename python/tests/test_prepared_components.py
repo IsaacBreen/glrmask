@@ -158,9 +158,9 @@ def test_expr_literal_str_rejection_and_empty_choice():
     assert isinstance(lit_bytes, glrmask.Expr)
 
     # Plain str in Expr.choice / sequence raises TypeError mentioning Expr.literal
-    with pytest.raises(TypeError, match="Expr.literal"):
+    with pytest.raises(TypeError, match="wrap them in a literal expression"):
         glrmask.Expr.choice("x")
-    with pytest.raises(TypeError, match="Expr.literal"):
+    with pytest.raises(TypeError, match="wrap them in a literal expression"):
         glrmask.Expr.sequence("x")
 
     # Empty choice matches nothing, does not error

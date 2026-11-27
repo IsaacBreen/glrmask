@@ -33,17 +33,19 @@
     "Module.__init__": "",
     "Module.externs": "",
     "Module.bind": "Binds externs by name. If one fails, none are bound.",
-    "Module.precompile": "Compiles what it can for `vocab` now, even with externs unbound.",
+    "Module.precompile": "Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.",
     "Module.compile": "Finishes compiling the module into a constraint.",
     "Module.save": "",
     "Module.load": "May fail if saved by a different GLRMask version.",
     "Module.copy": "",
     "Constraint": "",
+    "Constraint.__repr__": "",
     "Constraint.start": "Starts a new sequence.",
     "Constraint.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
     "Constraint.save": "",
     "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` isn't the one it was compiled with.",
     "ConstraintState": "",
+    "ConstraintState.__repr__": "",
     "ConstraintState.mask": "Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`. With `dtype=bool`, one boolean per token instead.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. Extra words are set to 0. Releases the GIL.",
     "ConstraintState.mask_bit_len": "The mask's length in bits (the largest token ID plus one).",
@@ -174,8 +176,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "ed74ff152fe1b53a666cc30bfd837fa52f49bc5380140761c24f7ba5f31efad4",
-    "bindings/node/README.md": "fbbb2f02fafce164af4e04542122d4a169a22994b2c9270bf7bbf506726163d2",
+    "bindings/cpp/README.md": "5e02852f6841094426399d91bfd5f537fb965a7c0aedb43b46a8ec47bf3981e5",
+    "bindings/node/README.md": "036ec31309113364954da5212d011d91cd05898d82271f8cfe2bdaa20408c1f1",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -183,5 +185,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "80ac6818867004a2fb305891ae7f2e1266ebcd0bf31e50ff8d13dc7ed058da87"
+  "content_sha256": "6dd654687c98333a86c465340acf463de375a2e96203ca1f4ef2948421803028"
 }

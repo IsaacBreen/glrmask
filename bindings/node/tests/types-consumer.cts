@@ -11,8 +11,11 @@ const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.c
 const accepted: boolean = s.isAccepting();
 const saved: Uint8Array = c.saveSync(); api.Constraint.loadSync(saved, v);
 
-// @ts-expect-error Mask words must be unsigned 32-bit values.
 s.fillMask(new Int32Array(1));
+// @ts-expect-error Mask words must be 32-bit integers.
+s.fillMask(new Float32Array(1));
+// @ts-expect-error Grammar cannot bind a TokenSet.
+g.bind("slot", exact);
 // @ts-expect-error Token sets are constructed from an iterable of IDs.
 new api.TokenSet('invalid');
 // @ts-expect-error Invalid option spelling must not be accepted by declarations.

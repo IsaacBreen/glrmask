@@ -133,6 +133,14 @@ impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingK
 /// let module = Module::new(&Grammar::from_glrm("start s nt s = \"a\"").unwrap());
 /// grammar.bind("CHILD", module).unwrap();
 /// ```
+///
+/// A token set cannot be bound to a grammar either:
+///
+/// ```compile_fail
+/// use glrmask::{Grammar, TokenSet};
+/// let mut grammar = Grammar::from_glrm("extern token T; start s; nt s = T;").unwrap();
+/// grammar.bind("T", TokenSet::new([1])).unwrap();
+/// ```
 #[derive(Debug, Clone)]
 pub struct GrammarBinding(pub(crate) GrammarBindingKind);
 
@@ -140,15 +148,12 @@ pub struct GrammarBinding(pub(crate) GrammarBindingKind);
 pub(crate) enum GrammarBindingKind {
     Grammar(Grammar),
     Expr(Expr),
-    TokenSet(TokenSet),
 }
 
 impl From<Grammar> for GrammarBinding { fn from(g: Grammar) -> Self { Self(GrammarBindingKind::Grammar(g)) } }
 impl From<&Grammar> for GrammarBinding { fn from(g: &Grammar) -> Self { Self(GrammarBindingKind::Grammar(g.clone())) } }
 impl From<Expr> for GrammarBinding { fn from(e: Expr) -> Self { Self(GrammarBindingKind::Expr(e)) } }
 impl From<&Expr> for GrammarBinding { fn from(e: &Expr) -> Self { Self(GrammarBindingKind::Expr(e.clone())) } }
-impl From<TokenSet> for GrammarBinding { fn from(t: TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t)) } }
-impl From<&TokenSet> for GrammarBinding { fn from(t: &TokenSet) -> Self { Self(GrammarBindingKind::TokenSet(t.clone())) } }
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
@@ -626,7 +631,7 @@ impl Module {
         Ok(())
     }
 
-    /// Compiles what it can for `vocab` now, even with externs unbound.
+    /// Compiles what it can now, even with externs unbound. After this, `compile` and `precompile` need the same `vocab`.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.precompile_with(vocab, CompileOptions::default())
     }
@@ -1364,7 +1369,7 @@ impl Module {
 
     pub(super) fn to_source(&self) -> Result<Grammar> {
         if !self.node.prepared.is_empty() {
-            return Err(error("an expression containing a Module can't become a Grammar; bind it into a Module instead"));
+            return Err(error("a Module can't be part of a Grammar; bind it to a Module instead"));
         }
         self.flatten_source()
     }

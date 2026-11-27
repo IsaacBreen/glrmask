@@ -212,7 +212,7 @@ class Expr extends Owned {
     try {
       for (const value of values) {
         if (typeof value === 'string') {
-          throw new TypeError('Plain strings are not supported as Expr operands; use Expr.literal(stringOrBytes)');
+          throw new TypeError('plain strings are not Expr operands; wrap them in a literal expression');
         }
         parts.push(invoke(() => {
           if (value instanceof Grammar) return native.NativeExpr.fromGrammar(handle(value, Grammar));
@@ -322,6 +322,7 @@ class Module extends Owned {
 }
 
 class Constraint extends Owned {
+  [inspect.custom]() { return `<glrmask.Constraint mask_bit_len=${this.maskBitLength}>`; }
   get maskBitLength() { return invoke(() => handle(this, Constraint).maskBitLen); }
   clone() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
@@ -337,11 +338,12 @@ class Constraint extends Owned {
 }
 
 class ConstraintState extends Owned {
+  [inspect.custom]() { return `<glrmask.ConstraintState accepting=${this.isAccepting()} terminated=${this.isTerminated()}>`; }
   get maskBitLength() { return invoke(() => handle(this, ConstraintState).maskBitLen); }
   clone() { return wrap(ConstraintState, invoke(() => handle(this, ConstraintState).clone())); }
   mask() { return invoke(() => handle(this, ConstraintState).mask()); }
   fillMask(output) {
-    if (!types.isUint32Array(output)) throw new TypeError('fillMask requires a Uint32Array');
+    if (!types.isUint32Array(output) && !types.isInt32Array(output)) throw new TypeError('fillMask requires a Uint32Array or Int32Array');
     invoke(() => handle(this, ConstraintState).fillMask(output));
   }
   commitToken(id) {
