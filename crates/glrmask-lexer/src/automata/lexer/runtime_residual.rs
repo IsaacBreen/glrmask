@@ -780,7 +780,7 @@ const MAX_BOUNDED_CODE_ORACLE_PATTERN_STATES: usize = 4_096;
 const MAX_BOUNDED_CODE_ORACLE_BODY_PRODUCT_CELLS: usize = 2_000_000;
 const MAX_BOUNDED_CODE_ORACLE_RELATION_BYTES: usize = 128 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum BoundedCodeEnvelopeState {
     Prefix { next: usize },
     Body { completed: usize, body_state: u32 },
@@ -788,7 +788,7 @@ enum BoundedCodeEnvelopeState {
     Done,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct BoundedCodeOracleCoordinate {
     pattern_state: u32,
     envelope: BoundedCodeEnvelopeState,
@@ -851,7 +851,7 @@ impl EnvelopeStepper<'_> {
 /// This is lexer state only. It contains no parser state, token result, or DWA
 /// effect.
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VirtualResidualDirectCoordinate {
     pub(super) runtime_index: u32,
     coordinate: BoundedCodeOracleCoordinate,

@@ -885,7 +885,7 @@ pub struct TerminalExclusionContinuation {
 /// tokenizer state that produced it. Runtime direct walkers use this only when
 /// the compiler-retained product-trace sidecar proves the mapping.
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TerminalResidualDirectCoordinate {
     raw_state: u32,
     terminal: TerminalID,

@@ -386,7 +386,7 @@ enum DirectPruneStep {
     Live(ResidualCoordinate),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum ResidualCoordinate {
     Virtual(VirtualResidualDirectCoordinate),
     Physical(TerminalResidualDirectCoordinate),
@@ -1664,19 +1664,35 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum FullWalkPruneGuard {
     Passed,
     Pending(SmallVec<[FullWalkPruneMemory; 2]>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum FullWalkPruneMemory {
     Exact(u32, TerminalID),
     Residual(ResidualCoordinate, TerminalID),
 }
 
 impl FullWalkPruneGuard {
+    fn from_memories(mut memories: SmallVec<[FullWalkPruneMemory; 2]>) -> Self {
+        memories.sort_unstable();
+        memories.dedup();
+        if memories.is_empty() { Self::Passed } else { Self::Pending(memories) }
+    }
+
+    // A guard is a conjunction of exclusions. Fewer exclusions accept a
+    // superset of suffixes, so the weaker guard subsumes the stronger one.
+    fn subsumes(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Passed, _) => true,
+            (Self::Pending(a), Self::Pending(b)) =>
+                a.len() <= b.len() && a.iter().all(|m| b.binary_search(m).is_ok()),
+            _ => false,
+        }
+    }
     fn from_initial<T: FullWalkTransitionTable>(
         guard: &InitialPruneGuard,
         transitions: &mut T,
@@ -1703,11 +1719,7 @@ impl FullWalkPruneGuard {
                         projected.push(FullWalkPruneMemory::Exact(state, terminal));
                     }
                 }
-                Ok(if projected.is_empty() {
-                    Self::Passed
-                } else {
-                    Self::Pending(projected)
-                })
+                Ok(Self::from_memories(projected))
             }
         }
     }
@@ -1768,11 +1780,7 @@ impl FullWalkPruneGuard {
                 }
             }
         }
-        if next.is_empty() {
-            Some(Self::Passed)
-        } else {
-            Some(Self::Pending(next))
-        }
+        Some(Self::from_memories(next))
     }
 
     fn remember_terminal_match<T: FullWalkTransitionTable>(
@@ -1795,7 +1803,7 @@ impl FullWalkPruneGuard {
                     memories.push(memory);
                 }
             }
-            return Self::Pending(memories);
+            return Self::from_memories(memories);
         }
         if !transitions.future_contains(lexer_state, terminal) {
             return self.clone();
@@ -1808,11 +1816,11 @@ impl FullWalkPruneGuard {
         if !memories.contains(&memory) {
             memories.push(memory);
         }
-        Self::Pending(memories)
+        Self::from_memories(memories)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct FullWalkBranch {
     lexer_state: u32,
     parser_node: u32,
@@ -1831,17 +1839,30 @@ struct FullWalkProduct {
 impl FullWalkProduct {
     #[inline]
     fn push(&mut self, lexer_state: u32, parser_node: u32, prune_guard: FullWalkPruneGuard) {
-        if prune_guard.is_passed() {
-            let pair = (lexer_state, parser_node);
-            if let Err(index) = self.plain.binary_search(&pair) {
-                self.plain.insert(index, pair);
-            }
-        } else {
-            let branch = FullWalkBranch { lexer_state, parser_node, prune_guard };
-            if !self.guarded.contains(&branch) {
-                self.guarded.push(branch);
-            }
+        let pair = (lexer_state, parser_node);
+        if self.plain.binary_search(&pair).is_ok() {
+            return;
         }
+        let prune_guard = match prune_guard {
+            FullWalkPruneGuard::Passed => FullWalkPruneGuard::Passed,
+            FullWalkPruneGuard::Pending(memories) => FullWalkPruneGuard::from_memories(memories),
+        };
+        if prune_guard.is_passed() {
+            let index = self.plain.binary_search(&pair).unwrap_err();
+            self.plain.insert(index, pair);
+            self.guarded.retain(|b| (b.lexer_state, b.parser_node) != pair);
+            return;
+        }
+        // Compare only alternatives with the same exact lexer/parser pair.
+        if self.guarded.iter().any(|b| (b.lexer_state, b.parser_node) == pair
+            && b.prune_guard.subsumes(&prune_guard)) {
+            return;
+        }
+        self.guarded.retain(|b| (b.lexer_state, b.parser_node) != pair
+            || !prune_guard.subsumes(&b.prune_guard));
+        let branch = FullWalkBranch { lexer_state, parser_node, prune_guard };
+        let index = self.guarded.binary_search(&branch).unwrap_err();
+        self.guarded.insert(index, branch);
     }
 
     #[inline]
@@ -2021,10 +2042,34 @@ fn singleton_product_cache_keeps_exact_keys_and_capacity() {
     product.push(7, 3, FullWalkPruneGuard::Pending(smallvec::smallvec![
         FullWalkPruneMemory::Exact(8, 1),
     ]));
+    assert_eq!(product.len(), 1);
+    product.push(8, 3, FullWalkPruneGuard::Pending(smallvec::smallvec![
+        FullWalkPruneMemory::Exact(8, 1),
+    ]));
     assert_eq!(product.len(), 2);
     assert!(matches!(cache.hold(product), FullWalkCursor::Owned(_)));
 }
 
+
+#[cfg(test)]
+#[test]
+fn product_guards_form_a_canonical_antichain_per_exact_pair() {
+    let a = FullWalkPruneMemory::Exact(1, 1);
+    let b = FullWalkPruneMemory::Exact(2, 1);
+    let mut left = FullWalkProduct::default();
+    left.push(4, 5, FullWalkPruneGuard::Pending(smallvec::smallvec![b, a, b]));
+    left.push(4, 5, FullWalkPruneGuard::Pending(smallvec::smallvec![a]));
+    left.push(4, 6, FullWalkPruneGuard::Pending(smallvec::smallvec![a, b]));
+    let mut right = FullWalkProduct::default();
+    right.push(4, 6, FullWalkPruneGuard::Pending(smallvec::smallvec![b, a]));
+    right.push(4, 5, FullWalkPruneGuard::Pending(smallvec::smallvec![a]));
+    right.push(4, 5, FullWalkPruneGuard::Pending(smallvec::smallvec![a, b]));
+    assert!(left == right);
+    assert_eq!(left.len(), 2);
+    left.push(4, 5, FullWalkPruneGuard::Passed);
+    assert_eq!(left.len(), 2);
+    assert_eq!(left.guarded.len(), 1);
+}
 
 #[cfg(test)]
 #[test]
