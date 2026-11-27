@@ -50,8 +50,76 @@ const EXTERNAL_DWA_CONSTRAINT_VERSION: u16 = 44;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
-const V30_SECTION_MAGIC: [u8; 4] = *b"S30\0";
-const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
+const NATIVE_SECTION_MAGIC: [u8; 4] = *b"S31\0";
+const NATIVE_SECTION_HEADER_LEN: usize = NATIVE_SECTION_MAGIC.len() + NativeSection::COUNT * 8;
+const NATIVE_BODY_START: usize = CONSTRAINT_HEADER_LEN + NATIVE_SECTION_HEADER_LEN;
+
+/// The native artifact's ordered section inventory. The vocabulary is supplied
+/// externally, so there is no token-byte section.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum NativeSection {
+    Weights,
+    Dwa,
+    Table,
+    Core,
+    Runtime,
+    TokenClasses,
+    Tokenizer,
+    InternalMasks,
+    MaskCache,
+    CompositionMetadata,
+}
+
+impl NativeSection {
+    const COUNT: usize = Self::CompositionMetadata as usize + 1;
+    const ALL: [Self; Self::COUNT] = [
+        Self::Weights, Self::Dwa, Self::Table, Self::Core, Self::Runtime,
+        Self::TokenClasses, Self::Tokenizer, Self::InternalMasks,
+        Self::MaskCache, Self::CompositionMetadata,
+    ];
+
+    fn padding(self, bytes: &[u8], absolute_start: usize) -> usize {
+        match self {
+            Self::InternalMasks if bytes.starts_with(b"IBM2") && bytes.len() >= 12 => {
+                let group_count = u32::from_le_bytes(
+                    bytes[4..8].try_into().expect("IBM2 header has fixed width"),
+                ) as usize;
+                let align = std::mem::align_of::<PackedInternalTokenBufMask>();
+                let entries_offset = 12usize.saturating_add(group_count.saturating_add(1).saturating_mul(4));
+                (align - ((absolute_start % align + entries_offset % align) % align)) % align
+            }
+            Self::MaskCache if bytes.starts_with(b"TMC6") || bytes.starts_with(b"TMC7") => {
+                (4 - (absolute_start & 3)) & 3
+            }
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeSectionSource<'a> {
+    Bytes(&'a [u8]),
+    DirectDwa(usize),
+    DirectTokenizer(usize),
+    AppendDwa(usize),
+}
+
+impl NativeSectionSource<'_> {
+    fn estimated_len(self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::DirectDwa(len) | Self::DirectTokenizer(len) | Self::AppendDwa(len) => len,
+        }
+    }
+
+    fn padding(self, kind: NativeSection, absolute_start: usize) -> usize {
+        match self {
+            Self::Bytes(bytes) => kind.padding(bytes, absolute_start),
+            _ => 0,
+        }
+    }
+}
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
@@ -753,7 +821,7 @@ struct DecodedNativeArtifactLoad {
     runtime: Option<DecodedConstraintRuntime>,
     token_mask_cache: Option<TokenMaskCacheArtifact>,
     terminal_exprs: Option<Vec<Expr>>,
-    post_decode_ms: [f64; 4],
+    post_decode_ms: [f64; 2],
 }
 
 struct DecodedConstraintCore {
@@ -1636,7 +1704,7 @@ fn encode_internal_token_buf_masks(constraint: &Constraint) -> Vec<u8> {
     };
     let mut out = Vec::with_capacity(
         12usize
-            .saturating_add((group_count + 1).saturating_mul(4))
+            .saturating_add(group_count.saturating_add(1).saturating_mul(4))
             .saturating_add(entry_count.saturating_mul(ENTRY_BYTES)),
     );
     out.extend_from_slice(MAGIC);
@@ -2798,102 +2866,47 @@ fn restore_segmented_runtime_v27(
     }
 }
 
-fn eleven_section_payload<'a>(
-    payload: &'a [u8],
-    magic: &[u8; 4],
-    header_len: usize,
-    version_label: &str,
-) -> Result<
-    (
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-        &'a [u8],
-    ),
-    String,
-> {
-    if payload.len() < header_len || !payload.starts_with(magic) {
-        return Err(format!("invalid {version_label} constraint section header"));
+fn decode_native_sections(payload: &[u8]) -> Result<[&[u8]; NativeSection::COUNT], String> {
+    if payload.len() < NATIVE_SECTION_HEADER_LEN || !payload.starts_with(&NATIVE_SECTION_MAGIC) {
+        return Err("invalid native constraint section header".to_owned());
     }
-    let mut pos = magic.len();
-    let mut take_len = || {
-        let end = pos + 8;
-        let value = u64::from_le_bytes(
-            payload[pos..end]
-                .try_into()
-                .expect("constraint section length has fixed width"),
-        );
-        pos = end;
-        usize::try_from(value)
-            .map_err(|_| format!("{version_label} section length does not fit this platform"))
-    };
-    let lengths = [
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-        take_len()?,
-    ];
-    let total = lengths.iter().try_fold(header_len, |sum, &len| {
-        sum.checked_add(len)
-            .ok_or_else(|| format!("{version_label} constraint section lengths overflow"))
-    })?;
-    if total != payload.len() {
-        return Err(format!("invalid {version_label} constraint section lengths"));
+    let (header, mut remaining) = payload.split_at(NATIVE_SECTION_HEADER_LEN);
+    let mut sections = [&[][..]; NativeSection::COUNT];
+    for (section, encoded_len) in sections.iter_mut()
+        .zip(header[NATIVE_SECTION_MAGIC.len()..].chunks_exact(8))
+    {
+        let len = usize::try_from(u64::from_le_bytes(
+            encoded_len.try_into().expect("constraint section length has fixed width"),
+        )).map_err(|_| "constraint section length does not fit this platform".to_owned())?;
+        if len > remaining.len() {
+            return Err("invalid native constraint section lengths".to_owned());
+        }
+        let (bytes, rest) = remaining.split_at(len);
+        *section = bytes;
+        remaining = rest;
     }
-    let mut pos = header_len;
-    let mut next = |len: usize| {
-        let section = &payload[pos..pos + len];
-        pos += len;
-        section
-    };
-    Ok((
-        next(lengths[0]),
-        next(lengths[1]),
-        next(lengths[2]),
-        next(lengths[3]),
-        next(lengths[4]),
-        next(lengths[5]),
-        next(lengths[6]),
-        next(lengths[7]),
-        next(lengths[8]),
-        next(lengths[9]),
-        next(lengths[10]),
-    ))
+    if !remaining.is_empty() {
+        return Err("invalid native constraint section lengths".to_owned());
+    }
+    Ok(sections)
 }
 
-fn v30_sections(
-    payload: &[u8],
-) -> Result<
-    (
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-    ),
-    String,
-> {
-    eleven_section_payload(payload, &V30_SECTION_MAGIC, V30_SECTION_HEADER_LEN, "v30")
+fn write_native_section_header(
+    header: &mut [u8],
+    version: u16,
+    lengths: &[usize; NativeSection::COUNT],
+) {
+    assert_eq!(header.len(), NATIVE_BODY_START);
+    let payload_len = lengths.iter().try_fold(NATIVE_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+    }).expect("constraint artifact size overflow");
+    header[..8].copy_from_slice(&CONSTRAINT_MAGIC);
+    header[8..10].copy_from_slice(&version.to_le_bytes());
+    header[10..18].copy_from_slice(&(payload_len as u64).to_le_bytes());
+    header[18..22].copy_from_slice(&NATIVE_SECTION_MAGIC);
+    for (encoded_len, &len) in header[22..].chunks_exact_mut(8).zip(lengths) {
+        encoded_len.copy_from_slice(&(len as u64).to_le_bytes());
+    }
 }
 
 fn constraint_serialized_weight_pool_with_ids(
@@ -3480,16 +3493,15 @@ impl Constraint {
             .flatten()
             .filter(|_| !compact_tokenizer)
             .filter(|&len| len >= DIRECT_TOKENIZER_MIN_BYTES);
-        let ((token_bytes, (original_token_map, (tokenizer, internal_token_buf_masks))), ((weight_pool, core), (dwa, table, runtime, token_mask_cache, composition_metadata))) = rayon::join(
+        let ((original_token_map, (tokenizer, internal_token_buf_masks)), ((weight_pool, core), (dwa, table, runtime, token_mask_cache, composition_metadata))) = rayon::join(
             || rayon::join(
                 || {
                     let started = profile.then(std::time::Instant::now);
-                    // Saved artifacts never carry the vocabulary: the loader
-                    // supplies it and checks the envelope fingerprint.
-                    let bytes = std::sync::Arc::new(Vec::new());
+                    let bytes =
+                        self.token_classes.encode();
                     if let Some(started) = started {
                         eprintln!(
-                            "[glrmask/profile][constraint_save_section] name=token_bytes ms={:.3} bytes={}",
+                            "[glrmask/profile][constraint_save_section] name=original_token_map ms={:.3} bytes={}",
                             started.elapsed().as_secs_f64() * 1000.0,
                             bytes.len(),
                         );
@@ -3499,62 +3511,47 @@ impl Constraint {
                 || rayon::join(
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes =
-                            self.token_classes.encode();
+                        let bytes = if preserve_compressed_tokenizer {
+                            crate::automata::lexer::tokenizer::artifact_serde::build_huge_bytes(
+                                &self.tokenizer,
+                            )
+                                .unwrap_or_else(|| {
+                                    crate::automata::lexer::tokenizer::artifact_serde::to_segment_bytes(
+                                        &self.tokenizer,
+                                    )
+                                })
+                        } else if compact_tokenizer {
+                            crate::automata::lexer::tokenizer::artifact_serde::to_packed_bytes(
+                                &self.tokenizer,
+                            )
+                        } else if direct_tokenizer_len.is_some() {
+                            Vec::new()
+                        } else {
+                            crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(
+                                &self.tokenizer,
+                            )
+                        };
                         if let Some(started) = started {
                             eprintln!(
-                                "[glrmask/profile][constraint_save_section] name=original_token_map ms={:.3} bytes={}",
+                                "[glrmask/profile][constraint_save_section] name=tokenizer ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                direct_tokenizer_len.unwrap_or(bytes.len()),
+                            );
+                        }
+                        bytes
+                    },
+                    || {
+                        let started = profile.then(std::time::Instant::now);
+                        let bytes = encode_internal_token_buf_masks(self);
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=internal_token_buf_masks ms={:.3} bytes={}",
                                 started.elapsed().as_secs_f64() * 1000.0,
                                 bytes.len(),
                             );
                         }
                         bytes
                     },
-                    || rayon::join(
-                        || {
-                            let started = profile.then(std::time::Instant::now);
-                            let bytes = if preserve_compressed_tokenizer {
-                                crate::automata::lexer::tokenizer::artifact_serde::build_huge_bytes(
-                                    &self.tokenizer,
-                                )
-                                    .unwrap_or_else(|| {
-                                        crate::automata::lexer::tokenizer::artifact_serde::to_segment_bytes(
-                                            &self.tokenizer,
-                                        )
-                                    })
-                            } else if compact_tokenizer {
-                                crate::automata::lexer::tokenizer::artifact_serde::to_packed_bytes(
-                                    &self.tokenizer,
-                                )
-                            } else if direct_tokenizer_len.is_some() {
-                                Vec::new()
-                            } else {
-                                crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(
-                                    &self.tokenizer,
-                                )
-                            };
-                            if let Some(started) = started {
-                                eprintln!(
-                                    "[glrmask/profile][constraint_save_section] name=tokenizer ms={:.3} bytes={}",
-                                    started.elapsed().as_secs_f64() * 1000.0,
-                                    direct_tokenizer_len.unwrap_or(bytes.len()),
-                                );
-                            }
-                            bytes
-                        },
-                        || {
-                            let started = profile.then(std::time::Instant::now);
-                            let bytes = encode_internal_token_buf_masks(self);
-                            if let Some(started) = started {
-                                eprintln!(
-                                    "[glrmask/profile][constraint_save_section] name=internal_token_buf_masks ms={:.3} bytes={}",
-                                    started.elapsed().as_secs_f64() * 1000.0,
-                                    bytes.len(),
-                                );
-                            }
-                            bytes
-                        },
-                    ),
                 ),
             ),
             || rayon::join(
@@ -3836,325 +3833,158 @@ impl Constraint {
             .or(packed_dwa_for_parallel.as_deref())
             .or_else(|| (!dwa.is_empty()).then_some(dwa.as_slice()))
             .or_else(|| self.packed_parser_dwa.is_none().then_some(dwa.as_slice()));
-        let dwa_wire_len = parallel_dwa
-            .map(<[u8]>::len)
-            .unwrap_or(estimated_dwa_wire_len);
-        let tokenizer_wire_len = direct_tokenizer_len.unwrap_or(tokenizer.len());
-        let weight_pool_wire = weight_pool.as_slice();
-        let table_wire = table.as_slice();
-        let runtime_wire = runtime.as_slice();
-        let original_token_map_wire = original_token_map.as_slice();
-        let internal_token_buf_masks_wire = internal_token_buf_masks.as_slice();
-        let token_mask_cache_wire = token_mask_cache.as_slice();
-        let composition_metadata_wire = composition_metadata.as_slice();
-        let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V30_SECTION_HEADER_LEN
-            + weight_pool_wire.len()
-            + dwa_wire_len
-            + table_wire.len()
-            + core.len()
-            + runtime_wire.len()
-            + token_bytes.len()
-            + original_token_map_wire.len()
-            + tokenizer_wire_len;
-        let internal_token_buf_masks_leading_padding = if internal_token_buf_masks_wire
-            .starts_with(b"IBM2")
-            && internal_token_buf_masks_wire.len() >= 12
-        {
-            let group_count = u32::from_le_bytes(
-                internal_token_buf_masks_wire[4..8]
-                    .try_into()
-                    .expect("IBM2 header has fixed width"),
-            ) as usize;
-            let entries_offset = 12usize.saturating_add((group_count + 1).saturating_mul(4));
-            let align = std::mem::align_of::<PackedInternalTokenBufMask>();
-            (align - ((internal_token_buf_masks_absolute_start + entries_offset) % align)) % align
+        let dwa_source = if let Some(bytes) = parallel_dwa {
+            NativeSectionSource::Bytes(bytes)
+        } else if let Some(len) = direct_dwa_wire_len {
+            NativeSectionSource::DirectDwa(len)
         } else {
-            0
+            NativeSectionSource::AppendDwa(estimated_dwa_wire_len)
         };
-        let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
-            + internal_token_buf_masks_wire.len();
-        let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V30_SECTION_HEADER_LEN
-            + weight_pool_wire.len()
-            + dwa_wire_len
-            + table_wire.len()
-            + core.len()
-            + runtime_wire.len()
-            + token_bytes.len()
-            + original_token_map_wire.len()
-            + tokenizer_wire_len
-            + internal_token_buf_masks_section_len;
-        let token_mask_cache_leading_padding = if token_mask_cache_wire.starts_with(b"TMC6")
-            || token_mask_cache_wire.starts_with(b"TMC7")
-        {
-            (4 - (token_mask_cache_absolute_start & 3)) & 3
-        } else {
-            0
-        };
-        let token_mask_cache_section_len =
-            token_mask_cache_leading_padding + token_mask_cache_wire.len();
+        let sources = NativeSection::ALL.map(|kind| match kind {
+            NativeSection::Weights => NativeSectionSource::Bytes(weight_pool.as_slice()),
+            NativeSection::Dwa => dwa_source,
+            NativeSection::Table => NativeSectionSource::Bytes(table.as_slice()),
+            NativeSection::Core => NativeSectionSource::Bytes(core.as_slice()),
+            NativeSection::Runtime => NativeSectionSource::Bytes(runtime.as_slice()),
+            NativeSection::TokenClasses => NativeSectionSource::Bytes(original_token_map.as_slice()),
+            NativeSection::Tokenizer => match direct_tokenizer_len {
+                Some(len) => NativeSectionSource::DirectTokenizer(len),
+                None => NativeSectionSource::Bytes(tokenizer.as_slice()),
+            },
+            NativeSection::InternalMasks => NativeSectionSource::Bytes(internal_token_buf_masks.as_slice()),
+            NativeSection::MaskCache => NativeSectionSource::Bytes(token_mask_cache.as_slice()),
+            NativeSection::CompositionMetadata => NativeSectionSource::Bytes(composition_metadata.as_slice()),
+        });
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V30_SECTION_HEADER_LEN
-            + weight_pool_wire.len()
-            + dwa_wire_len
-            + table_wire.len()
-            + core.len()
-            + runtime_wire.len()
-            + token_bytes.len()
-            + original_token_map_wire.len()
-            + tokenizer_wire_len
-            + internal_token_buf_masks_section_len
-            + token_mask_cache_section_len
-            + composition_metadata_wire.len();
+        let mut lengths = [0; NativeSection::COUNT];
+        let mut paddings = [0; NativeSection::COUNT];
+        let mut total_len = NATIVE_BODY_START;
+        for (kind, source) in NativeSection::ALL.into_iter().zip(sources) {
+            let index = kind as usize;
+            let padding = source.padding(kind, total_len);
+            paddings[index] = padding;
+            lengths[index] = source.estimated_len().checked_add(padding)
+                .expect("constraint section size overflow");
+            total_len = total_len.checked_add(lengths[index])
+                .expect("constraint artifact size overflow");
+        }
 
-        let direct_runtime_dwa = parallel_dwa.is_none().then(|| {
-            self.packed_parser_dwa.as_deref().filter(|packed| {
-                packed.direct_fast_wire_len() == Some(dwa_wire_len)
-            })
-        }).flatten();
-        if parallel_dwa.is_some() || direct_runtime_dwa.is_some() {
-            let dwa_bytes = parallel_dwa.unwrap_or(&[]);
-            if !dwa_bytes.is_empty() {
-                debug_assert_eq!(dwa_bytes.len(), dwa_wire_len);
+        let bytes = if matches!(dwa_source, NativeSectionSource::AppendDwa(_)) {
+            // Some packed layouts do not know their exact size until emitted.
+            // Stream those directly into the final allocation and derive later
+            // section padding from the actual emitted position.
+            let mut bytes = Vec::with_capacity(total_len);
+            bytes.resize(NATIVE_BODY_START, 0);
+            for (kind, source) in NativeSection::ALL.into_iter().zip(sources) {
+                let start = bytes.len();
+                let padding = source.padding(kind, start);
+                bytes.resize(start.checked_add(padding).expect("constraint section size overflow"), 0);
+                match source {
+                    NativeSectionSource::Bytes(source) => bytes.extend_from_slice(source),
+                    NativeSectionSource::AppendDwa(_) => {
+                        let started = profile.then(std::time::Instant::now);
+                        self.packed_parser_dwa.as_ref().expect("packed DWA source")
+                            .append_fast_wire_bytes(&mut bytes);
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=dwa_direct ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                bytes.len() - start,
+                            );
+                        }
+                    }
+                    NativeSectionSource::DirectDwa(_) | NativeSectionSource::DirectTokenizer(_) => {
+                        unreachable!("direct writing requires an exact section layout");
+                    }
+                }
+                lengths[kind as usize] = bytes.len() - start;
             }
-            let total_len = CONSTRAINT_HEADER_LEN + payload_len;
+            write_native_section_header(&mut bytes[..NATIVE_BODY_START], artifact_version, &lengths);
+            bytes
+        } else {
             let mut bytes = vec![0u8; total_len];
-            let header_len = CONSTRAINT_HEADER_LEN + V30_SECTION_HEADER_LEN;
-            let (header, mut body) = bytes.split_at_mut(header_len);
-            let mut pos = 0usize;
-            header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
-            pos += CONSTRAINT_MAGIC.len();
-            header[pos..pos + 2].copy_from_slice(&artifact_version.to_le_bytes());
-            pos += 2;
-            header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
-            pos += 8;
-            header[pos..pos + V30_SECTION_MAGIC.len()].copy_from_slice(&V30_SECTION_MAGIC);
-            pos += V30_SECTION_MAGIC.len();
-            for len in [
-                weight_pool_wire.len(),
-                dwa_wire_len,
-                table_wire.len(),
-                core.len(),
-                runtime_wire.len(),
-                token_bytes.len(),
-                original_token_map_wire.len(),
-                tokenizer_wire_len,
-                internal_token_buf_masks_section_len,
-                token_mask_cache_section_len,
-                composition_metadata_wire.len(),
-            ] {
-                header[pos..pos + 8].copy_from_slice(&(len as u64).to_le_bytes());
-                pos += 8;
-            }
-            debug_assert_eq!(pos, header.len());
+            let (header, mut body) = bytes.split_at_mut(NATIVE_BODY_START);
+            write_native_section_header(header, artifact_version, &lengths);
 
             let mut copy_jobs = Vec::<(&mut [u8], &[u8])>::with_capacity(24);
             let mut direct_tokenizer_destination = None;
             let mut direct_dwa_destination = None;
-            let sources: [&[u8]; 11] = [
-                weight_pool_wire,
-                dwa_bytes,
-                table_wire,
-                core.as_slice(),
-                runtime_wire,
-                token_bytes.as_slice(),
-                original_token_map_wire,
-                tokenizer.as_slice(),
-                internal_token_buf_masks_wire,
-                token_mask_cache_wire,
-                composition_metadata_wire,
-            ];
-            for (index, len) in [
-                weight_pool_wire.len(),
-                dwa_wire_len,
-                table_wire.len(),
-                core.len(),
-                runtime_wire.len(),
-                token_bytes.len(),
-                original_token_map_wire.len(),
-                tokenizer_wire_len,
-                internal_token_buf_masks_section_len,
-                token_mask_cache_section_len,
-                composition_metadata_wire.len(),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let (section, rest) = body.split_at_mut(len);
-                let section = if index == 8 && internal_token_buf_masks_leading_padding != 0 {
-                    let (padding, section) = section
-                        .split_at_mut(internal_token_buf_masks_leading_padding);
-                    padding.fill(0);
-                    section
-                } else if index == 9 && token_mask_cache_leading_padding != 0 {
-                    let (padding, section) =
-                        section.split_at_mut(token_mask_cache_leading_padding);
-                    padding.fill(0);
-                    section
-                } else {
-                    section
-                };
-                if index == 1 && direct_runtime_dwa.is_some() {
-                    direct_dwa_destination = Some(section);
-                } else if index == 7 && direct_tokenizer_len.is_some() {
-                    direct_tokenizer_destination = Some(section);
-                } else {
-                    const PARALLEL_COPY_SPLIT_MIN_BYTES: usize = 4 * 1024 * 1024;
-                    let source = sources[index];
-                    debug_assert_eq!(section.len(), source.len());
-                    if len >= PARALLEL_COPY_SPLIT_MIN_BYTES && rayon::current_num_threads() > 1 {
-                        let target_chunks = rayon::current_num_threads().clamp(2, 12);
-                        let chunk_size = source.len().div_ceil(target_chunks).max(1024 * 1024);
-                        let mut destination = section;
-                        let mut source = source;
-                        while !source.is_empty() {
-                            let count = chunk_size.min(source.len());
-                            let (destination_chunk, destination_rest) = destination.split_at_mut(count);
-                            let (source_chunk, source_rest) = source.split_at(count);
-                            copy_jobs.push((destination_chunk, source_chunk));
-                            destination = destination_rest;
-                            source = source_rest;
+            let parallel = rayon::current_num_threads() > 1;
+            for (kind, source) in NativeSection::ALL.into_iter().zip(sources) {
+                let index = kind as usize;
+                let (section, rest) = body.split_at_mut(lengths[index]);
+                let section = &mut section[paddings[index]..];
+                match source {
+                    NativeSectionSource::DirectDwa(_) => direct_dwa_destination = Some(section),
+                    NativeSectionSource::DirectTokenizer(_) => direct_tokenizer_destination = Some(section),
+                    NativeSectionSource::AppendDwa(_) => unreachable!("exact section layout"),
+                    NativeSectionSource::Bytes(source) => {
+                        const PARALLEL_COPY_SPLIT_MIN_BYTES: usize = 4 * 1024 * 1024;
+                        debug_assert_eq!(section.len(), source.len());
+                        if source.len() >= PARALLEL_COPY_SPLIT_MIN_BYTES && parallel {
+                            let target_chunks = rayon::current_num_threads().clamp(2, 12);
+                            let chunk_size = source.len().div_ceil(target_chunks).max(1024 * 1024);
+                            copy_jobs.extend(section.chunks_mut(chunk_size).zip(source.chunks(chunk_size)));
+                        } else {
+                            copy_jobs.push((section, source));
                         }
-                    } else {
-                        copy_jobs.push((section, source));
                     }
                 }
                 body = rest;
             }
             debug_assert!(body.is_empty());
-            if rayon::current_num_threads() > 1 {
-                let copy_all = || {
-                    copy_jobs.into_par_iter().for_each(|(destination, source)| {
-                        destination.copy_from_slice(source);
-                    });
-                };
-                let write_tokenizer = || {
-                    if let Some(destination) = direct_tokenizer_destination {
-                        let started = profile.then(std::time::Instant::now);
-                        crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes_with_layout(
-                            &self.tokenizer,
-                            fast_tokenizer_layout.expect("direct tokenizer write requires a fast layout"),
-                            destination,
-                        )
-                        .expect("precomputed fast tokenizer layout should match final section");
-                        if let Some(started) = started {
-                            eprintln!(
-                                "[glrmask/profile][constraint_save_section] name=tokenizer_direct ms={:.3} bytes={}",
-                                started.elapsed().as_secs_f64() * 1000.0,
-                                destination.len(),
-                            );
-                        }
-                    }
-                };
-                let write_dwa = || {
-                    if let (Some(packed), Some(destination)) =
-                        (direct_runtime_dwa, direct_dwa_destination)
-                    {
-                        let started = profile.then(std::time::Instant::now);
-                        packed
-                            .write_direct_fast_wire_bytes(destination)
-                            .expect("direct DWA length should match final section");
-                        if let Some(started) = started {
-                            eprintln!(
-                                "[glrmask/profile][constraint_save_section] name=dwa_direct_parallel ms={:.3} bytes={}",
-                                started.elapsed().as_secs_f64() * 1000.0,
-                                destination.len(),
-                            );
-                        }
-                    }
-                };
-                rayon::join(copy_all, || rayon::join(write_dwa, write_tokenizer));
-            } else {
-                for (destination, source) in copy_jobs {
+            let copy_all = || {
+                let copy = |(destination, source): (&mut [u8], &[u8])| {
                     destination.copy_from_slice(source);
+                };
+                if parallel {
+                    copy_jobs.into_par_iter().for_each(copy);
+                } else {
+                    copy_jobs.into_iter().for_each(copy);
                 }
+            };
+            let write_tokenizer = || {
                 if let Some(destination) = direct_tokenizer_destination {
+                    let started = profile.then(std::time::Instant::now);
                     crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes_with_layout(
                         &self.tokenizer,
                         fast_tokenizer_layout.expect("direct tokenizer write requires a fast layout"),
                         destination,
                     )
                     .expect("precomputed fast tokenizer layout should match final section");
+                    if let Some(started) = started {
+                        eprintln!(
+                            "[glrmask/profile][constraint_save_section] name=tokenizer_direct ms={:.3} bytes={}",
+                            started.elapsed().as_secs_f64() * 1000.0,
+                            destination.len(),
+                        );
+                    }
                 }
-                if let (Some(packed), Some(destination)) =
-                    (direct_runtime_dwa, direct_dwa_destination)
-                {
-                    packed
+            };
+            let write_dwa = || {
+                if let Some(destination) = direct_dwa_destination {
+                    let started = profile.then(std::time::Instant::now);
+                    self.packed_parser_dwa.as_ref().expect("packed DWA source")
                         .write_direct_fast_wire_bytes(destination)
                         .expect("direct DWA length should match final section");
+                    if let Some(started) = started {
+                        eprintln!(
+                            "[glrmask/profile][constraint_save_section] name=dwa_direct_parallel ms={:.3} bytes={}",
+                            started.elapsed().as_secs_f64() * 1000.0,
+                            destination.len(),
+                        );
+                    }
                 }
+            };
+            if parallel {
+                rayon::join(copy_all, || rayon::join(write_dwa, write_tokenizer));
+            } else {
+                copy_all();
+                write_dwa();
+                write_tokenizer();
             }
-            if let Some(started) = assemble_started {
-                eprintln!(
-                    "[glrmask/profile][constraint_save_assemble] ms={:.3} mode=parallel",
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            if let Some(started) = total_started {
-                eprintln!(
-                    "[glrmask/profile][constraint_save] total_ms={:.3} bytes={}",
-                    started.elapsed().as_secs_f64() * 1000.0,
-                    bytes.len(),
-                );
-            }
-            return bytes;
-        }
-        let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload_len);
-        bytes.extend_from_slice(&CONSTRAINT_MAGIC);
-        bytes.extend_from_slice(&artifact_version.to_le_bytes());
-        let payload_len_offset = bytes.len();
-        bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V30_SECTION_MAGIC);
-        bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
-        let dwa_len_offset = bytes.len();
-        bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(table_wire.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(core.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(runtime_wire.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(token_bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(original_token_map_wire.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(tokenizer_wire_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&(internal_token_buf_masks_section_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&(token_mask_cache_section_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&(composition_metadata_wire.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(weight_pool_wire);
-        let dwa_start = bytes.len();
-        if let Some(packed) = &self.packed_parser_dwa {
-            debug_assert!(dwa.is_empty());
-            let started = profile.then(std::time::Instant::now);
-            packed.append_fast_wire_bytes(&mut bytes);
-            if let Some(started) = started {
-                eprintln!(
-                    "[glrmask/profile][constraint_save_section] name=dwa_direct ms={:.3} bytes={}",
-                    started.elapsed().as_secs_f64() * 1000.0,
-                    bytes.len() - dwa_start,
-                );
-            }
-        } else {
-            bytes.extend_from_slice(&dwa);
-        }
-        let dwa_len = bytes.len() - dwa_start;
-        bytes[dwa_len_offset..dwa_len_offset + 8]
-            .copy_from_slice(&(dwa_len as u64).to_le_bytes());
-        bytes.extend_from_slice(table_wire);
-        bytes.extend_from_slice(&core);
-        bytes.extend_from_slice(runtime_wire);
-        bytes.extend_from_slice(token_bytes.as_slice());
-        bytes.extend_from_slice(original_token_map_wire);
-        if direct_tokenizer_len.is_some() {
-            unreachable!("direct tokenizer encoding requires the parallel assembly path");
-        } else {
-            bytes.extend_from_slice(&tokenizer);
-        }
-        bytes.resize(bytes.len() + internal_token_buf_masks_leading_padding, 0);
-        bytes.extend_from_slice(internal_token_buf_masks_wire);
-        bytes.resize(bytes.len() + token_mask_cache_leading_padding, 0);
-        bytes.extend_from_slice(token_mask_cache_wire);
-        bytes.extend_from_slice(composition_metadata_wire);
-        let payload_len = bytes.len() - CONSTRAINT_HEADER_LEN;
-        bytes[payload_len_offset..payload_len_offset + 8]
-            .copy_from_slice(&(payload_len as u64).to_le_bytes());
+            bytes
+        };
         if let Some(started) = assemble_started {
             eprintln!(
                 "[glrmask/profile][constraint_save_assemble] ms={:.3}",
@@ -4410,44 +4240,18 @@ impl Constraint {
         prepared_completion_wire: &mut Option<Arc<[u8]>>,
     ) -> crate::Result<DecodedNativeArtifactLoad> {
         debug_assert!(external_vocab.is_some() || deferred);
-        let (
-            weight,
-            dwa,
-            table,
-            core,
-            runtime,
-            token_bytes,
-            original_map,
-            tokenizer,
-            internal_masks,
-            token_mask_cache,
-            composition_metadata,
-        ) = v30_sections(serialized).map_err(crate::Error::Serialization)?;
-        let (
-            weight_section,
-            dwa_section,
-            table_section,
-            core_section,
-            runtime_section,
-            token_bytes_section,
-            original_token_map_section,
-            tokenizer_section,
-            internal_token_buf_masks_section,
-            token_mask_cache_section,
-            composition_metadata_section,
-        ) = (
-            weight,
-            dwa,
-            table,
-            core,
-            Some(runtime),
-            Some(token_bytes),
-            Some(original_map),
-            Some(tokenizer),
-            Some(internal_masks),
-            Some(token_mask_cache),
-            Some(composition_metadata),
-        );
+        let sections = decode_native_sections(serialized).map_err(crate::Error::Serialization)?;
+        let section = |kind: NativeSection| sections[kind as usize];
+        let weight_section = section(NativeSection::Weights);
+        let dwa_section = section(NativeSection::Dwa);
+        let table_section = section(NativeSection::Table);
+        let core_section = section(NativeSection::Core);
+        let runtime_section = section(NativeSection::Runtime);
+        let original_token_map_section = section(NativeSection::TokenClasses);
+        let tokenizer_section = section(NativeSection::Tokenizer);
+        let internal_token_buf_masks_section = section(NativeSection::InternalMasks);
+        let token_mask_cache_section = section(NativeSection::MaskCache);
+        let composition_metadata_section = section(NativeSection::CompositionMetadata);
         let (((dwa_result, (table_result, runtime_result)), ((tokenizer_result, original_token_map_result), (internal_token_buf_masks_result, token_mask_cache_result))), core_result) = rayon::join(
             || rayon::join(
                 || rayon::join(
@@ -4582,9 +4386,6 @@ impl Constraint {
                                 ))
                             },
                             || -> Result<Option<DecodedConstraintRuntime>, String> {
-                                let Some(runtime_section) = runtime_section else {
-                                    return Ok(None);
-                                };
                                 let started = profile.then(std::time::Instant::now);
                                 let result = if matches!(version, EXTERNAL_TEMPLATE_CONSTRAINT_VERSION | EXTERNAL_LR_CONSTRAINT_VERSION) {
                                     current_backing
@@ -4640,9 +4441,7 @@ impl Constraint {
                 || rayon::join(
                     || rayon::join(
                         || -> Result<Option<crate::automata::lexer::tokenizer::Tokenizer>, String> {
-                        let Some(section) = tokenizer_section else {
-                            return Ok(None);
-                        };
+                        let section = tokenizer_section;
                         let started = profile.then(std::time::Instant::now);
                         let result = {
                             let backing = current_backing.as_ref().ok_or_else(|| {
@@ -4671,7 +4470,7 @@ impl Constraint {
                         result
                         },
                         || -> Result<crate::runtime::TokenClasses, String> {
-                        let section = original_token_map_section.ok_or_else(|| "missing token class section".to_owned())?;
+                        let section = original_token_map_section;
                         let started = profile.then(std::time::Instant::now);
                         let result = {
                             let backing = current_backing.as_ref().ok_or_else(|| {
@@ -4701,9 +4500,7 @@ impl Constraint {
                     ),
                     || rayon::join(
                         || -> Result<Option<DecodedInternalTokenBufMasks>, String> {
-                            let Some(section) = internal_token_buf_masks_section else {
-                                return Ok(None);
-                            };
+                            let section = internal_token_buf_masks_section;
                             let started = profile.then(std::time::Instant::now);
                             let backing = current_backing
                                 .as_ref()
@@ -4731,9 +4528,7 @@ impl Constraint {
                             result
                         },
                         || -> Result<Option<TokenMaskCacheArtifact>, String> {
-                            let Some(section) = token_mask_cache_section else {
-                                return Ok(None);
-                            };
+                            let section = token_mask_cache_section;
                             if section.is_empty() {
                                 return Ok(None);
                             }
@@ -4878,12 +4673,6 @@ impl Constraint {
             token_mask_cache_result.map_err(crate::Error::Serialization)?;
         let (artifact, packed_weights) =
             core_result.map_err(crate::Error::Serialization)?;
-        let token_bytes_started = profile.then(std::time::Instant::now);
-        if !token_bytes_section.is_some_and(<[u8]>::is_empty) {
-            return Err(crate::Error::Serialization("external artifact unexpectedly contains token bytes".into()));
-        }
-        let token_bytes_ms = token_bytes_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let mut constraint = artifact.constraint;
         if let Some(tokenizer) = tokenizer {
             constraint.tokenizer = tokenizer.into();
@@ -4907,12 +4696,12 @@ impl Constraint {
         }
         constraint.deferred_table_rules_blob = deferred_table_rules_blob;
         constraint.deferred_table_rules = Default::default();
-        let invert_ms = 0.0;
         constraint.ignore_expr = artifact.ignore_expr;
         constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
         constraint.deferred_terminal_exprs_blob = artifact.terminal_exprs_blob;
         constraint.deferred_terminal_exprs = Default::default();
-        constraint.deferred_composition_metadata_blob = if let Some(section) = composition_metadata_section {
+        constraint.deferred_composition_metadata_blob = {
+            let section = composition_metadata_section;
             let (_, prepared)=crate::compiler::boundary_precomputed_completion::split_envelope(section)
                 .map_err(crate::Error::Serialization)?;
             *prepared_completion_wire=prepared.map(Arc::from);
@@ -4949,8 +4738,6 @@ impl Constraint {
                     std::sync::Arc::from(section.to_vec().into_boxed_slice()),
                 ))
             }
-        } else {
-            None
         };
         constraint.composition_link_metadata_materialized =
             constraint.deferred_composition_metadata_blob.is_none();
@@ -4971,7 +4758,7 @@ impl Constraint {
             runtime,
             token_mask_cache,
             terminal_exprs: artifact.terminal_exprs,
-            post_decode_ms: [token_bytes_ms, attach_weights_ms, attach_dwa_ms, invert_ms],
+            post_decode_ms: [attach_weights_ms, attach_dwa_ms],
         })
     }
 
@@ -5047,7 +4834,7 @@ impl Constraint {
             let runtime = decoded.runtime;
             let token_mask_cache = decoded.token_mask_cache;
             let terminal_exprs = decoded.terminal_exprs;
-            let [token_bytes_ms, attach_weights_ms, attach_dwa_ms, invert_ms] = decoded.post_decode_ms;
+            let [attach_weights_ms, attach_dwa_ms] = decoded.post_decode_ms;
             if !deferred
                 && let Some(cache) = token_mask_cache {
                     install_token_mask_cache(&mut constraint, cache)
@@ -5169,7 +4956,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             if profile {
                 eprintln!(
-                    "[glrmask/profile][constraint_post_decode] token_bytes_ms={token_bytes_ms:.3} attach_weights_ms={attach_weights_ms:.3} attach_dwa_ms={attach_dwa_ms:.3} invert_original_map_ms={invert_ms:.3} restore_exprs_ms={restore_exprs_ms:.3}"
+                    "[glrmask/profile][constraint_post_decode] attach_weights_ms={attach_weights_ms:.3} attach_dwa_ms={attach_dwa_ms:.3} restore_exprs_ms={restore_exprs_ms:.3}"
                 );
             }
             constraint

@@ -54,10 +54,10 @@ fn parser_range(bytes: &[u8]) -> Range<usize> {
     let offset = envelope_len(bytes);
     let body = &bytes[offset..];
     assert_eq!(&body[..8], b"GLRCONS\0");
-    assert_eq!(&body[18..22], b"S30\0");
+    assert_eq!(&body[18..22], b"S31\0");
     let length =
         |i: usize| u64::from_le_bytes(body[22 + i * 8..30 + i * 8].try_into().unwrap()) as usize;
-    let section_start = offset + 110 + length(0) + length(1);
+    let section_start = offset + 102 + length(0) + length(1);
     let start = if bytes[section_start..].starts_with(b"TPX1") { section_start + 36 } else { section_start };
     start..section_start + length(2)
 }

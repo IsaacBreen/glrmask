@@ -98,9 +98,9 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
 fn envelope_len(bytes:&[u8])->usize { if bytes.starts_with(b"GLRCON02") { 40 } else { 0 } }
 fn parser_range(bytes:&[u8])->std::ops::Range<usize> {
     let offset=envelope_len(bytes); let bytes=&bytes[offset..];
-    assert_eq!(&bytes[18..22],b"S30\0");
-    let sizes:Vec<usize>=(0..11).map(|i|u64::from_le_bytes(bytes[22+i*8..30+i*8].try_into().unwrap()) as usize).collect();
-    let section_start=offset+18+4+11*8+sizes[0]+sizes[1];
+    assert_eq!(&bytes[18..22],b"S31\0");
+    let sizes:Vec<usize>=(0..10).map(|i|u64::from_le_bytes(bytes[22+i*8..30+i*8].try_into().unwrap()) as usize).collect();
+    let section_start=offset+18+4+10*8+sizes[0]+sizes[1];
     let start=if bytes[section_start-offset..].starts_with(b"TPX1") { section_start+36 } else { section_start };
     start..section_start+sizes[2]
 }
