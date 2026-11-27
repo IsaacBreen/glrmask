@@ -511,12 +511,8 @@ impl<C: FlatWalkCell> FullWalkTransitionTable for FullWalkFlat<'_, C> {
         lexer_state: u32,
         parser_node: u32,
     ) -> bool {
-        parser_cache.token_boundary_allowed_dense(
-            constraint,
-            self.tokenizer,
-            initial_lexer_state,
-            lexer_state,
-            parser_node,
+        lexer_state == initial_lexer_state || parser_cache.physical_token_boundary_allowed_table(
+            constraint, self, parser_node, lexer_state,
         )
     }
 
@@ -2191,6 +2187,7 @@ fn singleton_product_cache_keeps_exact_keys_and_capacity() {
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
+    admitted_singleton: Option<TerminalID>,
     shared_root_admission: SharedRootAdmission,
     reset_lexer: Option<u32>,
     token_boundary_allowed: Vec<u8>,
@@ -2199,9 +2196,19 @@ struct FullWalkParserNode {
     last_child_target: u32,
 }
 
+struct FullWalkDenseParserCanonical {
+    keys: crate::ds::leveled_gss::GssSemanticKeyInterner<u32, ()>,
+    nodes: FxHashMap<u32, u32>,
+    hits: usize,
+}
+
 struct FullWalkParserCache {
     nodes: Vec<FullWalkParserNode>,
     dense_lexer_state_count: Option<usize>,
+    direct_boundary_rows: Option<boundary_cache::FullWalkBoundaryDirectCache>,
+    row_liveness_enabled: bool,
+    canonicalize: bool,
+    canonical: Option<Box<FullWalkDenseParserCanonical>>,
     sparse_token_boundary_allowed: Vec<FxHashMap<u32, u8>>,
     hot_token_boundary_allowed: Vec<[u8; FULL_WALK_HOT_CAPACITY]>,
     profile: bool,
@@ -2218,9 +2225,18 @@ impl FullWalkParserCache {
         root_branches: &DynamicBranches,
         dense_lexer_state_count: Option<usize>,
     ) -> (Self, SmallVec<[u32; 4]>) {
+        static COMPACT: OnceLock<bool> = OnceLock::new();
+        let compact = *COMPACT.get_or_init(|| !env_flag("GLRMASK_DISABLE_COMPACT_BOUNDARY_ROWS", false));
+        let direct_boundary_rows = dense_lexer_state_count
+            .filter(|&count| compact && count > boundary_cache::FullWalkBoundaryDirectCache::compact_row_bytes())
+            .map(boundary_cache::FullWalkBoundaryDirectCache::with_width);
         let mut cache = Self {
             nodes: Vec::new(),
             dense_lexer_state_count,
+            direct_boundary_rows,
+            row_liveness_enabled: !env_flag("GLRMASK_DISABLE_ROW_LIVENESS", false),
+            canonicalize: dense_lexer_state_count.is_some() && full_walk_acceleration_enabled(),
+            canonical: None,
             sparse_token_boundary_allowed: Vec::new(),
             hot_token_boundary_allowed: Vec::new(),
             profile: crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
@@ -2259,15 +2275,19 @@ impl FullWalkParserCache {
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
             admitted: None,
+            admitted_singleton: None,
             shared_root_admission: None,
             reset_lexer: None,
-            token_boundary_allowed: self
-                .dense_lexer_state_count
-                .map_or_else(Vec::new, |count| vec![0; count]),
+            token_boundary_allowed: if self.direct_boundary_rows.is_some() {
+                Vec::new()
+            } else {
+                self.dense_lexer_state_count.map_or_else(Vec::new, |count| vec![0; count])
+            },
             children: SmallVec::new(),
             last_child_terminal: TerminalID::MAX,
             last_child_target: Self::DEAD,
         });
+        if let Some(cache) = self.direct_boundary_rows.as_mut() { cache.push_row(); }
         self.sparse_token_boundary_allowed.push(FxHashMap::default());
         self.hot_token_boundary_allowed.push([0; FULL_WALK_HOT_CAPACITY]);
         id
@@ -2325,7 +2345,7 @@ impl FullWalkParserCache {
             // Ordinary parser transitions already have their own exact
             // (parent node, terminal) cache. Preserve the original O(1) append;
             // only recursive split/reset routing needs pointer interning.
-            self.push_stacks(gss)
+            self.intern_dense_parser_stacks(gss)
         } else {
             Self::DEAD
         };
@@ -2375,6 +2395,10 @@ impl FullWalkParserCache {
             let admitted = parser_admission_with_root_memo(
                 constraint, &self.nodes[index].gss, &self.nodes[index].shared_root_admission,
             );
+            self.nodes[index].admitted_singleton = {
+                let mut ones = admitted.iter_ones();
+                ones.next().map(|terminal| terminal as TerminalID).filter(|_| ones.next().is_none())
+            };
             self.nodes[index].admitted = Some(admitted);
         }
         self.nodes[index].admitted.as_ref().unwrap()
@@ -2398,67 +2422,101 @@ impl FullWalkParserCache {
         }))
     }
 
-    #[inline(always)]
-    fn physical_token_boundary_allowed_dense(
-        &mut self,
-        constraint: &Constraint,
-        tokenizer: &Tokenizer,
-        parser_node: u32,
-        lexer_state: u32,
-    ) -> bool {
-        if self.profile {
-            self.profile_boundary_calls += 1;
+    /// Exact semantic interning is profitable only after a sizeable dense
+    /// parser frontier has appeared. Exhaustion never licenses an alias.
+    fn intern_dense_parser_stacks(&mut self, gss: ParserStacks) -> u32 {
+        if !self.canonicalize || self.nodes.len() < 32 {
+            return self.push_stacks(gss);
         }
+        if self.canonical.is_none() {
+            let mut canonical = FullWalkDenseParserCanonical {
+                keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(
+                    16_384, 8_192, 16_384,
+                ),
+                nodes: FxHashMap::default(),
+                hits: 0,
+            };
+            for (index, node) in self.nodes.iter().enumerate() {
+                let key = canonical.keys.key(&node.gss);
+                if canonical.keys.is_exhausted() { break; }
+                canonical.nodes.entry(key).or_insert(index as u32);
+            }
+            self.canonical = Some(Box::new(canonical));
+        }
+        let canonical = self.canonical.as_mut().expect("initialized above");
+        if canonical.keys.is_exhausted() { return self.push_stacks(gss); }
+        let key = canonical.keys.key(&gss);
+        if canonical.keys.is_exhausted() { return self.push_stacks(gss); }
+        if let Some(&node) = canonical.nodes.get(&key) {
+            canonical.hits += 1;
+            return node;
+        }
+        let node = self.push_stacks(gss);
+        self.canonical.as_mut().unwrap().nodes.insert(key, node);
+        node
+    }
+
+    /// The exact dense row predicate also supports synthetic subset/union
+    /// coordinates, by querying the executed transition provider's metadata.
+    #[inline(always)]
+    fn physical_token_boundary_allowed_table<T: FullWalkTransitionTable>(
+        &mut self, constraint: &Constraint, transitions: &mut T,
+        parser_node: u32, lexer_state: u32,
+    ) -> bool {
+        if self.profile { self.profile_boundary_calls += 1; }
         let node = parser_node as usize;
         let lexer = lexer_state as usize;
-        let cached = unsafe {
-            *self
-                .nodes
-                .get_unchecked(node)
-                .token_boundary_allowed
-                .get_unchecked(lexer)
+        let cached = if let Some(cache) = self.direct_boundary_rows.as_ref() {
+            unsafe { cache.get_physical(node, lexer_state) }
+        } else {
+            self.nodes[node].token_boundary_allowed[lexer]
         };
         if cached != 0 {
-            if self.profile {
-                self.profile_boundary_hits += 1;
-            }
+            if self.profile { self.profile_boundary_hits += 1; }
             return cached == 2;
         }
-        if self.profile {
-            self.profile_boundary_misses += 1;
-        }
-        let future = tokenizer.possible_future_terminals(lexer_state);
-        let allowed = constraint
-            .ignore_terminal
-            .is_some_and(|terminal| future.contains(terminal as usize))
-            || !self.admitted(constraint, parser_node).is_disjoint(future);
-        unsafe {
-            *self
-                .nodes
-                .get_unchecked_mut(node)
-                .token_boundary_allowed
-                .get_unchecked_mut(lexer) = if allowed { 2 } else { 1 };
+        if self.profile { self.profile_boundary_misses += 1; }
+        let row_bound = if self.row_liveness_enabled
+            && self.nodes[node].admitted.is_none()
+            && !constraint.uses_sparse_direct_regular_runtime()
+            && !constraint.uses_compact_segmented_parser_runtime()
+            && !constraint.parser_has_controls()
+        {
+            self.nodes[node].gss.single_top_value().and_then(|top| {
+                let necessary = constraint.parser_advance_row(top)?;
+                let guaranteed = constraint.parser_unconditional_row(top)?;
+                if transitions.future_intersects(lexer_state, guaranteed) {
+                    Some(true)
+                } else if !transitions.future_intersects(lexer_state, necessary) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        let allowed = constraint.ignore_terminal
+            .is_some_and(|terminal| transitions.future_contains(lexer_state, terminal))
+            || row_bound.unwrap_or_else(|| {
+                let _ = self.admitted(constraint, parser_node);
+                if let Some(terminal) = self.nodes[node].admitted_singleton {
+                    transitions.future_contains(lexer_state, terminal)
+                } else {
+                    transitions.future_intersects(
+                        lexer_state, self.nodes[node].admitted.as_ref().expect("admitted set"),
+                    )
+                }
+            });
+        let value = if allowed { 2 } else { 1 };
+        if let Some(cache) = self.direct_boundary_rows.as_mut() {
+            cache.set(node, lexer_state, value);
+        } else {
+            self.nodes[node].token_boundary_allowed[lexer] = value;
         }
         allowed
     }
 
-    #[inline(always)]
-    fn token_boundary_allowed_dense(
-        &mut self,
-        constraint: &Constraint,
-        tokenizer: &Tokenizer,
-        initial_lexer_state: u32,
-        lexer_state: u32,
-        parser_node: u32,
-    ) -> bool {
-        lexer_state == initial_lexer_state
-            || self.physical_token_boundary_allowed_dense(
-                constraint,
-                tokenizer,
-                parser_node,
-                lexer_state,
-            )
-    }
 
     /// Both tagged-hot and generic configuration rows cache this same
     /// existential continuation query. Their coordinate layouts differ.
