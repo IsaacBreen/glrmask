@@ -25,7 +25,6 @@ use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, BoundaryShardMetadata,
     accepted_original_tokens, build_segmented_parser_links, compose_profile_enabled,
-    eliminate_composed_runtime_controls,
     leaf_ignores_are_globally_erasable,
     merged_leaf_ignore_terminals, merged_leaf_terminal_display_names,
     merged_retained_terminal_exprs, merged_terminal_display_names,
@@ -36,8 +35,12 @@ use crate::compiler::glr::parser::{
     ScopedSubgrammarLink, materialize_control_eliminated_scoped_provider_table,
 };
 use crate::compiler::glr::table::{
-    ComposedTable, GLRTable, SubgrammarTableInput, compose_subgrammar_tables_with_rules,
+    ComposedTable, GLRTable,
 };
+#[cfg(test)]
+use crate::compiler::constraint_compose::eliminate_composed_runtime_controls;
+#[cfg(test)]
+use crate::compiler::glr::table::{SubgrammarTableInput, compose_subgrammar_tables_with_rules};
 use crate::compiler::pipeline::compute_disallowed_follows;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa as tdwa;
@@ -2347,7 +2350,6 @@ fn compile_leaf_boundary_link(
     let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
     let post_context_setup_started = Instant::now();
 
-    let composed = link_analysis_splice(inputs, expansion, global_ignores)?;
     if expansion.top_terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
         return Err(format!(
             "walk link top-level layout differs from coordinator table: walk {:?} vs coordinator {:?} (leaf_terms {:?}, top_sizes {:?})",
@@ -2356,10 +2358,6 @@ fn compile_leaf_boundary_link(
             expansion.top_terminal_sizes,
         ));
     }
-    if composed.table.num_terminals != expansion.num_terminals {
-        return Err("walk link analysis terminal domain differs from leaf domain".into());
-    }
-
     // Merged tokenizer + names + ignores over leaves.
     let tokenizer_merge_started = Instant::now();
     let terminal_names = if expansion.nested {
@@ -2409,19 +2407,19 @@ fn compile_leaf_boundary_link(
 
     // Grammar + pairwise follows over the spliced rules.
     let grammar_analysis_started = Instant::now();
-    let augmented_start = composed
-        .table
-        .rules
-        .first()
-        .map(|rule| rule.lhs)
-        .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
-    let grammar = AnalyzedGrammar::from_composed_rules(
-        composed.table.rules.clone(),
-        composed.table.num_terminals,
-        terminal_names,
-        composed.table.nonterminal_display_names.clone(),
-        augmented_start,
-    );
+    let grammar = analyze_leaf_link_rules(expansion, terminal_names)?;
+    #[cfg(test)]
+    if crate::env::var_os("GLRMASK_VALIDATE_LEAF_LINK_ANALYSIS").is_some() {
+        let packed = link_analysis_splice(inputs, expansion, global_ignores)?;
+        let start = packed.table.rules[0].lhs;
+        let reference = AnalyzedGrammar::from_composed_rules(
+            packed.table.rules, packed.table.num_terminals,
+            grammar.terminal_display_names.clone(), packed.table.nonterminal_display_names, start,
+        );
+        assert_eq!(grammar.rules, reference.rules);
+        assert_eq!(tdwa::grammar_helpers::compute_allowed_follow_sets(&grammar),
+            tdwa::grammar_helpers::compute_allowed_follow_sets(&reference));
+    }
     let disallowed = compute_disallowed_follows(&grammar);
     let grammar_analysis_ms = grammar_analysis_started.elapsed().as_secs_f64() * 1000.0;
     let leaf_state_counts: Vec<u32> = tokenizer_inputs
@@ -2649,7 +2647,7 @@ fn compile_leaf_boundary_link(
         let (_, summary_stats, summary_ms) = &candidate_summary_profiles[start_component];
         let emitted = boundary_emitted_terminals(
             &shard.output.dwa,
-            composed.table.num_terminals as usize,
+            expansion.num_terminals as usize,
         );
         let templates_started = Instant::now();
         let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
@@ -2663,7 +2661,7 @@ fn compile_leaf_boundary_link(
         trace_boundary_terminal_dwa_words(
             &format!("component{start_component}"),
             &shard.output.dwa,
-            composed.table.num_terminals as usize,
+            expansion.num_terminals as usize,
         );
         let parser_started = Instant::now();
         let compiled = crate::compiler::boundary_transfer::compile_signed_shard_parser(
@@ -2841,8 +2839,230 @@ fn compile_leaf_boundary_link(
 }
 
 
+/// One child root per distinct provider edge (multiple slots share the
+/// same child occurrence in one parent). Different parent occurrences must
+/// retain distinct grammar nonterminal identities: existential FOLLOW would
+/// tolerate their union, but universal FOLLOW takes an intersection.
+struct AnalysisChild {
+    leaf: usize,
+    slots: Vec<u32>,
+    nullable: bool,
+}
+
+struct AnalysisOccurrence {
+    leaf: usize,
+    incoming_nullable: bool,
+    name_prefix: String,
+    children: Vec<usize>,
+}
+
+fn link_analysis_children(
+    expansion: &NestedLinkExpansion<'_>,
+) -> Result<Vec<Vec<AnalysisChild>>, String> {
+    let n = expansion.leaves.len();
+    let mut children: Vec<BTreeMap<usize, AnalysisChild>> =
+        (0..n).map(|_| BTreeMap::new()).collect();
+    let mut slot_owner = BTreeMap::new();
+    for link in &expansion.links {
+        let parent = link.parent_component as usize;
+        let child = link.child_component as usize;
+        if parent >= n || child >= n {
+            return Err("link endpoint lies outside leaf domain".into());
+        }
+        let slot = link.slot_terminal;
+        if slot >= expansion.leaves[parent].table.num_terminals {
+            return Err(format!("link slot {slot} lies outside parent leaf {parent}"));
+        }
+        if let Some(previous) = slot_owner.insert((parent, slot), child)
+            && previous != child
+        {
+            return Err(format!("link slot {slot} in leaf {parent} has two child owners"));
+        }
+        let entry = children[parent].entry(child).or_insert_with(|| AnalysisChild {
+            leaf: child,
+            slots: Vec::new(),
+            nullable: link.child_start_nullable,
+        });
+        if entry.nullable != link.child_start_nullable {
+            return Err(format!("links to leaf {child} disagree on nullability"));
+        }
+        entry.slots.push(slot);
+    }
+    let mut result = Vec::with_capacity(n);
+    for (parent, row) in children.into_iter().enumerate() {
+        let table = &expansion.leaves[parent].table;
+        let mut row = row.into_values().collect::<Vec<_>>();
+        for child in &mut row {
+            child.slots.sort_unstable();
+            child.slots.dedup();
+            // The packed splice used to reject a child whose bound slots
+            // have no actual shift call site. Retain that meaningful check
+            // without constructing any spliced action or goto row.
+            if !(0..table.num_states).any(|state| {
+                child.slots.iter().any(|&slot| {
+                    table.action(state, slot).is_some_and(|action| action.shift_target().is_some())
+                })
+            }) {
+                return Err(format!("placeholder terminals {:?} have no shift call sites in leaf {parent}", child.slots));
+            }
+        }
+        result.push(row);
+    }
+    Ok(result)
+}
+
+fn link_analysis_occurrences(
+    children: &[Vec<AnalysisChild>],
+) -> Result<Vec<AnalysisOccurrence>, String> {
+    if children.is_empty() {
+        return Err("link analysis requires a root leaf".into());
+    }
+    let mut occurrences = vec![AnalysisOccurrence {
+        leaf: 0,
+        incoming_nullable: false,
+        name_prefix: String::new(),
+        children: Vec::new(),
+    }];
+    let mut active = vec![false; children.len()];
+    let mut reached = vec![false; children.len()];
+    active[0] = true;
+    reached[0] = true;
+    // Explicit DFS stack: occurrence id and next outgoing child index.
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((occurrence, next_child)) = stack.last_mut() {
+        let leaf = occurrences[*occurrence].leaf;
+        if let Some(child) = children[leaf].get(*next_child) {
+            if active[child.leaf] {
+                return Err(format!("link-level control cycle through leaf {}", child.leaf));
+            }
+            let child_index = *next_child;
+            *next_child += 1;
+            let parent_occurrence = *occurrence;
+            let child_id = occurrences.len();
+            let prefix = format!("{}child{child_index}::", occurrences[parent_occurrence].name_prefix);
+            occurrences[parent_occurrence].children.push(child_id);
+            occurrences.push(AnalysisOccurrence {
+                leaf: child.leaf,
+                incoming_nullable: child.nullable,
+                name_prefix: prefix,
+                children: Vec::new(),
+            });
+            active[child.leaf] = true;
+            reached[child.leaf] = true;
+            stack.push((child_id, 0));
+        } else {
+            active[leaf] = false;
+            stack.pop();
+        }
+    }
+    if reached.contains(&false) {
+        return Err("link forest contains leaves unreachable from root 0".into());
+    }
+    Ok(occurrences)
+}
+
+/// Build exactly the rule metadata needed for nullable/FIRST/FOLLOW in the
+/// canonical runtime terminal coordinate. A grammar occurrence carries only
+/// a nonterminal range, not a temporary parser table. Bound slots are
+/// replaced directly by the child occurrence root and every other terminal
+/// is injected into its original leaf. Unbound slots remain in the analysis
+/// (the signed context independently gives them an empty parser transfer).
+fn analyze_leaf_link_rules(
+    expansion: &NestedLinkExpansion<'_>,
+    terminal_names: Vec<String>,
+) -> Result<AnalyzedGrammar, String> {
+    use crate::grammar::flat::Rule;
+    let children = link_analysis_children(expansion)?;
+    let occurrences = link_analysis_occurrences(&children)?;
+    let mut source_rules = Vec::with_capacity(expansion.leaves.len());
+    let mut roots = Vec::with_capacity(expansion.leaves.len());
+    let mut terminal_end = 0u32;
+    for (leaf_index, leaf) in expansion.leaves.iter().enumerate() {
+        if expansion.leaf_terminal_offsets[leaf_index] != terminal_end
+            || leaf.table.num_terminals != leaf.parser_terminal_count()
+        {
+            return Err(format!("analysis leaf {leaf_index} disagrees with terminal layout"));
+        }
+        terminal_end = terminal_end.checked_add(leaf.table.num_terminals)
+            .ok_or_else(|| "analysis terminal domain overflow".to_string())?;
+        let rules = leaf.retained_table_rules()?;
+        let augmented = rules.first().ok_or_else(|| {
+            format!("leaf {leaf_index} has no augmented-start production")
+        })?;
+        let [Symbol::Nonterminal(root)] = augmented.rhs.as_slice() else {
+            return Err(format!("leaf {leaf_index} has invalid augmented-start production"));
+        };
+        roots.push(*root);
+        source_rules.push(rules);
+    }
+    if terminal_end != expansion.num_terminals {
+        return Err("analysis terminal domain differs from leaf domain".into());
+    }
+
+    let mut offsets = Vec::with_capacity(occurrences.len());
+    let mut names = Vec::new();
+    for occurrence in &occurrences {
+        offsets.push(u32::try_from(names.len()).map_err(|_| "analysis nonterminal domain overflow")?);
+        let local_names = &expansion.leaves[occurrence.leaf].table.nonterminal_display_names;
+        names.extend(local_names.iter().map(|name| format!("{}{name}", occurrence.name_prefix)));
+    }
+    u32::try_from(names.len()).map_err(|_| "analysis nonterminal domain overflow")?;
+    let mut rules = Vec::new();
+    for (id, occurrence) in occurrences.iter().enumerate() {
+        let leaf = occurrence.leaf;
+        let table = &expansion.leaves[leaf].table;
+        let offset = offsets[id];
+        let map_nonterminal = |local: u32| -> Result<u32, String> {
+            if local as usize >= table.nonterminal_display_names.len() {
+                return Err(format!("analysis leaf {leaf} nonterminal {local} lies outside its domain"));
+            }
+            offset.checked_add(local).ok_or_else(|| "analysis nonterminal ID overflow".into())
+        };
+        let mut bound_slots = BTreeMap::new();
+        for (child, &child_occurrence) in children[leaf].iter().zip(&occurrence.children) {
+            let root = offsets[child_occurrence].checked_add(roots[child.leaf])
+                .ok_or_else(|| "analysis child root overflow".to_string())?;
+            for &slot in &child.slots {
+                bound_slots.insert(slot, root);
+            }
+        }
+        let root = map_nonterminal(roots[leaf])?;
+        let begin = rules.len();
+        for rule in source_rules[leaf] {
+            let lhs = map_nonterminal(rule.lhs)?;
+            let rhs = rule.rhs.iter().map(|symbol| {
+                match *symbol {
+                    Symbol::Nonterminal(local) => map_nonterminal(local).map(Symbol::Nonterminal),
+                    Symbol::Terminal(local) => {
+                        if let Some(&child_root) = bound_slots.get(&local) {
+                            Ok(Symbol::Nonterminal(child_root))
+                        } else if local < table.num_terminals {
+                            Ok(Symbol::Terminal(expansion.leaf_terminal_offsets[leaf] + local))
+                        } else {
+                            Err(format!("analysis leaf {leaf} terminal {local} lies outside its domain"))
+                        }
+                    }
+                }
+            }).collect::<Result<Vec<_>, String>>()?;
+            rules.push(Rule { lhs, rhs });
+        }
+        // The old nested splice restored every leaf's source epsilon before
+        // attaching its parent; a flat child used its incoming link flag.
+        let nullable = occurrence.incoming_nullable
+            || ((id == 0 || expansion.nested) && table.embedded_start_nullable());
+        if nullable && !rules[begin..].iter().any(|rule| rule.lhs == root && rule.rhs.is_empty()) {
+            rules.push(Rule { lhs: root, rhs: Vec::new() });
+        }
+    }
+    let start = rules.first().ok_or_else(|| "link analysis has no rules".to_string())?.lhs;
+    Ok(AnalyzedGrammar::from_composed_rules(
+        rules, expansion.num_terminals, terminal_names, names, start,
+    ))
+}
+
 /// Grammar analysis uses only the rules, display names, and terminal domain
 /// of the temporary splice. Parser transfers always use intact providers.
+#[cfg(test)]
 fn link_analysis_splice(
     inputs: &WalkStaticLinkInputs,
     expansion: &NestedLinkExpansion<'_>,
@@ -2918,6 +3138,7 @@ fn link_analysis_splice(
 /// multi-slot binds contribute one link per slot for the same child).
 /// Bounds-checked loudly; the splice and the DFS oracle share this so the two
 /// traversals cannot drift apart.
+#[cfg(test)]
 fn link_tree_child_roots(
     expansion: &NestedLinkExpansion<'_>,
     parent_leaf: usize,
@@ -2945,6 +3166,7 @@ fn link_tree_child_roots(
 /// Splice occurrence order. A shared child is visited once per parent path:
 /// analysis rules may be duplicated, but their terminals map back to the
 /// same runtime leaf. Reject cycles before invoking the recursive splice.
+#[cfg(test)]
 pub(crate) fn nested_splice_leaf_order(
     expansion: &NestedLinkExpansion<'_>,
 ) -> Result<Vec<usize>, String> {
@@ -3012,6 +3234,7 @@ pub(crate) fn nested_splice_leaf_order(
 /// remap the packed rules explicitly into leaf coordinate (see
 /// `remap_spliced_terminals_to_leaf_order`); traversal order is pinned against
 /// the independent `nested_splice_leaf_order` oracle there.
+#[cfg(test)]
 fn splice_nested_block(
     root_leaf: usize,
     expansion: &NestedLinkExpansion<'_>,
@@ -3119,6 +3342,7 @@ fn splice_nested_block(
 /// The root-frame offsets are pinned against DFS-derived expectations first
 /// (the splice must have packed what the traversal recorded), then rewritten
 /// to the leaf-coordinate block-root offsets the rules now speak.
+#[cfg(test)]
 fn remap_spliced_terminals_to_leaf_order(
     expansion: &NestedLinkExpansion<'_>,
     dfs_order: &[usize],
