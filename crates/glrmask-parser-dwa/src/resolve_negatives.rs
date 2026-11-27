@@ -1,11 +1,9 @@
 //! Resolve negative parser-state labels in weighted NWAs.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
-use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
@@ -16,9 +14,6 @@ type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<SmallQueryWeights>;
 type DerivedEpsilons = Vec<SmallTargetWeights>;
-type SubsetMemo = FxHashMap<(usize, usize), bool>;
-type SingleIntersectionMemo = FxHashMap<(usize, usize), (Weight, Weight, Weight)>;
-
 /// Wave scheduling pays two parallel-iterator setup costs per DAG layer.  This
 /// many predecessor edges per Rayon worker is enough to amortize that work on
 /// the small and large BFCL catalogs while leaving genuinely small parsers on
@@ -27,10 +22,6 @@ const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
 /// Grouping identical cancellation queries pays for a wave/group build. Large
 /// parser NWAs amortize it heavily; small NWAs are faster with the direct FIFO.
 const GROUPED_CANCELLATION_MIN_STATES: usize = 4_096;
-/// Checking for structurally dead cancellation tasks avoids weight cloning and
-/// inspection on the large parser-NWA tail, but the extra transition probes do
-/// not amortize on small graphs.
-const DEAD_CANCELLATION_FAST_PATH_MIN_STATES: usize = 65_536;
 /// Direct reverse-topological accumulation avoids one pending buffer per state
 /// and wins on the large parser-NWA tail. Smaller graphs benefit more from
 /// batching their few multi-edge contributions before unioning them.
@@ -226,78 +217,6 @@ fn merge_weight(entry: &mut Weight, add: Weight) -> bool {
     }
 }
 
-fn intersect_with_single_weight_hint(
-    left: &Weight,
-    left_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
-    right: &Weight,
-) -> Weight {
-    if left.is_full() {
-        return right.clone();
-    }
-    if right.is_full() {
-        return left.clone();
-    }
-    if let Some((start, end, tokens)) = left_single {
-        right.intersect_single_parts(*start, *end, tokens)
-    } else {
-        left.intersection(right)
-    }
-}
-
-fn intersect_with_single_weight_hint_cached(
-    left: &Weight,
-    left_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
-    right: &Weight,
-    memo: &mut SingleIntersectionMemo,
-) -> Weight {
-    if left.is_full() {
-        return right.clone();
-    }
-    if right.is_full() {
-        return left.clone();
-    }
-    let Some((start, end, tokens)) = left_single else {
-        return left.intersection(right);
-    };
-
-    let key = (left.ptr_key(), right.ptr_key());
-    if let Some((cached_left, cached_right, result)) = memo.get(&key) {
-        debug_assert!(cached_left.storage_ptr_eq(left));
-        debug_assert!(cached_right.storage_ptr_eq(right));
-        return result.clone();
-    }
-
-    let result = right.intersect_single_parts(*start, *end, tokens);
-    // Holding both operands strongly makes pointer identity a safe cache key:
-    // neither address can be recycled while the entry is resident.
-    memo.insert(key, (left.clone(), right.clone(), result.clone()));
-    result
-}
-
-fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
-    if right.is_subset(left) {
-        right.clone()
-    } else {
-        left.intersection(right)
-    }
-}
-
-fn intersect_or_clone_right_if_subset_cached(
-    left: &Weight,
-    right: &Weight,
-    subset_memo: &mut SubsetMemo,
-) -> Weight {
-    let key = (left.ptr_key(), right.ptr_key());
-    let subset = *subset_memo
-        .entry(key)
-        .or_insert_with(|| right.is_subset(left));
-    if subset {
-        right.clone()
-    } else {
-        left.intersection(right)
-    }
-}
-
 #[derive(Clone)]
 struct PredEdge {
     from: usize,
@@ -449,165 +368,6 @@ fn queue_query_weight(
     }
 }
 
-fn propagate_query_through_derived_epsilons(
-    query_weight_to_current: &Weight,
-    query_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
-    current_state: u32,
-    source_state: u32,
-    positive_label: i32,
-    query_weights: &mut QueryWeights,
-    worklist: &mut VecDeque<CancellationTask>,
-    derived_epsilons: &DerivedEpsilons,
-    foreign_derived: Option<&DerivedEpsilons>,
-    single_intersection_memo: &mut SingleIntersectionMemo,
-) {
-    let local = &derived_epsilons[current_state as usize];
-    let foreign = foreign_derived.map(|derived| &derived[current_state as usize]);
-
-    let mut propagate = |target_state: u32,
-                         epsilon_weight: &Weight,
-                         query_weights: &mut QueryWeights,
-                         worklist: &mut VecDeque<CancellationTask>| {
-        let propagated = intersect_with_single_weight_hint_cached(
-            query_weight_to_current,
-            query_single,
-            epsilon_weight,
-            single_intersection_memo,
-        );
-        if propagated.is_empty() {
-            return;
-        }
-        queue_query_weight(
-            query_weights,
-            worklist,
-            target_state,
-            source_state,
-            positive_label,
-            propagated,
-        );
-    };
-
-    local.for_each(|target_state, epsilon_weight| {
-        propagate(target_state, epsilon_weight, query_weights, worklist);
-    });
-    if let Some(foreign) = foreign {
-        foreign.for_each(|target_state, epsilon_weight| {
-            // Skip if local already has a stronger entry for this target
-            // (merging handled below in queue_query_weight's dedup anyway).
-            propagate(target_state, epsilon_weight, query_weights, worklist);
-        });
-    }
-}
-
-fn extend_derived_epsilons(
-    query_weight_to_current: &Weight,
-    query_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
-    source_state: u32,
-    target_state: u32,
-    edge_weight: &Weight,
-    query_weights: &mut QueryWeights,
-    worklist: &mut VecDeque<CancellationTask>,
-    derived_epsilons: &mut DerivedEpsilons,
-    subset_memo: &mut SubsetMemo,
-    single_intersection_memo: &mut SingleIntersectionMemo,
-) {
-    let new_derived_weight = intersect_with_single_weight_hint_cached(
-        query_weight_to_current,
-        query_single,
-        edge_weight,
-        single_intersection_memo,
-    );
-    if new_derived_weight.is_empty() {
-        return;
-    }
-
-    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight) {
-        return;
-    }
-
-    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
-        return;
-    };
-
-    let existing_queries = &query_weights[source_state as usize];
-    if existing_queries.is_empty() {
-        return;
-    }
-
-    let mut propagated_updates = Vec::with_capacity(existing_queries.len());
-
-    existing_queries.for_each(|(upstream_source_state, upstream_label), upstream_weight| {
-        let propagated = intersect_or_clone_right_if_subset_cached(
-            upstream_weight,
-            derived_weight,
-            subset_memo,
-        );
-        if propagated.is_empty() {
-            return;
-        }
-        propagated_updates.push((upstream_source_state, upstream_label, propagated));
-    });
-
-    for (upstream_source_state, upstream_label, propagated) in propagated_updates {
-        queue_query_weight(
-            query_weights,
-            worklist,
-            target_state,
-            upstream_source_state,
-            upstream_label,
-            propagated,
-        );
-    }
-}
-
-fn extend_derived_epsilon_precomputed(
-    source_state: u32,
-    target_state: u32,
-    new_derived_weight: &Weight,
-    query_weights: &mut QueryWeights,
-    worklist: &mut VecDeque<CancellationTask>,
-    derived_epsilons: &mut DerivedEpsilons,
-    subset_memo: &mut SubsetMemo,
-) {
-    if new_derived_weight.is_empty() {
-        return;
-    }
-
-    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight.clone()) {
-        return;
-    }
-
-    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
-        return;
-    };
-    let existing_queries = &query_weights[source_state as usize];
-    if existing_queries.is_empty() {
-        return;
-    }
-
-    let mut propagated_updates = Vec::with_capacity(existing_queries.len());
-    existing_queries.for_each(|(upstream_source_state, upstream_label), upstream_weight| {
-        let propagated = intersect_or_clone_right_if_subset_cached(
-            upstream_weight,
-            derived_weight,
-            subset_memo,
-        );
-        if !propagated.is_empty() {
-            propagated_updates.push((upstream_source_state, upstream_label, propagated));
-        }
-    });
-    for (upstream_source_state, upstream_label, propagated) in propagated_updates {
-        queue_query_weight(
-            query_weights,
-            worklist,
-            target_state,
-            upstream_source_state,
-            upstream_label,
-            propagated,
-        );
-    }
-}
-
 #[derive(Debug)]
 struct CancellationQueryGroup {
     current_state: u32,
@@ -674,169 +434,167 @@ fn queue_group_propagation(
     }
 }
 
-fn compute_cancellations_range_grouped_inner(
-    nwa: &NWA,
-    range: std::ops::Range<u32>,
-    foreign_derived: Option<&DerivedEpsilons>,
-) -> Vec<(u32, u32, Weight)> {
-    let state_count = nwa.states().len() as u32;
-    if state_count == 0 {
-        return Vec::new();
+/// Q(current, source, read) describes an unmatched push at source, followed
+/// by epsilon and already-balanced excursions to current. Closing Q with a
+/// matching read grows the balanced relation D(source, target). Whenever D
+/// grows, every query waiting at its source must also traverse that edge.
+/// These are the same monotone equations for grouped and singleton work.
+struct CancellationSolver<'a> {
+    nwa: &'a NWA,
+    foreign: Option<&'a DerivedEpsilons>,
+    classes: Option<&'a crate::pop_classes::PopLabelClasses>,
+    queries: QueryWeights,
+    queue: VecDeque<CancellationTask>,
+    derived: DerivedEpsilons,
+    products: ScopedWeightOpCache,
+}
+
+impl<'a> CancellationSolver<'a> {
+    fn new(
+        nwa: &'a NWA,
+        foreign: Option<&'a DerivedEpsilons>,
+        classes: Option<&'a crate::pop_classes::PopLabelClasses>,
+    ) -> Self {
+        let n = nwa.states().len();
+        Self {
+            nwa, foreign, classes, queries: vec![SmallQueryWeights::Empty; n],
+            queue: VecDeque::new(), derived: vec![SmallTargetWeights::Empty; n],
+            products: ScopedWeightOpCache::default(),
+        }
     }
 
-    let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
-    let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons =
-        vec![SmallTargetWeights::Empty; state_count as usize];
-    let mut subset_memo = SubsetMemo::default();
-
-    for source_state in range {
-        if source_state >= state_count {
-            continue;
-        }
-        for (&label, targets) in nwa.states()[source_state as usize].transitions.range(..0) {
-            let positive_label = negative_to_positive_label(label);
-            for (target_state, weight) in targets {
-                if *target_state < state_count && !weight.is_empty() {
-                    queue_query_weight(
-                        &mut query_weights,
-                        &mut worklist,
-                        *target_state,
-                        source_state,
-                        positive_label,
-                        weight.clone(),
-                    );
+    fn seed(&mut self, sources: impl IntoIterator<Item = u32>) {
+        let nwa = self.nwa;
+        for source in sources {
+            let Some(state) = nwa.states().get(source as usize) else { continue; };
+            for (&label, branches) in state.transitions.range(..0) {
+                let positive = negative_to_positive_label(label);
+                for (target, weight) in branches {
+                    if (*target as usize) < nwa.states().len() {
+                        queue_query_weight(&mut self.queries, &mut self.queue,
+                            *target, source, positive, weight.clone());
+                    }
                 }
             }
         }
     }
 
-    let profile_detail = std::env::var_os("GLRMASK_PROFILE_CANCELLATION_DETAIL").is_some();
-    let initial_tasks = worklist.len();
-    let initial_groups = if profile_detail {
-        let mut groups = FxHashSet::<(u32, i32, usize)>::default();
-        for (state, queries) in query_weights.iter().enumerate() {
-            queries.for_each(|(_source, label), weight| {
-                groups.insert((state as u32, label, weight.ptr_key()));
-            });
+    fn extend_balanced(&mut self, source: u32, target: u32, weight: &Weight) {
+        if weight.is_empty() || !self.derived[source as usize].merge(target, weight.clone()) {
+            return;
         }
-        groups.len()
-    } else {
-        0
-    };
-    let mut rounds = 0usize;
-    let mut groups_processed = 0usize;
-    let mut source_queries_processed = 0usize;
+        let balanced = self.derived[source as usize].get(target).unwrap();
+        let queries = &mut self.queries;
+        let queue = &mut self.queue;
+        let products = &mut self.products;
+        // Query storage can alias its update destination on cyclic graphs.
+        // Collect the upstream products before mutating any query row.
+        let mut updates = SmallVec::<[(u32, i32, Weight); 4]>::new();
+        queries[source as usize].for_each(|(upstream, read), query| {
+            let propagated = products.intersection(query, balanced);
+            if !propagated.is_empty() {
+                updates.push((upstream, read, propagated));
+            }
+        });
+        for (upstream, read, propagated) in updates {
+            queue_query_weight(queries, queue, target, upstream, read, propagated);
+        }
+    }
 
-    while !worklist.is_empty() {
-        rounds += 1;
-        let groups = build_cancellation_query_groups(&mut worklist, &query_weights);
-        groups_processed += groups.len();
-        for group in groups {
-            source_queries_processed += group.sources.len();
-            let query_single = group.weight.single_compact_entry_parts();
-            let current_state = group.current_state;
-            let positive_label = group.positive_label;
+    fn process(&mut self, group: CancellationQueryGroup) {
+        let current = group.current_state as usize;
+        let nwa = self.nwa;
+        let classes = self.classes;
+        let state = &nwa.states()[current];
+        let label = group.positive_label;
+        let n = nwa.states().len();
+        let local = &self.derived[current];
+        let foreign = self.foreign.map(|rows| &rows[current]);
+        let products = &mut self.products;
+        let queries = &mut self.queries;
+        let queue = &mut self.queue;
+        let mut propagate = |target: u32, weight: &Weight| {
+            if target as usize >= n { return; }
+            let value = products.intersection(&group.weight, weight);
+            queue_group_propagation(queries, queue, &group.sources, target, label, &value);
+        };
+        local.for_each(&mut propagate);
+        if let Some(foreign) = foreign {
+            foreign.for_each(&mut propagate);
+        }
+        for (target, weight) in &state.epsilons {
+            propagate(*target, weight);
+        }
 
-            let propagate_map = |targets: &SmallTargetWeights,
-                                 query_weights: &mut QueryWeights,
-                                 worklist: &mut VecDeque<CancellationTask>| {
-                targets.for_each(|target_state, epsilon_weight| {
-                    let propagated = intersect_with_single_weight_hint(
-                        &group.weight,
-                        query_single.as_ref(),
-                        epsilon_weight,
-                    );
-                    queue_group_propagation(
-                        query_weights,
-                        worklist,
-                        &group.sources,
-                        target_state,
-                        positive_label,
-                        &propagated,
-                    );
-                });
+        // Concrete reads, row-local complement classes and ordinary
+        // DEFAULT reads are additive witnesses to the same cancellation.
+        let reads = [state.transitions.get(&label), state.transitions.get(&DEFAULT_LABEL)]
+            .into_iter().flatten().flatten()
+            .chain(classes.into_iter().flat_map(|classes| classes.matching_targets(state, label as u32)));
+        for (target, weight) in reads {
+            if *target as usize >= n { continue; }
+            let value = self.products.intersection(&group.weight, weight);
+            if !value.is_empty() {
+                for &source in &group.sources {
+                    self.extend_balanced(source, *target, &value);
+                }
+            }
+        }
+    }
+
+    fn run(mut self, grouped: bool) -> Vec<(u32, u32, Weight)> {
+        let started = std::time::Instant::now();
+        let mut groups = 0usize;
+        let mut queries = 0usize;
+        while !self.queue.is_empty() {
+            let batch = if grouped {
+                SmallVec::<[CancellationQueryGroup; 1]>::from_vec(
+                    build_cancellation_query_groups(&mut self.queue, &self.queries))
+            } else {
+                let (current_state, source, positive_label) = self.queue.pop_front().unwrap();
+                let Some(weight) = self.queries[current_state as usize]
+                    .get(&(source, positive_label)).cloned() else { continue; };
+                smallvec::smallvec![CancellationQueryGroup {
+                    current_state, positive_label, weight, sources: smallvec::smallvec![source],
+                }]
             };
-            let local = &derived_epsilons[current_state as usize];
-            propagate_map(local, &mut query_weights, &mut worklist);
-            if let Some(foreign) =
-                foreign_derived.map(|derived| &derived[current_state as usize])
-            {
-                propagate_map(foreign, &mut query_weights, &mut worklist);
+            for group in batch {
+                groups += 1;
+                queries += group.sources.len();
+                self.process(group);
             }
-
-            let state = &nwa.states()[current_state as usize];
-            for targets in [
-                state.transitions.get(&positive_label),
-                state.transitions.get(&DEFAULT_LABEL),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for (target_state, edge_weight) in targets {
-                    if *target_state >= state_count {
-                        continue;
-                    }
-                    let new_derived_weight = intersect_with_single_weight_hint(
-                        &group.weight,
-                        query_single.as_ref(),
-                        edge_weight,
-                    );
-                    if new_derived_weight.is_empty() {
-                        continue;
-                    }
-                    for &source_state in &group.sources {
-                        extend_derived_epsilon_precomputed(
-                            source_state,
-                            *target_state,
-                            &new_derived_weight,
-                            &mut query_weights,
-                            &mut worklist,
-                            &mut derived_epsilons,
-                            &mut subset_memo,
-                        );
-                    }
-                }
-            }
-
-            for (target_state, epsilon_weight) in &state.epsilons {
-                if *target_state >= state_count {
-                    continue;
-                }
-                let propagated = intersect_with_single_weight_hint(
-                    &group.weight,
-                    query_single.as_ref(),
-                    epsilon_weight,
-                );
-                queue_group_propagation(
-                    &mut query_weights,
-                    &mut worklist,
-                    &group.sources,
-                    *target_state,
-                    positive_label,
-                    &propagated,
-                );
+            // Weak operand identities in ScopedWeightOpCache also prevent
+            // stale pointer-key hits when a growing query replaces a weight.
+            // Bound retained cache entries on very large cyclic worklists.
+            if self.products.intersection_entry_count() > 262_144 {
+                self.products = ScopedWeightOpCache::default();
             }
         }
+        let result = collect_non_empty_derived_epsilons(self.derived);
+        if std::env::var_os("GLRMASK_PROFILE_CANCELLATION_DETAIL").is_some() {
+            eprintln!("[glrmask/profile][cancellation] groups={} source_queries={} derived_edges={} grouped={} total_ms={:.3}",
+                groups, queries, result.len(), grouped, started.elapsed().as_secs_f64() * 1000.0);
+        }
+        result
     }
+}
 
-    let mut derived = collect_non_empty_derived_epsilons(derived_epsilons);
-    derived.sort_by_key(|(from, to, _)| (*from, *to));
-    if profile_detail {
-        eprintln!(
-            "[glrmask/profile][cancellation_grouped] states={} initial_tasks={} initial_groups={} initial_compression={:.2} rounds={} groups={} source_queries={} compression={:.2} derived_edges={}",
-            state_count,
-            initial_tasks,
-            initial_groups,
-            initial_tasks as f64 / initial_groups.max(1) as f64,
-            rounds,
-            groups_processed,
-            source_queries_processed,
-            source_queries_processed as f64 / groups_processed.max(1) as f64,
-            derived.len(),
-        );
-    }
-    derived
+fn compute_cancellations_sources(
+    nwa: &NWA,
+    sources: impl IntoIterator<Item = u32>,
+    foreign: Option<&DerivedEpsilons>,
+    classes: Option<&crate::pop_classes::PopLabelClasses>,
+    grouped: bool,
+) -> Vec<(u32, u32, Weight)> {
+    let mut solver = CancellationSolver::new(nwa, foreign, classes);
+    solver.seed(sources);
+    solver.run(grouped)
+}
+
+fn compute_cancellations_range_grouped_inner(
+    nwa: &NWA, range: std::ops::Range<u32>, foreign: Option<&DerivedEpsilons>,
+) -> Vec<(u32, u32, Weight)> {
+    compute_cancellations_sources(nwa, range, foreign, None, true)
 }
 
 fn collect_non_empty_derived_epsilons(
@@ -960,30 +718,9 @@ fn compute_cancellations_reverse_topological_parallel(
                 .unwrap_or(false);
         let rows = layer
             .par_chunks(chunk_size)
-            .map(|sources| {
-                if grouped_requested {
-                    // The grouped solver still takes a contiguous range and
-                    // cannot represent arbitrary layer chunks exactly.  Keep
-                    // grouped mode on the established source-local path until
-                    // it has a source-slice workspace implementation.
-                    sources
-                        .iter()
-                        .flat_map(|&source| {
-                            compute_cancellations_range_grouped_inner(
-                                nwa,
-                                source..source + 1,
-                                Some(foreign),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    compute_cancellations_sources_serial_inner(
-                        nwa,
-                        sources.iter().copied(),
-                        Some(foreign),
-                    )
-                }
-            })
+            .map(|sources| compute_cancellations_sources(
+                nwa, sources.iter().copied(), Some(foreign), None, grouped_requested,
+            ))
             .collect::<Vec<_>>();
         for row in rows {
             for (from, to, weight) in row {
@@ -1039,189 +776,19 @@ pub fn compute_cancellations_range(
     }
 }
 
-fn compute_cancellations_sources_serial_inner<I>(
-    nwa: &NWA,
-    sources: I,
-    foreign_derived: Option<&DerivedEpsilons>,
-) -> Vec<(u32, u32, Weight)>
-where
-    I: IntoIterator<Item = u32>,
-{
-    compute_cancellations_sources_with_pop_classes(nwa, sources, foreign_derived, None)
-}
-
 fn compute_cancellations_sources_with_pop_classes<I>(
-    nwa: &NWA,
-    sources: I,
-    foreign_derived: Option<&DerivedEpsilons>,
-    pop_classes: Option<&crate::pop_classes::PopLabelClasses>,
+    nwa: &NWA, sources: I, foreign: Option<&DerivedEpsilons>,
+    classes: Option<&crate::pop_classes::PopLabelClasses>,
 ) -> Vec<(u32, u32, Weight)>
-where
-    I: IntoIterator<Item = u32>,
+where I: IntoIterator<Item = u32>,
 {
-    let state_count = nwa.states().len() as u32;
-    if state_count == 0 {
-        return Vec::new();
-    }
-
-    let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
-    let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons =
-        vec![SmallTargetWeights::Empty; state_count as usize];
-    let mut subset_memo = SubsetMemo::default();
-    let mut single_intersection_memo = SingleIntersectionMemo::default();
-    let use_dead_task_fast_path =
-        state_count as usize >= DEAD_CANCELLATION_FAST_PATH_MIN_STATES;
-
-    for source_state in sources {
-        if source_state >= state_count {
-            continue;
-        }
-
-        for (&label, targets) in nwa.states()[source_state as usize].transitions.range(..0) {
-            let positive_label = negative_to_positive_label(label);
-
-            for (target_state, weight) in targets {
-                if *target_state >= state_count || weight.is_empty() {
-                    continue;
-                }
-
-                queue_query_weight(
-                    &mut query_weights,
-                    &mut worklist,
-                    *target_state,
-                    source_state,
-                    positive_label,
-                    weight.clone(),
-                );
-            }
-        }
-    }
-
-    while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
-        let state = &nwa.states()[current_state as usize];
-        let local_derived = &derived_epsilons[current_state as usize];
-        let foreign_derived_at_state =
-            foreign_derived.map(|derived| &derived[current_state as usize]);
-        let positive_targets = state.transitions.get(&positive_label);
-        let default_targets = state.transitions.get(&DEFAULT_LABEL);
-
-        if use_dead_task_fast_path
-            && local_derived.is_empty()
-            && foreign_derived_at_state.is_none_or(SmallTargetWeights::is_empty)
-            && positive_targets.is_none()
-            && default_targets.is_none()
-            && pop_classes.is_none_or(|classes|
-                classes.matching_targets(state, positive_label as u32).next().is_none())
-            && state.epsilons.is_empty()
-        {
-            continue;
-        }
-
-        let Some(query_weight_to_current) = query_weights[current_state as usize]
-            .get(&(source_state, positive_label))
-            .cloned()
-        else {
-            continue;
-        };
-        let query_single = query_weight_to_current.single_compact_entry_parts();
-
-        propagate_query_through_derived_epsilons(
-            &query_weight_to_current,
-            query_single.as_ref(),
-            current_state,
-            source_state,
-            positive_label,
-            &mut query_weights,
-            &mut worklist,
-            &derived_epsilons,
-            foreign_derived,
-            &mut single_intersection_memo,
-        );
-
-        if let Some(positive_targets) = positive_targets {
-            for (target_state, edge_weight) in positive_targets {
-                if *target_state < state_count {
-                    extend_derived_epsilons(
-                        &query_weight_to_current,
-                        query_single.as_ref(),
-                        source_state,
-                        *target_state,
-                        edge_weight,
-                        &mut query_weights,
-                        &mut worklist,
-                        &mut derived_epsilons,
-                        &mut subset_memo,
-                        &mut single_intersection_memo,
-                    );
-                }
-            }
-        }
-
-        if let Some(classes) = pop_classes {
-            for (target_state, edge_weight) in classes.matching_targets(state, positive_label as u32) {
-                extend_derived_epsilons(
-                    &query_weight_to_current, query_single.as_ref(), source_state,
-                    *target_state, edge_weight, &mut query_weights, &mut worklist,
-                    &mut derived_epsilons, &mut subset_memo, &mut single_intersection_memo,
-                );
-            }
-        }
-
-        if let Some(default_targets) = default_targets {
-            for (target_state, edge_weight) in default_targets {
-                if *target_state < state_count {
-                    extend_derived_epsilons(
-                        &query_weight_to_current,
-                        query_single.as_ref(),
-                        source_state,
-                        *target_state,
-                        edge_weight,
-                        &mut query_weights,
-                        &mut worklist,
-                        &mut derived_epsilons,
-                        &mut subset_memo,
-                        &mut single_intersection_memo,
-                    );
-                }
-            }
-        }
-
-        for (target_state, epsilon_weight) in &state.epsilons {
-            if *target_state >= state_count {
-                continue;
-            }
-
-            let propagated = intersect_with_single_weight_hint_cached(
-                &query_weight_to_current,
-                query_single.as_ref(),
-                epsilon_weight,
-                &mut single_intersection_memo,
-            );
-            if propagated.is_empty() {
-                continue;
-            }
-
-            queue_query_weight(
-                &mut query_weights,
-                &mut worklist,
-                *target_state,
-                source_state,
-                positive_label,
-                propagated,
-            );
-        }
-    }
-
-    collect_non_empty_derived_epsilons(derived_epsilons)
+    compute_cancellations_sources(nwa, sources, foreign, classes, false)
 }
 
 fn compute_cancellations_range_serial_inner(
-    nwa: &NWA,
-    range: std::ops::Range<u32>,
-    foreign_derived: Option<&DerivedEpsilons>,
+    nwa: &NWA, range: std::ops::Range<u32>, foreign: Option<&DerivedEpsilons>,
 ) -> Vec<(u32, u32, Weight)> {
-    compute_cancellations_sources_serial_inner(nwa, range, foreign_derived)
+    compute_cancellations_sources(nwa, range, foreign, None, false)
 }
 
 pub fn apply_cancellations_range(
@@ -1881,7 +1448,7 @@ fn resolve_negative_codes_in_nwa_impl(
 #[cfg(test)]
 mod terminal_default_tests {
     use range_set_blaze::RangeSetBlaze;
-
+    
     use super::*;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
@@ -1976,6 +1543,49 @@ mod terminal_default_tests {
         nwa
     }
 
+    fn reference_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
+        let n = nwa.states().len();
+        let mut balanced = vec![vec![Weight::empty(); n]; n];
+        loop {
+            let previous = balanced.clone();
+            for (source, state) in nwa.states().iter().enumerate() {
+                for (&push, targets) in state.transitions.range(..0) {
+                    let read = negative_to_positive_label(push);
+                    for (target, weight) in targets {
+                        let mut reach = vec![Weight::empty(); n];
+                        reach[*target as usize] = weight.clone();
+                        loop {
+                            let old = reach.clone();
+                            for (from, state) in nwa.states().iter().enumerate() {
+                                for (to, edge) in &state.epsilons {
+                                    reach[*to as usize] = reach[*to as usize].union(&old[from].intersection(edge));
+                                }
+                                for (to, edge) in previous[from].iter().enumerate() {
+                                    reach[to] = reach[to].union(&old[from].intersection(edge));
+                                }
+                            }
+                            if reach == old { break; }
+                        }
+                        for (from, state) in nwa.states().iter().enumerate() {
+                            for (to, edge) in [state.transitions.get(&read), state.transitions.get(&DEFAULT_LABEL)]
+                                .into_iter().flatten().flatten()
+                            {
+                                let slot = &mut balanced[source][*to as usize];
+                                *slot = slot.union(&reach[from].intersection(edge));
+                            }
+                        }
+                    }
+                }
+            }
+            if balanced == previous { break; }
+        }
+        balanced.into_iter().enumerate().flat_map(|(source, row)| {
+            row.into_iter().enumerate().filter_map(move |(target, weight)| {
+                (!weight.is_empty()).then_some((source as u32, target as u32, weight))
+            })
+        }).collect()
+    }
+
     #[test]
     fn grouped_cancellation_matches_serial_solver_on_generated_nwas() {
         for seed in 0..32 {
@@ -1991,7 +1601,9 @@ mod terminal_default_tests {
                 range,
                 None,
             ));
-            assert_eq!(grouped, serial, "cancellation mismatch for seed {seed}");
+            let expected = normalize_cancellations(reference_cancellations(&nwa));
+            assert_eq!(serial, expected, "serial cancellation mismatch for seed {seed}");
+            assert_eq!(grouped, expected, "grouped cancellation mismatch for seed {seed}");
         }
     }
 
