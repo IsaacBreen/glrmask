@@ -52,6 +52,7 @@ const VOCAB_SEQUENTIAL_TRIE_WORK_MAX_LARGE_POOL: usize = 40_000;
 const VOCAB_SEQUENTIAL_TRIE_LARGE_POOL_THREADS: usize = 32;
 const SELF_LOOP_ACTIVE_LEN_LIMIT: usize = 512;
 
+#[cfg(test)]
 #[inline]
 fn state_signature_block_factor(block_len: usize) -> u64 {
     let mut factor = 1u64;
@@ -61,6 +62,7 @@ fn state_signature_block_factor(block_len: usize) -> u64 {
     factor
 }
 
+#[cfg(test)]
 #[inline]
 fn append_state_signature_block(prefix: u64, block: u64, factor: u64) -> u64 {
     // A block signature is
@@ -3677,11 +3679,18 @@ struct FirstTransitionBucket {
     initial_outcomes: Vec<usize>,
 }
 
-struct FirstTransitionBucketResult {
-    classes: Vec<Vec<usize>>,
-    signature_ms: f64,
-    grouping_ms: f64,
-    trie_walk: TrieWalkChunkStats,
+fn merge_first_transition_buckets(buckets: Vec<FirstTransitionBucket>) -> Vec<FirstTransitionBucket> {
+    let mut by_shape = HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
+    let mut merged = Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
+    for bucket in buckets {
+        if let Some(&index) = by_shape.get(&bucket.initial_outcomes) {
+            merged[index].token_indices.extend(bucket.token_indices);
+        } else {
+            by_shape.insert(bucket.initial_outcomes.clone(), merged.len());
+            merged.push(bucket);
+        }
+    }
+    merged
 }
 
 /// Build an exact token prepartition using deterministic first transitions.
@@ -3794,23 +3803,6 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         return None;
     }
 
-    if buckets.len() > 1 {
-        let mut merged_buckets = Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
-        let mut shape_to_bucket = HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
-        for bucket in buckets {
-            if let Some(&merged_idx) = shape_to_bucket.get(&bucket.initial_outcomes) {
-                merged_buckets[merged_idx]
-                    .token_indices
-                    .extend(bucket.token_indices);
-            } else {
-                let merged_idx = merged_buckets.len();
-                shape_to_bucket.insert(bucket.initial_outcomes.clone(), merged_idx);
-                merged_buckets.push(bucket);
-            }
-        }
-        buckets = merged_buckets;
-    }
-
     let full_state_token_pairs = strings.len().saturating_mul(initial_states.len());
     let preliminary_ratio = preliminary_state_token_pairs as f64
         / full_state_token_pairs.max(1) as f64;
@@ -3889,28 +3881,6 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
                 bucket.initial_outcomes = quotient_outcomes;
             }
 
-            // The quotient may make two previously distinct first-byte buckets
-            // share the exact same source coordinate. Reuse one traversal while
-            // retaining each token's semantic leading-byte domain in the later
-            // grouping key.
-            if buckets.len() > 1 {
-                let mut merged_buckets =
-                    Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
-                let mut shape_to_bucket =
-                    HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
-                for bucket in buckets {
-                    if let Some(&merged_idx) = shape_to_bucket.get(&bucket.initial_outcomes) {
-                        merged_buckets[merged_idx]
-                            .token_indices
-                            .extend(bucket.token_indices);
-                    } else {
-                        let merged_idx = merged_buckets.len();
-                        shape_to_bucket.insert(bucket.initial_outcomes.clone(), merged_idx);
-                        merged_buckets.push(bucket);
-                    }
-                }
-                buckets = merged_buckets;
-            }
             if profiling {
                 let bucket_states_after = buckets
                     .iter()
@@ -3943,6 +3913,9 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
             );
         }
     }
+
+    // Share traversal only after the final source coordinate is chosen.
+    buckets = merge_first_transition_buckets(buckets);
 
     // Suffix sorting is required only for an accepted plan. Deferring it until
     // after the structural work-ratio test keeps default-off/rejected attempts
@@ -3979,43 +3952,6 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         )
     };
 
-    let group_active_sigs = |active_sigs: Vec<(usize, u64)>| {
-        let grouping_started_at = Instant::now();
-        // Equal outcome vectors may share one suffix trie walk, but retain the
-        // original semantic leading-byte domain in the preliminary partition.
-        // This captures traversal reuse without making the authority pass
-        // resolve a deliberately coarser cross-domain class.
-        let mut by_signature =
-            HashMap::<(usize, u64), Vec<usize>>::with_capacity(active_sigs.len());
-        for (token_idx, signature) in active_sigs {
-            by_signature
-                .entry((preliminary_domain_by_token[token_idx], signature))
-                .or_default()
-                .push(token_idx);
-        }
-        let mut classes = by_signature.into_values().collect::<Vec<_>>();
-        for class in &mut classes {
-            class.sort_unstable();
-        }
-        classes.sort_unstable_by_key(|class| class[0]);
-        (
-            classes,
-            grouping_started_at.elapsed().as_secs_f64() * 1000.0,
-        )
-    };
-
-    let process_bucket = |bucket: &FirstTransitionBucket| {
-        let (active_sigs, trie_walk, signature_ms) =
-            process_token_chunk(bucket, &bucket.token_indices);
-        let (classes, grouping_ms) = group_active_sigs(active_sigs);
-        FirstTransitionBucketResult {
-            classes,
-            signature_ms,
-            grouping_ms,
-            trie_walk,
-        }
-    };
-
     // The factor pass normally runs inside the partition-level Rayon DAG.
     // Preserve the existing scheduler for factors admitted by the established
     // 5% work-ratio gate. The moderate-vocabulary extension deliberately
@@ -4039,79 +3975,34 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     // for controlled A/B diagnostics.
     let token_chunk_size = first_transition_factor_token_chunk_size();
     let token_chunk_min_work = first_transition_factor_token_chunk_min_work();
-    let split_active = parallel_buckets
-        && token_chunk_size > 0
-        && buckets.iter().any(|bucket| {
-            bucket.token_indices.len() > token_chunk_size
-                && bucket
-                    .token_indices
-                    .len()
-                    .saturating_mul(bucket.initial_outcomes.len())
-                    >= token_chunk_min_work
-        });
-
-    let bucket_results = if split_active {
-        let mut tasks = Vec::<(usize, usize, usize)>::new();
-        let mut split_bucket_count = 0usize;
-        for (bucket_idx, bucket) in buckets.iter().enumerate() {
-            let len = bucket.token_indices.len();
-            let bucket_work = len.saturating_mul(bucket.initial_outcomes.len());
-            if len > token_chunk_size && bucket_work >= token_chunk_min_work {
-                split_bucket_count += 1;
-                for start in (0..len).step_by(token_chunk_size) {
-                    tasks.push((bucket_idx, start, (start + token_chunk_size).min(len)));
-                }
-            } else {
-                tasks.push((bucket_idx, 0, len));
-            }
+    let mut tasks = Vec::new();
+    for (bucket_idx, bucket) in buckets.iter().enumerate() {
+        let len = bucket.token_indices.len();
+        let chunk_size = if parallel_buckets && token_chunk_size > 0
+            && len.saturating_mul(bucket.initial_outcomes.len()) >= token_chunk_min_work
+        {
+            token_chunk_size
+        } else {
+            len
+        };
+        for start in (0..len).step_by(chunk_size) {
+            tasks.push((bucket_idx, start, start.saturating_add(chunk_size).min(len)));
         }
-        if profiling || env_flag_enabled("GLRMASK_PROFILE_VOCAB_FACTOR_TOKEN_SPLIT") {
-            eprintln!(
-                "[glrmask/profile][vocab_first_transition_factor_token_split] buckets={} split_buckets={} tasks={} chunk_size={} min_work={}",
-                buckets.len(),
-                split_bucket_count,
-                tasks.len(),
-                token_chunk_size,
-                token_chunk_min_work,
-            );
-        }
-
-        let task_results = tasks
-            .par_iter()
-            .map(|&(bucket_idx, start, end)| {
-                let bucket = &buckets[bucket_idx];
-                let (active_sigs, trie_walk, signature_ms) =
-                    process_token_chunk(bucket, &bucket.token_indices[start..end]);
-                (bucket_idx, active_sigs, trie_walk, signature_ms)
-            })
-            .collect::<Vec<_>>();
-        let mut bucket_sigs = (0..buckets.len())
-            .map(|_| Vec::<(usize, u64)>::new())
-            .collect::<Vec<_>>();
-        let mut bucket_walk = vec![TrieWalkChunkStats::default(); buckets.len()];
-        let mut bucket_signature_ms = vec![0.0f64; buckets.len()];
-        for (bucket_idx, task_sigs, task_walk, task_signature_ms) in task_results {
-            bucket_sigs[bucket_idx].extend(task_sigs);
-            bucket_walk[bucket_idx].add_assign(task_walk);
-            bucket_signature_ms[bucket_idx] += task_signature_ms;
-        }
-        bucket_sigs
-            .into_iter()
-            .enumerate()
-            .map(|(bucket_idx, active_sigs)| {
-                let (classes, grouping_ms) = group_active_sigs(active_sigs);
-                FirstTransitionBucketResult {
-                    classes,
-                    signature_ms: bucket_signature_ms[bucket_idx],
-                    grouping_ms,
-                    trie_walk: bucket_walk[bucket_idx],
-                }
-            })
-            .collect::<Vec<_>>()
-    } else if parallel_buckets {
-        buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
+    }
+    if profiling || env_flag_enabled("GLRMASK_PROFILE_VOCAB_FACTOR_TOKEN_SPLIT") {
+        eprintln!(
+            "[glrmask/profile][vocab_first_transition_factor_token_split] buckets={} tasks={} chunk_size={} min_work={}",
+            buckets.len(), tasks.len(), token_chunk_size, token_chunk_min_work,
+        );
+    }
+    let evaluate = |&(bucket_idx, start, end): &(usize, usize, usize)| {
+        let bucket = &buckets[bucket_idx];
+        process_token_chunk(bucket, &bucket.token_indices[start..end])
+    };
+    let task_results = if parallel_buckets {
+        tasks.par_iter().map(evaluate).collect::<Vec<_>>()
     } else {
-        buckets.iter().map(process_bucket).collect::<Vec<_>>()
+        tasks.iter().map(evaluate).collect::<Vec<_>>()
     };
     let mut stats = FirstTransitionFactorStats {
         semantic_buckets,
@@ -4129,12 +4020,23 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         .into_iter()
         .map(|token_idx| vec![token_idx])
         .collect::<Vec<_>>();
-    for result in bucket_results {
-        stats.preliminary_signature_ms += result.signature_ms;
-        stats.preliminary_grouping_ms += result.grouping_ms;
-        stats.trie_walk.add_assign(result.trie_walk);
-        preliminary_classes.extend(result.classes);
+    let grouping_started_at = Instant::now();
+    // Domain identifies the actual leading-byte equivalence class, not
+    // the traversal bucket. Chunking and merging cannot merge domains.
+    let mut by_signature = HashMap::<(usize, u64), Vec<usize>>::new();
+    for (signatures, walk, signature_ms) in task_results {
+        stats.preliminary_signature_ms += signature_ms;
+        stats.trie_walk.add_assign(walk);
+        for (token, signature) in signatures {
+            by_signature.entry((preliminary_domain_by_token[token], signature))
+                .or_default().push(token);
+        }
     }
+    for mut class in by_signature.into_values() {
+        class.sort_unstable();
+        preliminary_classes.push(class);
+    }
+    stats.preliminary_grouping_ms = grouping_started_at.elapsed().as_secs_f64() * 1000.0;
     preliminary_classes.sort_unstable_by_key(|class| class[0]);
     stats.preliminary_classes = preliminary_classes.len();
 
@@ -4783,6 +4685,40 @@ pub fn find_vocab_equivalence_classes_with_factor_state_refinement_profiled<
     )
 }
 
+/// Meet the current token partition with one state-slab observation.
+/// Already distinguished singletons are excluded from future work.
+fn refine_token_partition(
+    partition: &mut [usize], next_class_id: &mut usize,
+    active_indices: &mut Vec<usize>, active_tokens: &mut [bool],
+    signatures: impl IntoIterator<Item = (usize, u64)>,
+) {
+    let mut refinement = HashMap::<(usize, u64), Vec<usize>>::with_capacity(active_indices.len() / 2);
+    for (token, signature) in signatures {
+        if active_tokens[token] {
+            refinement.entry((partition[token], signature)).or_default().push(token);
+        }
+    }
+    let mut seen_classes = vec![false; *next_class_id];
+    active_indices.clear();
+    active_tokens.fill(false);
+    for ((old_class, _), tokens) in refinement {
+        let class = if !std::mem::replace(&mut seen_classes[old_class], true) {
+            old_class
+        } else {
+            let id = *next_class_id;
+            *next_class_id += 1;
+            id
+        };
+        for token in tokens.iter().copied() {
+            partition[token] = class;
+            if tokens.len() > 1 {
+                active_indices.push(token);
+                active_tokens[token] = true;
+            }
+        }
+    }
+}
+
 fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     strings: &[S],
@@ -5115,9 +5051,8 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // The ordinary loop below refines token classes by one state batch at a
     // time. State batches do not depend on one another, so on the many-core
     // path we evaluate every batch concurrently and preserve their original
-    // order. `append_state_signature_block` then recombines the slab hashes
-    // algebraically into the exact same polynomial signature as one monolithic
-    // state batch.
+    // order. Both schedules meet the same per-slab token partitions; this
+    // avoids cancellation between distinct slab hashes in a combined hash.
     // Each worker deliberately performs one sequential full-trie walk: the
     // outer state slabs are the parallelism, avoiding nested Rayon work on the
     // token axis.
@@ -5182,40 +5117,18 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         used_trie_walk = true;
 
         let refinement_started_at = Instant::now();
-        let mut signatures_by_token = vec![HASH_SEED3; num_tokens];
-        for (batch_index, (batch_signatures, batch_stats)) in
-            batch_results.into_iter().enumerate()
-        {
+        for (batch_signatures, batch_stats) in batch_results {
             if profiling {
                 trie_walk_stats.add_assign(batch_stats);
             }
             debug_assert_eq!(batch_signatures.len(), num_tokens);
-            let block_len = state_ranges[batch_index].len();
-            let block_factor = state_signature_block_factor(block_len);
-            for (token_idx, signature) in batch_signatures {
-                signatures_by_token[token_idx] = append_state_signature_block(
-                    signatures_by_token[token_idx],
-                    signature,
-                    block_factor,
+            if !active_indices.is_empty() {
+                refine_token_partition(
+                    &mut partition, &mut next_class_id, &mut active_indices, &mut active_tokens,
+                    batch_signatures,
                 );
             }
         }
-
-        let mut class_by_signature = HashMap::<u64, usize>::with_capacity(num_tokens);
-        next_class_id = 0;
-        for (token_idx, signature) in signatures_by_token.into_iter().enumerate() {
-            let class_id = match class_by_signature.entry(signature) {
-                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
-                hashbrown::hash_map::Entry::Vacant(entry) => {
-                    let class_id = next_class_id;
-                    next_class_id += 1;
-                    *entry.insert(class_id)
-                }
-            };
-            partition[token_idx] = class_id;
-        }
-        active_indices.clear();
-        active_tokens.fill(false);
         let parallel_refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
         refinement_ms += parallel_refinement_ms;
         if profiling {
@@ -5250,7 +5163,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
         && num_authority_states > SINGLETON_PROBE_STATES
         && batch_size > SINGLETON_PROBE_STATES;
-    let mut batch_start = 0usize;
+    let mut batch_start = if parallel_state_batch_size.is_some() { num_authority_states } else { 0 };
     let mut batch_index = 0usize;
     while batch_start < num_authority_states {
         if active_indices.is_empty() {
@@ -5433,38 +5346,9 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         };
 
         let refinement_started_at = profiling.then(Instant::now);
-        let mut refinement: HashMap<(usize, u64), Vec<usize>> =
-            HashMap::with_capacity(active_sigs.len() / 2);
-        for (ti, sig) in active_sigs {
-            refinement
-                .entry((partition[ti], sig))
-                .or_default()
-                .push(ti);
-        }
-
-        let mut new_active = Vec::with_capacity(active_indices.len());
-        let mut seen_classes = vec![false; next_class_id.max(1)];
-        for ((old_class, _), tokens) in refinement {
-            let class_id = if !seen_classes[old_class] {
-                seen_classes[old_class] = true;
-                old_class
-            } else {
-                let id = next_class_id;
-                next_class_id += 1;
-                id
-            };
-            for &ti in &tokens {
-                partition[ti] = class_id;
-            }
-            if tokens.len() > 1 {
-                new_active.extend(tokens);
-            }
-        }
-        active_tokens.fill(false);
-        for &token_idx in &new_active {
-            active_tokens[token_idx] = true;
-        }
-        active_indices = new_active;
+        refine_token_partition(
+            &mut partition, &mut next_class_id, &mut active_indices, &mut active_tokens, active_sigs,
+        );
         refinement_ms += elapsed_ms(refinement_started_at);
         batch_start = batch_end;
         batch_index += 1;
