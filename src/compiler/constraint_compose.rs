@@ -8024,7 +8024,6 @@ fn build_composed_constraint_unfinalized(
     composed_table: ComposedTable,
     tokenizer: impl Into<Arc<Tokenizer>>,
     tokenizer_state_offsets: Vec<u32>,
-    parser_dwa: DWA,
     parser_state_domain_labels: Vec<i32>,
     possible_matches: PossibleMatches,
     internal_ids: InternalIdMap,
@@ -8094,7 +8093,7 @@ fn build_composed_constraint_unfinalized(
         late_bind_vocab: OnceLock::from(vocab.clone()),
         pending_vocab_fingerprint: None,
         pending_special_token_ids: None,
-        parser_dwa: crate::runtime::ParserDwaStorage::Owned(parser_dwa),
+        parser_dwa: crate::runtime::ParserDwaStorage::Absent,
         non_dwa_weights: crate::runtime::NonDwaWeightStorage::Materialized(
             crate::runtime::NonDwaWeights {
                 // Constraint composition is not allowed to rely on the legacy dynamic
@@ -8444,7 +8443,6 @@ fn compose_dynamic_recursive_shared_fast(
         composed_table,
         root_tokenizer,
         tokenizer_state_offsets.clone(),
-        DWA::new(1, 0),
         Vec::new(),
         Default::default(),
         id_map,

@@ -2216,7 +2216,7 @@ impl Constraint {
                 .final_weight(dwa_state)
                 .map(RuntimeWeightRef::PackedDwa);
         }
-        self.parser_dwa.owned().expect("owned parser DWA").states()
+        self.parser_dwa.owned()?.states()
             .get(dwa_state as usize)?
             .final_weight
             .as_ref()
@@ -10728,9 +10728,10 @@ impl Constraint {
                 // pointer-keyed dense caches.
                 (InventoryBatch::default(), None)
             }
-        } else if rayon::current_num_threads() > 1 && self.parser_dwa.owned().expect("owned parser DWA").states().len() >= 4_096 {
+        } else if let Some(dwa) = self.parser_dwa.owned() {
+            if rayon::current_num_threads() > 1 && dwa.states().len() >= 4_096 {
             (
-                self.parser_dwa.owned().expect("owned parser DWA").states()
+                dwa.states()
                     .par_iter()
                     .fold(InventoryBatch::default, |mut batch, state| {
                         batch.add_state(state);
@@ -10742,12 +10743,15 @@ impl Constraint {
                     }),
                 None,
             )
-        } else {
-            let mut batch = InventoryBatch::default();
-            for state in self.parser_dwa.owned().expect("owned parser DWA").states() {
-                batch.add_state(state);
+            } else {
+                let mut batch = InventoryBatch::default();
+                for state in dwa.states() {
+                    batch.add_state(state);
+                }
+                (batch, None)
             }
-            (batch, None)
+        } else {
+            (InventoryBatch::default(), None)
         };
 
         let non_dwa_started = profile.then(std::time::Instant::now);

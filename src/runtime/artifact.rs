@@ -237,13 +237,15 @@ pub(crate) struct CompositionGrammarSummary {
 /// Packed constraints never retain a second owned state graph.
 #[derive(Debug, Clone)]
 pub(crate) enum ParserDwaStorage {
+    /// Masks are computed directly or by the linked component accelerators.
+    Absent,
     Owned(DWA),
     Packed(Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>),
 }
 
 impl Default for ParserDwaStorage {
     fn default() -> Self {
-        Self::Owned(DWA::new(0, 0))
+        Self::Absent
     }
 }
 
@@ -251,19 +253,20 @@ impl ParserDwaStorage {
     pub(crate) fn owned(&self) -> Option<&DWA> {
         match self {
             Self::Owned(dwa) => Some(dwa),
-            Self::Packed(_) => None,
+            Self::Packed(_) | Self::Absent => None,
         }
     }
 
     pub(crate) fn packed(&self) -> Option<&crate::automata::weighted::dwa::PackedRuntimeDwa> {
         match self {
-            Self::Owned(_) => None,
+            Self::Owned(_) | Self::Absent => None,
             Self::Packed(dwa) => Some(dwa),
         }
     }
 
     pub(crate) fn for_compilation(&self) -> Result<std::borrow::Cow<'_, DWA>, String> {
         match self {
+            Self::Absent => Err("constraint has no global parser DWA".into()),
             Self::Owned(dwa) => Ok(std::borrow::Cow::Borrowed(dwa)),
             Self::Packed(dwa) => dwa.to_dwa().map(std::borrow::Cow::Owned),
         }
@@ -271,6 +274,7 @@ impl ParserDwaStorage {
 
     pub(crate) fn state_count(&self) -> usize {
         match self {
+            Self::Absent => 0,
             Self::Owned(dwa) => dwa.states().len(),
             Self::Packed(dwa) => dwa.state_count(),
         }
@@ -279,6 +283,7 @@ impl ParserDwaStorage {
     #[cfg(feature = "internal-api")]
     pub(crate) fn transition_count(&self) -> usize {
         match self {
+            Self::Absent => 0,
             Self::Owned(dwa) => dwa.num_transitions(),
             Self::Packed(dwa) => dwa.transition_count(),
         }
@@ -286,6 +291,7 @@ impl ParserDwaStorage {
 
     pub(crate) fn start_state(&self) -> u32 {
         match self {
+            Self::Absent => panic!("constraint has no global parser DWA start state"),
             Self::Owned(dwa) => dwa.start_state(),
             Self::Packed(dwa) => dwa.start_state(),
         }

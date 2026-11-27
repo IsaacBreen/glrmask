@@ -966,15 +966,6 @@ impl DynamicConstraint {
             .tokenizer
             .restore_terminal_exprs(payload.terminal_exprs.take())
             .expect("dynamic payload terminal expressions must match tokenizer terminal count");
-        let max_token_id = payload
-            .token_bytes
-            .keys()
-            .next_back()
-            .copied()
-            .into_iter()
-            .chain(special_token_terminals.iter().map(|special| special.token_id_end))
-            .max()
-            .unwrap_or(0);
         // Compile callers own precisely this Vocab's immutable byte inventory.
         // Loaded payloads have no such identity witness and must derive the
         // summary from their authoritative decoded bytes instead.
@@ -999,7 +990,7 @@ impl DynamicConstraint {
             late_bind_vocab: std::sync::OnceLock::new(),
             pending_vocab_fingerprint: None,
             pending_special_token_ids: None,
-            parser_dwa: crate::runtime::ParserDwaStorage::Owned(DWA::new(payload.tokenizer.num_states(), max_token_id)),
+            parser_dwa: crate::runtime::ParserDwaStorage::Absent,
             non_dwa_weights: Default::default(),
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),

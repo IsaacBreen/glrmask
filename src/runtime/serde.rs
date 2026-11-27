@@ -3498,7 +3498,7 @@ impl Constraint {
                     || {
                         let Some(_packed) = self.parser_dwa.packed() else {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = self.parser_dwa.owned().expect("owned DWA section").artifact_packed_bytes();
+                            let bytes = self.parser_dwa.owned().map_or_else(Vec::new, |dwa| dwa.artifact_packed_bytes());
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=dwa ms={:.3} bytes={}",
@@ -4072,7 +4072,9 @@ impl Constraint {
                 || rayon::join(
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let result = {
+                        let result = if dwa_section.is_empty() {
+                            Ok(crate::runtime::ParserDwaStorage::Absent)
+                        } else {
                             let decoded = if dwa_section.starts_with(b"DWF3")
                                 || dwa_section.starts_with(b"DWF4")
                 || dwa_section.starts_with(b"DWF5")
@@ -4114,7 +4116,7 @@ impl Constraint {
                                     dwa_section,
                                 )
                             };
-                            decoded.map(Arc::new)
+                            decoded.map(|dwa| crate::runtime::ParserDwaStorage::Packed(Arc::new(dwa)))
                         };
                         if let Some(started) = started {
                             eprintln!("[glrmask/profile][constraint_section] name=dwa ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
@@ -4447,7 +4449,13 @@ impl Constraint {
         }
         constraint.token_classes = original_token_map;
         let attach_dwa_started = profile.then(std::time::Instant::now);
-        constraint.parser_dwa = crate::runtime::artifact::ParserDwaStorage::Packed(parser_dwa);
+        constraint.parser_dwa = parser_dwa;
+        if matches!(&constraint.parser_dwa, crate::runtime::ParserDwaStorage::Absent)
+            && !constraint.uses_dynamic_runtime()
+            && !runtime.as_ref().is_some_and(|runtime| runtime.segmented_runtime_v27.is_some())
+        {
+            return Err(crate::Error::Serialization("static constraint is missing its parser DWA".into()));
+        }
         let attach_dwa_ms = attach_dwa_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         constraint.table = table;
