@@ -31,8 +31,8 @@ fn timed<T>(operation: impl FnOnce() -> T) -> (T, f64) {
 
 fn selection(name: &str, n: u32) -> Vec<Range<u32>> {
     match name {
-        "singleton" => vec![n - 1..n],
-        "all" => vec![0..n],
+        "singleton" => std::iter::once(n - 1..n).collect(),
+        "all" => std::iter::once(0..n).collect(),
         "all_except_middle" => vec![0..n / 2, n / 2 + 1..n],
         "eight_disjoint_ranges" => (0..8).map(|i| {
             let start = i * n / 8 + n / 16;
