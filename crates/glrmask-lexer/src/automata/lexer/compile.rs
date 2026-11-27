@@ -551,140 +551,90 @@ fn seq_from_parts(mut parts: Vec<Expr>) -> Expr {
     }
 }
 
-fn choice_first_part(expr: &Expr) -> Option<&Expr> {
-    match expr {
-        Expr::Shared(inner) => choice_first_part(inner),
-        Expr::Seq(parts) => parts.first(),
-        Expr::Epsilon => None,
-        other => Some(other),
+/// Concatenation distributes over choice on either side. Keep the direction
+/// explicit so both factorizations share grouping and recursion.
+#[derive(Clone, Copy)]
+enum ChoiceEdge {
+    Prefix,
+    Suffix,
+}
+
+impl ChoiceEdge {
+    fn atom(self, expr: &Expr) -> Option<&Expr> {
+        match unwrap_shared(expr) {
+            Expr::Seq(parts) => match self {
+                Self::Prefix => parts.first(),
+                Self::Suffix => parts.last(),
+            },
+            Expr::Epsilon => None,
+            other => Some(other),
+        }
+    }
+
+    fn remainder(self, expr: &Expr) -> Expr {
+        match unwrap_shared(expr) {
+            Expr::Seq(parts) => seq_from_parts(match self {
+                Self::Prefix => parts[1..].to_vec(),
+                Self::Suffix => parts[..parts.len() - 1].to_vec(),
+            }),
+            _ => Expr::Epsilon,
+        }
+    }
+
+    fn factor(self, atom: &Expr, remainders: Vec<Expr>) -> Expr {
+        let choice = factor_choice_of_factored(remainders);
+        seq_from_parts(match self {
+            Self::Prefix => vec![atom.clone(), choice],
+            Self::Suffix => vec![choice, atom.clone()],
+        })
     }
 }
 
-fn choice_without_first_part(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Shared(inner) => choice_without_first_part(inner),
-        Expr::Seq(parts) => seq_from_parts(parts[1..].to_vec()),
-        Expr::Epsilon => Expr::Epsilon,
-        _ => Expr::Epsilon,
-    }
-}
-
-fn choice_last_part(expr: &Expr) -> Option<&Expr> {
-    match expr {
-        Expr::Shared(inner) => choice_last_part(inner),
-        Expr::Seq(parts) => parts.last(),
-        Expr::Epsilon => None,
-        other => Some(other),
-    }
-}
-
-fn choice_without_last_part(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Shared(inner) => choice_without_last_part(inner),
-        Expr::Seq(parts) => seq_from_parts(parts[..parts.len() - 1].to_vec()),
-        Expr::Epsilon => Expr::Epsilon,
-        _ => Expr::Epsilon,
-    }
-}
-
-fn factor_choice_common_prefix(options: &[Expr]) -> Option<Expr> {
+fn factor_choice_common_edge(options: &[Expr], edge: ChoiceEdge) -> Option<Expr> {
     if options.len() < 2 {
         return None;
     }
-
-    let prefix = choice_first_part(options.first()?)?.clone();
-    if !options
-        .iter()
-        .all(|option| choice_first_part(option) == Some(&prefix))
-    {
+    let atom = edge.atom(options.first()?)?;
+    if !options.iter().all(|option| edge.atom(option) == Some(atom)) {
         return None;
     }
-
-    let remainders = options
-        .iter()
-        .map(choice_without_first_part)
-        .collect::<Vec<_>>();
-
-    Some(seq_from_parts(vec![
-        prefix,
-        factor_choice_of_factored(remainders),
-    ]))
+    let remainders = options.iter().map(|option| edge.remainder(option)).collect();
+    Some(edge.factor(atom, remainders))
 }
 
-fn factor_choice_common_suffix(options: &[Expr]) -> Option<Expr> {
-    if options.len() < 2 {
-        return None;
-    }
-
-    let suffix = choice_last_part(options.first()?)?.clone();
-    if !options
-        .iter()
-        .all(|option| choice_last_part(option) == Some(&suffix))
-    {
-        return None;
-    }
-
-    let prefixes = options
-        .iter()
-        .map(choice_without_last_part)
-        .collect::<Vec<_>>();
-
-    Some(seq_from_parts(vec![
-        factor_choice_of_factored(prefixes),
-        suffix,
-    ]))
-}
-
-/// Factor one repeated leading atom even when it is shared by only a subset
-/// of the choice arms. This is the exact identity
+/// Factor a repeated atom shared by only a subset of choice arms:
 ///
-/// ```text
-/// A B | A C | D  ==  A (B | C) | D
-/// ```
+/// A B | A C | D = A (B | C) | D, and B A | C A | D = (B | C) A | D.
 ///
-/// and is particularly important for mixed anchored/unanchored JSON-schema
-/// string patterns: the unanchored arms often share a `JSON_STRING_CHAR*`
-/// prefix while an anchored arm does not. Requiring every arm to share the
-/// prefix leaves subset construction to rediscover that factoring through a
-/// potentially enormous intermediate DFA.
-fn factor_choice_repeated_prefix_subset(options: &[Expr]) -> Option<Expr> {
-    // Group once instead of rescanning the whole choice for every candidate.
-    // Large finite literal languages routinely have thousands of distinct
-    // arms; the old nested scan made a no-op subset-factor probe quadratic.
-    // Iterating `options` again below preserves the historical deterministic
-    // choice of the first repeated leading atom.
+/// This matters for mixed anchored/unanchored JSON-schema string patterns.
+/// Group by hash once, confirm exact expression equality, and choose the
+/// first repeated atom in input order (not hash-map iteration order).
+fn factor_choice_repeated_edge(options: &[Expr], edge: ChoiceEdge) -> Option<Expr> {
     let mut groups = FxHashMap::<u64, Vec<usize>>::default();
     for (index, option) in options.iter().enumerate() {
-        if let Some(prefix) = choice_first_part(option) {
-            groups.entry(expr_hash(prefix)).or_default().push(index);
+        if let Some(atom) = edge.atom(option) {
+            groups.entry(expr_hash(atom)).or_default().push(index);
         }
     }
 
     for (first_index, option) in options.iter().enumerate() {
-        let Some(prefix) = choice_first_part(option) else {
+        let Some(atom) = edge.atom(option) else {
             continue;
         };
-        let Some(candidates) = groups.get(&expr_hash(prefix)) else {
+        let Some(candidates) = groups.get(&expr_hash(atom)) else {
             continue;
         };
-        let matching = candidates
-            .iter()
-            .copied()
-            .filter(|&index| choice_first_part(&options[index]) == Some(prefix))
+        let matching = candidates.iter().copied()
+            .filter(|&index| edge.atom(&options[index]) == Some(atom))
             .collect::<Vec<_>>();
         if matching.len() < 2 || matching.len() == options.len() {
             continue;
         }
-        let prefix = prefix.clone();
 
-        let remainders = matching
-            .iter()
-            .map(|&index| choice_without_first_part(&options[index]))
-            .collect::<Vec<_>>();
-        let factored_group = seq_from_parts(vec![
-            prefix,
-            factor_choice_of_factored(remainders),
-        ]);
+        let remainders = matching.iter()
+            .map(|&index| edge.remainder(&options[index]))
+            .collect();
+        let mut factored_group = Some(edge.factor(atom, remainders));
         let mut is_matching = vec![false; options.len()];
         for &index in &matching {
             is_matching[index] = true;
@@ -692,62 +642,7 @@ fn factor_choice_repeated_prefix_subset(options: &[Expr]) -> Option<Expr> {
         let mut rewritten = Vec::with_capacity(options.len() - matching.len() + 1);
         for (index, option) in options.iter().enumerate() {
             if index == first_index {
-                rewritten.push(factored_group.clone());
-            } else if !is_matching[index] {
-                rewritten.push(option.clone());
-            }
-        }
-        return Some(factor_choice_of_factored(rewritten));
-    }
-    None
-}
-
-/// Suffix counterpart of `factor_choice_repeated_prefix_subset`:
-///
-/// ```text
-/// B A | C A | D  ==  (B | C) A | D
-/// ```
-fn factor_choice_repeated_suffix_subset(options: &[Expr]) -> Option<Expr> {
-    let mut groups = FxHashMap::<u64, Vec<usize>>::default();
-    for (index, option) in options.iter().enumerate() {
-        if let Some(suffix) = choice_last_part(option) {
-            groups.entry(expr_hash(suffix)).or_default().push(index);
-        }
-    }
-
-    for (first_index, option) in options.iter().enumerate() {
-        let Some(suffix) = choice_last_part(option) else {
-            continue;
-        };
-        let Some(candidates) = groups.get(&expr_hash(suffix)) else {
-            continue;
-        };
-        let matching = candidates
-            .iter()
-            .copied()
-            .filter(|&index| choice_last_part(&options[index]) == Some(suffix))
-            .collect::<Vec<_>>();
-        if matching.len() < 2 || matching.len() == options.len() {
-            continue;
-        }
-        let suffix = suffix.clone();
-
-        let prefixes = matching
-            .iter()
-            .map(|&index| choice_without_last_part(&options[index]))
-            .collect::<Vec<_>>();
-        let factored_group = seq_from_parts(vec![
-            factor_choice_of_factored(prefixes),
-            suffix,
-        ]);
-        let mut is_matching = vec![false; options.len()];
-        for &index in &matching {
-            is_matching[index] = true;
-        }
-        let mut rewritten = Vec::with_capacity(options.len() - matching.len() + 1);
-        for (index, option) in options.iter().enumerate() {
-            if index == first_index {
-                rewritten.push(factored_group.clone());
+                rewritten.push(factored_group.take().expect("first matching arm"));
             } else if !is_matching[index] {
                 rewritten.push(option.clone());
             }
@@ -1331,19 +1226,19 @@ fn factor_choice_of_factored(mut options: Vec<Expr>) -> Expr {
     if let Some(factored) = factor_choice_literals(&options) {
         return factored;
     }
-    if let Some(factored) = factor_choice_common_prefix(&options) {
+    if let Some(factored) = factor_choice_common_edge(&options, ChoiceEdge::Prefix) {
         return factored;
     }
-    if let Some(factored) = factor_choice_common_suffix(&options) {
+    if let Some(factored) = factor_choice_common_edge(&options, ChoiceEdge::Suffix) {
         return factored;
     }
     if let Some(factored) = factor_choice_repeated_exclusion_rhs(&options) {
         return factored;
     }
-    if let Some(factored) = factor_choice_repeated_prefix_subset(&options) {
+    if let Some(factored) = factor_choice_repeated_edge(&options, ChoiceEdge::Prefix) {
         return factored;
     }
-    if let Some(factored) = factor_choice_repeated_suffix_subset(&options) {
+    if let Some(factored) = factor_choice_repeated_edge(&options, ChoiceEdge::Suffix) {
         return factored;
     }
     Expr::Choice(options)
