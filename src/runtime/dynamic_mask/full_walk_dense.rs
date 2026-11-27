@@ -3938,7 +3938,7 @@ mod full_walk_acceleration_tests {
         for value in 0..32 {
             cache.push_stacks(ParserStacks::from_single_stack(vec![value], ()));
         }
-        cache.canonical = Some(Box::new(FullWalkDenseParserCanonical {
+        cache.canonical = Some(Box::new(FullWalkParserCanonical {
             keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(1, 1, 1),
             nodes: FxHashMap::from_iter([(0, 0)]),
             hits: 0,

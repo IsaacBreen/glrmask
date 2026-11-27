@@ -567,80 +567,17 @@ struct RecursiveFullWalkTransitions<'a> {
     leaves: SmallVec<[RecursiveFullWalkLeaf<'a>; 4]>,
     token_boundary_cache: FxHashMap<(u32, u32), bool>,
     parser_advance_cache: FxHashMap<(u32, TerminalID), SmallVec<[(u32, u32); 4]>>,
-    parser_canonicalizer: RecursiveParserCanonicalizer,
-    parser_gss_cache: Vec<Option<ParserGSS>>,
     cache_parser_gss: bool,
     pre_admitted_original_mask: Option<&'a [u32]>,
 }
 
 
 
-#[derive(Default)]
-struct RecursiveParserCanonicalizer {
-    semantic: Option<Box<RecursiveParserSemanticCache>>,
-}
-
-struct RecursiveParserSemanticCache {
-    keys: crate::ds::leveled_gss::GssSemanticKeyInterner<u32, ()>,
-    nodes: FxHashMap<u32, u32>,
-}
-
-impl RecursiveParserCanonicalizer {
-    fn intern(&mut self, stacks: ParserStacks, cache: &mut FullWalkParserCache) -> u32 {
-        static THRESHOLD: OnceLock<usize> = OnceLock::new();
-        let threshold = *THRESHOLD.get_or_init(|| {
-            crate::env::var("GLRMASK_PROFILE_PARSER_INTERN_THRESHOLD").ok()
-                .and_then(|v| v.parse().ok()).unwrap_or(32)
-        });
-        self.intern_with_threshold(stacks, cache, threshold)
-    }
-
-    fn intern_with_threshold(
-        &mut self,
-        stacks: ParserStacks,
-        cache: &mut FullWalkParserCache,
-        threshold: usize,
-    ) -> u32 {
-        if self.semantic.is_none() {
-            if cache.nodes.len() < threshold {
-                return cache.intern_stacks(stacks);
-            }
-            // Canonicalize exact finite stack languages, not pointer identity
-            // or just stack tops. Accumulators are unit here; exclusion guards
-            // remain correlated in FullWalkBranch and are never merged away.
-            let mut semantic = RecursiveParserSemanticCache {
-                keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(
-                    16_384, 8_192, 16_384,
-                ),
-                nodes: FxHashMap::default(),
-            };
-            for (index, node) in cache.nodes.iter().enumerate() {
-                let key = semantic.keys.key(&node.gss);
-                if semantic.keys.is_exhausted() { break; }
-                semantic.nodes.entry(key).or_insert(index as u32);
-            }
-            self.semantic = Some(Box::new(semantic));
-        }
-        let semantic = self.semantic.as_mut().expect("initialized above");
-        if semantic.keys.is_exhausted() { return cache.intern_stacks(stacks); }
-        let key = semantic.keys.key(&stacks);
-        // Budget exhaustion must never let the interner's sentinel represent
-        // a real parser language. The established exact path remains valid.
-        if semantic.keys.is_exhausted() { return cache.intern_stacks(stacks); }
-        if let Some(&node) = semantic.nodes.get(&key) { return node; }
-        let node = cache.push_stacks(stacks);
-        semantic.nodes.insert(key, node);
-        node
-    }
-}
-
 impl<'a> RecursiveFullWalkTransitions<'a> {
     fn parser_gss(&mut self, node: u32, cache: &FullWalkParserCache) -> ParserGSS {
         if !self.cache_parser_gss { return with_empty_accumulators(&cache.nodes[node as usize].gss); }
-        self.parser_gss_cache.resize_with(cache.nodes.len(), || None);
-        self.parser_gss_cache[node as usize].get_or_insert_with(|| {
-            with_empty_accumulators(&cache.nodes[node as usize].gss)
-        }).clone()
+        let node = &cache.nodes[node as usize];
+        node.annotated.get_or_init(|| with_empty_accumulators(&node.gss)).clone()
     }
 
     fn new(constraint: &'a Constraint) -> Option<Self> {
@@ -675,8 +612,6 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
             leaves,
             token_boundary_cache: FxHashMap::default(),
             parser_advance_cache: FxHashMap::default(),
-            parser_canonicalizer: RecursiveParserCanonicalizer::default(),
-            parser_gss_cache: Vec::new(),
             cache_parser_gss: env_flag("GLRMASK_PROFILE_PARSER_ACC_CACHE", true),
             pre_admitted_original_mask: None,
 
@@ -898,7 +833,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         };
         let mut result = SmallVec::<[(u32, u32); 4]>::new();
         super::commit::visit_parser_reset_routes(constraint, advanced, ignored, |reset, partition| {
-            let node = self.parser_canonicalizer.intern(partition.apply(|_| ()), parser_cache);
+            let node = parser_cache.intern_scoped_parser_stacks(partition.apply(|_| ()));
             if !result.contains(&(reset, node)) {
                 result.push((reset, node));
             }
@@ -2248,6 +2183,8 @@ fn bounded_product_cache_keeps_guard_correlations_and_exact_hash_collisions() {
 
 struct FullWalkParserNode {
     gss: ParserStacks,
+    /// Lazily mapped only for parser operations still requiring commit annotations.
+    annotated: OnceLock<ParserGSS>,
     admitted: Option<BitSet>,
     admitted_singleton: Option<TerminalID>,
     shared_root_admission: SharedRootAdmission,
@@ -2258,7 +2195,7 @@ struct FullWalkParserNode {
     last_child_target: u32,
 }
 
-struct FullWalkDenseParserCanonical {
+struct FullWalkParserCanonical {
     keys: crate::ds::leveled_gss::GssSemanticKeyInterner<u32, ()>,
     nodes: FxHashMap<u32, u32>,
     hits: usize,
@@ -2270,7 +2207,7 @@ struct FullWalkParserCache {
     direct_boundary_rows: Option<boundary_cache::FullWalkBoundaryDirectCache>,
     row_liveness_enabled: bool,
     canonicalize: bool,
-    canonical: Option<Box<FullWalkDenseParserCanonical>>,
+    canonical: Option<Box<FullWalkParserCanonical>>,
     sparse_token_boundary_allowed: Vec<FxHashMap<u32, u8>>,
     hot_token_boundary_allowed: Vec<[u8; FULL_WALK_HOT_CAPACITY]>,
     profile: bool,
@@ -2336,6 +2273,7 @@ impl FullWalkParserCache {
         let id = self.nodes.len() as u32;
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
+            annotated: OnceLock::new(),
             admitted: None,
             admitted_singleton: None,
             shared_root_admission: None,
@@ -2489,14 +2427,34 @@ impl FullWalkParserCache {
         }))
     }
 
-    /// Exact semantic interning is profitable only after a sizeable dense
-    /// parser frontier has appeared. Exhaustion never licenses an alias.
     fn intern_dense_parser_stacks(&mut self, gss: ParserStacks) -> u32 {
-        if !self.canonicalize || self.nodes.len() < 32 {
-            return self.push_stacks(gss);
+        if !self.canonicalize { return self.push_stacks(gss); }
+        self.intern_semantic_parser_stacks(gss, 32, false)
+    }
+
+    fn intern_scoped_parser_stacks(&mut self, gss: ParserStacks) -> u32 {
+        static THRESHOLD: OnceLock<usize> = OnceLock::new();
+        let threshold = *THRESHOLD.get_or_init(|| {
+            crate::env::var("GLRMASK_PROFILE_PARSER_INTERN_THRESHOLD").ok()
+                .and_then(|v| v.parse().ok()).unwrap_or(32)
+        });
+        self.intern_semantic_parser_stacks(gss, threshold, true)
+    }
+
+    /// One semantic index owns exact finite stack-language identity across
+    /// ordinary and recursive execution. On exhaustion, neither provider
+    /// aliases by a sentinel; scoped routing retains its pointer reuse policy.
+    fn intern_semantic_parser_stacks(
+        &mut self, gss: ParserStacks, threshold: usize, reuse_pointer: bool,
+    ) -> u32 {
+        let fallback = |cache: &mut Self, gss| {
+            if reuse_pointer { cache.intern_stacks(gss) } else { cache.push_stacks(gss) }
+        };
+        if self.nodes.len() < threshold {
+            return fallback(self, gss);
         }
         if self.canonical.is_none() {
-            let mut canonical = FullWalkDenseParserCanonical {
+            let mut canonical = FullWalkParserCanonical {
                 keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(
                     16_384, 8_192, 16_384,
                 ),
@@ -2511,9 +2469,9 @@ impl FullWalkParserCache {
             self.canonical = Some(Box::new(canonical));
         }
         let canonical = self.canonical.as_mut().expect("initialized above");
-        if canonical.keys.is_exhausted() { return self.push_stacks(gss); }
+        if canonical.keys.is_exhausted() { return fallback(self, gss); }
         let key = canonical.keys.key(&gss);
-        if canonical.keys.is_exhausted() { return self.push_stacks(gss); }
+        if canonical.keys.is_exhausted() { return fallback(self, gss); }
         if let Some(&node) = canonical.nodes.get(&key) {
             canonical.hits += 1;
             return node;
@@ -8714,33 +8672,33 @@ mod tests {
     #[test]
     fn recursive_parser_semantic_interning_preserves_exact_languages_and_exhaustion() {
         let (mut cache, _) = FullWalkParserCache::from_roots(&DynamicBranches::new(), None);
-        let mut canonicalizer = RecursiveParserCanonicalizer::default();
         let left = ParserStacks::from_single_stack(vec![0, 1, 2], ());
         let left_again = ParserStacks::from_single_stack(vec![0, 1, 2], ());
         assert!(!left.ptr_eq(&left_again));
-        let a = canonicalizer.intern_with_threshold(left.clone(), &mut cache, 0);
-        let b = canonicalizer.intern_with_threshold(left_again.clone(), &mut cache, 0);
+        let a = cache.intern_semantic_parser_stacks(left.clone(), 0, true);
+        let b = cache.intern_semantic_parser_stacks(left_again.clone(), 0, true);
         assert_eq!(a, b, "different allocations of one language must share a node");
         let right = ParserStacks::from_single_stack(vec![0, 1, 3], ());
-        let c = canonicalizer.intern_with_threshold(right.clone(), &mut cache, 0);
+        let c = cache.intern_semantic_parser_stacks(right.clone(), 0, true);
         assert_ne!(a, c, "equal tops/prefixes are not an equality proof");
         let union_a = left.merge(&right);
         let union_b = right.merge(&left_again);
-        let u = canonicalizer.intern_with_threshold(union_a, &mut cache, 0);
-        let v = canonicalizer.intern_with_threshold(union_b, &mut cache, 0);
+        let u = cache.intern_semantic_parser_stacks(union_a, 0, true);
+        let v = cache.intern_semantic_parser_stacks(union_b, 0, true);
         assert_eq!(u, v, "union construction order must not change the language key");
         assert_ne!(u, a);
-        canonicalizer.semantic = Some(Box::new(RecursiveParserSemanticCache {
+        cache.canonical = Some(Box::new(FullWalkParserCanonical {
             keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(1, 1, 1),
             nodes: FxHashMap::default(),
+            hits: 0,
         }));
-        let x = canonicalizer.intern_with_threshold(
-            ParserStacks::from_single_stack(vec![0, 4, 5], ()), &mut cache, 0,
+        let x = cache.intern_semantic_parser_stacks(
+            ParserStacks::from_single_stack(vec![0, 4, 5], ()), 0, true,
         );
-        let y = canonicalizer.intern_with_threshold(
-            ParserStacks::from_single_stack(vec![0, 4, 6], ()), &mut cache, 0,
+        let y = cache.intern_semantic_parser_stacks(
+            ParserStacks::from_single_stack(vec![0, 4, 6], ()), 0, true,
         );
-        assert!(canonicalizer.semantic.as_ref().unwrap().keys.is_exhausted());
+        assert!(cache.canonical.as_ref().unwrap().keys.is_exhausted());
         assert_ne!(x, y, "exhaustion must not collapse distinct languages into sentinel zero");
     }
 
