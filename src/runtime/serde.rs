@@ -2786,6 +2786,9 @@ fn restore_segmented_runtime_v27(
             restore_recursive_segmented_runtime_v27(constraint, runtime, vocab)
         }
         SegmentedRuntimeArtifactV27::RecursiveObserved(runtime, observation) => {
+            if runtime.recursive_tokenizer_internal_tsids.is_none() {
+                return Err(crate::Error::Serialization("projected static observation has no physical runtime image".into()));
+            }
             restore_recursive_segmented_runtime_v27(constraint, runtime, vocab)?;
             observation.validate(constraint).map_err(crate::Error::Serialization)?;
             constraint.static_dynamic_overlay.as_mut().expect("restored recursive overlay")

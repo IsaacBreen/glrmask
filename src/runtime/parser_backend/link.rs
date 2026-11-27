@@ -197,8 +197,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     constraint.late_grammar_slots = remaining_slots;
     constraint.end_tokens = Arc::clone(&components[0].end_tokens);
     // DynamicDirect never consumes a coordinator TSID quotient. Preserve the
-    // ordinary recursive linker's one-class wire compatibility image, while
-    // leaving all actual component lexer and parser coordinates unchanged.
+    // one-class coordinator placeholder; actual component coordinates are unchanged.
     constraint.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]);
     let mut candidate_tokens = components.iter().map(|component| {
         crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(component, vocab)

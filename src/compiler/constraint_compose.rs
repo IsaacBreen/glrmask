@@ -8451,13 +8451,11 @@ fn compose_dynamic_recursive_shared_fast(
     let root_fast_transitions = parent.tokenizer_fast_transitions.clone();
     let id_map = InternalIdMap {
         // DynamicDirect never consumes the coordinator TSID quotient. Keep a
-        // one-class placeholder so serialized recursive compatibility metadata
-        // can use a compact constant relation without building the old global
-        // state/token partition.
+        // one-class placeholder without building the global state/token partition.
         tokenizer_states: ManyToOneIdMap {
             original_to_internal: vec![0],
-            internal_to_originals: Vec::new(),
-            representative_original_ids: Vec::new(),
+            internal_to_originals: vec![vec![0]],
+            representative_original_ids: vec![0],
         },
         vocab_tokens: ManyToOneIdMap::empty(),
         deferred_vocab_singleton_original_ids: None,
