@@ -317,6 +317,125 @@ struct PackedRuntimeState {
     final_weight: u32,
 }
 
+// SAFETY: implement only for padding-free records containing exclusively
+// initialized integer words of WORD_BYTES bytes (all words have the same
+// width). The byte view is native-endian, converted on big-endian hosts.
+unsafe trait WirePod {
+    const WORD_BYTES: usize;
+}
+macro_rules! wire_pod {
+    ($ty:ty, $width:literal, $size:literal) => {
+        const _: () = assert!(std::mem::size_of::<$ty>() == $size);
+        unsafe impl WirePod for $ty {
+            const WORD_BYTES: usize = $width;
+        }
+    };
+}
+wire_pod!(u8, 1, 1);
+wire_pod!(u16, 2, 2);
+wire_pod!(u32, 4, 4);
+wire_pod!(i32, 4, 4);
+wire_pod!([u16; 2], 2, 4);
+wire_pod!([u32; 2], 4, 8);
+wire_pod!(PackedRuntimeTokenSetSpan, 4, 12);
+wire_pod!(PackedRuntimeWeight, 4, 12);
+wire_pod!(PackedRuntimeRow, 4, 12);
+wire_pod!(PackedRuntimeState, 4, 8);
+
+type WireCopyJob<'dst, 'src> = (&'dst mut [u8], &'src [u8], usize);
+
+struct WireCopyPlan<'dst, 'src> {
+    remaining: &'dst mut [u8],
+    jobs: Vec<WireCopyJob<'dst, 'src>>,
+    narrow: bool,
+}
+
+impl<'dst, 'src> WireCopyPlan<'dst, 'src> {
+    fn new(dst: &'dst mut [u8], narrow: bool) -> Self {
+        Self {
+            remaining: dst,
+            jobs: Vec::with_capacity(if narrow { 7 } else { 64 }),
+            narrow,
+        }
+    }
+
+    fn take(&mut self, len: usize) -> &'dst mut [u8] {
+        let (dst, remaining) = std::mem::take(&mut self.remaining).split_at_mut(len);
+        self.remaining = remaining;
+        dst
+    }
+
+    #[inline]
+    fn bytes(&mut self, bytes: &[u8]) {
+        self.take(bytes.len()).copy_from_slice(bytes);
+    }
+
+    #[inline]
+    fn u16(&mut self, value: u16) {
+        self.bytes(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn u24(&mut self, value: u32) {
+        self.bytes(&value.to_le_bytes()[..3]);
+    }
+
+    #[inline]
+    fn u32(&mut self, value: u32) {
+        self.bytes(&value.to_le_bytes());
+    }
+
+    fn queue<T: WirePod>(&mut self, values: &'src [T]) {
+        let len = std::mem::size_of_val(values);
+        if len == 0 {
+            return;
+        }
+        // SAFETY: WirePod guarantees initialized, padding-free integer words.
+        let source = unsafe {
+            std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), len)
+        };
+        let destination = self.take(len);
+        const MIB: usize = 1024 * 1024;
+        // Preserve the measured scheduling policies of DWF8 and DWF7.
+        let chunk_size = if self.narrow {
+            if len >= 4 * MIB {
+                len.div_ceil(2).max(MIB).next_multiple_of(T::WORD_BYTES)
+            } else {
+                len
+            }
+        } else {
+            MIB
+        };
+        self.jobs.extend(destination.chunks_mut(chunk_size)
+            .zip(source.chunks(chunk_size))
+            .map(|(dst, src)| (dst, src, T::WORD_BYTES)));
+    }
+
+    fn finish(self) -> Option<()> {
+        if !self.remaining.is_empty() {
+            return None;
+        }
+        let copy = |(dst, src, width): WireCopyJob<'_, '_>| {
+            if cfg!(target_endian = "little") || width == 1 {
+                dst.copy_from_slice(src);
+            } else {
+                for (dst, src) in dst.chunks_exact_mut(width).zip(src.chunks_exact(width)) {
+                    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
+                        *d = *s;
+                    }
+                }
+            }
+        };
+        if rayon::current_num_threads() > 1 && self.jobs.len() > 1 {
+            self.jobs.into_par_iter().for_each(copy);
+        } else {
+            self.jobs.into_iter().for_each(copy);
+        }
+        Some(())
+    }
+}
+
+
 #[derive(Debug)]
 struct PackedRuntimeSeqPool<T> {
     values: Box<[T]>,
@@ -2039,180 +2158,53 @@ impl PackedRuntimeDwa {
     }
 
     fn write_owned_narrow_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
-        if !cfg!(target_endian = "little") {
-            return None;
-        }
         let narrow = self.owned_narrow.as_ref()?;
         let spans = narrow.token_spans.as_ref();
-        let expected_len = self.owned_narrow_fast_wire_len()?;
-        if dst.len() != expected_len
-            || spans.len() != self.token_set_count()
-            || narrow.token_range_overflow_starts.len() != spans.len()
-        {
+        if dst.len() != self.owned_narrow_fast_wire_len()? {
             return None;
         }
-
-        #[inline]
-        fn put_u16(dst: &mut [u8], pos: &mut usize, value: u16) {
-            dst[*pos..*pos + 2].copy_from_slice(&value.to_le_bytes());
-            *pos += 2;
-        }
-        #[inline]
-        fn put_u24(dst: &mut [u8], pos: &mut usize, value: u32) {
-            dst[*pos] = value as u8;
-            dst[*pos + 1] = (value >> 8) as u8;
-            dst[*pos + 2] = (value >> 16) as u8;
-            *pos += 3;
-        }
-        #[inline]
-        fn put_u32(dst: &mut [u8], pos: &mut usize, value: u32) {
-            dst[*pos..*pos + 4].copy_from_slice(&value.to_le_bytes());
-            *pos += 4;
-        }
-        #[inline]
-        fn schedule_pod_copy<T>(
-            jobs: &mut Vec<(usize, usize, usize)>,
-            dst: &mut [u8],
-            pos: &mut usize,
-            values: &[T],
-            split_chunks: usize,
-        ) {
-            let len = std::mem::size_of_val(values);
-            if len != 0 {
-                const SPLIT_MIN_BYTES: usize = 4 * 1024 * 1024;
-                let destination = dst[*pos..*pos + len].as_mut_ptr() as usize;
-                let source = values.as_ptr().cast::<u8>() as usize;
-                if len >= SPLIT_MIN_BYTES && split_chunks > 1 {
-                    let chunk_size = len.div_ceil(split_chunks).max(1024 * 1024);
-                    let mut offset = 0usize;
-                    while offset < len {
-                        let count = chunk_size.min(len - offset);
-                        jobs.push((destination + offset, source + offset, count));
-                        offset += count;
-                    }
-                } else {
-                    jobs.push((destination, source, len));
-                }
-            }
-            *pos += len;
-        }
-
-        // The large parts of DWF6 are already the live execution arrays.
-        // Reserve their final ranges while writing the small scalar metadata,
-        // then copy the disjoint slabs concurrently. This is still fresh-save
-        // work: no wire bytes are prepared or retained by compilation.
-        let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(7);
-        // Two-way slab copies were the best crossover in the canonical large
-        // parser save benchmarks; more jobs increased scheduling/memory-bandwidth
-        // overhead without improving wall time.
-        let split_chunks = 2;
-        let mut pos = 0usize;
-        dst[pos..pos + 4].copy_from_slice(b"DWF8");
-        pos += 4;
-        put_u32(dst, &mut pos, self.start_state);
-        put_u32(dst, &mut pos, spans.len() as u32);
-        put_u32(
-            dst,
-            &mut pos,
-            u32::try_from(narrow.token_ranges.len().saturating_mul(2)).ok()?,
-        );
+        let mut wire = WireCopyPlan::new(dst, true);
+        wire.bytes(b"DWF8");
+        wire.u32(self.start_state);
+        wire.u32(spans.len() as u32);
+        wire.u32(u32::try_from(narrow.token_ranges.len().checked_mul(2)?).ok()?);
         for span in spans {
-            put_u24(dst, &mut pos, span.start);
+            wire.u24(span.start);
         }
         for &overflow_start in narrow.token_range_overflow_starts.iter() {
-            put_u24(dst, &mut pos, overflow_start);
+            wire.u24(overflow_start);
         }
         for span in spans {
-            put_u16(dst, &mut pos, span.word_spans as u16);
+            wire.u16(span.word_spans as u16);
         }
-        schedule_pod_copy(
-            &mut copy_jobs,
-            dst,
-            &mut pos,
-            &narrow.token_ranges,
-            split_chunks,
-        );
-
-        put_u32(
-            dst,
-            &mut pos,
-            u32::try_from(narrow.token_range_overflows.len()).ok()?,
-        );
-        schedule_pod_copy(
-            &mut copy_jobs,
-            dst,
-            &mut pos,
-            &narrow.token_range_overflows,
-            split_chunks,
-        );
-
-        put_u32(dst, &mut pos, self.geometries.len() as u32);
+        wire.queue(&narrow.token_ranges);
+        wire.u32(u32::try_from(narrow.token_range_overflows.len()).ok()?);
+        wire.queue(&narrow.token_range_overflows);
+        wire.u32(self.geometries.len() as u32);
         for geometry in self.geometries.iter() {
-            put_u16(dst, &mut pos, geometry.len() as u16);
+            wire.u16(geometry.len() as u16);
             for &(start, end) in geometry {
-                put_u16(dst, &mut pos, start as u16);
-                put_u16(dst, &mut pos, end as u16);
+                wire.u16(start as u16);
+                wire.u16(end as u16);
             }
         }
-
-        put_u32(
-            dst,
-            &mut pos,
-            (narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE) as u32,
-        );
-        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.weights, split_chunks);
-
-        put_u32(dst, &mut pos, narrow.weight_token_ids.len() as u32);
-        schedule_pod_copy(
-            &mut copy_jobs,
-            dst,
-            &mut pos,
-            &narrow.weight_token_ids,
-            split_chunks,
-        );
-
-        put_u32(
-            dst,
-            &mut pos,
-            (narrow.transitions.len() / OwnedNarrowPackedRuntimeDwa::TRANSITION_STRIDE) as u32,
-        );
-        schedule_pod_copy(
-            &mut copy_jobs,
-            dst,
-            &mut pos,
-            &narrow.transitions,
-            split_chunks,
-        );
-
-        put_u32(dst, &mut pos, narrow.spans.len() as u32);
-        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.spans, split_chunks);
-
-        put_u32(
-            dst,
-            &mut pos,
-            (narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE) as u32,
-        );
-        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.states, split_chunks);
-        debug_assert_eq!(pos, dst.len());
-
-        let copy_one = |(destination, source, len): (usize, usize, usize)| unsafe {
-            std::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, len);
-        };
-        if rayon::current_num_threads() > 1 && copy_jobs.len() > 1 {
-            copy_jobs.into_par_iter().for_each(copy_one);
-        } else {
-            copy_jobs.into_iter().for_each(copy_one);
-        }
-        Some(())
+        wire.u32((narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE) as u32);
+        wire.queue(&narrow.weights);
+        wire.u32(narrow.weight_token_ids.len() as u32);
+        wire.queue(&narrow.weight_token_ids);
+        wire.u32((narrow.transitions.len() / OwnedNarrowPackedRuntimeDwa::TRANSITION_STRIDE) as u32);
+        wire.queue(&narrow.transitions);
+        wire.u32(narrow.spans.len() as u32);
+        wire.queue(&narrow.spans);
+        wire.u32((narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE) as u32);
+        wire.queue(&narrow.states);
+        wire.finish()
     }
 
     /// Exact directly-writable wire size for compiler-owned runtime storage.
-    /// DWF6 is preferred when the hot execution view is narrow; DWF7 remains
+    /// DWF8 is preferred when the hot execution view is narrow; DWF7 remains
     /// the wide runtime-shaped fallback.
     pub fn direct_fast_wire_len(&self) -> Option<usize> {
-        if !cfg!(target_endian = "little") {
-            return None;
-        }
         self.owned_narrow_fast_wire_len()
             .or_else(|| self.runtime_shaped_fast_wire_len())
     }
@@ -2271,349 +2263,58 @@ impl PackedRuntimeDwa {
     /// section. The destination must have exactly
     /// [`Self::runtime_shaped_fast_wire_len`] bytes.
     pub fn write_runtime_shaped_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
-        if !cfg!(target_endian = "little") {
-            return None;
-        }
-        let expected_len = self.runtime_shaped_fast_wire_len()?;
-        if dst.len() != expected_len {
+        if dst.len() != self.runtime_shaped_fast_wire_len()? {
             return None;
         }
         let ranges = self.flat_token_ranges_u16.as_deref()?;
         let spans = self.flat_token_spans.as_deref()?;
-        if spans.len() != self.token_set_count() {
-            return None;
-        }
-
-        #[inline]
-        fn put_u32_at(dst: &mut [u8], pos: &mut usize, value: u32) {
-            dst[*pos..*pos + 4].copy_from_slice(&value.to_le_bytes());
-            *pos += 4;
-        }
-
-        #[inline]
-        fn put_pod_slice<T>(dst: &mut [u8], pos: &mut usize, values: &[T]) {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    values.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(values),
-                )
-            };
-            dst[*pos..*pos + bytes.len()].copy_from_slice(bytes);
-            *pos += bytes.len();
-        }
-
-        debug_assert_eq!(std::mem::size_of::<PackedRuntimeTokenSetSpan>(), 12);
-        debug_assert_eq!(std::mem::size_of::<PackedRuntimeWeight>(), 12);
-        debug_assert_eq!(std::mem::size_of::<PackedRuntimeRow>(), 12);
-        debug_assert_eq!(std::mem::size_of::<PackedRuntimeState>(), 8);
-
-        dst[..4].copy_from_slice(b"DWF7");
-        dst[4..8].copy_from_slice(&self.start_state.to_le_bytes());
-        dst[8..12].copy_from_slice(&(spans.len() as u32).to_le_bytes());
-        dst[12..16].copy_from_slice(&(ranges.len() as u32).to_le_bytes());
-
-        // The runtime-shaped wire is almost entirely POD slabs. Queue those
-        // slabs as disjoint copy jobs instead of grouping them into only three
-        // coarse branches; on large parser DWAs the ~11 MiB token slab alone
-        // otherwise becomes the critical path. Geometry metadata is small and
-        // irregular, so keep that part scalar while the fixed-width pools are
-        // copied in parallel below.
-        let mut pos = 16usize;
-        let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(64);
-
-        #[inline]
-        fn queue_pod_copy<T>(
-            dst: &mut [u8],
-            pos: &mut usize,
-            values: &[T],
-            jobs: &mut Vec<(usize, usize, usize)>,
-        ) {
-            let byte_len = std::mem::size_of_val(values);
-            if byte_len == 0 {
-                return;
-            }
-            let dst_base = unsafe { dst.as_mut_ptr().add(*pos) } as usize;
-            let src_base = values.as_ptr().cast::<u8>() as usize;
-            const COPY_CHUNK: usize = 1024 * 1024;
-            let mut offset = 0usize;
-            while offset < byte_len {
-                let len = COPY_CHUNK.min(byte_len - offset);
-                jobs.push((dst_base + offset, src_base + offset, len));
-                offset += len;
-            }
-            *pos += byte_len;
-        }
-
-        queue_pod_copy(dst, &mut pos, spans, &mut copy_jobs);
-        queue_pod_copy(dst, &mut pos, ranges, &mut copy_jobs);
-
-        put_u32_at(dst, &mut pos, self.geometries.len() as u32);
+        let mut wire = WireCopyPlan::new(dst, false);
+        wire.bytes(b"DWF7");
+        wire.u32(self.start_state);
+        wire.u32(spans.len() as u32);
+        wire.u32(ranges.len() as u32);
+        wire.queue(spans);
+        wire.queue(ranges);
+        wire.u32(self.geometries.len() as u32);
         for geometry in self.geometries.iter() {
-            put_u32_at(dst, &mut pos, geometry.len() as u32);
+            wire.u32(geometry.len() as u32);
             for &(start, end) in geometry {
-                put_u32_at(dst, &mut pos, start);
-                put_u32_at(dst, &mut pos, end);
+                wire.u32(start);
+                wire.u32(end);
             }
         }
-
-        put_u32_at(dst, &mut pos, self.weights.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.weights, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.weight_token_ids.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.weight_token_ids, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.label_pool.values.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.label_pool.values, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.label_pool.spans.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.label_pool.spans, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.target_pool.values.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.target_pool.values, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.target_pool.spans.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.target_pool.spans, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.weight_id_pool.values.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.weight_id_pool.values, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.weight_id_pool.spans.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.weight_id_pool.spans, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.rows.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.rows, &mut copy_jobs);
-        put_u32_at(dst, &mut pos, self.states.len() as u32);
-        queue_pod_copy(dst, &mut pos, &self.states, &mut copy_jobs);
-
-        debug_assert_eq!(pos, expected_len);
-        if rayon::current_num_threads() > 1 && copy_jobs.len() > 1 {
-            copy_jobs.into_par_iter().for_each(|(destination, source, len)| {
-                // SAFETY: every job targets a disjoint byte range in `dst`,
-                // and all source runtime slabs outlive this parallel copy.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        source as *const u8,
-                        destination as *mut u8,
-                        len,
-                    );
-                }
-            });
-        } else {
-            for (destination, source, len) in copy_jobs {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        source as *const u8,
-                        destination as *mut u8,
-                        len,
-                    );
-                }
-            }
-        }
-        Some(())
+        wire.u32(self.weights.len() as u32);
+        wire.queue(&self.weights);
+        wire.u32(self.weight_token_ids.len() as u32);
+        wire.queue(&self.weight_token_ids);
+        wire.u32(self.label_pool.values.len() as u32);
+        wire.queue(&self.label_pool.values);
+        wire.u32(self.label_pool.spans.len() as u32);
+        wire.queue(&self.label_pool.spans);
+        wire.u32(self.target_pool.values.len() as u32);
+        wire.queue(&self.target_pool.values);
+        wire.u32(self.target_pool.spans.len() as u32);
+        wire.queue(&self.target_pool.spans);
+        wire.u32(self.weight_id_pool.values.len() as u32);
+        wire.queue(&self.weight_id_pool.values);
+        wire.u32(self.weight_id_pool.spans.len() as u32);
+        wire.queue(&self.weight_id_pool.spans);
+        wire.u32(self.rows.len() as u32);
+        wire.queue(&self.rows);
+        wire.u32(self.states.len() as u32);
+        wire.queue(&self.states);
+        wire.finish()
     }
 
     fn try_append_runtime_shaped_fast_wire_bytes(&self, out: &mut Vec<u8>) -> Option<usize> {
-        if !self.prefer_runtime_shaped_wire() {
+        let len = self.runtime_shaped_fast_wire_len()?;
+        let start = out.len();
+        out.resize(start + len, 0);
+        if self.write_runtime_shaped_fast_wire_bytes(&mut out[start..]).is_none() {
+            out.truncate(start);
             return None;
         }
-        let ranges = self.flat_token_ranges_u16.as_deref()?;
-        let spans = self.flat_token_spans.as_deref()?;
-        if spans.len() != self.token_set_count() {
-            return None;
-        }
-
-        #[inline]
-        fn put_u32(out: &mut Vec<u8>, value: u32) {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        #[inline]
-        fn put_u32s(out: &mut Vec<u8>, values: &[u32]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        values.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(values),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &value in values {
-                    put_u32(out, value);
-                }
-            }
-        }
-        #[inline]
-        fn put_i32s(out: &mut Vec<u8>, values: &[i32]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        values.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(values),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &value in values {
-                    out.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-        }
-        #[inline]
-        fn put_spans(out: &mut Vec<u8>, spans: &[[u32; 2]]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        spans.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(spans),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &[start, len] in spans {
-                    put_u32(out, start);
-                    put_u32(out, len);
-                }
-            }
-        }
-        #[inline]
-        fn put_token_spans(out: &mut Vec<u8>, spans: &[PackedRuntimeTokenSetSpan]) {
-            if cfg!(target_endian = "little") {
-                debug_assert_eq!(std::mem::size_of::<PackedRuntimeTokenSetSpan>(), 12);
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        spans.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(spans),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for span in spans {
-                    put_u32(out, span.start);
-                    put_u32(out, span.len);
-                    put_u32(out, span.word_spans);
-                }
-            }
-        }
-        #[inline]
-        fn put_ranges16(out: &mut Vec<u8>, ranges: &[[u16; 2]]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        ranges.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(ranges),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for &[start, end] in ranges {
-                    out.extend_from_slice(&start.to_le_bytes());
-                    out.extend_from_slice(&end.to_le_bytes());
-                }
-            }
-        }
-        #[inline]
-        fn put_weights(out: &mut Vec<u8>, weights: &[PackedRuntimeWeight]) {
-            if cfg!(target_endian = "little") {
-                debug_assert_eq!(std::mem::size_of::<PackedRuntimeWeight>(), 12);
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        weights.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(weights),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for weight in weights {
-                    put_u32(out, weight.geometry);
-                    put_u32(out, weight.token_ids_start);
-                    put_u32(out, weight.full);
-                }
-            }
-        }
-        #[inline]
-        fn put_rows(out: &mut Vec<u8>, rows: &[PackedRuntimeRow]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        rows.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(rows),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for row in rows {
-                    put_u32(out, row.labels);
-                    put_u32(out, row.targets);
-                    put_u32(out, row.weights);
-                }
-            }
-        }
-        #[inline]
-        fn put_states(out: &mut Vec<u8>, states: &[PackedRuntimeState]) {
-            if cfg!(target_endian = "little") {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        states.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(states),
-                    )
-                };
-                out.extend_from_slice(bytes);
-            } else {
-                for state in states {
-                    put_u32(out, state.row);
-                    put_u32(out, state.final_weight);
-                }
-            }
-        }
-
-        let expected_len = self.runtime_shaped_fast_wire_len()?;
-
-        // DWF7 mirrors the owned runtime widths, so on little-endian hosts the
-        // large sections are already byte-for-byte wire data. Size the final
-        // region once and copy the independent runtime slabs concurrently
-        // instead of serially extending the Vec through ~20+ MiB of pools.
-        if cfg!(target_endian = "little") {
-            let output_start = out.len();
-            out.resize(output_start + expected_len, 0);
-            self.write_runtime_shaped_fast_wire_bytes(
-                &mut out[output_start..output_start + expected_len],
-            )?;
-            return Some(expected_len);
-        }
-
-        let output_start = out.len();
-        out.reserve(expected_len);
-        out.extend_from_slice(b"DWF7");
-        put_u32(out, self.start_state);
-        put_u32(out, spans.len() as u32);
-        put_u32(out, ranges.len() as u32);
-        put_token_spans(out, spans);
-        put_ranges16(out, ranges);
-
-        put_u32(out, self.geometries.len() as u32);
-        for geometry in self.geometries.iter() {
-            put_u32(out, geometry.len() as u32);
-            for &(start, end) in geometry {
-                put_u32(out, start);
-                put_u32(out, end);
-            }
-        }
-        put_u32(out, self.weights.len() as u32);
-        put_weights(out, &self.weights);
-        put_u32(out, self.weight_token_ids.len() as u32);
-        put_u32s(out, &self.weight_token_ids);
-        put_u32(out, self.label_pool.values.len() as u32);
-        put_i32s(out, &self.label_pool.values);
-        put_u32(out, self.label_pool.spans.len() as u32);
-        put_spans(out, &self.label_pool.spans);
-        put_u32(out, self.target_pool.values.len() as u32);
-        put_u32s(out, &self.target_pool.values);
-        put_u32(out, self.target_pool.spans.len() as u32);
-        put_spans(out, &self.target_pool.spans);
-        put_u32(out, self.weight_id_pool.values.len() as u32);
-        put_u32s(out, &self.weight_id_pool.values);
-        put_u32(out, self.weight_id_pool.spans.len() as u32);
-        put_spans(out, &self.weight_id_pool.spans);
-        put_u32(out, self.rows.len() as u32);
-        put_rows(out, &self.rows);
-        put_u32(out, self.states.len() as u32);
-        put_states(out, &self.states);
-
-        let written = out.len() - output_start;
-        debug_assert_eq!(written, expected_len);
-        Some(written)
+        Some(len)
     }
 
     /// DWF5/6 narrow the directly-read fixed tail while preserving DWF3's
@@ -4627,8 +4328,7 @@ impl PackedRuntimeDwa {
             None
         };
 
-        let owned_narrow = if cfg!(target_endian = "little")
-            && requires_dwf6
+        let owned_narrow = if requires_dwf6
             && compact_tokens.is_some()
             && flat_token_spans.len() <= u16::MAX as usize + 1
             && flat_token_spans
